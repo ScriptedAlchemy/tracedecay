@@ -2198,4 +2198,237 @@ mod tests {
                 .collect()
         );
     }
+
+    // --- Scope-root reconciliation -----------------------------------------
+
+    const LIVE_ROOT: &str = "/repos/live-checkout";
+    const STRANDED_ROOT: &str = "/repos/.claude/worktrees/agent-deleted";
+    const AGED_NOW_SECS: i64 = 4_000_000_000;
+
+    /// A `code-index-v1/` parent holding one live scope and one stranded scope,
+    /// each with a payload file so the census has bytes to measure.
+    fn fixture_scope_store() -> (tempfile::TempDir, String, String) {
+        let store = tempfile::TempDir::new().expect("create code-index store");
+        let mut hashes = Vec::new();
+        for (root, payload) in [(LIVE_ROOT, "live"), (STRANDED_ROOT, "stranded")] {
+            let hash = code_index_scope_hash(Path::new(root));
+            let scope = store.path().join(&hash);
+            std::fs::create_dir_all(scope.join(GENERATIONS_DIRECTORY))
+                .expect("create scope generations directory");
+            std::fs::write(
+                scope.join(GENERATIONS_DIRECTORY).join("generation-fixture"),
+                payload.as_bytes(),
+            )
+            .expect("write scope payload");
+            hashes.push(hash);
+        }
+        let (live, stranded) = (hashes[0].clone(), hashes[1].clone());
+        (store, live, stranded)
+    }
+
+    fn live_root_set() -> BTreeSet<PathBuf> {
+        [PathBuf::from(LIVE_ROOT)].into_iter().collect()
+    }
+
+    #[test]
+    fn scope_plan_refuses_an_unproven_live_root_set() {
+        let (store, _live, stranded) = fixture_scope_store();
+
+        let error = plan_scope_root_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect_err("an empty live-root set must never be interpreted");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+        assert!(store.path().join(stranded).is_dir());
+    }
+
+    #[test]
+    fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
+        let (store, live, stranded) = fixture_scope_store();
+        let plan = plan_scope_root_retention(
+            store.path(),
+            &live_root_set(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan scope reconciliation");
+        assert_eq!(plan.collectable_scopes.len(), 1);
+        assert_eq!(plan.collectable_scopes[0].scope_hash, stranded);
+
+        let receipt = build_scope_receipt(&plan, plan.collectable_scopes.clone(), UtcMicros(11))
+            .expect("build reconciliation receipt");
+        let transaction = ScopeRootRetentionTransactionV1 {
+            schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
+            receipt: receipt.clone(),
+        };
+        let staged_root = scope_stage_root(store.path(), &receipt);
+
+        // Crash exactly between quarantine and the durable receipt.
+        persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+        stage_stranded_scopes(store.path(), &transaction).expect("quarantine stranded scope");
+        assert!(!store.path().join(&stranded).exists());
+        assert!(staged_root.join(&stranded).is_dir());
+
+        recover_scope_root_retention(store.path()).expect("recover uncommitted reconciliation");
+
+        assert!(
+            store.path().join(&stranded).is_dir(),
+            "without a durable receipt the scope must come back intact"
+        );
+        assert!(store.path().join(&live).is_dir());
+        assert!(!scope_transaction_path(store.path()).exists());
+        assert!(!staged_root.exists());
+    }
+
+    #[test]
+    fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
+        let (store, live, stranded) = fixture_scope_store();
+        let plan = plan_scope_root_retention(
+            store.path(),
+            &live_root_set(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan scope reconciliation");
+        let receipt = build_scope_receipt(&plan, plan.collectable_scopes.clone(), UtcMicros(12))
+            .expect("build reconciliation receipt");
+        let transaction = ScopeRootRetentionTransactionV1 {
+            schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
+            receipt: receipt.clone(),
+        };
+        let staged_root = scope_stage_root(store.path(), &receipt);
+
+        // Crash after the receipt is durable but before the quarantine is
+        // unlinked: the decision is committed, so recovery rolls forward.
+        persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+        stage_stranded_scopes(store.path(), &transaction).expect("quarantine stranded scope");
+        write_scope_receipt(store.path(), &receipt).expect("commit reconciliation receipt");
+
+        recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
+
+        assert!(!store.path().join(&stranded).exists());
+        assert!(!staged_root.exists());
+        assert!(store.path().join(&live).is_dir());
+        assert!(!scope_transaction_path(store.path()).exists());
+        assert!(scope_receipt_path(store.path(), &receipt).is_file());
+    }
+
+    #[test]
+    fn scope_transaction_never_journals_a_live_scope() {
+        let (_store, live, stranded) = fixture_scope_store();
+        let receipt = ScopeRootRetentionReceiptV1 {
+            schema: SCOPE_RETENTION_RECEIPT_SCHEMA.to_owned(),
+            receipt_digest: "a".repeat(64),
+            live_scope_hashes: [live.clone()].into_iter().collect(),
+            minimum_stranding_age_secs: DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            collected_scopes: vec![
+                StrandedCodeIndexScopeV1 {
+                    scope_hash: stranded,
+                    size_bytes: 8,
+                    newest_mtime_secs: 1,
+                },
+                StrandedCodeIndexScopeV1 {
+                    scope_hash: live,
+                    size_bytes: 4,
+                    newest_mtime_secs: 1,
+                },
+            ],
+            reclaimed_bytes: 12,
+            completed_at_micros: 13,
+        };
+
+        let error = validate_scope_transaction(&ScopeRootRetentionTransactionV1 {
+            schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
+            receipt,
+        })
+        .expect_err("a live scope in the collected set must be rejected");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+    }
+
+    #[test]
+    fn scope_reconciliation_never_treats_its_own_artifacts_as_scopes() {
+        let (store, _live, _stranded) = fixture_scope_store();
+        std::fs::create_dir_all(store.path().join(SCOPE_RETENTION_RECEIPTS_DIRECTORY))
+            .expect("create receipts directory");
+        std::fs::create_dir_all(store.path().join(SCOPE_RETENTION_QUARANTINE_DIRECTORY))
+            .expect("create quarantine directory");
+
+        let plan = plan_scope_root_retention(
+            store.path(),
+            &live_root_set(),
+            DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+            AGED_NOW_SECS,
+        )
+        .expect("plan scope reconciliation");
+
+        assert_eq!(plan.collectable_scopes.len(), 1);
+        assert_eq!(
+            plan.unrecognized_entry_count, 2,
+            "reconciliation's own directories are never candidates"
+        );
+    }
+
+    #[test]
+    fn metadata_only_census_matches_full_verification() {
+        let (store, _generations) = fixture_store(5);
+
+        let full = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("full census");
+        let metadata_only = plan_code_generation_retention_with_verification(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            GenerationDigestVerificationV1::MetadataOnly,
+        )
+        .expect("metadata-only census");
+
+        assert_eq!(
+            full.superseded_generations,
+            metadata_only.superseded_generations
+        );
+        assert_eq!(
+            full.collectable_generations,
+            metadata_only.collectable_generations
+        );
+    }
+
+    #[test]
+    fn applied_retention_refuses_a_metadata_only_plan() {
+        let (store, _generations) = fixture_store(5);
+        let plan = plan_code_generation_retention_with_verification(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            GenerationDigestVerificationV1::MetadataOnly,
+        )
+        .expect("metadata-only census");
+
+        let error = execute_code_generation_retention(
+            store.path(),
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(14),
+        )
+        .expect_err("unlinking evidence requires proven content digests");
+
+        assert!(matches!(
+            error,
+            CodeGenerationRetentionErrorV1::UnsafeState(_)
+        ));
+    }
 }
