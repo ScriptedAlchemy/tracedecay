@@ -112,7 +112,7 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         deadline,
         cancellation,
     );
-    let mut pre_admission_requests = vec![read_request.clone()];
+    let mut pre_admission_requests = vec![wire_round_trip(&read_request)];
     let (cas_deadline, cas_cancellation) = controls("pre-admission-cas", observed_at);
     pre_admission_requests.push(
         DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
