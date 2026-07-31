@@ -8,9 +8,12 @@ recovery, and deletes migration-only and superseded V1 paths.
 
 Here V1/V2 name the released product path and the TraceDecay V2 product
 cutover, not a blanket requirement to version every branch contract. Migration
-inventory includes only a predecessor proven on `origin/master`, in a
-published package/release, or in live persisted data. Pure branch-local API
-aliases, adapters, and transient DTOs change to their final shape in place.
+inventory includes predecessors proven on `origin/master`, in a published
+package/release, an independently deployed client, a live host installation, or
+live persisted data. It also fail-closes over potentially installed callable
+aliases and potentially persisted branch shapes until an authorized census
+proves absence. Pure source-only aliases, internal adapters, and transient DTOs
+change to their final shape in place.
 Branch-written schemas, stores, spools, files, journals, checkpoints, and
 receipts remain in the migration inventory until a separately authorized
 registered-store/profile census proves absence; Git history alone cannot remove

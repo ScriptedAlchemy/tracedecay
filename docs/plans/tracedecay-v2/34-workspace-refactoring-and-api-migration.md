@@ -41,9 +41,11 @@ request DTOs change in place. Any migration-plan file, staged mutation,
 journal, checkpoint, rollback artifact, or receipt potentially written by
 dogfood remains backward-readable/recoverable until a separately authorized
 registered-store/profile census proves absence. An API alias, deprecation, or
-wrapper is planned only for a predecessor proven on `origin/master` or in a
-published package/release, never solely from source moves, PR sequencing,
-tests, or branch history.
+wrapper is retained for a predecessor proven on `origin/master`, in a published
+package/release, an independently deployed client, or a live host installation.
+A branch-era callable name remains until an authorized installed-client/host
+census proves absence; source moves, PR sequencing, tests, and branch history
+alone are not release evidence.
 
 ## User outcome
 
@@ -106,10 +108,12 @@ history, tags, or remotes.
 5. Replanning may classify operations already satisfied, still pending, or
    invalidated and issues a new preview/digest. It never silently rebases stale
    evidence. Each deliberately sliced apply is atomic for its declared scope.
-6. PR19 removes unreleased temporary aliases directly after their branch
-   consumers migrate. Evidence-backed released aliases retain their declared
-   compatibility/semantic-equivalence journey, and stable public aliases
-   remain thin delegates to the primary implementation.
+6. PR19 removes unreleased source-only aliases directly after their internal
+   consumers migrate. Branch-era callable aliases remain until the authorized
+   installed-client/host census proves absence. Evidence-backed released
+   aliases retain their declared compatibility/semantic-equivalence journey,
+   and stable public aliases remain thin delegates to the primary
+   implementation.
 
 ## Required behavior
 
@@ -223,9 +227,10 @@ edits for forward store migration.
 - The provider-neutral observation journey migrates request, outcome, error,
   function, projection, session-message projection, and projector-version
   source names together while preserving the projector's persisted value.
-- PR19 uses this journey to remove unapproved unreleased V1/delivery names and
-  production consumers in place while preserving only compatibility contracts
-  evidenced on `origin/master` or in a published package/release.
+- PR19 uses this journey to remove unapproved source-only V1/delivery names and
+  internal consumers in place while preserving callable branch-era names until
+  the authorized installed-client/host census and preserving published
+  compatibility contracts.
 
 ### Supported adoption
 
@@ -240,9 +245,10 @@ edits for forward store migration.
 
 The working journeys replace manual multi-call edits and any copied resolver,
 text replacement, transaction, diagnostics, formatter, catalog, or Git writer.
-PR19 deletes unreleased temporary migration wrappers after named consumer
-migration; direct equivalence tests do not create a compatibility window.
-Evidence-backed stable public aliases remain. There is no general
+PR19 deletes unreleased source-only migration wrappers after named internal
+consumer migration. Branch-era callable wrappers remain until the authorized
+installed-client/host census; direct equivalence tests do not establish
+publication. Evidence-backed stable public aliases remain. There is no general
 patch language, autonomous rewrite framework, language-independent regex
 fallback, generated-output editor, LSP `workspace/applyEdit` authority, or
 source-level dual-write/shadow/lazy store migration.

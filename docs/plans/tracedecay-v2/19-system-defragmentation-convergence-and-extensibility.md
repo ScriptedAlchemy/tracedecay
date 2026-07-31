@@ -103,8 +103,10 @@ the current authority unchanged.
   loops have one daemon-owned writer below all callers.
 - Preserve evidence-backed compatibility aliases, pagination, streams,
   cancellation, retry and error behavior through the canonical operation
-  instead of parallel compatibility implementations. Delete branch-only
-  aliases in place after their callers move.
+  instead of parallel compatibility implementations. Delete pure source-only
+  aliases in place after their internal callers move; callable branch-era
+  aliases remain until an authorized installed-client/host census proves
+  absence.
 
 ### Recover, converge, and delete
 
@@ -132,9 +134,10 @@ A new crate is retained only for a real ownership/runtime boundary or a
 measured build-graph benefit; file size, speculative reuse, or package-count
 targets do not justify it.
 
-PR19 removes every unreleased temporary wrapper whose consumer has migrated.
-Stable public aliases remain only when release evidence makes them actual
-compatibility contracts, and they delegate
+PR19 removes every unreleased source-only wrapper whose internal consumer has
+migrated. Callable branch-era wrappers remain until an authorized
+installed-client/host census proves absence. Stable public aliases backed by
+release evidence remain compatibility contracts, and they delegate
 all availability, errors, authorization, effects, health, paging, streaming,
 cancellation, and retries to the canonical operation.
 

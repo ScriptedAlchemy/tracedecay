@@ -187,8 +187,10 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
   boundary for every supported operation, including all PR12 base families and
   the accepted PR17 additions.
 - Preserve names proven on `origin/master` or in a published package/release as
-  compatibility aliases that delegate to the canonical operation. Branch-only
-  names are replaced in place. A compatibility name may translate syntax but
+  compatibility aliases that delegate to the canonical operation. Pure
+  source-only names are replaced in place; branch-era callable names remain
+  until a separately authorized installed-client/host census proves absence.
+  A compatibility name may translate syntax but
   owns no readiness, scoring, routing, scheduling, provider selection,
   storage, or lifecycle logic.
 - Define pagination cursors, stream events, cancellation and retry classes,

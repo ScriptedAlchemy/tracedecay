@@ -409,8 +409,9 @@ shadow gate counts as delivery.
   and repeated authority prose.
 - Keep every capability above in the production loop. Compatibility aliases
   may delegate to canonical operations only with release evidence and own no
-  logic; branch-local aliases are removed in place. PR18 freezes rather than
-  invents lifecycle behavior.
+  logic. Pure source-only aliases are removed in place; branch-era callable
+  aliases remain until an authorized installed-client/host census proves
+  absence. PR18 freezes rather than invents lifecycle behavior.
 
 ## Direct acceptance
 
