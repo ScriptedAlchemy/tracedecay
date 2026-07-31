@@ -673,12 +673,20 @@ fn render_python_operations(
     for operation in operations {
         let request_name = format!("{}Request", operation.type_name);
         let result_name = format!("{}Result", operation.type_name);
-        let (request_definitions, _) =
+        let (request_definitions, request_type) =
             render_python_schema_type(&operation.request_schema.body, &request_name)?;
-        let (result_definitions, _) =
+        let (result_definitions, result_type) =
             render_python_schema_type(&operation.result_schema.body, &result_name)?;
         out.push_str(&request_definitions);
+        if request_type != request_name {
+            writeln!(out, "{request_name}: TypeAlias = {request_type}\n")
+                .expect("String writes cannot fail");
+        }
         out.push_str(&result_definitions);
+        if result_type != result_name {
+            writeln!(out, "{result_name}: TypeAlias = {result_type}\n")
+                .expect("String writes cannot fail");
+        }
     }
 
     out.push_str(

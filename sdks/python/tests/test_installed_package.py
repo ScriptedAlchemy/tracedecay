@@ -228,12 +228,14 @@ token = os.environ["TRACEDECAY_SDK_TOKEN"]
 
 for mode in ("local",):
     client = TraceDecayClient.local(base_url, project_id=project_id, token=token)
-    available_work = {name for name in SERVER_OPERATIONS if name.startswith("work_")}
+    server_operations = set(SERVER_OPERATIONS)
+    available_operations = set(WORK_OPERATIONS)
+    unavailable_operations = set(UNAVAILABLE_OPERATIONS)
     if (
         not SERVER_OPERATIONS
         or not UNAVAILABLE_OPERATIONS
-        or available_work != set(WORK_OPERATIONS)
-        or available_work & set(UNAVAILABLE_OPERATIONS)
+        or server_operations != available_operations | unavailable_operations
+        or available_operations & unavailable_operations
     ):
         raise AssertionError("installed operation availability inventory drifted")
     if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
