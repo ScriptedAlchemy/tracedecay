@@ -145,7 +145,6 @@ impl<T> RemoteHttpRequestV1<T> {
             credential: authorization.into_credential(),
         })
     }
-
 }
 
 impl RemoteHttpRequestV1<EnrollmentRequestV1> {
