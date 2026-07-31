@@ -1,9 +1,12 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(any(test, feature = "test-transport"))]
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, LazyLock, Mutex};
 
+#[cfg(any(test, feature = "test-transport"))]
 use fs2::FileExt;
 
 use crate::errors::{Result, TraceDecayError};

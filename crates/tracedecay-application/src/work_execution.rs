@@ -6,8 +6,9 @@ use tracedecay_domain::{
     UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestV1,
-    WorkCancellationStateV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1,
+    WorkCancellationStateV1, WorkExecutionEnvelopeV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRuntimeContractError,
+    WorkTerminalEvidenceV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub struct WorkAttemptAcquireLeaseRequestV1 {
     pub snapshot: WorkProjectionSnapshotV1,
     pub identity: WorkAttemptIdentityV1,
     pub projection_binding: WorkAttemptProjectionBindingV1,
+    pub execution: WorkExecutionEnvelopeV1,
     pub lease: WorkLeaseFenceV1,
     pub requested_route: WorkProviderRouteV1,
 }
@@ -231,12 +233,14 @@ where
         snapshot: &WorkProjectionSnapshotV1,
         identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
+        execution: WorkExecutionEnvelopeV1,
         lease: WorkLeaseFenceV1,
         requested_route: WorkProviderRouteV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let attempt = WorkAttemptV1::new(
             identity,
             projection_binding,
+            execution,
             lease,
             WorkAttemptStateV1::Leased,
             None,
@@ -507,6 +511,7 @@ where
         let state = match terminal {
             WorkTerminalEvidenceV1::Succeeded { .. } => WorkAttemptStateV1::Succeeded,
             WorkTerminalEvidenceV1::Failed { .. } => WorkAttemptStateV1::Failed,
+            WorkTerminalEvidenceV1::TimedOut { .. } => WorkAttemptStateV1::TimedOut,
             WorkTerminalEvidenceV1::Cancelled { .. } => WorkAttemptStateV1::Cancelled,
         };
         let artifacts = current.artifacts().to_vec();
@@ -562,6 +567,7 @@ where
             WorkAttemptV1::new(
                 current.identity().clone(),
                 current.projection_binding().clone(),
+                current.execution().clone(),
                 lease,
                 state,
                 progress,
@@ -597,6 +603,7 @@ fn rebuild_attempt(
     WorkAttemptV1::new(
         attempt.identity().clone(),
         attempt.projection_binding().clone(),
+        attempt.execution().clone(),
         lease,
         attempt.state(),
         attempt.progress(),
@@ -614,10 +621,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::{
-        ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProviderId,
-        RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkCancellationRequestId,
-        WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1, WorkProviderRouteId, WorkVersion,
-        WorktreeId,
+        ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId,
+        ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId,
+        WorkCancellationRequestId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1,
+        WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1, WorkProviderRouteId,
+        WorkVersion, WorkflowOperationRef, WorktreeId,
     };
 
     use super::*;
@@ -664,28 +672,60 @@ mod tests {
 
     fn route(value: &str) -> WorkProviderRouteV1 {
         WorkProviderRouteV1::new(
-            id::<ProviderId>("provider.work.execution"),
+            id::<ProviderId>("provider.work.codex-app-server"),
             id::<WorkProviderRouteId>(value),
         )
         .unwrap()
     }
 
+    fn execution_envelope(
+        identity: WorkAttemptIdentityV1,
+        projection_binding: WorkAttemptProjectionBindingV1,
+        route: WorkProviderRouteV1,
+    ) -> WorkExecutionEnvelopeV1 {
+        WorkExecutionEnvelopeV1::new(
+            identity,
+            projection_binding,
+            id::<WorkflowOperationRef>("operation.work.execute-provider"),
+            route,
+            WorkProviderBackendV1::CodexAppServer,
+            "gpt-test".to_owned(),
+            digest('c'),
+            id::<ProjectId>("project.work.execution"),
+            id::<RepositoryId>("repository.work.execution"),
+            id::<WorktreeId>("worktree.work.execution"),
+            "/tmp/work-execution".to_owned(),
+            Some(id::<RefId>("refs/heads/work-execution")),
+            id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+            UtcMicros(1_000_000),
+            1,
+            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
+            WorkEffectStateV1::Observational,
+        )
+        .unwrap()
+    }
+
     fn leased_attempt(attempt_id: &str) -> WorkAttemptV1 {
+        let identity = identity(attempt_id);
+        let projection_binding = WorkAttemptProjectionBindingV1::new(
+            id::<ProjectionGenerationId>("generation.work.execution"),
+            WorkProjectionSequenceV1::new(4),
+            WorkVersion::initial(),
+            id::<ProposalId>("proposal.work.execution"),
+        )
+        .unwrap();
+        let requested_route = route("route.requested");
         WorkAttemptV1::new(
-            identity(attempt_id),
-            WorkAttemptProjectionBindingV1::new(
-                id::<ProjectionGenerationId>("generation.work.execution"),
-                WorkProjectionSequenceV1::new(4),
-                WorkVersion::initial(),
-            )
-            .unwrap(),
+            identity.clone(),
+            projection_binding.clone(),
+            execution_envelope(identity, projection_binding, requested_route.clone()),
             lease(1),
             WorkAttemptStateV1::Leased,
             None,
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            route("route.requested"),
+            requested_route,
             None,
             None,
         )

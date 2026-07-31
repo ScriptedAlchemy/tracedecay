@@ -2,7 +2,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    WorkAuthority, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1, WorkProjectionSnapshotV1,
+    TaskId, WorkAuthority, WorkProjectionDeltaV1, WorkProjectionResumeCursorV1,
+    WorkProjectionSnapshotV1,
 };
 
 use crate::{ApplicationProblem, RequestContext};
@@ -31,6 +32,12 @@ pub enum WorkProjectionPortError {
 }
 
 pub trait WorkProjectionReadPort: Send + Sync {
+    fn exact_snapshot(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError>;
+
     fn snapshot(
         &self,
         authority: &WorkAuthority,
@@ -65,6 +72,18 @@ where
 {
     pub const fn new(port: P) -> Self {
         Self { port }
+    }
+
+    pub fn exact_snapshot(
+        &self,
+        context: &RequestContext,
+        task_id: &TaskId,
+    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionApplicationError> {
+        let authority = super::work::work_authority(context)
+            .map_err(WorkProjectionApplicationError::Admission)?;
+        self.port
+            .exact_snapshot(&authority, task_id)
+            .map_err(Into::into)
     }
 
     pub fn snapshot(

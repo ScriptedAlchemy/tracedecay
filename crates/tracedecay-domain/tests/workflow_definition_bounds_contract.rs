@@ -169,9 +169,9 @@ fn recursive_step_dispatch_is_rejected_rather_than_diverging() {
 
 #[test]
 fn fan_out_is_accepted_across_the_whole_declared_range() {
-    for max_parallel in [1, MAX_WORKFLOW_FAN_OUT] {
+    for max_width in [1, MAX_WORKFLOW_FAN_OUT] {
         let mut fan_out = step("review", &[], vec![], &["finding".to_owned()]);
-        fan_out.fan_out = Some(WorkflowFanOutV1 { max_parallel });
+        fan_out.fan_out = Some(WorkflowFanOutV1 { max_width });
         definition(vec![fan_out]).unwrap();
     }
 }
@@ -191,7 +191,7 @@ fn wire_definitions_reject_bound_violations_after_deserialization() {
     let valid = definition(vec![step("prepare", &[], vec![], &["context".to_owned()])]).unwrap();
 
     let mut unbounded_fan_out = serde_json::to_value(&valid).unwrap();
-    unbounded_fan_out["steps"][0]["fan_out"] = json!({ "max_parallel": MAX_WORKFLOW_FAN_OUT + 1 });
+    unbounded_fan_out["steps"][0]["fan_out"] = json!({ "max_width": MAX_WORKFLOW_FAN_OUT + 1 });
     assert!(serde_json::from_value::<WorkflowDefinitionV1>(unbounded_fan_out).is_err());
 
     let mut unbounded_fan_in = serde_json::to_value(&valid).unwrap();

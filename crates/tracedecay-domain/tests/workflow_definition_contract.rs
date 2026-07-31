@@ -158,9 +158,9 @@ fn output_reference_from_non_predecessor_is_rejected() {
 
 #[test]
 fn zero_and_unbounded_fan_out_are_rejected() {
-    for max_parallel in [0, MAX_WORKFLOW_FAN_OUT + 1] {
+    for max_width in [0, MAX_WORKFLOW_FAN_OUT + 1] {
         let mut fan_out = step("review", &[], vec![], &["finding"]);
-        fan_out.fan_out = Some(WorkflowFanOutV1 { max_parallel });
+        fan_out.fan_out = Some(WorkflowFanOutV1 { max_width });
         let error = definition(vec![fan_out]).unwrap_err();
         assert!(matches!(
             error,

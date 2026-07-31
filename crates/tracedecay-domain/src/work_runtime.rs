@@ -1,15 +1,18 @@
 //! Canonical execution-attempt, lease, cancellation, recovery, and terminal contracts for Work.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AttemptId, ManifestDigest, ProjectionGenerationId, ProviderId, RunId, RuntimeEvidenceRef,
-    TaskId, UtcMicros, WorkArtifactId, WorkCancellationRequestId, WorkLeaseId, WorkProjection,
+    AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
+    RefId, RepositoryId, RunId, RuntimeEvidenceRef, TaskId, UtcMicros, WorkArtifactId,
+    WorkAuthority, WorkCancellationRequestId, WorkLeaseId, WorkProjection,
     WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderRouteId, WorkVersion,
+    WorkflowOperationRef, WorktreeId,
 };
 
 pub const MAX_WORK_ATTEMPT_ARTIFACTS: usize = 256;
@@ -42,6 +45,8 @@ pub enum WorkRuntimeContractError {
     ProjectionMismatch,
     #[error("Work execution has not been admitted")]
     ExecutionNotAdmitted,
+    #[error("Work execution envelope is invalid")]
+    InvalidExecutionEnvelope,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -189,6 +194,324 @@ impl WorkProviderRouteV1 {
 
     pub fn route_id(&self) -> &WorkProviderRouteId {
         &self.route_id
+    }
+}
+
+/// Provider protocol selected by the pinned Work configuration snapshot.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkProviderBackendV1 {
+    ClaudeCodeCli,
+    CodexAppServer,
+    CodexCli,
+}
+
+/// Effect semantics admitted for one provider attempt.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEffectStateV1 {
+    Observational,
+    Intercepted,
+    CompoundNonRepeatable,
+}
+
+/// Immutable stream and artifact ceilings reserved before provider startup.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkExecutionBudgetV1 {
+    max_stdout_bytes: u64,
+    max_stderr_bytes: u64,
+    max_protocol_bytes: u64,
+}
+
+impl WorkExecutionBudgetV1 {
+    pub fn new(
+        max_stdout_bytes: u64,
+        max_stderr_bytes: u64,
+        max_protocol_bytes: u64,
+    ) -> Result<Self, WorkRuntimeContractError> {
+        if max_stdout_bytes == 0 || max_stderr_bytes == 0 || max_protocol_bytes == 0 {
+            return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
+        }
+        Ok(Self {
+            max_stdout_bytes,
+            max_stderr_bytes,
+            max_protocol_bytes,
+        })
+    }
+
+    pub const fn max_stdout_bytes(self) -> u64 {
+        self.max_stdout_bytes
+    }
+
+    pub const fn max_stderr_bytes(self) -> u64 {
+        self.max_stderr_bytes
+    }
+
+    pub const fn max_protocol_bytes(self) -> u64 {
+        self.max_protocol_bytes
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkExecutionBudgetV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            max_stdout_bytes: u64,
+            max_stderr_bytes: u64,
+            max_protocol_bytes: u64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.max_stdout_bytes,
+            wire.max_stderr_bytes,
+            wire.max_protocol_bytes,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Exact immutable provider admission attached to the durable Work attempt.
+///
+/// Callers name typed route and scope facts, never argv, environment entries,
+/// or executable paths. The daemon resolves the registered executable only
+/// after this envelope has been persisted and admitted to the canonical queue.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkExecutionEnvelopeV1 {
+    attempt_identity: WorkAttemptIdentityV1,
+    projection_binding: WorkAttemptProjectionBindingV1,
+    operation: WorkflowOperationRef,
+    route: WorkProviderRouteV1,
+    backend: WorkProviderBackendV1,
+    model: String,
+    configuration_digest: ManifestDigest,
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    worktree_root: String,
+    reference: Option<RefId>,
+    commit: CommitId,
+    deadline: UtcMicros,
+    cancellation_generation: u64,
+    budget: WorkExecutionBudgetV1,
+    effect_state: WorkEffectStateV1,
+}
+
+impl WorkExecutionEnvelopeV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        attempt_identity: WorkAttemptIdentityV1,
+        projection_binding: WorkAttemptProjectionBindingV1,
+        operation: WorkflowOperationRef,
+        route: WorkProviderRouteV1,
+        backend: WorkProviderBackendV1,
+        model: String,
+        configuration_digest: ManifestDigest,
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+        worktree_id: WorktreeId,
+        worktree_root: String,
+        reference: Option<RefId>,
+        commit: CommitId,
+        deadline: UtcMicros,
+        cancellation_generation: u64,
+        budget: WorkExecutionBudgetV1,
+        effect_state: WorkEffectStateV1,
+    ) -> Result<Self, WorkRuntimeContractError> {
+        if model.is_empty()
+            || model.trim() != model
+            || model.len() > 256
+            || model.chars().any(char::is_control)
+            || worktree_root.len() > 4_096
+            || !Path::new(&worktree_root).is_absolute()
+            || worktree_root.contains('\0')
+            || deadline.0 <= 0
+            || cancellation_generation == 0
+            || route.provider_id() != backend.provider_id()
+        {
+            return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
+        }
+        Ok(Self {
+            attempt_identity,
+            projection_binding,
+            operation,
+            route,
+            backend,
+            model,
+            configuration_digest,
+            project_id,
+            repository_id,
+            worktree_id,
+            worktree_root,
+            reference,
+            commit,
+            deadline,
+            cancellation_generation,
+            budget,
+            effect_state,
+        })
+    }
+
+    pub fn attempt_identity(&self) -> &WorkAttemptIdentityV1 {
+        &self.attempt_identity
+    }
+
+    pub fn projection_binding(&self) -> &WorkAttemptProjectionBindingV1 {
+        &self.projection_binding
+    }
+
+    pub fn operation(&self) -> &WorkflowOperationRef {
+        &self.operation
+    }
+
+    pub fn route(&self) -> &WorkProviderRouteV1 {
+        &self.route
+    }
+
+    pub const fn backend(&self) -> WorkProviderBackendV1 {
+        self.backend
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn configuration_digest(&self) -> &ManifestDigest {
+        &self.configuration_digest
+    }
+
+    pub fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    pub fn repository_id(&self) -> &RepositoryId {
+        &self.repository_id
+    }
+
+    pub fn worktree_id(&self) -> &WorktreeId {
+        &self.worktree_id
+    }
+
+    pub fn worktree_root(&self) -> &str {
+        &self.worktree_root
+    }
+
+    pub fn reference(&self) -> Option<&RefId> {
+        self.reference.as_ref()
+    }
+
+    pub fn commit(&self) -> &CommitId {
+        &self.commit
+    }
+
+    pub const fn deadline(&self) -> UtcMicros {
+        self.deadline
+    }
+
+    pub const fn cancellation_generation(&self) -> u64 {
+        self.cancellation_generation
+    }
+
+    pub const fn budget(&self) -> WorkExecutionBudgetV1 {
+        self.budget
+    }
+
+    pub const fn effect_state(&self) -> WorkEffectStateV1 {
+        self.effect_state
+    }
+
+    fn validate_attempt(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        projection_binding: &WorkAttemptProjectionBindingV1,
+        requested_route: &WorkProviderRouteV1,
+    ) -> Result<(), WorkRuntimeContractError> {
+        if &self.attempt_identity != identity
+            || &self.projection_binding != projection_binding
+            || &self.route != requested_route
+        {
+            return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
+        }
+        Ok(())
+    }
+}
+
+impl WorkProviderBackendV1 {
+    fn provider_id(self) -> &'static ProviderId {
+        static CLAUDE: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
+        static CODEX_APP_SERVER: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
+        static CODEX_CLI: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
+        match self {
+            Self::ClaudeCodeCli => CLAUDE.get_or_init(|| {
+                ProviderId::new("provider.work.claude-code-cli")
+                    .expect("static Claude Work provider ID")
+            }),
+            Self::CodexAppServer => CODEX_APP_SERVER.get_or_init(|| {
+                ProviderId::new("provider.work.codex-app-server")
+                    .expect("static Codex app-server Work provider ID")
+            }),
+            Self::CodexCli => CODEX_CLI.get_or_init(|| {
+                ProviderId::new("provider.work.codex-cli")
+                    .expect("static Codex CLI Work provider ID")
+            }),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            attempt_identity: WorkAttemptIdentityV1,
+            projection_binding: WorkAttemptProjectionBindingV1,
+            operation: WorkflowOperationRef,
+            route: WorkProviderRouteV1,
+            backend: WorkProviderBackendV1,
+            model: String,
+            configuration_digest: ManifestDigest,
+            project_id: ProjectId,
+            repository_id: RepositoryId,
+            worktree_id: WorktreeId,
+            worktree_root: String,
+            reference: Option<RefId>,
+            commit: CommitId,
+            deadline: UtcMicros,
+            cancellation_generation: u64,
+            budget: WorkExecutionBudgetV1,
+            effect_state: WorkEffectStateV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(
+            wire.attempt_identity,
+            wire.projection_binding,
+            wire.operation,
+            wire.route,
+            wire.backend,
+            wire.model,
+            wire.configuration_digest,
+            wire.project_id,
+            wire.repository_id,
+            wire.worktree_id,
+            wire.worktree_root,
+            wire.reference,
+            wire.commit,
+            wire.deadline,
+            wire.cancellation_generation,
+            wire.budget,
+            wire.effect_state,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -579,6 +902,7 @@ impl WorkTerminalEvidenceV1 {
 pub struct WorkAttemptV1 {
     identity: WorkAttemptIdentityV1,
     projection_binding: WorkAttemptProjectionBindingV1,
+    execution: WorkExecutionEnvelopeV1,
     lease: WorkLeaseFenceV1,
     state: WorkAttemptStateV1,
     progress: Option<WorkAttemptProgressV1>,
@@ -595,6 +919,7 @@ impl WorkAttemptV1 {
     pub fn new(
         identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
+        execution: WorkExecutionEnvelopeV1,
         lease: WorkLeaseFenceV1,
         state: WorkAttemptStateV1,
         progress: Option<WorkAttemptProgressV1>,
@@ -606,9 +931,11 @@ impl WorkAttemptV1 {
         terminal: Option<WorkTerminalEvidenceV1>,
     ) -> Result<Self, WorkRuntimeContractError> {
         canonicalize_artifacts(&mut artifacts)?;
+        execution.validate_attempt(&identity, &projection_binding, &requested_route)?;
         let attempt = Self {
             identity,
             projection_binding,
+            execution,
             lease,
             state,
             progress,
@@ -629,6 +956,10 @@ impl WorkAttemptV1 {
 
     pub fn projection_binding(&self) -> &WorkAttemptProjectionBindingV1 {
         &self.projection_binding
+    }
+
+    pub fn execution(&self) -> &WorkExecutionEnvelopeV1 {
+        &self.execution
     }
 
     pub fn lease(&self) -> &WorkLeaseFenceV1 {
@@ -733,6 +1064,7 @@ impl WorkAttemptV1 {
         Self::new(
             self.identity.clone(),
             self.projection_binding.clone(),
+            self.execution.clone(),
             lease,
             state,
             progress,
@@ -820,6 +1152,7 @@ impl<'de> Deserialize<'de> for WorkAttemptV1 {
         struct Wire {
             identity: WorkAttemptIdentityV1,
             projection_binding: WorkAttemptProjectionBindingV1,
+            execution: WorkExecutionEnvelopeV1,
             lease: WorkLeaseFenceV1,
             state: WorkAttemptStateV1,
             progress: Option<WorkAttemptProgressV1>,
@@ -835,6 +1168,7 @@ impl<'de> Deserialize<'de> for WorkAttemptV1 {
         Self::new(
             wire.identity,
             wire.projection_binding,
+            wire.execution,
             wire.lease,
             wire.state,
             wire.progress,

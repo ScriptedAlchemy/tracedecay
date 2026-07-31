@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019c08bb-8eef-7b50-84fe-6d2681c23c60"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"native codex terminal fixture"}}
+{"type":"turn.completed","usage":{"input_tokens":2841,"cached_input_tokens":2560,"output_tokens":14}}

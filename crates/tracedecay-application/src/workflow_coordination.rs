@@ -13,6 +13,9 @@ use tracedecay_domain::{
     WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
+use tracedecay_tool_catalog::OperationId;
+
+pub const WORKFLOW_CANONICAL_WORK_OPERATION_V1: &str = "operation.work.attempt_start";
 
 /// Upper inclusive bound for calibrated placement scores (micros of unit interval).
 pub const MAX_CALIBRATED_SCORE_MICROS: u32 = 1_000_000;
@@ -59,11 +62,29 @@ pub struct WorkflowActivationV1 {
     pub active_version: u64,
 }
 
+/// Wire request for [`WorkflowDefinitionService::register`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionRegisterRequestV1 {
+    pub definition: WorkflowDefinitionV1,
+}
+
+/// Wire request for [`WorkflowDefinitionService::activate`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionActivateRequestV1 {
+    pub definition_id: WorkflowDefinitionId,
+    pub expected_active_version: Option<u64>,
+    #[schemars(range(min = 1))]
+    pub replacement_version: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowCoordinationError {
     InvalidDefinition,
     ImmutableDefinitionConflict,
     DefinitionNotFound,
+    UnsupportedOperation,
     StaleActivation,
     AuthorityUnavailable(String),
 }
@@ -76,6 +97,9 @@ impl Display for WorkflowCoordinationError {
                 formatter.write_str("workflow definition identity and version are immutable")
             }
             Self::DefinitionNotFound => formatter.write_str("workflow definition was not found"),
+            Self::UnsupportedOperation => {
+                formatter.write_str("workflow definition references an unavailable operation")
+            }
             Self::StaleActivation => {
                 formatter.write_str("workflow activation changed concurrently")
             }
@@ -137,10 +161,26 @@ where
         if replacement_version == 0 {
             return Err(WorkflowCoordinationError::InvalidDefinition);
         }
-        self.authority
+        let definition = self
+            .authority
             .load(definition_id, replacement_version)
             .map_err(coordination_authority_error)?
             .ok_or(WorkflowCoordinationError::DefinitionNotFound)?;
+        let catalog = crate::work_executable_binding_registry().map_err(|_| {
+            WorkflowCoordinationError::AuthorityUnavailable(
+                "canonical operation catalog is unavailable".to_owned(),
+            )
+        })?;
+        if definition.steps().iter().any(|step| {
+            step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1
+                || OperationId::new(step.operation.as_str())
+                    .ok()
+                    .and_then(|operation| catalog.get(&operation))
+                    .and_then(|availability| availability.binding())
+                    .is_none()
+        }) {
+            return Err(WorkflowCoordinationError::UnsupportedOperation);
+        }
 
         let current = self
             .authority
@@ -528,13 +568,71 @@ impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskHandoffConsumeOutcome {
     Consumed,
     Missing,
     ScopeMismatch,
     Expired,
     Replay,
+}
+
+/// Wire request for [`TaskHandoffService::issue`].
+///
+/// `secret` is the caller-supplied bearer token; the authority persists only
+/// its digest, never the secret itself.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHandoffIssueRequestV1 {
+    pub issuer: ActorId,
+    pub scope: TaskHandoffScopeV1,
+    pub secret: String,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+}
+
+impl fmt::Debug for TaskHandoffIssueRequestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskHandoffIssueRequestV1")
+            .field("issuer", &self.issuer)
+            .field("scope", &self.scope)
+            .field("secret", &"[REDACTED]")
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Wire request for [`TaskHandoffService::redeem`].
+#[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHandoffRedeemRequestV1 {
+    pub secret: String,
+    pub expected_scope: TaskHandoffScopeV1,
+    pub redeemer: ActorId,
+    pub consumed_at: UtcMicros,
+}
+
+impl fmt::Debug for TaskHandoffRedeemRequestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskHandoffRedeemRequestV1")
+            .field("secret", &"[REDACTED]")
+            .field("expected_scope", &self.expected_scope)
+            .field("redeemer", &self.redeemer)
+            .field("consumed_at", &self.consumed_at)
+            .finish()
+    }
+}
+
+/// Wire response for [`TaskHandoffService::redeem`]: the redeemed scope,
+/// once and only once, for the caller that actually consumed it.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskHandoffRedeemedV1 {
+    pub scope: TaskHandoffScopeV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

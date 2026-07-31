@@ -58,10 +58,10 @@ pub enum WorkflowDefinitionError {
         step_id: WorkflowStepId,
         output_name: WorkflowOutputName,
     },
-    #[error("workflow step {step_id} has invalid fan-out {max_parallel}")]
+    #[error("workflow step {step_id} has invalid fan-out width {max_width}")]
     InvalidFanOut {
         step_id: WorkflowStepId,
-        max_parallel: u32,
+        max_width: u32,
     },
 }
 
@@ -70,7 +70,7 @@ pub enum WorkflowDefinitionError {
 )]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowFanOutV1 {
-    pub max_parallel: u32,
+    pub max_width: u32,
 }
 
 #[derive(
@@ -251,11 +251,11 @@ impl WorkflowDefinitionV1 {
         }
 
         if let Some(fan_out) = step.fan_out
-            && !(1..=MAX_WORKFLOW_FAN_OUT).contains(&fan_out.max_parallel)
+            && !(1..=MAX_WORKFLOW_FAN_OUT).contains(&fan_out.max_width)
         {
             return Err(WorkflowDefinitionError::InvalidFanOut {
                 step_id: step.step_id.clone(),
-                max_parallel: fan_out.max_parallel,
+                max_width: fan_out.max_width,
             });
         }
         Ok(())

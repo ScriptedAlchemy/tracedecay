@@ -21,6 +21,7 @@ pub mod remediation;
 pub mod remote;
 mod sse;
 pub mod work;
+pub mod workflow;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -45,6 +46,10 @@ pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
     WorkOperationFamily, work_application_router, work_core_router, work_invalid_request_response,
+};
+pub use workflow::{
+    WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
+    workflow_application_router, workflow_invalid_request_response,
 };
 
 /// A resolved canonical invocation result ready for HTTP presentation.

@@ -39,6 +39,7 @@ impl WorkDispatchBoundsV1 {
 pub enum WorkProviderSettlementV1 {
     Completed { evidence: String },
     Cancelled,
+    TimedOut,
     Failed { message: String },
 }
 
@@ -62,6 +63,13 @@ pub trait WorkProviderExecutionPort: Send + Sync {
     type Run: WorkProviderRun;
 
     fn route(&self) -> Result<WorkProviderRouteV1, WorkProviderExecutionError>;
+
+    fn supports_route(
+        &self,
+        route: &WorkProviderRouteV1,
+    ) -> Result<bool, WorkProviderExecutionError> {
+        self.route().map(|mounted| &mounted == route)
+    }
 
     fn prepare(&self, attempt: &WorkAttemptV1) -> Result<Self::Run, WorkProviderExecutionError>;
 }
@@ -159,6 +167,13 @@ where
         self.provider.route()
     }
 
+    pub fn supports_route(
+        &self,
+        route: &WorkProviderRouteV1,
+    ) -> Result<bool, WorkProviderExecutionError> {
+        self.provider.supports_route(route)
+    }
+
     pub fn in_flight(&self) -> usize {
         self.registry().len()
     }
@@ -185,8 +200,10 @@ where
         if self.closed.load(Ordering::Acquire) {
             return Err(WorkDispatchError::NotAdmitted);
         }
-        let route = self.provider.route()?;
-        if attempt.actual_route() != Some(&route) {
+        let Some(route) = attempt.actual_route() else {
+            return Err(WorkDispatchError::RouteNotMounted);
+        };
+        if !self.provider.supports_route(route)? {
             return Err(WorkDispatchError::RouteNotMounted);
         }
         if let Some(existing) = in_flight.get_mut(attempt.identity()) {
@@ -348,9 +365,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tracedecay_domain::{
-        AttemptId, ProjectionGenerationId, ProviderId, RunId, TaskId,
-        WorkAttemptProjectionBindingV1, WorkCancellationStateV1, WorkFenceEpochV1, WorkLeaseId,
-        WorkProjectionSequenceV1, WorkProviderRouteId, WorkRecoveryStateV1, WorkVersion,
+        ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId,
+        ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, WorkAttemptProjectionBindingV1,
+        WorkCancellationStateV1, WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
+        WorkFenceEpochV1, WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1,
+        WorkProviderRouteId, WorkRecoveryStateV1, WorkVersion, WorkflowOperationRef, WorktreeId,
     };
 
     use super::*;
@@ -365,10 +384,14 @@ mod tests {
 
     fn route(value: &str) -> WorkProviderRouteV1 {
         WorkProviderRouteV1::new(
-            id::<ProviderId>("provider.work.dispatch"),
+            id::<ProviderId>("provider.work.codex-app-server"),
             id::<WorkProviderRouteId>(value),
         )
         .unwrap()
+    }
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
     fn lease(lease_id: &str, epoch: u64) -> WorkLeaseFenceV1 {
@@ -385,26 +408,51 @@ mod tests {
         lease: WorkLeaseFenceV1,
         actual_route: Option<WorkProviderRouteV1>,
     ) -> WorkAttemptV1 {
+        let identity = WorkAttemptIdentityV1::new(
+            id::<TaskId>("task.work.dispatch"),
+            id::<RunId>("run.work.dispatch"),
+            id::<AttemptId>(attempt_id),
+        )
+        .unwrap();
+        let projection_binding = WorkAttemptProjectionBindingV1::new(
+            id::<ProjectionGenerationId>("generation.work.dispatch"),
+            WorkProjectionSequenceV1::new(2),
+            WorkVersion::initial(),
+            id::<ProposalId>("proposal.work.dispatch"),
+        )
+        .unwrap();
+        let requested_route = route("route.work.dispatch");
+        let execution = WorkExecutionEnvelopeV1::new(
+            identity.clone(),
+            projection_binding.clone(),
+            id::<WorkflowOperationRef>("operation.work.execute-provider"),
+            requested_route.clone(),
+            WorkProviderBackendV1::CodexAppServer,
+            "gpt-test".to_owned(),
+            digest('c'),
+            id::<ProjectId>("project.work.dispatch"),
+            id::<RepositoryId>("repository.work.dispatch"),
+            id::<WorktreeId>("worktree.work.dispatch"),
+            "/tmp/work-dispatch".to_owned(),
+            Some(id::<RefId>("refs/heads/work-dispatch")),
+            id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+            tracedecay_domain::UtcMicros(1_000_000),
+            1,
+            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
+            WorkEffectStateV1::Observational,
+        )
+        .unwrap();
         WorkAttemptV1::new(
-            WorkAttemptIdentityV1::new(
-                id::<TaskId>("task.work.dispatch"),
-                id::<RunId>("run.work.dispatch"),
-                id::<AttemptId>(attempt_id),
-            )
-            .unwrap(),
-            WorkAttemptProjectionBindingV1::new(
-                id::<ProjectionGenerationId>("generation.work.dispatch"),
-                WorkProjectionSequenceV1::new(2),
-                WorkVersion::initial(),
-            )
-            .unwrap(),
+            identity,
+            projection_binding,
+            execution,
             lease,
             state,
             None,
             Vec::new(),
             WorkCancellationStateV1::None,
             WorkRecoveryStateV1::Fresh,
-            route("route.work.dispatch"),
+            requested_route,
             actual_route,
             None,
         )

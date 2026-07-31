@@ -1234,6 +1234,7 @@ mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
+pub(crate) mod workflow_runtime;
 pub(crate) mod work_runtime;
 
 /// Enables background maintenance only for long-lived daemon/MCP processes.
@@ -1290,6 +1291,7 @@ pub(crate) use service::invocation::{
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
     Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
+    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
     admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
     parse_daemon_invocation_request,
 };

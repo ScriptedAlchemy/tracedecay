@@ -131,6 +131,43 @@ fn projection_reads_are_scope_exact_generation_bound_and_incremental() {
 }
 
 #[test]
+fn exact_projection_lookup_is_not_limited_by_snapshot_page_position() {
+    let store = RegisteredWorkStore::start("exact-read");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.exact-read", "actor.work.owner");
+    for index in 0..513 {
+        create(
+            &service,
+            &owner,
+            &format!("task.work.exact-read.{index:04}"),
+        );
+    }
+    let target = id::<TaskId>("task.work.exact-read.zzzz");
+    create(&service, &owner, target.as_str());
+
+    let capped = WorkProjectionReadPort::snapshot(&storage, &authority(&owner), 512).unwrap();
+    assert!(
+        capped
+            .projections()
+            .iter()
+            .all(|projection| projection.task_id() != &target)
+    );
+
+    let exact =
+        WorkProjectionReadPort::exact_snapshot(&storage, &authority(&owner), &target).unwrap();
+    assert_eq!(exact.projections().len(), 1);
+    assert_eq!(exact.projections()[0].task_id(), &target);
+    assert!(matches!(
+        exact.coverage(),
+        tracedecay_domain::WorkProjectionCoverageV1::Complete {
+            returned: 1,
+            total: 1
+        }
+    ));
+}
+
+#[test]
 fn immutable_history_and_projection_rebuild_survive_restart() {
     let store = RegisteredWorkStore::start("restart");
     let service = WorkService::new(store.storage().clone());

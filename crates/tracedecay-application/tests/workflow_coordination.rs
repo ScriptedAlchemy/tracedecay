@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 
 use schemars::schema_for;
 use tracedecay_application::{
-    MAX_CALIBRATED_SCORE_MICROS, MAX_TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
-    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrantV1,
-    TaskHandoffScopeV1, TaskHandoffService, TaskHandoffToken, WorkflowActivationV1,
-    WorkflowCoordinationError, WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
-    WorkflowDefinitionService, WorkflowPlacementCandidateV1, WorkflowPlacementError,
-    WorkflowPlacementPort, WorkflowPlacementRequestV1, WorkflowPlacementService,
+    MAX_CALIBRATED_SCORE_MICROS, MAX_TASK_HANDOFF_LIFETIME_MICROS,
+    WORKFLOW_CANONICAL_WORK_OPERATION_V1, TaskHandoffAuthorityError, TaskHandoffAuthorityPort,
+    TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrantV1, TaskHandoffScopeV1,
+    TaskHandoffService, TaskHandoffToken, WorkflowActivationV1, WorkflowCoordinationError,
+    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort, WorkflowDefinitionService,
+    WorkflowPlacementCandidateV1, WorkflowPlacementError, WorkflowPlacementPort,
+    WorkflowPlacementRequestV1, WorkflowPlacementService,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
@@ -30,7 +31,7 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 fn definition(version: u64) -> WorkflowDefinitionV1 {
-    definition_with_operation(version, "operation.prepare.v1")
+    definition_with_operation(version, WORKFLOW_CANONICAL_WORK_OPERATION_V1)
 }
 
 fn definition_with_operation(version: u64, operation: &str) -> WorkflowDefinitionV1 {

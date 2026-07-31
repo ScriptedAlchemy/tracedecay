@@ -19,3 +19,4 @@ mod fixture_authority_test;
 mod git_watch_test;
 #[cfg(unix)]
 mod pr_autotrack_test;
+mod workflow_handoff_test;
