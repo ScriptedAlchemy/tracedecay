@@ -645,8 +645,7 @@ async fn verify_rows(
     let actual = read_message(conn, &message.provider, &message.message_id).await?;
     let compatible = match actual.as_ref() {
         Some(actual) => {
-            actual == message
-                || protected_message_rows_compatible(conn, actual, message).await?
+            actual == message || protected_message_rows_compatible(conn, actual, message).await?
         }
         None => false,
     };

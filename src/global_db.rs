@@ -12,8 +12,7 @@ pub use tracedecay_store::ParseOffset;
 use crate::db::engine::{Value as EngineValue, WalCheckpointExecutor};
 use crate::errors::TraceDecayError;
 use crate::sessions::{
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
-    lcm::LcmSummaryRequest,
+    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, lcm::LcmSummaryRequest,
 };
 
 pub mod configuration;
@@ -54,21 +53,6 @@ const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 /// Compatibility re-export: workflow search filters now live beside the
 /// workflow-index contracts in [`crate::sessions::workflow_index`].
 pub use crate::sessions::workflow_index::WorkflowScopeFilter;
-
-/// Internal query context for the session-message search fan-in.
-///
-/// The optional scoped filters are intentionally grouped with the common search
-/// fields so every search entry point feeds the same SQL builder.
-#[derive(Clone, Copy)]
-struct SessionMessageSearchQuery<'a> {
-    provider: Option<&'a str>,
-    project_key: Option<&'a str>,
-    query: &'a str,
-    limit: usize,
-    filters: SessionSearchFilters<'a>,
-    git_filter: Option<&'a crate::sessions::git_correlation::GitScopeFilter>,
-    workflow_filter: Option<&'a WorkflowScopeFilter>,
-}
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -775,10 +759,6 @@ fn global_db_path_override() -> Option<PathBuf> {
     std::env::var_os(GLOBAL_DB_PATH_ENV)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-}
-
-fn global_db_mmap_size_guard() -> u64 {
-    0
 }
 
 fn global_db_operation_error(

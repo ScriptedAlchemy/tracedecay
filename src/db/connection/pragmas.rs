@@ -16,6 +16,7 @@ pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
 /// - **`mmap_size`**: 2× DB size, clamped to \[0, 256 MB\].
 ///
 /// This avoids the fixed 320 MB memory baseline for small/medium projects.
+#[cfg(test)]
 pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
@@ -42,6 +43,7 @@ pub(crate) fn platform_safe_mmap_size(_mmap: u64) -> u64 {
     0
 }
 
+#[cfg(test)]
 fn sqlite_unsafe_fast_enabled() -> bool {
     std::env::var(SQLITE_UNSAFE_FAST_ENV).as_deref() == Ok("1")
 }
@@ -57,6 +59,7 @@ fn sqlite_unsafe_fast_enabled() -> bool {
 /// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
 /// production) this returns `MEMORY` on every platform, skipping journal file
 /// I/O entirely at the cost of crash durability.
+#[cfg(test)]
 pub(crate) fn platform_safe_journal_mode() -> &'static str {
     if sqlite_unsafe_fast_enabled() {
         "MEMORY"
@@ -77,6 +80,7 @@ pub(crate) fn platform_safe_journal_mode() -> &'static str {
 /// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
 /// production) this returns `OFF` on every platform, skipping fsyncs entirely
 /// at the cost of crash durability.
+#[cfg(test)]
 pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
     if sqlite_unsafe_fast_enabled() {
         "OFF"

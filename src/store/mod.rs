@@ -16,8 +16,8 @@ pub mod global_db;
 pub mod memory;
 pub mod observation;
 pub mod session;
-pub mod workflow;
 pub(crate) mod vector_generations;
+pub mod workflow;
 
 pub use git_correlation::GlobalDbGitCorrelationStore;
 pub use global_db::GlobalDbTranscriptStore;

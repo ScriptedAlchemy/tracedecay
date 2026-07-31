@@ -884,16 +884,6 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("commit transcript parse offset: {error}"))
     }
 
-    pub async fn advance_parse_offset(
-        &self,
-        path: &str,
-        offset: ParseOffset,
-    ) -> Result<(), String> {
-        self.advance_parse_offset_result(path, offset)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
     pub(crate) async fn advance_parse_offset_result(
         &self,
         path: &str,

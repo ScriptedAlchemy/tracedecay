@@ -108,10 +108,6 @@ impl Connection {
         }
     }
 
-    pub(crate) fn attach_read_only(runtime: MigrationSqlHandle) -> ReadConnection {
-        Self::attach(runtime).read_only()
-    }
-
     pub(crate) fn read_only(&self) -> ReadConnection {
         ReadConnection {
             connection: self.clone(),

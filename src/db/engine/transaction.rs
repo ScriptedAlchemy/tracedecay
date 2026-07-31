@@ -111,26 +111,6 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    /// Executes one separately authorized schema statement without the
-    /// ordinary statement deadline.
-    pub(crate) async fn execute_schema_step<P>(&self, sql: &str, params: P) -> Result<u64>
-    where
-        P: IntoParams,
-    {
-        let runtime = Arc::clone(&self.runtime);
-        let statement = statement(sql, params)?;
-        tokio::task::spawn_blocking(move || {
-            lock_runtime(&runtime)?
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_schema_step(statement)
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
-        .map(|result| result.changed_rows as u64)
-    }
-
     /// Executes one separately authorized schema batch without the ordinary
     /// statement deadline.
     pub(crate) async fn execute_schema_batch_step(&self, sql: &str) -> Result<()> {
