@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language cannot resurrect
+> branch-only scaffolding; compatibility begins only after an evidenced package
+> publication or other released/live predecessor.
 
 **Goal:** Publish Rust, TypeScript, and Python SDKs for accepted PR12–PR17
 operations without inventing lifecycle semantics.
@@ -43,8 +46,9 @@ acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Generated schemas are additive until the accepted major-version policy permits
-removal. Rollback unpublishes or yanks a package release according to registry
+Before first publication, generated schemas change to their final shape in
+place. After an evidenced package release, schemas follow the accepted
+major-version compatibility policy. Rollback unpublishes or yanks a package release according to registry
 policy but never changes server semantics. Measure generation, package size,
 startup, paging/SSE overhead, and conformance duration. Delete private client
 wrappers and aliases only after three-language local/remote conformance,
