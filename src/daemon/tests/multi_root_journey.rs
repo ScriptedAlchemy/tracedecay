@@ -112,40 +112,84 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         deadline,
         cancellation,
     );
-    let pre_admission_read =
-        execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(&read_request)).await;
-    assert!(matches!(
-        pre_admission_read.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
-    ));
-    assert_eq!(
-        engine.project_open_attempts.load(Ordering::Relaxed),
-        0,
-        "quarantined read must refuse before project admission"
+    let mut pre_admission_requests = vec![read_request.clone()];
+    let (cas_deadline, cas_cancellation) = controls("pre-admission-cas", observed_at);
+    pre_admission_requests.push(
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.pre-admission-cas",
+            MultiRootScopeSetCasRequestV1::new(
+                scope_set_id.clone(),
+                None,
+                vec![tracedecay_domain::ProjectId::new("project.pre-admission").expect("project")],
+            )
+            .expect("CAS request"),
+            observed_at,
+            cas_deadline,
+            cas_cancellation,
+        ),
     );
-    let portable_read = execute_portable_daemon_invocation(
-        engine.lifecycle.clone(),
-        engine.store_administration.clone(),
-        Arc::clone(&engine.project_open_gates),
-        &first_handshake,
-        &engine.invocation,
-        engine.http_application_registry.clone(),
-        wire_round_trip(&read_request),
-        Some(Arc::clone(&engine.project_open_attempts)),
-    )
-    .await;
-    assert!(matches!(
-        portable_read.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
-    ));
+    let pre_admission_revision = ScopeSetRevision::new(1).expect("revision");
+    let pre_admission_digest =
+        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("digest");
+    for (index, operation) in [
+        MultiRootOperationV1::Work { request: json!({}) },
+        MultiRootOperationV1::Git { request: json!({}) },
+        MultiRootOperationV1::Feedback { request: json!({}) },
+        MultiRootOperationV1::Impact { request: json!({}) },
+        MultiRootOperationV1::Query { request: json!({}) },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (deadline, cancellation) =
+            controls(&format!("pre-admission-execute-{index}"), observed_at);
+        pre_admission_requests.push(DaemonInvocationRequest::multi_root_execute(
+            format!("request.multi-root.pre-admission-execute-{index}"),
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                pre_admission_revision.clone(),
+                pre_admission_digest.clone(),
+                operation,
+                0,
+                None,
+            )
+            .expect("execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ));
+    }
+    for request in &pre_admission_requests {
+        let unix =
+            execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(request)).await;
+        assert!(matches!(
+            unix.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            }
+        ));
+        let portable = execute_portable_daemon_invocation(
+            engine.lifecycle.clone(),
+            engine.store_administration.clone(),
+            Arc::clone(&engine.project_open_gates),
+            &first_handshake,
+            &engine.invocation,
+            engine.http_application_registry.clone(),
+            wire_round_trip(request),
+            Some(Arc::clone(&engine.project_open_attempts)),
+        )
+        .await;
+        assert!(matches!(
+            portable.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            }
+        ));
+    }
     assert_eq!(
         engine.project_open_attempts.load(Ordering::Relaxed),
         0,
-        "portable quarantined read must refuse before project admission"
+        "all quarantined payloads must refuse before Unix or portable project admission"
     );
 
     let mut invalid_read = read_request;

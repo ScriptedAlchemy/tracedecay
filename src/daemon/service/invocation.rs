@@ -1412,7 +1412,7 @@ impl DaemonInvocationRequest {
         )
     }
 
-    fn validate(&self) -> Result<(), DaemonInvocationProblem> {
+    pub(crate) fn validate(&self) -> Result<(), DaemonInvocationProblem> {
         if self.protocol != DAEMON_INVOCATION_PROTOCOL {
             return Err(DaemonInvocationProblem::InvalidRequest);
         }
@@ -10685,6 +10685,7 @@ mod tests {
         assert_eq!(registry.lock().await.active_sessions(), 0);
         assert!(service.lsp_sessions.lock().await.is_empty());
         assert!(service.authorized_lsp_workspaces.lock().await.is_empty());
+        assert!(service.project_runtimes.is_empty().await);
     }
 
     #[tokio::test]
