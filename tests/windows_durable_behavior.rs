@@ -9,14 +9,8 @@ mod common;
 #[path = "storage_suite/support.rs"]
 mod support;
 
-#[path = "session_suite/lcm_payload.rs"]
-mod lcm_payload;
-#[path = "session_suite/lcm_query/mod.rs"]
-mod lcm_query;
 #[path = "session_suite/lcm_summary_lineage_review.rs"]
 mod lcm_summary_lineage_review;
-#[path = "session_suite/temporal_application.rs"]
-mod temporal_kernel_behavior;
 #[path = "session_suite/temporal_projection/mod.rs"]
 mod temporal_projection;
 
@@ -31,6 +25,116 @@ mod migration_manifest;
 
 #[path = "../crates/tracedecay-domain/tests/session_contract.rs"]
 mod domain_session_contract;
+
+mod temporal_kernel_behavior {
+    use tracedecay_temporal_query::candidates::{CandidateChannel, plan_candidates};
+
+    #[test]
+    fn public_candidate_plan_preserves_exact_phrase_and_time_authority() {
+        let query = "\"durable checkpoint\" 2026-07-31";
+        let plan = plan_candidates(query);
+
+        assert!(plan.contains(CandidateChannel::ExactMessage, query));
+        assert!(plan.contains(CandidateChannel::Phrase, "durable checkpoint"));
+        assert!(plan.contains(CandidateChannel::Time, "2026-07-31"));
+        assert!(!plan.has_semantic_channel());
+    }
+}
+
+mod lcm_payload_behavior {
+    use tempfile::TempDir;
+    use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay::sessions::lcm::{LcmExpandRequest, LcmExpandTarget};
+
+    use super::common::{lcm_payload_message, lcm_payload_session};
+
+    #[tokio::test]
+    async fn canonical_external_payload_survives_ingest_and_expansion() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+            .await
+            .expect("open canonical profile runtime");
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Profile,
+                &lcm_payload_session("cursor", "durable-payload-session"),
+            )
+            .await
+            .expect("store canonical session");
+        let content = format!("durable payload\n{}", "P".repeat(260 * 1024));
+        let message = lcm_payload_message(
+            "cursor",
+            "durable-payload-message",
+            "durable-payload-session",
+            "tool",
+            &content,
+        );
+        runtime
+            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Profile, &message)
+            .await
+            .expect("externalize canonical payload");
+        let payload_ref = runtime
+            .lcm_load_raw_message_for_test("cursor", "durable-payload-message")
+            .await
+            .and_then(|stored| stored.payload_ref)
+            .expect("external payload reference");
+        let expanded = runtime
+            .lcm_expand_for_test(LcmExpandRequest {
+                provider: "cursor".to_string(),
+                session_id: "durable-payload-session".to_string(),
+                target: LcmExpandTarget::ExternalPayload { payload_ref },
+                content_slice: None,
+                source_offset: 0,
+                source_limit: None,
+            })
+            .await
+            .expect("expand canonical payload");
+        assert_eq!(expanded.content, content);
+    }
+}
+
+mod lcm_query_behavior {
+    use tempfile::TempDir;
+    use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+
+    use super::common::{lcm_payload_message, lcm_payload_session};
+
+    #[tokio::test]
+    async fn canonical_status_reads_ingested_session_state() {
+        let tmp = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+            .await
+            .expect("open canonical profile runtime");
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Profile,
+                &lcm_payload_session("cursor", "durable-query-session"),
+            )
+            .await
+            .expect("store canonical session");
+        runtime
+            .lcm_ingest_raw_message_for_test(
+                HostAdmissionScope::Profile,
+                &lcm_payload_message(
+                    "cursor",
+                    "durable-query-message",
+                    "durable-query-session",
+                    "assistant",
+                    "durable query payload",
+                ),
+            )
+            .await
+            .expect("store canonical LCM record");
+
+        let status = runtime
+            .lcm_status_for_test("cursor", Some("durable-query-session"))
+            .await
+            .expect("read canonical LCM status");
+        assert_eq!(status.raw_message_count, 1);
+        assert_eq!(status.store.messages, 1);
+        assert!(status.store.token_estimate.complete);
+    }
+}
 
 mod lcm_schema_durability {
     use tempfile::TempDir;
@@ -54,7 +158,7 @@ mod lcm_schema_durability {
             "cursor",
             "durable-schema-message",
             "durable-schema-session",
-            1,
+            "tool",
             "durable schema payload",
         );
         runtime
