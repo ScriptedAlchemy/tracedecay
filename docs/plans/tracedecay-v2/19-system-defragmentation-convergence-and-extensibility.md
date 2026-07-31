@@ -14,6 +14,12 @@ persisted formats remain compatibility contracts until their declared
 migration or retirement; all other convergence is judged by the direct
 behavior and architecture boundaries below.
 
+This cutover inventories only V1 APIs/data proven on `origin/master`, in a
+published package/release, or in live persisted storage. `TraceDecay V2` is
+the product destination, not evidence for contract-version siblings.
+Unreleased aliases, schemas, and adapters converge in place and do not acquire
+migration or deprecation windows from PR sequencing or tests.
+
 ## User outcome
 
 After upgrading, every supported surface reaches one coherent V2 system.
@@ -30,7 +36,7 @@ longer remain available as hidden fallbacks.
    operations. CLI, MCP, hooks, dashboard, LSP bridge, HTTP, and SDK adapters
    translate requests but do not own storage, policy, query, scheduling,
    diagnostics, or lifecycle behavior.
-3. Stable public compatibility aliases are bound to those same canonical
+3. Stable public compatibility aliases with release evidence are bound to those same canonical
    operations and preserve semantic and lifecycle equivalence. Temporary
    aliases identify their consumer, owner, exact deletion condition, and latest
    delivery slice and are removed in PR19 after that consumer migrates.
@@ -92,9 +98,10 @@ the current authority unchanged.
 - Preserve exactly one writer before, during, and after cutover. Hooks remain
   bounded event clients; reads never perform repair; repair and convergence
   loops have one daemon-owned writer below all callers.
-- Preserve compatibility aliases, pagination, streams, cancellation, retry and
-  error behavior through the canonical operation instead of parallel
-  compatibility implementations.
+- Preserve evidence-backed compatibility aliases, pagination, streams,
+  cancellation, retry and error behavior through the canonical operation
+  instead of parallel compatibility implementations. Delete branch-only
+  aliases in place after their callers move.
 
 ### Recover, converge, and delete
 
@@ -122,8 +129,9 @@ A new crate is retained only for a real ownership/runtime boundary or a
 measured build-graph benefit; file size, speculative reuse, or package-count
 targets do not justify it.
 
-PR19 removes every temporary wrapper whose consumer has migrated. Stable public
-aliases remain only when they are actual compatibility contracts and delegate
+PR19 removes every unreleased temporary wrapper whose consumer has migrated.
+Stable public aliases remain only when release evidence makes them actual
+compatibility contracts, and they delegate
 all availability, errors, authorization, effects, health, paging, streaming,
 cancellation, and retries to the canonical operation.
 
