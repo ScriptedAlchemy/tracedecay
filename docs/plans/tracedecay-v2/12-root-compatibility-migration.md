@@ -211,9 +211,11 @@ implementation or a permanent migration runtime.
 
 ## Direct acceptance
 
-- Real V1 fixtures derived from evidenced released/live families migrate through the
-  production upgrade entry point and produce semantically equivalent V2 reads,
-  searches, identities, references, and lineage.
+- Real V1 fixtures derived from evidenced released/live families and fixtures
+  for every potentially persisted branch-era family not eliminated by the
+  authorized census migrate through the production upgrade entry point and
+  produce semantically equivalent V2 reads, searches, identities, references,
+  and lineage.
 - Fault injection at every preflight, backup, staging transaction, checkpoint,
   verification, cutover, archive, and forward-recovery boundary proves
   crash/restart behavior and that no partial authority is published.

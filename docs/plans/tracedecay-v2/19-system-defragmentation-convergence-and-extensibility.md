@@ -56,9 +56,11 @@ longer remain available as hidden fallbacks.
    rollback restores forward to the exact prior verified V2 epoch from verified
    backup/archive material. There is no reverse cutover, dual write,
    production shadow read, or lazy migration.
-6. After the bounded recovery window passes, V1 stores, implementations,
-   writable fallbacks, migration-only adapters, dead features and dependencies,
-   and their dedicated tests are deleted.
+6. After the bounded recovery window passes and the applicable authorized
+   installed-client/host/registered-store census proves no remaining
+   dependency, V1 stores, implementations, writable fallbacks, migration-only
+   adapters, dead features and dependencies, and their dedicated tests are
+   deleted.
 
 If migration, parity, authority, or recovery evidence is missing or partial,
 the operation returns a blocking or `insufficient_evidence` outcome and keeps

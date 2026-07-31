@@ -804,29 +804,33 @@ generated declaration coverage, or schema equality alone is not acceptance.
 
 ## PR19 — V2 becomes the only product path
 
-**User outcome.** Existing released installations migrate only the predecessor
-APIs and persisted families proven in released or live use, cut over to the V2
+**User outcome.** Existing installations migrate predecessor APIs and persisted
+families proven in released/live use plus potentially deployed or persisted
+branch-era families not eliminated by an authorized census, cut over to the V2
 product with bounded recovery, and finish with one supported implementation.
 
 **End-to-end production path.** A destination-committed resumable backfill
 converts released data, isolated read-only shadow comparison verifies product
 behavior, an explicit bounded cutover makes V2 default, and recovery restores
-the V1 archive forward into verified V2 under a new fence. After the recovery
-window, superseded V1 and migration-only paths are deleted.
+the V1 archive forward into verified V2 under a new fence. Superseded V1 and
+migration-only paths are deleted only after the recovery window and the
+applicable authorized installed-client/host/registered-store census.
 
 **Implementation and deletion.**
 
 - Record explicit compatibility dispositions for every published API, every
   callable name or protocol revision potentially retained by a dogfood
   client/host, and every stored datum potentially present in a released or live
-  format that crosses the cutover. Pure branch-local transient API shapes
-  change in place; potentially installed names and branch-written stores,
+  format that crosses the cutover. Pure source-only/internal API shapes change
+  in place; potentially installed names and branch-written stores,
   spools, files, and projections remain in the inventory until the applicable
   authorized installed-host/live-profile census proves absence.
 - Do not retain reverse cutover, long-lived dual write, lazy read migration,
   production shadow reads, or V1 as renewed authority.
 - Remove superseded V1 implementations, adapters, flags, branches, and
-  migration-only machinery when their recovery boundary closes.
+  migration-only machinery only when their recovery boundary closes and the
+  applicable authorized census proves no installed consumer or registered store
+  depends on them.
 
 **Library-first implementation defaults.** Use the existing SQLite
 `VACUUM INTO`/backup path, migration and fault-injection seams, and proptest
