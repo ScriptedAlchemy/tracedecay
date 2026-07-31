@@ -528,7 +528,7 @@ mod tests {
         DiagnosticSnapshotPort, GenerationDiagnostics,
     };
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll};
 
     fn range(start: u32, end: u32) -> LspRange {
         LspRange {
@@ -705,18 +705,13 @@ mod tests {
         fn abort(&self) {}
     }
 
-    struct InlineWake;
-
-    impl Wake for InlineWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     struct InlineSpawner;
 
     impl LspRuntimeSpawner for InlineSpawner {
         fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-            let waker = Waker::from(Arc::new(InlineWake));
-            let mut context = Context::from_waker(&waker);
+            // These harness futures must complete synchronously; a wake would
+            // indicate that the test spawner is not a valid runtime for them.
+            let mut context = Context::from_waker(std::task::Waker::noop());
             assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(()));
             Box::new(InlineTask)
         }

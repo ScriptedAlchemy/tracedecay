@@ -197,7 +197,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::RecvTimeoutError;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll};
     use std::thread;
     use std::time::Duration;
 
@@ -213,12 +213,6 @@ mod tests {
         }
     }
 
-    struct InlineWake;
-
-    impl Wake for InlineWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     #[derive(Default)]
     struct InlineSpawner {
         last_aborted: Mutex<Option<Arc<AtomicBool>>>,
@@ -226,8 +220,9 @@ mod tests {
 
     impl LspRuntimeSpawner for InlineSpawner {
         fn spawn(&self, mut future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-            let waker = Waker::from(Arc::new(InlineWake));
-            let mut context = Context::from_waker(&waker);
+            // These harness futures must complete synchronously; a wake would
+            // indicate that the test spawner is not a valid runtime for them.
+            let mut context = Context::from_waker(std::task::Waker::noop());
             assert_eq!(Pin::new(&mut future).poll(&mut context), Poll::Ready(()));
             let aborted = Arc::new(AtomicBool::new(false));
             *self.last_aborted.lock().unwrap() = Some(Arc::clone(&aborted));
@@ -293,21 +288,21 @@ mod tests {
         let runtime = InlineSpawner::default();
         let table = BoundedOperationTable::new(1);
         let preparations = AtomicUsize::new(0);
-        let mut prepare = || {
+        let prepare = || {
             preparations.fetch_add(1, Ordering::AcqRel);
             Ok::<_, ()>(("meta", Box::pin(async { 7 }) as LspRuntimeFuture<i32>))
         };
 
         assert_eq!(
-            table.admit_with("first", &runtime, &mut prepare),
+            table.admit_with("first", &runtime, prepare),
             Ok(OperationAdmission::Started("meta"))
         );
         assert_eq!(
-            table.admit_with("first", &runtime, &mut prepare),
+            table.admit_with("first", &runtime, prepare),
             Ok(OperationAdmission::Existing("meta"))
         );
         assert_eq!(
-            table.admit_with("second", &runtime, &mut prepare),
+            table.admit_with("second", &runtime, prepare),
             Ok(OperationAdmission::Saturated)
         );
         assert_eq!(preparations.load(Ordering::Acquire), 1);
