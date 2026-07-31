@@ -779,6 +779,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 ))
                 .await,
             ),
+            Some(McpToolDispatchGroup::Lcm) => {
+                boxed_send(dispatch_lcm_tool(tool_name, args, active_lcm_context)).await
+            }
             Some(McpToolDispatchGroup::RetainedApplication) => expect_classified_dispatch(
                 tool_name,
                 boxed_send(dispatch_retained_application_tools(
@@ -806,9 +809,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 ))
                 .await,
             ),
-            None if tool_name.starts_with("tracedecay_lcm_") => {
-                boxed_send(dispatch_lcm_tool(tool_name, args, active_lcm_context)).await
-            }
             None => Err(TraceDecayError::Config {
                 message: format!("unknown tool: {tool_name}"),
             }),
@@ -1707,135 +1707,73 @@ mod tests {
         }
     }
 
-    fn dispatch_tool_names_from_source(function_name: &str) -> BTreeSet<String> {
-        let source = include_str!("mod.rs");
-        let fn_marker = format!("async fn {function_name}");
-        let function_source = source
-            .split_once(&fn_marker)
-            .unwrap_or_else(|| panic!("missing function source for {function_name}"))
-            .1;
-        let match_source = function_source
-            .split_once("match tool_name {")
-            .unwrap_or_else(|| panic!("{function_name} does not match on tool_name"))
-            .1;
-        let handler_arms = match_source
-            .split_once("_ =>")
-            .unwrap_or_else(|| panic!("{function_name} does not have a wildcard fallback arm"))
-            .0;
-
-        handler_arms
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim_start();
-                if !trimmed.starts_with("\"tracedecay_") || !trimmed.contains("=>") {
-                    return None;
-                }
-                let after_opening_quote = trimmed.strip_prefix('"')?;
-                let (name, after_name) = after_opening_quote.split_once('"')?;
-                if after_name.trim_start().starts_with("=>") {
-                    Some(name.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn assert_set_empty(names: BTreeSet<String>, message: &str) {
-        assert!(
-            names.is_empty(),
-            "{message}: {}",
-            names.into_iter().collect::<Vec<_>>().join(", ")
-        );
-    }
-
-    // MCP registry maintenance guardrail:
-    // when adding a tool, update all three surfaces together: its `def_*`
-    // entry in definitions.rs, the `get_tool_definitions()` registry, and
-    // the application operation catalog. These lockstep tests
-    // intentionally fail with the missing tool name when any surface drifts.
     #[test]
-    fn tool_definitions_and_dispatch_handlers_stay_in_lockstep() {
-        let definition_names = get_tool_definitions()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
-        handler_names.extend(dispatch_tool_names_from_source("dispatch_lcm_tool"));
-        for dispatch_fn in [
-            "dispatch_graph_tools",
-            "dispatch_info_tools",
-            "dispatch_admin_tools",
-            "dispatch_analysis_tools",
-            "dispatch_git_tools",
-            "dispatch_edit_tools",
-            "dispatch_health_tools",
-            "dispatch_memory_tools",
-            "dispatch_session_workflow_tools",
-        ] {
-            handler_names.extend(dispatch_tool_names_from_source(dispatch_fn));
-        }
-        handler_names.extend(
-            APPLICATION_SURFACE_OPERATIONS
-                .into_iter()
-                .map(|operation| format!("tracedecay_{}", operation.as_str())),
-        );
-        for hidden in super::super::definitions::UNADVERTISED_HANDLE_GATED_TOOL_NAMES {
-            handler_names.remove(*hidden);
-        }
-        for operation in RetainedSurfaceOperation::ALL {
-            let tool_name = format!("tracedecay_{}", operation.as_str());
-            let composition = retained_mcp_composition()
-                .unwrap_or_else(|error| panic!("{tool_name} catalog composition failed: {error}"));
-            let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-            let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-            let capability = composition
-                .snapshot()
-                .resolve_binding(
-                    &profile,
-                    BindingSurface::Mcp,
-                    &operation_name,
-                    1,
-                    &BTreeSet::new(),
-                )
-                .unwrap_or_else(|| panic!("{tool_name} catalog binding is not callable"));
-            let expected = retained_surface_application_operation(operation).unwrap();
-            assert_eq!(capability.capability_id(), expected.capability_id());
-            assert_eq!(capability.use_case_id(), expected.use_case_id());
+    fn advertised_tools_resolve_one_concrete_dispatch_entry() {
+        let options = ToolCallRegistryOptions::default();
+        let mut advertised = BTreeSet::new();
+
+        for definition in get_tool_definitions() {
             assert!(
-                composition
-                    .bind_handler(capability.use_case_id(), &())
-                    .is_some(),
-                "{tool_name} application handler is not registered"
+                advertised.insert(definition.name.clone()),
+                "{} is advertised more than once",
+                definition.name
             );
-            handler_names.insert(tool_name);
-        }
-        for internal in INTERNAL_DAEMON_TOOL_NAMES {
-            handler_names.remove(*internal);
+            let group = classify_mcp_tool_dispatch_group(&definition.name, &options)
+                .unwrap_or_else(|| panic!("{} has no production dispatch entry", definition.name));
+
+            match group {
+                McpToolDispatchGroup::ApplicationSurface => assert!(
+                    ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
+                    "{} has no application-surface handler entry",
+                    definition.name
+                ),
+                McpToolDispatchGroup::RetainedApplication => {
+                    let operation = RetainedSurfaceOperation::from_name(&definition.name)
+                        .unwrap_or_else(|| {
+                            panic!("{} has no retained-surface handler entry", definition.name)
+                        });
+                    let composition = retained_mcp_composition().unwrap_or_else(|error| {
+                        panic!("{} catalog composition failed: {error}", definition.name)
+                    });
+                    let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+                    let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+                    let capability = composition
+                        .snapshot()
+                        .resolve_binding(
+                            &profile,
+                            BindingSurface::Mcp,
+                            &operation_name,
+                            1,
+                            &BTreeSet::new(),
+                        )
+                        .unwrap_or_else(|| {
+                            panic!("{} catalog binding is not callable", definition.name)
+                        });
+                    assert!(
+                        composition
+                            .bind_handler(capability.use_case_id(), &())
+                            .is_some(),
+                        "{} application handler is not registered",
+                        definition.name
+                    );
+                }
+                group => assert_eq!(
+                    dispatch_group_for_tool(&definition.name),
+                    Some(group),
+                    "{} does not resolve through the canonical MCP binding registry",
+                    definition.name
+                ),
+            }
         }
 
-        // These tools are intentionally hidden from the advertised surface when
-        // the host ast-grep CLI capability they need is unavailable; mirror the
-        // runtime filters so the integrity check covers the actual tools/list
-        // surface.
-        if !super::super::definitions::ast_grep_available() {
-            handler_names.remove("tracedecay_ast_grep_rewrite");
+        for tool_name in ["tracedecay_not_registered", "tracedecay_lcm_not_registered"] {
+            assert!(!advertised.contains(tool_name));
+            assert_eq!(
+                classify_mcp_tool_dispatch_group(tool_name, &options),
+                None,
+                "{tool_name} must fail closed"
+            );
         }
-
-        assert_set_empty(
-            definition_names
-                .difference(&handler_names)
-                .cloned()
-                .collect(),
-            "MCP tool definitions missing handle_tool_call handlers",
-        );
-        assert_set_empty(
-            handler_names
-                .difference(&definition_names)
-                .cloned()
-                .collect(),
-            "handle_tool_call handlers missing MCP tool definitions",
-        );
     }
 
     #[test]
