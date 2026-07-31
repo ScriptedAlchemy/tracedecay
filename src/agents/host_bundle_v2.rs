@@ -6221,6 +6221,61 @@ mod tests {
         );
     }
 
+    /// Discovery and planning must agree on the ownership boundary: whenever
+    /// `Repair` refuses a path as contested, the doctor reports an ownership
+    /// conflict, and whenever `Repair` would converge it, the doctor reports
+    /// drift or current. A disagreement means the doctor either fails on
+    /// something `reinstall` fixes, or hides something it cannot.
+    #[test]
+    fn doctor_discovery_mirrors_the_repair_ownership_boundary() {
+        let bundle = manifest(HostKindV1::OpenCode, b"current");
+        let artifact = &bundle.artifacts[0];
+        let owned = Some(artifact.ownership_marker.clone());
+        let foreign = Some(expected_ownership_marker(
+            HostKindV1::Hermes,
+            HostBundleComponentV1::Core,
+        ));
+
+        for (marker, bytes, expected) in [
+            (
+                owned.clone(),
+                b"current".as_slice(),
+                HostBundleComponentDoctorStateV1::Current,
+            ),
+            (
+                owned.clone(),
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::Drifted,
+            ),
+            (
+                foreign,
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::OwnershipConflict,
+            ),
+            (
+                None,
+                b"drifted".as_slice(),
+                HostBundleComponentDoctorStateV1::OwnershipConflict,
+            ),
+        ] {
+            let mut observed = pre_v2_artifact(artifact, bytes, None);
+            observed.ownership_marker = marker;
+            observed.owned_artifact_digest = observed
+                .ownership_marker
+                .as_ref()
+                .map(|_| Sha256::digest(b"current").into());
+
+            let state = doctor_artifact_state(&observed, artifact);
+            assert_eq!(state, expected, "observed {observed:?}");
+            assert_eq!(
+                plan_artifact_action(HostBundleLifecycleOpV1::Repair, artifact, Some(&observed))
+                    .is_err(),
+                state == HostBundleComponentDoctorStateV1::OwnershipConflict,
+                "planning and discovery must refuse the same observations"
+            );
+        }
+    }
+
     #[test]
     fn repair_takes_ownership_of_pre_v2_artifacts_that_no_receipt_records() {
         let root = tempfile::tempdir().unwrap();
@@ -6563,7 +6618,10 @@ mod tests {
             HostBundleComponentDoctorStateV1::Missing
         );
 
-        std::fs::write(&artifact, b"foreign").unwrap();
+        // Same ownership marker, different bytes: ordinary content drift. The
+        // planner would converge this with `BackupThenReplace` under `Repair`,
+        // so discovery must not report a contested path.
+        std::fs::write(&artifact, b"drifted").unwrap();
         let report = inspect_installed_host_bundle_components_at(
             artifacts.path(),
             lifecycle.path(),
@@ -6572,8 +6630,65 @@ mod tests {
         .unwrap();
         assert_eq!(
             report.components[0].state,
-            HostBundleComponentDoctorStateV1::OwnershipConflict
+            HostBundleComponentDoctorStateV1::Drifted
         );
+        assert_eq!(
+            report.components[0].artifacts[0].state,
+            HostBundleComponentDoctorStateV1::Drifted
+        );
+        assert_eq!(
+            report.components[0].repair_action,
+            "run `tracedecay reinstall --component core --yes` (backs up and re-owns)"
+        );
+
+        // A second receipt claiming the same deploy path with a different
+        // ownership marker is a foreign claim: no single component owns the
+        // bytes, so both components report the conflict rather than one of
+        // them silently adopting the other's path.
+        let foreign_receipt = HostBundleInstallReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: [23; 16],
+            host: HostKindV1::Hermes,
+            component: HostBundleComponentV1::Core,
+            operation: HostBundleLifecycleOpV1::Install,
+            manifest_digest: manifest(HostKindV1::Hermes, b"foreign")
+                .canonical_digest()
+                .unwrap(),
+            artifacts: vec![HostBundleReceiptArtifactV1 {
+                relative_path: "plugins/tracedecay.json".to_string(),
+                artifact_digest: Sha256::digest(b"foreign").into(),
+                ownership_marker: expected_ownership_marker(
+                    HostKindV1::Hermes,
+                    HostBundleComponentV1::Core,
+                ),
+            }],
+            rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+            rollback_history: Vec::new(),
+        };
+        let foreign_receipt_path = lifecycle
+            .path()
+            .join(HOST_BUNDLE_CONTROL_DIR)
+            .join(receipt_file(HostKindV1::Hermes, HostBundleComponentV1::Core));
+        std::fs::write(
+            &foreign_receipt_path,
+            serde_json::to_vec(&foreign_receipt).unwrap(),
+        )
+        .unwrap();
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap();
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|component| component.state
+                    == HostBundleComponentDoctorStateV1::OwnershipConflict),
+            "a contested deploy path conflicts for every claimant"
+        );
+        std::fs::remove_file(&foreign_receipt_path).unwrap();
 
         let receipt_path = lifecycle
             .path()
