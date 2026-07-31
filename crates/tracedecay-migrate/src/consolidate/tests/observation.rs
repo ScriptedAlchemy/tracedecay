@@ -2,8 +2,8 @@
 //! merge/rollback consolidation tests.
 
 use super::*;
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::global_db::RegisteredGlobalDb;
+use crate::root_seam::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::root_seam::global_db::RegisteredGlobalDb;
 
 struct ObservationDatabaseFixture {
     runtime: HostAdmissionTestRuntimeV1,
@@ -108,7 +108,7 @@ async fn legacy_completed_backfills_resume_from_the_premerge_frontier() {
     assert_eq!(
         observation_backfill_watermark(
             target.database(),
-            crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+            crate::root_seam::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
         )
         .await,
         None
@@ -116,7 +116,7 @@ async fn legacy_completed_backfills_resume_from_the_premerge_frontier() {
     assert_eq!(
         observation_backfill_watermark(
             target.database(),
-            crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+            crate::root_seam::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
         )
         .await,
         None
@@ -139,8 +139,8 @@ async fn legacy_completed_backfills_resume_from_the_premerge_frontier() {
     .unwrap();
 
     for migration in [
-        crate::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
-        crate::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_ANCHOR_SCHEMA_MIGRATION,
+        crate::root_seam::global_db::observation::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION,
     ] {
         assert_eq!(
             observation_backfill_watermark(target.database(), migration).await,
@@ -779,7 +779,7 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
     }
 
     let writer = target.database().writer_connection().unwrap();
-    crate::global_db::schema_stages::begin_observation_authority_canonical_repair(&writer)
+    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(&writer)
         .await
         .unwrap();
     let canonical_receipt = serde_json::to_string(observation.receipt()).unwrap();
@@ -809,7 +809,7 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
         )
         .await
         .unwrap();
-    crate::global_db::schema_stages::finish_observation_authority_canonical_repair(&writer)
+    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(&writer)
         .await
         .unwrap();
 
@@ -1331,10 +1331,10 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
     );
     let snapshot = source.database().read_snapshot().await.unwrap();
     let error =
-        crate::global_db::schema_stages::validate_observation_authority_connection(&snapshot)
+        crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(&snapshot)
             .await
             .unwrap_err();
-    let crate::errors::TraceDecayError::Database { message, operation } = error else {
+    let crate::root_seam::errors::TraceDecayError::Database { message, operation } = error else {
         panic!("authority preflight must return a typed database error");
     };
     assert_eq!(operation, "ensure global database authority invariants");

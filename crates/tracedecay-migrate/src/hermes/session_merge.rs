@@ -3,9 +3,9 @@
 use tracedecay_application::DirectorySyncPolicy;
 
 use super::*;
-use crate::db::engine::Value;
-use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
-use crate::sqlite_read_snapshot::SnapshotConnection;
+use crate::root_seam::db::engine::Value;
+use crate::root_seam::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use crate::root_seam::sqlite_read_snapshot::SnapshotConnection;
 
 pub(super) struct MergeOutcome {
     pub(super) already_migrated: bool,

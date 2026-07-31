@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table_columns};
-use crate::db::engine::{QueryExecutor, params};
-use crate::global_db::RegisteredGlobalDb;
+use crate::root_seam::db::engine::{QueryExecutor, params};
+use crate::root_seam::global_db::RegisteredGlobalDb;
 
 pub(crate) struct ResolvedTargetProject {
     pub(crate) root: PathBuf,
@@ -57,10 +57,10 @@ fn real_project_root(
     if canonical == canonical_user_home || is_hermes_home {
         return None;
     }
-    if let Some(git_root) = crate::worktree::git_worktree_root(&canonical) {
+    if let Some(git_root) = crate::root_seam::worktree::git_worktree_root(&canonical) {
         return Some(git_root);
     }
-    crate::config::has_project_database(&canonical).then_some(canonical)
+    crate::root_seam::config::has_project_database(&canonical).then_some(canonical)
 }
 
 fn target_key(target: &ResolvedTargetProject) -> String {
@@ -190,7 +190,7 @@ pub(crate) async fn resolve_target_project<Q>(
 where
     Q: QueryExecutor + ?Sized,
 {
-    if let Some(pin) = crate::agents::hermes::read_config_pinned_project_root(config_path) {
+    if let Some(pin) = crate::root_seam::agents::hermes::read_config_pinned_project_root(config_path) {
         return resolve_project_candidate(Path::new(&pin), user_home, hermes_homes, registry)
             .await?
             .ok_or_else(|| format!("legacy project pin '{pin}' is not a resolvable code project"));

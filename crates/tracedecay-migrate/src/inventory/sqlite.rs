@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::db::engine::{Error as EngineError, QueryExecutor, params};
-use crate::global_db::{self, RegisteredGlobalDb};
-use tracedecay_migrate::inventory::{
+use crate::root_seam::db::engine::{Error as EngineError, QueryExecutor, params};
+use crate::root_seam::global_db::{self, RegisteredGlobalDb};
+use crate::inventory::{
     GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome,
 };
 
@@ -17,7 +17,7 @@ pub(super) async fn inspect_global_db(
 
     if exists {
         let authority =
-            crate::db::DatabaseAuthority::for_runtime(path, "inspect global database offline");
+            crate::root_seam::db::DatabaseAuthority::for_runtime(path, "inspect global database offline");
         if let Err(error) = authority.as_ref() {
             let warning = format!(
                 "global DB '{}' is owned by the daemon; stop it before offline inventory: {error}",
@@ -29,7 +29,7 @@ pub(super) async fn inspect_global_db(
         if authority.is_ok() {
             drop(authority);
             let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-            match crate::sqlite_read_snapshot::open_in(path, scratch_root).await {
+            match crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root).await {
                 Ok(db) => {
                     return inventory_from_connection(
                         path,
@@ -151,7 +151,7 @@ fn should_verify_integrity(integrity: InventoryIntegrityMode) -> bool {
 }
 
 pub(super) async fn sqlite_quick_check(path: &Path) -> SqliteIntegrityOutcome {
-    let authority = match crate::db::DatabaseAuthority::for_runtime(
+    let authority = match crate::root_seam::db::DatabaseAuthority::for_runtime(
         path,
         "quick-check SQLite database offline",
     ) {
@@ -164,7 +164,7 @@ pub(super) async fn sqlite_quick_check(path: &Path) -> SqliteIntegrityOutcome {
     };
     drop(authority);
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = match crate::sqlite_read_snapshot::open_in(path, scratch_root).await {
+    let db = match crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root).await {
         Ok(db) => db,
         Err(error) => {
             return SqliteIntegrityOutcome::Unavailable {

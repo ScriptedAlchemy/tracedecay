@@ -9,9 +9,9 @@
 
 use std::path::Path;
 
-use crate::db::engine::params;
-use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
-use crate::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
+use crate::root_seam::db::engine::params;
+use crate::root_seam::global_db::tests::harness::RegisteredGlobalDbHarness;
+use crate::root_seam::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
 
 use super::{
     delete_registry_gc_candidates_in_transaction, graph_scope_location_drift_is_repairable,
@@ -217,11 +217,11 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
 mod liveness {
     use std::path::{Path, PathBuf};
 
-    use crate::global_db::{
+    use crate::root_seam::global_db::{
         CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
         StoreInstanceRecord,
     };
-    use crate::migrate::registry::{
+    use crate::registry::{
         RootLivenessV1, StaleRootScope, code_project_root_exists, probe_root,
         project_context_liveness, stale_project_contexts,
     };

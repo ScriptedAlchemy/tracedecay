@@ -2,7 +2,7 @@
 //! and message-family materialization consolidation tests.
 
 use super::*;
-use crate::db::engine::DatabaseAttachmentExecutor;
+use crate::root_seam::db::engine::DatabaseAttachmentExecutor;
 
 async fn session_runtime(fixture: &Fixture, project_id: &str) -> HostAdmissionTestRuntimeV1 {
     let runtime =
@@ -99,7 +99,7 @@ async fn planning_rejects_future_source_lcm_schema_before_target_normalization()
     .await;
     set_lcm_schema_version(
         &source,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
+        crate::root_seam::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
     )
     .await;
     let target_before = file_digest(&target).unwrap();
@@ -132,7 +132,7 @@ async fn planning_rejects_future_target_lcm_schema_without_normalization() {
             "DROP TABLE lcm_lifecycle_state;
              UPDATE session_schema_migrations SET version={}
              WHERE name='lcm'",
-            crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1)
+            crate::root_seam::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1)
         ),
     )
     .await;
@@ -202,7 +202,7 @@ async fn merge_rejects_future_target_input_lcm_schema_before_destination_mutatio
     copy_sqlite_family_exact(&target, &target_input).unwrap();
     set_lcm_schema_version(
         &target_input,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
+        crate::root_seam::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
     )
     .await;
     let target_before = file_digest(&target).unwrap();
@@ -250,7 +250,7 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
 
     let graph_path = report
         .destination_data_root
-        .join(crate::config::DB_FILENAME);
+        .join(crate::root_seam::config::DB_FILENAME);
     // Deliberately corrupt the frozen result outside the product writer. The
     // writer must continue rejecting the foreign-key bypass this fixture needs.
     let fixture_db = rusqlite::Connection::open(&graph_path).unwrap();
@@ -459,7 +459,7 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
     let payload = b"shared payload";
     let payload_ref = "shared.payload";
     let content_hash =
-        crate::application::session::compatibility::projected_content_hash("shared payload");
+        crate::root_seam::application::session::compatibility::projected_content_hash("shared payload");
     for layout in [&source, &target] {
         fs::create_dir_all(layout.data_root.join("lcm-payloads")).unwrap();
         fs::write(
@@ -572,7 +572,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
             "target external body",
         ),
     ] {
-        let payload = crate::sessions::lcm::payload::write_external_payload(
+        let payload = crate::root_seam::sessions::lcm::payload::write_external_payload(
             &layout.data_root,
             "codex",
             session_id,
@@ -588,7 +588,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         let runtime = session_runtime(&fixture, project_id).await;
         let db = session_database(&runtime);
         let writer = db.begin_write_transaction().await.unwrap();
-        crate::sessions::lcm::payload::upsert_payload_metadata(&writer, &payload)
+        crate::root_seam::sessions::lcm::payload::upsert_payload_metadata(&writer, &payload)
             .await
             .unwrap();
         writer
@@ -646,7 +646,7 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         variant_id
     );
     drop(owners);
-    let expanded = crate::sessions::lcm::payload::expand_payload(
+    let expanded = crate::root_seam::sessions::lcm::payload::expand_payload(
         &snapshot,
         &applied.destination_data_root,
         "codex",

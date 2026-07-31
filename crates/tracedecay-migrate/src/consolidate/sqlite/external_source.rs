@@ -5,10 +5,10 @@
 //! an old project owner to the destination identity because doing so would
 //! invalidate the receipt and frontier digests embedded in `state_json`.
 
-use crate::db::engine::Executor;
+use crate::root_seam::db::engine::Executor;
 
 use super::{db_message, query_i64, quote_identifier};
-use crate::errors::Result;
+use crate::root_seam::errors::Result;
 
 const COLUMNS: &str = "binding_id, source_id, owner_kind, owner_id,
     definition_digest, binding_digest, frontier_digest,

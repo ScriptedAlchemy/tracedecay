@@ -12,7 +12,7 @@ async fn current_schema_tables_have_an_explicit_consolidation_disposition() {
         .profile
         .join("projects")
         .join(&fixture.source_id)
-        .join(crate::config::DB_FILENAME);
+        .join(crate::root_seam::config::DB_FILENAME);
     let sessions = fixture
         .profile
         .join("projects")

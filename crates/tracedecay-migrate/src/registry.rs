@@ -4,13 +4,13 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::branch_meta;
-use crate::db::engine::{Executor, IntoParams, QueryExecutor, params};
-use crate::global_db::{
+use crate::root_seam::branch_meta;
+use crate::root_seam::db::engine::{Executor, IntoParams, QueryExecutor, params};
+use crate::root_seam::global_db::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
     StoreArtifactUpsert, StoreInstanceUpsert,
 };
-use crate::storage::{
+use crate::root_seam::storage::{
     ProjectStorageLocation, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
     try_classify_project_storage_with_registry, validate_project_id,
@@ -111,7 +111,7 @@ pub struct RegistryReconstructionDiffReport {
 /// The command crate can request exact registry/session operations without
 /// receiving database handles or reopening owned paths.
 pub struct MigrationRegistryRuntime {
-    registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    registry: crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     profile_database: std::sync::Arc<RegisteredGlobalDb>,
 }
 
@@ -120,10 +120,10 @@ impl MigrationRegistryRuntime {
     ///
     /// Callers hold the profile's exclusive maintenance lease, so this
     /// existence check cannot race another authorized lifecycle mutation.
-    pub async fn try_open_existing(profile_root: &Path) -> crate::errors::Result<Option<Self>> {
+    pub async fn try_open_existing(profile_root: &Path) -> crate::root_seam::errors::Result<Option<Self>> {
         if !profile_root
             .try_exists()
-            .map_err(|error| crate::errors::TraceDecayError::Database {
+            .map_err(|error| crate::root_seam::errors::TraceDecayError::Database {
                 operation: "inspect existing profile root".to_string(),
                 message: error.to_string(),
             })?
@@ -131,7 +131,7 @@ impl MigrationRegistryRuntime {
             return Ok(None);
         }
         let profile_root = profile_root.canonicalize().map_err(|error| {
-            crate::errors::TraceDecayError::Database {
+            crate::root_seam::errors::TraceDecayError::Database {
                 operation: "resolve existing profile registry".to_string(),
                 message: error.to_string(),
             }
@@ -139,7 +139,7 @@ impl MigrationRegistryRuntime {
         if !profile_root
             .join("global.db")
             .try_exists()
-            .map_err(|error| crate::errors::TraceDecayError::Database {
+            .map_err(|error| crate::root_seam::errors::TraceDecayError::Database {
                 operation: "inspect existing profile registry".to_string(),
                 message: error.to_string(),
             })?
@@ -149,10 +149,10 @@ impl MigrationRegistryRuntime {
         Self::open(&profile_root).await.map(Some)
     }
 
-    pub async fn open(profile_root: &Path) -> crate::errors::Result<Self> {
-        let identity = crate::daemon::profile_identity::load_or_create(profile_root)?;
+    pub async fn open(profile_root: &Path) -> crate::root_seam::errors::Result<Self> {
+        let identity = crate::root_seam::daemon::profile_identity::load_or_create(profile_root)?;
         let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                 identity,
             )
             .await?;
@@ -163,7 +163,7 @@ impl MigrationRegistryRuntime {
         })
     }
 
-    pub async fn registered_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+    pub async fn registered_project_paths(&self) -> crate::root_seam::errors::Result<Vec<PathBuf>> {
         self.profile_database
             .try_list_code_project_paths(usize::MAX)
             .await
@@ -173,7 +173,7 @@ impl MigrationRegistryRuntime {
         &self,
         project_root: &Path,
         profile_root: &Path,
-    ) -> crate::errors::Result<ProjectStorageLocation> {
+    ) -> crate::root_seam::errors::Result<ProjectStorageLocation> {
         try_classify_project_storage_with_registry(
             project_root,
             self.profile_database.as_ref(),
@@ -189,7 +189,7 @@ impl MigrationRegistryRuntime {
     pub async fn delete_project_paths(
         &self,
         project_paths: &[PathBuf],
-    ) -> crate::errors::Result<usize> {
+    ) -> crate::root_seam::errors::Result<usize> {
         let transaction = self.profile_database.begin_write_transaction().await?;
         let (_, deleted) =
             delete_registry_gc_candidates_in_transaction(&transaction, &[], project_paths).await?;
@@ -216,7 +216,7 @@ impl MigrationRegistryRuntime {
         profile_root: &Path,
         prefix: Option<String>,
         apply: bool,
-    ) -> crate::errors::Result<RegistryGcReport> {
+    ) -> crate::root_seam::errors::Result<RegistryGcReport> {
         if apply {
             apply_registry_gc(self.profile_database.as_ref(), profile_root, prefix).await
         } else {
@@ -229,9 +229,9 @@ impl MigrationRegistryRuntime {
         project_id: &str,
         project_root: &Path,
         expected_database_path: &Path,
-    ) -> crate::errors::Result<()> {
+    ) -> crate::root_seam::errors::Result<()> {
         let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
-            crate::errors::TraceDecayError::Config {
+            crate::root_seam::errors::TraceDecayError::Config {
                 message: format!("invalid project identity '{project_id}': {error}"),
             }
         })?;
@@ -240,11 +240,11 @@ impl MigrationRegistryRuntime {
             .project_sessions(project_id, [project_root.to_path_buf()])
             .await?;
         if database.db_path() != expected_database_path {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(crate::root_seam::errors::TraceDecayError::Config {
                 message: "registered session database does not match repair manifest".to_string(),
             });
         }
-        crate::global_db::repair_session_temporal_store(database.as_ref()).await
+        crate::root_seam::global_db::repair_session_temporal_store(database.as_ref()).await
     }
 }
 
@@ -770,7 +770,7 @@ where
     E: Executor + ?Sized,
 {
     let mut applied = RegistryReconstructionApplyReport::default();
-    let now = crate::tracedecay::current_timestamp();
+    let now = crate::root_seam::tracedecay::current_timestamp();
     for plan in &report.plans {
         if plan.status != RegistryReconstructionStatus::Eligible {
             continue;
@@ -1042,7 +1042,7 @@ pub(crate) async fn registry_gc_report(
     db: &RegisteredGlobalDb,
     _profile_root: &Path,
     prefix: Option<String>,
-) -> crate::errors::Result<RegistryGcReport> {
+) -> crate::root_seam::errors::Result<RegistryGcReport> {
     let prefixes = prefix.iter().map(PathBuf::from).collect::<Vec<_>>();
     let projects = db.list_code_projects(usize::MAX).await?;
     let mut candidates = Vec::new();
@@ -1108,12 +1108,12 @@ pub(crate) async fn apply_registry_gc(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     prefix: Option<String>,
-) -> crate::errors::Result<RegistryGcReport> {
+) -> crate::root_seam::errors::Result<RegistryGcReport> {
     let transaction = db.begin_write_transaction().await?;
     let mut report = registry_gc_report(db, profile_root, prefix).await?;
     for project in &report.candidates {
         if Path::new(&project.canonical_root).exists() {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(crate::root_seam::errors::TraceDecayError::Config {
                 message: format!(
                     "registry cleanup candidate '{}' became live while applying the plan",
                     project.project_id
@@ -1123,7 +1123,7 @@ pub(crate) async fn apply_registry_gc(
     }
     for project_path in &report.storage_project_candidates {
         if project_path.exists() {
-            return Err(crate::errors::TraceDecayError::Config {
+            return Err(crate::root_seam::errors::TraceDecayError::Config {
                 message: format!(
                     "registry cleanup candidate '{}' became live while applying the plan",
                     project_path.display()
@@ -1149,10 +1149,10 @@ pub(crate) async fn apply_registry_gc(
 }
 
 async fn delete_registry_gc_candidates_in_transaction(
-    transaction: &crate::global_db::RegisteredGlobalDbWriteTransaction<'_>,
+    transaction: &crate::root_seam::global_db::RegisteredGlobalDbWriteTransaction<'_>,
     project_ids: &[String],
     project_paths: &[PathBuf],
-) -> crate::errors::Result<(usize, usize)> {
+) -> crate::root_seam::errors::Result<(usize, usize)> {
     const CHUNK: usize = 256;
     let mut code_projects = 0_usize;
     for chunk in project_ids.chunks(CHUNK) {
@@ -1163,7 +1163,7 @@ async fn delete_registry_gc_candidates_in_transaction(
         let values = chunk
             .iter()
             .cloned()
-            .map(crate::db::engine::Value::Text)
+            .map(crate::root_seam::db::engine::Value::Text)
             .collect::<Vec<_>>();
         code_projects =
             code_projects.saturating_add(transaction.execute(&sql, values).await? as usize);
@@ -1178,7 +1178,7 @@ async fn delete_registry_gc_candidates_in_transaction(
         let values = chunk
             .iter()
             .map(|path| {
-                crate::db::engine::Value::Text(RegisteredGlobalDb::project_path_alias_key(path))
+                crate::root_seam::db::engine::Value::Text(RegisteredGlobalDb::project_path_alias_key(path))
             })
             .collect::<Vec<_>>();
         storage_projects =
@@ -1473,7 +1473,7 @@ fn classify_project_root(
 fn validate_manifest_shape(
     manifest_path: &Path,
     profile_root: &Path,
-    manifest: &crate::storage::StoreManifest,
+    manifest: &crate::root_seam::storage::StoreManifest,
 ) -> Vec<String> {
     let mut issues = Vec::new();
     if manifest.schema_version != STORE_MANIFEST_SCHEMA_VERSION {

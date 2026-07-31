@@ -21,6 +21,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::inventory::MigrationInventory;
 
+mod runtime;
+
+pub use runtime::*;
+
 pub const MIGRATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

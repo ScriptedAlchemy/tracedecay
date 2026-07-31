@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use super::copy::{MIGRATION_QUERY_PAGE_ROWS, quote_identifier, table_columns};
 use super::{COPIED_MEMORY_TABLES, COPIED_TABLES};
-use crate::db::engine::{QueryExecutor, Value, params};
+use crate::root_seam::db::engine::{QueryExecutor, Value, params};
 
 pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     match value {
