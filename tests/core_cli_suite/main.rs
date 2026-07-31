@@ -6,10 +6,10 @@
 //! name as the module prefix (e.g. `tracedecay_test::test_get_all_files`),
 //! which the Windows test-group filters in `.config/nextest.toml` match on.
 
-#[path = "../common/mod.rs"]
-mod common;
 mod cli_help_test;
 mod cli_non_interactive_test;
+#[path = "../common/mod.rs"]
+mod common;
 mod config_test;
 mod gain_test;
 mod integration_test;

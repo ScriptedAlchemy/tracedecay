@@ -182,8 +182,8 @@ impl RemoteEnrollmentAdmissionEvidenceV1 {
         self.privacy_digest
             .validate()
             .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
-        let grant_digest = canonical_sha256(grant)
-            .map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
+        let grant_digest =
+            canonical_sha256(grant).map_err(|_| RemoteEnrollmentEvidenceErrorV1::InvalidField)?;
         if self.authority.grant_id.as_str() != grant.grant_id.as_str()
             || self.authority.grant_revision != grant.revision
             || self.authority.grant_digest != grant_digest
