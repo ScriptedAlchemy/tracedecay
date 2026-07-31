@@ -12,8 +12,9 @@ inventory includes predecessors proven on `origin/master`, in a published
 package/release, an independently deployed client, a live host installation, or
 live persisted data. It also fail-closes over potentially installed callable
 aliases and potentially persisted branch shapes until an authorized census
-proves absence. Pure source-only aliases, internal adapters, and transient DTOs
-change to their final shape in place.
+proves absence. Pure source-only aliases, internal adapters, and internal DTO
+helpers change to their final shape in place; wire-visible DTO revisions follow
+the installed-client/host census gate.
 Branch-written schemas, stores, spools, files, journals, checkpoints, and
 receipts remain in the migration inventory until a separately authorized
 registered-store/profile census proves absence; Git history alone cannot remove
