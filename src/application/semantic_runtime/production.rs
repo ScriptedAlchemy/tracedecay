@@ -18,7 +18,7 @@ use tracedecay_domain::{
     ManifestDigest, ProjectionBatchRequestV1, ProjectionOperationV1, ProjectionReplayReasonV1,
     QueryFallbackSubpayload, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
     RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
-    SemanticSearchIndexProfileV1, SourceOccurrenceId, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    SemanticSearchIndexProfileV1, SourceOccurrenceId, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_policy::retrieval_selection::{
