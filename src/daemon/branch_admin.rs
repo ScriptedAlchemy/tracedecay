@@ -258,6 +258,16 @@ impl Drop for RetirementReaperRegistrationBarrier {
     }
 }
 
+type SessionRuntimeRegistries = HashMap<
+    PathBuf,
+    Arc<
+        tokio::sync::OnceCell<
+            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        >,
+    >,
+>;
+type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
+
 /// Coordinates every daemon operation that can create, rekey, or remove a
 /// database owner. There is intentionally one gate and one copy of each shared
 /// registry so branch administration cannot prove ownership against stale
@@ -265,24 +275,10 @@ impl Drop for RetirementReaperRegistrationBarrier {
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    session_runtime_registries: Arc<
-        tokio::sync::Mutex<
-            HashMap<
-                PathBuf,
-                Arc<
-                    tokio::sync::OnceCell<
-                        Arc<
-                            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-                        >,
-                    >,
-                >,
-            >,
-        >,
-    >,
+    session_runtime_registries: SharedSessionRuntimeRegistries,
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    project_server_retirements:
-        Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    project_server_retirements: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<

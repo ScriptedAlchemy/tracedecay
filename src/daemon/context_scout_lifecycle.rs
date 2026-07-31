@@ -14,6 +14,10 @@ use crate::global_db::RegisteredGlobalDb;
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
 
+type ContextScoutLifecycleKeyV1 = ([u8; 16], [u8; 16]);
+type ContextScoutLifecycleAuthoritiesV1 =
+    Mutex<BTreeMap<ContextScoutLifecycleKeyV1, ContextScoutLifecycleLookupAuthorityV1>>;
+
 struct ContextScoutLifecycleLookupAuthorityV1 {
     profile_id: UserProfileId,
     project_id: ProjectId,
@@ -21,11 +25,8 @@ struct ContextScoutLifecycleLookupAuthorityV1 {
     sessions: Weak<RegisteredGlobalDb>,
 }
 
-fn registered_context_scout_lifecycle_authorities()
--> &'static Mutex<BTreeMap<([u8; 16], [u8; 16]), ContextScoutLifecycleLookupAuthorityV1>> {
-    static AUTHORITIES: OnceLock<
-        Mutex<BTreeMap<([u8; 16], [u8; 16]), ContextScoutLifecycleLookupAuthorityV1>>,
-    > = OnceLock::new();
+fn registered_context_scout_lifecycle_authorities() -> &'static ContextScoutLifecycleAuthoritiesV1 {
+    static AUTHORITIES: OnceLock<ContextScoutLifecycleAuthoritiesV1> = OnceLock::new();
     AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 

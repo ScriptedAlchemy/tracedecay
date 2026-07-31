@@ -1,7 +1,7 @@
 //! One retained Git index transaction service per daemon-owned project store.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -399,11 +399,11 @@ struct ServiceKey {
 }
 
 impl ServiceKey {
-    fn new(database_path: &PathBuf, project_id: &ProjectId, repository_root: &PathBuf) -> Self {
+    fn new(database_path: &Path, project_id: &ProjectId, repository_root: &Path) -> Self {
         Self {
-            database_path: database_path.clone(),
+            database_path: database_path.to_path_buf(),
             project_id: project_id.clone(),
-            repository_root: repository_root.clone(),
+            repository_root: repository_root.to_path_buf(),
         }
     }
 }
@@ -531,8 +531,8 @@ impl DaemonGitIndexTransactionServiceRegistry {
 
     async fn existing(
         &self,
-        database_path: &PathBuf,
-        repository_root: &PathBuf,
+        database_path: &Path,
+        repository_root: &Path,
         project_id: &ProjectId,
     ) -> Result<Option<Arc<DaemonProjectGitIndexTransactionService>>, GitIndexTransactionPortError>
     {

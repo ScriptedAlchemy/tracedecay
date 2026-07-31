@@ -542,11 +542,13 @@ async fn run_maintenance_repair_scheduler_tick(
             let database = Arc::clone(&database);
             let project_path = project_path.clone();
             async move {
+                let page_rows = i64::try_from(page_rows).map_err(|_| TraceDecayError::Config {
+                    message: "session temporal repair page size exceeds i64".to_owned(),
+                })?;
                 let outcome =
                     crate::global_db::advance_session_temporal_store_repair_with_page_rows(
                         database.as_ref(),
-                        i64::try_from(page_rows)
-                            .expect("bounded session temporal page size fits in i64"),
+                        page_rows,
                     )
                     .await?;
                 match outcome {
