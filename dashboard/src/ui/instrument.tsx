@@ -349,6 +349,93 @@ export function MeterRow({
   );
 }
 
+/** The right-hand end of a dense list row: a figure with its quiet unit, and
+ * directly under it the same quantity as a length.
+ *
+ * The rail is right-aligned and grows leftward so the number and its bar share
+ * the row's trailing edge — a left-growing bar under a right-set figure reads
+ * as two unrelated ragged things. `fraction: null` draws the track and no fill,
+ * because a row whose share of the whole is unknown must not borrow a length.
+ * The meter stays out of the accessibility tree: the figure above it is the
+ * same number. */
+export function FigureRail({
+  value,
+  unit,
+  fraction,
+  width = 'standard',
+  tone,
+  className,
+}: {
+  value: ReactNode;
+  unit?: string | undefined;
+  fraction: number | null;
+  /** `wide` gives a full extra rem to figures whose digits plus unit would
+   * otherwise wrap the row. */
+  width?: 'standard' | 'wide';
+  /** Utility class for the fill, when the rail carries a state hue. */
+  tone?: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn(
+        'flex shrink-0 flex-col items-end gap-1',
+        width === 'wide' ? 'w-24' : 'w-20',
+        className,
+      )}
+    >
+      <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
+        {value}
+        {unit ? <span className="td-unit ml-1">{unit}</span> : null}
+      </span>
+      <Meter fraction={fraction} height="row" className="w-full" align="right" tone={tone} />
+    </span>
+  );
+}
+
+/** One labelled term in a definition grid: the label engraved above in caps,
+ * the value below, wrapping rather than truncating. Used for the horizon lines
+ * where the value is a scope reference or a pair of timestamps — strings a
+ * reader has to be able to read in full, not scan. */
+export function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <dt className="uppercase tracking-[0.08em] text-text-muted">{label}</dt>
+      <dd className="min-w-0 break-words text-text-secondary tabular">{children}</dd>
+    </div>
+  );
+}
+
+/** A definition-list term for a single short string of provenance — a ref, an
+ * id, a stamp. Tighter than `Field` and truncating rather than wrapping,
+ * because these sit in a grid under a record where the label carries the
+ * meaning and the full value is on the record itself. `muted` files the term as
+ * secondary detail without giving it a second layout. */
+export function Fact({
+  label,
+  value,
+  muted,
+}: {
+  label: string;
+  value: string;
+  muted?: boolean;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <dt className="td-legend">{label}</dt>
+      <dd
+        className={
+          muted
+            ? 'truncate text-3xs text-text-muted'
+            : 'truncate text-3xs text-text-secondary'
+        }
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 export interface ReadoutItem {
   label: string;
   value: ReactNode;

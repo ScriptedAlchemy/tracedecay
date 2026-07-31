@@ -1,23 +1,25 @@
 import { useQuery } from '@tanstack/react-query';
-import type { ReactNode } from 'react';
 import {
   assertNever,
   StorageTelemetryPayloadSchema,
   type DoctorReportEntry,
   type StorageFindingKindStatus,
   type StorageFindingsPayload,
+  type StorageTelemetryPayload,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type TableGrowthDimension,
   type TableGrowthThreshold,
   type WireCoverage,
+  type WireEnvelope,
 } from '../../contracts/wire.ts';
-import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { CapacityBar } from '../../ui/ActivityColumns.tsx';
-import { EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
+import { EnvelopeSection, EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
@@ -63,78 +65,51 @@ export function ObservatoryPage() {
 
       <CanonicalObservations />
 
-      <StorageSection title="Store telemetry" query={telemetry.data} pending={telemetry.isPending}>
-        {(result) => (
+      <EnvelopeSection
+        title="Store telemetry"
+        result={telemetry.data}
+        pending={telemetry.isPending}
+        loadingDetail="requesting store telemetry"
+      >
+        {(envelope) => (
           <TelemetryReadModel
-            result={result}
+            envelope={envelope}
             refreshing={telemetry.isFetching}
             onRefresh={() => void telemetry.refetch()}
           />
         )}
-      </StorageSection>
+      </EnvelopeSection>
 
-      <StorageSection title="Doctor storage findings" query={findings.data} pending={findings.isPending}>
-        {(result) => (
+      <EnvelopeSection
+        title="Doctor storage findings"
+        result={findings.data}
+        pending={findings.isPending}
+        loadingDetail="requesting doctor storage findings"
+      >
+        {(envelope) => (
           <FindingsReadModel
-            result={result}
+            envelope={envelope}
             refreshing={findings.isFetching}
             onRefresh={() => void findings.refetch()}
           />
         )}
-      </StorageSection>
+      </EnvelopeSection>
     </div>
   );
 }
 
-function StorageSection<T>({
-  title,
-  pending,
-  query,
-  children,
-}: {
-  title: string;
-  pending: boolean;
-  query: T | undefined;
-  children: (result: T) => ReactNode;
-}) {
-  return (
-    <section className="border-b border-edge-subtle" aria-label={title}>
-      <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">{title}</h2>
-      {pending ? (
-        <ReadModelState kind="loading" detail={`requesting ${title.toLowerCase()}`} />
-      ) : query ? (
-        children(query)
-      ) : (
-        <ReadModelState kind="unknown" detail="no response recorded" />
-      )}
-    </section>
-  );
-}
-
 function TelemetryReadModel({
-  result,
+  envelope,
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<ReturnType<typeof StorageTelemetryPayloadSchema.parse>>;
+  envelope: WireEnvelope<StorageTelemetryPayload>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
-  if (result.outcome === 'transport') {
-    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
-  }
-  const { envelope } = result;
   return (
     <>
-      <EnvelopeTruth
-        state={envelope.domain_state}
-        coverage={envelope.coverage}
-        freshness={envelope.freshness}
-        legalActions={envelope.legal_actions}
-        authorization={envelope.authorization}
-        refreshing={refreshing}
-        onRefresh={onRefresh}
-      />
+      <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
       {envelope.payload.stores.length === 0 ? (
         <ReadModelState kind="unknown" detail="telemetry payload contained no stores" />
       ) : (
@@ -162,29 +137,17 @@ function TelemetryReadModel({
 }
 
 function FindingsReadModel({
-  result,
+  envelope,
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<StorageFindingsPayload>;
+  envelope: WireEnvelope<StorageFindingsPayload>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
-  if (result.outcome === 'transport') {
-    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
-  }
-  const { envelope } = result;
   return (
     <>
-      <EnvelopeTruth
-        state={envelope.domain_state}
-        coverage={envelope.coverage}
-        freshness={envelope.freshness}
-        legalActions={envelope.legal_actions}
-        authorization={envelope.authorization}
-        refreshing={refreshing}
-        onRefresh={onRefresh}
-      />
+      <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
       <StorageSourceStatuses statuses={envelope.payload.kind_statuses} />
       {envelope.payload.entries.length === 0 ? (
         <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
@@ -392,8 +355,8 @@ function TableGrowthPanel({
                 {formatBytes(sample.previous_bytes)} → {formatBytes(sample.current_bytes)}
               </p>
               <p className="mt-1 text-3xs text-text-muted">
-                {formatUtcMicros(sample.previous_observed_at)} →{' '}
-                {formatUtcMicros(sample.current_observed_at)}
+                {formatMicrosUtc(sample.previous_observed_at)} →{' '}
+                {formatMicrosUtc(sample.current_observed_at)}
               </p>
             </li>
           ))}
@@ -447,10 +410,6 @@ function TableGrowthPanel({
       </p>
     </section>
   );
-}
-
-function formatUtcMicros(micros: number): string {
-  return new Date(Math.floor(micros / 1000)).toISOString();
 }
 
 /** `/api/storage/findings` is the storage-family projection of the admitted
