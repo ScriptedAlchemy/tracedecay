@@ -43,34 +43,21 @@ fn owner_json(owner: &impl serde::Serialize) -> Result<String> {
     serde_json::to_string(owner).map_err(database_error)
 }
 
+// The disposition legality rules are owned by
+// `AnchorDispositionStateV1` in `tracedecay-store`, because the
+// rusqlite-runtime `RetrievalAnchorExecutor` appends to the same tables and
+// the two must never disagree about what an anchor's history permits. Only
+// the refusal wording below is local, and it is observable, so it stays.
+
 fn disposition_transition_allowed(
     current: Option<AnchorDispositionStateV1>,
     next: AnchorDispositionStateV1,
 ) -> bool {
-    match current {
-        Some(
-            AnchorDispositionStateV1::Redacted
-            | AnchorDispositionStateV1::Expired
-            | AnchorDispositionStateV1::Deleted,
-        ) => false,
-        Some(AnchorDispositionStateV1::Superseded) => next == AnchorDispositionStateV1::Deleted,
-        Some(
-            AnchorDispositionStateV1::Active
-            | AnchorDispositionStateV1::Quarantined
-            | AnchorDispositionStateV1::Unavailable,
-        )
-        | None => true,
-    }
+    AnchorDispositionStateV1::transition_allowed(current, next)
 }
 
 fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
-    matches!(
-        state,
-        AnchorDispositionStateV1::Superseded
-            | AnchorDispositionStateV1::Redacted
-            | AnchorDispositionStateV1::Expired
-            | AnchorDispositionStateV1::Deleted
-    )
+    state.suppresses_derivatives()
 }
 
 async fn current_disposition(
@@ -103,9 +90,8 @@ pub(crate) async fn publish_anchor_derivative(
 ) -> Result<AnchorDispositionAppendOutcomeV1> {
     derivative.validate()?;
     let owner = owner_json(derivative.owner())?;
-    if !matches!(
+    if !AnchorDispositionStateV1::serves_derivatives(
         current_disposition(connection, derivative.source_anchor_id(), &owner).await?,
-        None | Some(AnchorDispositionStateV1::Active)
     ) {
         return Err(authority_error(
             "cannot publish lineage from an unavailable anchor",
@@ -166,9 +152,8 @@ where
     O: serde::Serialize + Clone + Into<RetrievalAnchorOwnerV1>,
 {
     let owner_json = owner_json(owner)?;
-    if !matches!(
+    if !AnchorDispositionStateV1::serves_derivatives(
         current_disposition(connection, anchor_id, &owner_json).await?,
-        None | Some(AnchorDispositionStateV1::Active)
     ) {
         return Ok(Vec::new());
     }
@@ -425,9 +410,8 @@ impl super::Database {
         derivative.validate()?;
         let transaction = self.begin_write_transaction(OPERATION).await?;
         let owner = owner_json(derivative.owner())?;
-        if !matches!(
+        if !AnchorDispositionStateV1::serves_derivatives(
             current_disposition(&transaction, derivative.source_anchor_id(), &owner).await?,
-            None | Some(AnchorDispositionStateV1::Active)
         ) {
             return Err(authority_error(
                 "cannot publish lineage from an unavailable anchor",

@@ -82,10 +82,11 @@ impl RetrievalAnchorExecutor {
     ) -> rusqlite::Result<()> {
         derivative.validate().map_err(invalid)?;
         let owner = encode(derivative.owner())?;
-        if !matches!(
-            current_state(savepoint, derivative.source_anchor_id(), &owner)?,
-            None | Some(AnchorDispositionStateV1::Active)
-        ) {
+        if !AnchorDispositionStateV1::serves_derivatives(current_state(
+            savepoint,
+            derivative.source_anchor_id(),
+            &owner,
+        )?) {
             return Err(invalid(
                 "cannot publish lineage from an unavailable retrieval anchor",
             ));
@@ -179,10 +180,11 @@ fn read_anchor(
     owner: &RetrievalAnchorOwnerV1,
 ) -> rusqlite::Result<Option<StoredRetrievalAnchorRecordV1>> {
     let owner_json = encode(owner)?;
-    if !matches!(
-        current_state(connection, anchor_id, &owner_json)?,
-        None | Some(AnchorDispositionStateV1::Active)
-    ) {
+    if !AnchorDispositionStateV1::serves_derivatives(current_state(
+        connection,
+        anchor_id,
+        &owner_json,
+    )?) {
         return Ok(None);
     }
     connection
@@ -274,10 +276,11 @@ fn read_derivatives(
     owner: &RetrievalAnchorOwnerV1,
 ) -> rusqlite::Result<Vec<RetrievalAnchorDerivativeV1>> {
     let owner_json = encode(owner)?;
-    if !matches!(
-        current_state(connection, anchor_id, &owner_json)?,
-        None | Some(AnchorDispositionStateV1::Active)
-    ) {
+    if !AnchorDispositionStateV1::serves_derivatives(current_state(
+        connection,
+        anchor_id,
+        &owner_json,
+    )?) {
         return Ok(Vec::new());
     }
     let mut statement = connection.prepare(
@@ -307,34 +310,21 @@ fn read_derivatives(
         .collect()
 }
 
+// The disposition legality rules are owned by `AnchorDispositionStateV1` in
+// `tracedecay-store`, because the root authority in
+// `src/db/retrieval_anchor_authority.rs` appends to the same tables and the two
+// must never disagree about what an anchor's history permits. Only the refusal
+// wording in this module is local, and it is observable, so it stays.
+
 fn transition_allowed(
     current: Option<AnchorDispositionStateV1>,
     next: AnchorDispositionStateV1,
 ) -> bool {
-    match current {
-        Some(
-            AnchorDispositionStateV1::Redacted
-            | AnchorDispositionStateV1::Expired
-            | AnchorDispositionStateV1::Deleted,
-        ) => false,
-        Some(AnchorDispositionStateV1::Superseded) => next == AnchorDispositionStateV1::Deleted,
-        Some(
-            AnchorDispositionStateV1::Active
-            | AnchorDispositionStateV1::Quarantined
-            | AnchorDispositionStateV1::Unavailable,
-        )
-        | None => true,
-    }
+    AnchorDispositionStateV1::transition_allowed(current, next)
 }
 
 fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
-    matches!(
-        state,
-        AnchorDispositionStateV1::Superseded
-            | AnchorDispositionStateV1::Redacted
-            | AnchorDispositionStateV1::Expired
-            | AnchorDispositionStateV1::Deleted
-    )
+    state.suppresses_derivatives()
 }
 
 #[cfg(test)]
@@ -354,17 +344,16 @@ mod tests {
     }
 
     fn install(connection: &rusqlite::Connection) {
+        // The anchors table comes from the canonical production DDL so this
+        // executor is exercised against the constraints the live table has,
+        // rather than a relaxed local restatement of its columns.
+        connection.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        connection
+            .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
+            .unwrap();
         connection
             .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 CREATE TABLE retrieval_anchors (
-                    anchor_id TEXT PRIMARY KEY,
-                    anchor_json TEXT NOT NULL,
-                    owner_json TEXT NOT NULL,
-                    projection_generation TEXT NOT NULL,
-                    UNIQUE(anchor_id, owner_json)
-                 );
-                 CREATE TABLE retrieval_anchor_dispositions (
+                "CREATE TABLE retrieval_anchor_dispositions (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     disposition_id TEXT NOT NULL UNIQUE,
                     anchor_id TEXT NOT NULL,

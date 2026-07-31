@@ -1,9 +1,29 @@
 //! Session-store fixture DDL shared verbatim by the unit and subprocess
 //! test harnesses so the closed-table schemas cannot drift apart.
+//!
+//! These fixtures are deliberately weaker than production: they restate column
+//! sets and primary keys but omit CHECK, FOREIGN KEY, and non-primary UNIQUE
+//! clauses. That is sound for the tables this crate only probes, but two of
+//! them — `retrieval_anchors` and `generation_diagnostics` — are real
+//! production tables whose canonical DDL now lives in
+//! `tracedecay_store::schema`. Their definitions below are therefore known
+//! divergences, not authoritative: `retrieval_anchors` here has no
+//! `CHECK(length(anchor_id) > 0)`, no `json_valid` checks on `anchor_json` and
+//! `owner_json`, and no composite `UNIQUE(anchor_id, owner_json)`.
+//!
+//! Installing them from `tracedecay_store::schema` instead is the intended
+//! end state. It requires this crate — today a dependency-light, process-
+//! isolated probe with no `tracedecay-*` dependency other than the parity
+//! protocol — to take a dependency on `tracedecay-store`, and requires
+//! rechecking the schema-shape probes in `closed_sql.rs` against the stricter
+//! definitions. Do not hand-copy the production constraints here instead; that
+//! recreates the drift this note exists to record.
 
 /// Faithful column set/order and primary keys for every closed session-store
 /// table except `observations` (whose foreign-key clause differs between the
-/// two harnesses). CHECK/FK clauses are omitted per the harness convention.
+/// two harnesses). CHECK/FK clauses are omitted per the harness convention;
+/// see the module note for the two tables where that convention diverges from
+/// a real production schema.
 #[doc(hidden)]
 pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
             CREATE TABLE source_cursors (
