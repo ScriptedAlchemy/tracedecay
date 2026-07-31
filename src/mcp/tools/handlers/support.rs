@@ -29,26 +29,65 @@ pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Wraps a JSON payload in a text `ToolResult`, rendering the default-format
-/// (markdown) body with a caller-supplied closure. The `format:"json"` path is
+/// Key under which context handlers stash analytics that must reach the server
+/// but never the client. [`rendered_tool_result`] is the one place it is lifted
+/// back out, so no handler has to remember to strip it.
+pub(super) const CONTEXT_MEMORY_ANALYTICS_KEY: &str = "context_memory_analytics";
+
+/// The single wrapper every MCP tool handler returns through.
+///
+/// Lifts internal analytics out of `value` so they travel beside the result
+/// instead of inside the client payload, renders the default-format (markdown)
+/// body with `md`, and records `touched_files`. The `format:"json"` path is
 /// unaffected — [`render::finalize`] serializes `value` compactly there.
+pub(super) fn rendered_tool_result<F: FnOnce() -> String>(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+    md: F,
+) -> ToolResult {
+    let internal_analytics = value.get(CONTEXT_MEMORY_ANALYTICS_KEY).cloned();
+    let public_value = internal_analytics
+        .as_ref()
+        .and_then(|_| public_value_without_internal_context_memory_analytics(value));
+    let value = public_value.as_ref().unwrap_or(value);
+    let text = render::finalize(project_root, args, value, md);
+    let result = text_tool_result(&text, touched_files);
+    if let Some(internal_analytics) = internal_analytics {
+        result.with_internal_analytics(internal_analytics)
+    } else {
+        result
+    }
+}
+
+fn public_value_without_internal_context_memory_analytics(value: &Value) -> Option<Value> {
+    let mut value = value.clone();
+    take_internal_context_memory_analytics(&mut value).map(|_| value)
+}
+
+pub(super) fn take_internal_context_memory_analytics(value: &mut Value) -> Option<Value> {
+    value.as_object_mut()?.remove(CONTEXT_MEMORY_ANALYTICS_KEY)
+}
+
+pub(super) fn text_tool_result(text: &str, touched_files: Vec<String>) -> ToolResult {
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files,
+    )
+}
+
+/// [`rendered_tool_result`] for handlers that touch no files.
 pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
     project_root: Option<&Path>,
     args: &Value,
     value: &Value,
     md: F,
 ) -> ToolResult {
-    let text = render::finalize(project_root, args, value, md);
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    )
+    rendered_tool_result(project_root, args, value, Vec::new(), md)
 }
 
-/// Wraps a JSON payload in a text `ToolResult`, rendering the default markdown
-/// body via [`render::generic_md`]. Convenience wrapper around
-/// [`tool_json_with_md`] for handlers that don't need a custom markdown
-/// renderer.
+/// [`tool_json_with_md`] for handlers that don't need a custom markdown renderer.
 pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
     tool_json_with_md(project_root, args, value, || render::generic_md(value))
 }

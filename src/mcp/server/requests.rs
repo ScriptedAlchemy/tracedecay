@@ -392,7 +392,6 @@ impl McpServer {
             )),
         };
 
-        // Track errors
         if let Some(ref resp) = result
             && resp.error.is_some()
         {
@@ -632,18 +631,28 @@ impl McpServer {
         }
     }
 
-    /// Returns the `SQLite` schema documentation as a markdown resource.
-    /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
-    pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
+    /// Wraps a single resource body in the `resources/read` contents envelope.
+    fn resource_contents(id: Value, uri: &str, mime: &str, text: &str) -> JsonRpcResponse {
         JsonRpcResponse::success(
             id,
             json!({
                 "contents": [{
-                    "uri": "tracedecay://schema",
-                    "mimeType": "text/markdown",
-                    "text": SCHEMA_MARKDOWN
+                    "uri": uri,
+                    "mimeType": mime,
+                    "text": text
                 }]
             }),
+        )
+    }
+
+    /// Returns the `SQLite` schema documentation as a markdown resource.
+    /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
+    pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
+        Self::resource_contents(
+            id,
+            "tracedecay://schema",
+            "text/markdown",
+            SCHEMA_MARKDOWN,
         )
     }
 
@@ -656,16 +665,7 @@ impl McpServer {
                 output["branch_diagnostics"] =
                     serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
                 let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-                JsonRpcResponse::success(
-                    id,
-                    json!({
-                        "contents": [{
-                            "uri": "tracedecay://status",
-                            "mimeType": "application/json",
-                            "text": text
-                        }]
-                    }),
-                )
+                Self::resource_contents(id, "tracedecay://status", "application/json", &text)
             }
             Err(e) => JsonRpcResponse::error(
                 id,
@@ -702,16 +702,7 @@ impl McpServer {
                     }
                 }
                 let text = lines.join("\n");
-                JsonRpcResponse::success(
-                    id,
-                    json!({
-                        "contents": [{
-                            "uri": "tracedecay://files",
-                            "mimeType": "text/plain",
-                            "text": text
-                        }]
-                    }),
-                )
+                Self::resource_contents(id, "tracedecay://files", "text/plain", &text)
             }
             Err(e) => JsonRpcResponse::error(
                 id,
@@ -763,16 +754,7 @@ impl McpServer {
         }
 
         let text = lines.join("\n");
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "contents": [{
-                    "uri": "tracedecay://overview",
-                    "mimeType": "text/plain",
-                    "text": text
-                }]
-            }),
-        )
+        Self::resource_contents(id, "tracedecay://overview", "text/plain", &text)
     }
 
     pub(crate) async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
@@ -806,16 +788,7 @@ impl McpServer {
             "branches": branches,
         });
         let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "contents": [{
-                    "uri": "tracedecay://branches",
-                    "mimeType": "application/json",
-                    "text": text
-                }]
-            }),
-        )
+        Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
     }
 
     #[allow(clippy::result_large_err)]

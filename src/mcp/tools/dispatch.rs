@@ -17,6 +17,25 @@ use crate::application_surface::{
 };
 use crate::daemon_client::{DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat};
 
+/// Reports an argument rejection to the executor and hands the error back so the
+/// caller can return it unchanged.
+async fn reject_surface_argument(
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    operation: ApplicationSurfaceOperation,
+    request_id: &RequestId,
+    error: ApplicationSurfaceAdapterError,
+) -> ApplicationSurfaceAdapterError {
+    observe_surface_argument_rejection(
+        executor,
+        BindingSurface::Mcp,
+        operation,
+        request_id,
+        &error,
+    )
+    .await;
+    error
+}
+
 pub async fn resolve_mcp_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
@@ -51,42 +70,11 @@ pub async fn resolve_mcp_application_surface_for_target(
     ) {
         Ok(dispatched) => dispatched,
         Err(error) => {
-            observe_surface_argument_rejection(
-                executor,
-                BindingSurface::Mcp,
-                operation,
-                &request_id,
-                &error,
-            )
-            .await;
-            return Err(error);
+            return Err(reject_surface_argument(executor, operation, &request_id, error).await);
         }
     };
     dispatched.invocation.invocation.scope = target;
     execute_application_surface(operation, dispatched, executor).await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn resolve_mcp_application_surface_with_controls(
-    operation: ApplicationSurfaceOperation,
-    request_id: RequestId,
-    request: ApplicationSurfaceRequest,
-    requested_format: RequestedOutputFormat,
-    deadline: Deadline,
-    cancellation: CancellationSignal,
-    executor: Option<&dyn DaemonInvocationExecutor>,
-) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
-    resolve_mcp_application_surface_with_controls_for_target(
-        operation,
-        request_id,
-        request,
-        requested_format,
-        deadline,
-        cancellation,
-        InvocationTarget::CurrentProject,
-        executor,
-    )
-    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,15 +92,7 @@ pub async fn resolve_mcp_application_surface_with_controls_for_target(
         Ok(page) => page,
         Err(error) => {
             let error = ApplicationSurfaceAdapterError::from(error);
-            observe_surface_argument_rejection(
-                executor,
-                BindingSurface::Mcp,
-                operation,
-                &request_id,
-                &error,
-            )
-            .await;
-            return Err(error);
+            return Err(reject_surface_argument(executor, operation, &request_id, error).await);
         }
     };
     let mut dispatched = match resolve_application_surface_dispatch_with_controls(
@@ -127,15 +107,7 @@ pub async fn resolve_mcp_application_surface_with_controls_for_target(
     ) {
         Ok(dispatched) => dispatched,
         Err(error) => {
-            observe_surface_argument_rejection(
-                executor,
-                BindingSurface::Mcp,
-                operation,
-                &request_id,
-                &error,
-            )
-            .await;
-            return Err(error);
+            return Err(reject_surface_argument(executor, operation, &request_id, error).await);
         }
     };
     dispatched.invocation.invocation.scope = target;

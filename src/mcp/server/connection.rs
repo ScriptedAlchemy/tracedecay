@@ -250,93 +250,46 @@ impl McpServer {
             let line: String = if let Some(line) = pending_lines.pop_front() {
                 line
             } else {
-                #[cfg(unix)]
-                {
-                    if let Some(sigterm) = sigterm.as_mut() {
-                        tokio::select! {
-                            result = transport.read_line() => {
-                                match result {
-                                    Ok(Some(line)) => line,
-                                    Ok(None) => break,
-                                    Err(e) => {
-                                        if is_wire_oversized_io_error(&e) {
-                                            let _ = write_wire_oversized_rejection(transport, &e).await;
-                                            break;
-                                        }
-                                        self.shutdown_if(shutdown_on_exit).await;
-                                        return Err(e.into());
-                                    }
-                                }
+                let read = {
+                    #[cfg(unix)]
+                    {
+                        if let Some(sigterm) = sigterm.as_mut() {
+                            tokio::select! {
+                                result = transport.read_line() => result,
+                                _ = tokio::signal::ctrl_c() => break,
+                                _ = sigterm.recv() => break,
                             }
-                            _ = tokio::signal::ctrl_c() => break,
-                            _ = sigterm.recv() => break,
-                        }
-                    } else if let Some(lifecycle) = request_lifecycle {
-                        tokio::select! {
-                            result = transport.read_line() => {
-                                match result {
-                                    Ok(Some(line)) => line,
-                                    Ok(None) => break,
-                                    Err(e) => {
-                                        if is_wire_oversized_io_error(&e) {
-                                            let _ = write_wire_oversized_rejection(transport, &e).await;
-                                            break;
-                                        }
-                                        self.shutdown_if(shutdown_on_exit).await;
-                                        return Err(e.into());
-                                    }
-                                }
+                        } else if let Some(lifecycle) = request_lifecycle {
+                            tokio::select! {
+                                result = transport.read_line() => result,
+                                () = lifecycle.wait_for_draining() => break,
                             }
-                            () = lifecycle.wait_for_draining() => break,
-                        }
-                    } else {
-                        match transport.read_line().await {
-                            Ok(Some(line)) => line,
-                            Ok(None) => break,
-                            Err(e) => {
-                                if is_wire_oversized_io_error(&e) {
-                                    let _ = write_wire_oversized_rejection(transport, &e).await;
-                                    break;
-                                }
-                                self.shutdown_if(shutdown_on_exit).await;
-                                return Err(e.into());
-                            }
+                        } else {
+                            transport.read_line().await
                         }
                     }
-                }
-                #[cfg(not(unix))]
-                {
-                    if listen_for_process_signals {
-                        tokio::select! {
-                            result = transport.read_line() => {
-                                match result {
-                                    Ok(Some(line)) => line,
-                                    Ok(None) => break,
-                                    Err(e) => {
-                                        if is_wire_oversized_io_error(&e) {
-                                            let _ = write_wire_oversized_rejection(transport, &e).await;
-                                            break;
-                                        }
-                                        self.shutdown_if(shutdown_on_exit).await;
-                                        return Err(e.into());
-                                    }
-                                }
+                    #[cfg(not(unix))]
+                    {
+                        if listen_for_process_signals {
+                            tokio::select! {
+                                result = transport.read_line() => result,
+                                _ = tokio::signal::ctrl_c() => break,
                             }
-                            _ = tokio::signal::ctrl_c() => break,
+                        } else {
+                            transport.read_line().await
                         }
-                    } else {
-                        match transport.read_line().await {
-                            Ok(Some(line)) => line,
-                            Ok(None) => break,
-                            Err(e) => {
-                                if is_wire_oversized_io_error(&e) {
-                                    let _ = write_wire_oversized_rejection(transport, &e).await;
-                                    break;
-                                }
-                                self.shutdown_if(shutdown_on_exit).await;
-                                return Err(e.into());
-                            }
+                    }
+                };
+                match read {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if is_wire_oversized_io_error(&e) {
+                            let _ = write_wire_oversized_rejection(transport, &e).await;
+                            break;
                         }
+                        self.shutdown_if(shutdown_on_exit).await;
+                        return Err(e.into());
                     }
                 }
             };
@@ -346,7 +299,6 @@ impl McpServer {
                 continue;
             }
 
-            // Parse the incoming JSON
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
             let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
                 (request.method == "tools/call").then_some(())?;
@@ -523,7 +475,6 @@ impl McpServer {
                 }
             }
 
-            // Write response (if any) as a single line to stdout
             if let Some(resp) = response {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
@@ -589,7 +540,6 @@ impl McpServer {
             tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
         }
 
-        // Update global DB with final count and checkpoint it
         if let Some(ref gdb) = self.accounting_db {
             gdb.upsert(cg.project_root(), tokens_saved).await;
             gdb.checkpoint().await;

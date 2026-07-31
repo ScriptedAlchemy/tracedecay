@@ -161,7 +161,6 @@ pub(crate) struct SessionRetrievalFilters {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Slice 1 exposes this contract before server injection is wired.
 pub(crate) struct SessionRetrievalCommand {
     query: SessionTemporalQuery,
     filters: SessionRetrievalFilters,
@@ -170,7 +169,6 @@ pub(crate) struct SessionRetrievalCommand {
     project_selector: Option<SessionRetrievalProjectSelector>,
 }
 
-#[allow(dead_code)] // Consumed by the injected service in the follow-up wiring slice.
 impl SessionRetrievalCommand {
     pub(crate) fn new(
         query: SessionTemporalQuery,
@@ -194,10 +192,14 @@ impl SessionRetrievalCommand {
         &self.query
     }
 
+    // The service folds filters and goals into the temporal query at construction,
+    // so these two accessors exist only for contract assertions in tests.
+    #[allow(dead_code)]
     pub(crate) fn filters(&self) -> &SessionRetrievalFilters {
         &self.filters
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn goals(&self) -> bool {
         self.goals
     }
