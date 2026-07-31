@@ -230,16 +230,6 @@ impl TraceDecay {
             )
             .is_some_and(|current| pin.configuration().matches_current(&current))
     }
-
-    #[allow(dead_code)] // Plan 22 context-scout model config — staged
-    pub(crate) async fn configure_context_scout_model(
-        &self,
-        config: &crate::automation::config::AutomationConfig,
-    ) {
-        if let Some(owner) = &self.context_scout_owner {
-            owner.configure_model(config).await;
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
