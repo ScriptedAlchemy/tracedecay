@@ -125,12 +125,12 @@ impl DaemonWorkflowIndexReadService {
             .map_err(workflow_error)?;
         let agents_complete =
             i64::try_from(agents.len()).is_ok_and(|returned| returned == agent_count);
-        Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+        Ok(WorkflowRunDetailOutcome::Run(Box::new(WorkflowRunDetail {
             run,
             agents,
             agent_count,
             agents_complete,
-        }))
+        })))
     }
 
     /// Resolves a label with an exact predicate, so a missing agent is never
@@ -160,12 +160,12 @@ impl DaemonWorkflowIndexReadService {
             .map_err(workflow_error)?
             .into_iter()
             .collect();
-        Ok(WorkflowRunDetailOutcome::Run(WorkflowRunDetail {
+        Ok(WorkflowRunDetailOutcome::Run(Box::new(WorkflowRunDetail {
             run,
             agents,
             agent_count,
             agents_complete: true,
-        }))
+        })))
     }
 }
 
