@@ -19,11 +19,11 @@ use tracedecay_code_index::{
 };
 use tracedecay_domain::{
     BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
+    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryId, SanitizationReceiptId,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, TestAttributionEvidenceClassV1, UtcMicros, WorktreeId,
+    StackNodeId, TestAttributionEvidenceClassV1, UtcMicros, WorktreeId, canonical_sha256,
 };
 
 use crate::support::{RUST_SOURCE, id};
@@ -328,6 +328,39 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .admitted_chunks()
             .expect("carry-forward retains parser-backed exact authority")
             .is_empty()
+    );
+}
+
+#[test]
+fn sealed_generation_rejects_file_authority_from_foreign_project() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.project-binding", 1_200_000), &ActiveControl)
+        .expect("valid generation publishes");
+    let sealed = generation.encode_sealed().expect("valid generation seals");
+
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
+    assert_eq!(restored.manifest().project_id, config().project_id);
+
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    envelope["generation"]["files"][0]["authority"]["project_id"] =
+        serde_json::Value::String("project.foreign".to_owned());
+    let state_digest =
+        canonical_sha256(&envelope["generation"]).expect("forged payload has canonical digest");
+    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
+    let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
+
+    let error = CodeIndexPublishedGenerationV1::decode_sealed(&forged)
+        .expect_err("foreign file authority must fail sealed restoration");
+    assert!(
+        error
+            .to_string()
+            .contains("file authority project does not match the generation manifest"),
+        "unexpected project mismatch error: {error}"
     );
 }
 
