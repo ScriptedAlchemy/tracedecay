@@ -1215,6 +1215,9 @@ mod git_watch;
 mod github_credential_lifecycle;
 mod http_application;
 mod lsp_gateway;
+mod maintenance;
+#[path = "daemon/git_watch/store_maintenance.rs"]
+mod store_maintenance;
 pub(crate) use lsp_gateway::{
     BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
     LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
@@ -1348,6 +1351,15 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
+    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let profile_database = store_administration.registered_profile_database().await?;
+    let maintenance = maintenance::MaintenanceCoordinator::spawn(
+        profile_root.clone(),
+        profile_database,
+        store_administration.clone(),
+        sync_config.retention,
+    )
+    .await;
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
     invocation.configure_github_read_only_credentials(authority.profile_identity());
@@ -1399,6 +1411,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    maintenance.shutdown().await;
     cancel_project_server_startup_ingests(&store_administration).await;
     let _ = timeout(
         DAEMON_TASK_ABORT_DEADLINE,
@@ -1506,20 +1519,29 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let profile_database = engine
+        .store_administration
+        .registered_profile_database()
+        .await?;
+    let maintenance = maintenance::MaintenanceCoordinator::spawn(
+        profile_root.clone(),
+        Arc::clone(&profile_database),
+        engine.store_administration.clone(),
+        sync_config.retention.clone(),
+    )
+    .await;
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
     // When `auto_watch` is off the watcher is inert. The watcher shares the
     // engine's administration coordinator before it can spawn any writer.
     let git_watcher = git_watch::GitWatcher::new_with_administration(
-        crate::config::SyncConfig::default().with_env_overrides(),
+        sync_config,
         engine.store_administration.clone(),
         profile_root.clone(),
+        maintenance.clone(),
     );
     if git_watcher.is_enabled() {
-        let profile_database = engine
-            .store_administration
-            .registered_profile_database()
-            .await?;
         git_watcher.spawn(profile_database).await;
     }
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
@@ -1531,6 +1553,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     );
     let engine = engine
         .with_git_watcher(git_watcher)
+        .with_maintenance_coordinator(maintenance)
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -3134,6 +3157,9 @@ struct DaemonEngine {
     /// config-driven watcher is installed by `run_foreground_unix` via
     /// [`DaemonEngine::with_git_watcher`] before the accept loop starts.
     git_watcher: git_watch::GitWatcher,
+    /// Platform-neutral retention owner. The Unix watcher may wake this task,
+    /// but never owns its cadence or lifecycle.
+    maintenance_coordinator: maintenance::MaintenanceCoordinator,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
     pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
@@ -4280,6 +4306,14 @@ impl DaemonEngine {
         self
     }
 
+    fn with_maintenance_coordinator(
+        mut self,
+        coordinator: maintenance::MaintenanceCoordinator,
+    ) -> Self {
+        self.maintenance_coordinator = coordinator;
+        self
+    }
+
     async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
         *self.pr_autotrack_task.lock().await = Some(task);
         self
@@ -4893,6 +4927,7 @@ impl DaemonEngine {
             .shutdown_host_admission_replay()
             .await;
 
+        self.maintenance_coordinator.shutdown().await;
         self.git_watcher.shutdown().await;
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();

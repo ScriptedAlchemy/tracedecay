@@ -43,9 +43,12 @@ use tokio::time::Instant;
 use crate::config::SyncConfig;
 use crate::tracedecay::TraceDecay;
 
-use super::{branch_admin::StoreAdministration, log_daemon_event};
-
-mod store_maintenance;
+#[cfg(test)]
+use super::maintenance::retention_maintenance_enabled;
+use super::{
+    branch_admin::StoreAdministration, log_daemon_event, maintenance::MaintenanceCoordinator,
+    store_maintenance,
+};
 
 /// Degraded watchers fall back to polling git metadata every 5 minutes.
 const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
@@ -126,6 +129,7 @@ struct WatchState {
     /// Raised by the notify callback (or degraded poller) on every metadata
     /// event; the debounce task waits on it instead of polling.
     wake: Notify,
+    maintenance: MaintenanceCoordinator,
     health: ProjectHealth,
     /// Handle to the supervised task so drop cancels it on shutdown.
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -216,19 +220,20 @@ pub struct GitWatcher {
     inner: Arc<GitWatcherInner>,
 }
 
-struct GitWatcherInner {
-    config: SyncConfig,
+pub(super) struct GitWatcherInner {
+    pub(super) config: SyncConfig,
     /// Profile selected by the owning daemon. Every open and administration
     /// action must use this identity rather than whichever profile a watcher
     /// task happens to resolve from its environment.
     profile_root: PathBuf,
     /// Serializes every store-writing lifetime with daemon branch administration.
-    administration: StoreAdministration,
+    pub(super) administration: StoreAdministration,
+    maintenance: MaintenanceCoordinator,
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
     /// Daemon-wide sync concurrency governor.
-    sync_semaphore: Arc<Semaphore>,
+    pub(super) sync_semaphore: Arc<Semaphore>,
     /// Canonical project root → watch state. Also the backstop's project set.
     projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
@@ -253,6 +258,7 @@ impl GitWatcher {
             StoreAdministration::default(),
             current_profile_root(),
             false,
+            MaintenanceCoordinator::default(),
         )
     }
 
@@ -261,6 +267,7 @@ impl GitWatcher {
         administration: StoreAdministration,
         profile_root: PathBuf,
         enabled: bool,
+        maintenance: MaintenanceCoordinator,
     ) -> Self {
         let permits = config.max_concurrent_syncs.max(1);
         Self {
@@ -268,6 +275,7 @@ impl GitWatcher {
                 config,
                 profile_root,
                 administration,
+                maintenance,
                 enabled,
                 sync_semaphore: Arc::new(Semaphore::new(permits)),
                 projects: Mutex::new(HashMap::new()),
@@ -288,6 +296,7 @@ impl GitWatcher {
             config,
             StoreAdministration::default(),
             current_profile_root(),
+            MaintenanceCoordinator::default(),
         )
     }
 
@@ -298,9 +307,10 @@ impl GitWatcher {
         config: SyncConfig,
         administration: StoreAdministration,
         profile_root: PathBuf,
+        maintenance: MaintenanceCoordinator,
     ) -> Self {
         let enabled = config.auto_watch;
-        Self::from_parts(config, administration, profile_root, enabled)
+        Self::from_parts(config, administration, profile_root, enabled, maintenance)
     }
 
     // Doctor watcher-health surface (follow-up wiring).
@@ -353,6 +363,7 @@ impl GitWatcher {
             dirty: Mutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
+            maintenance: self.inner.maintenance.clone(),
             health: ProjectHealth::default(),
             task: Mutex::new(None),
             #[cfg(test)]
@@ -600,6 +611,7 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
         state.reconciliation_pending.store(true, Ordering::Release);
     }
     state.wake.notify_one();
+    state.maintenance.wake();
 }
 
 /// Converts any callback event that could not record detailed path evidence
@@ -867,14 +879,6 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn retention_maintenance_enabled(retention: &crate::config::RetentionConfig) -> bool {
-    retention.session_lcm.enabled
-        || retention.observation.enabled
-        || retention.orphan_store_gc_days.is_some()
-        || retention.incident_debris_retention_days.is_some()
-        || retention.compaction.is_some()
-}
-
 /// Backstop scheduler (design D5): a single daemon timer covering projects whose
 /// watcher heartbeat is stale/absent, plus daily branch-store GC.
 mod backstop {
@@ -882,7 +886,7 @@ mod backstop {
 
     pub(super) async fn run(
         watcher: GitWatcher,
-        profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
+        _profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
     ) {
         let interval_mins = watcher.inner.config.backstop_interval_mins;
         if interval_mins == 0 {
@@ -895,41 +899,14 @@ mod backstop {
 
         let mut last_gc: Option<Instant> = None;
         let gc_period = Duration::from_hours(24);
-        // Retained-handle maintenance uses the owner-configurable interval and
-        // stays inert unless a registered retention/compaction pass is enabled.
-        let mut last_maintenance: Option<Instant> = None;
-        let maintenance_period = Duration::from_secs(
-            watcher
-                .inner
-                .config
-                .retention
-                .interval_hours
-                .max(1)
-                .saturating_mul(3_600),
-        );
 
         loop {
             ticker.tick().await;
-            tick(
-                &watcher,
-                profile_database.as_ref(),
-                &mut last_gc,
-                gc_period,
-                &mut last_maintenance,
-                maintenance_period,
-            )
-            .await;
+            tick(&watcher, &mut last_gc, gc_period).await;
         }
     }
 
-    async fn tick(
-        watcher: &GitWatcher,
-        profile_database: &crate::global_db::RegisteredGlobalDb,
-        last_gc: &mut Option<Instant>,
-        gc_period: Duration,
-        last_maintenance: &mut Option<Instant>,
-        maintenance_period: Duration,
-    ) {
+    async fn tick(watcher: &GitWatcher, last_gc: &mut Option<Instant>, gc_period: Duration) {
         let interval_secs = watcher
             .inner
             .config
@@ -987,96 +964,6 @@ mod backstop {
 
         if run_gc_now && !gc_retry_needed {
             *last_gc = Some(Instant::now());
-        }
-
-        // Maintenance runs independently of per-project GC. Only already-
-        // mounted profile/session/project handles participate; unopened stores
-        // are skipped rather than rediscovered.
-        let retention = &watcher.inner.config.retention;
-        let maintenance_enabled = super::retention_maintenance_enabled(retention);
-        let run_maintenance_now =
-            last_maintenance.is_none_or(|t| t.elapsed() >= maintenance_period);
-        if run_maintenance_now && maintenance_enabled {
-            let session_databases = watcher
-                .inner
-                .administration
-                .mounted_registered_session_databases()
-                .await;
-            let project_graphs = watcher.inner.administration.mounted_project_graphs().await;
-            let profile_root = watcher.inner.profile_root.clone();
-            let succeeded = watcher
-                .inner
-                .administration
-                .with_writer(|| async {
-                    let mut session_succeeded = true;
-                    for database in &session_databases {
-                        session_succeeded &=
-                            super::store_maintenance::run_session_retention(database, retention)
-                                .await;
-                    }
-                    let orphan_succeeded =
-                        if let Some(orphan_store_gc_days) = retention.orphan_store_gc_days {
-                            super::store_maintenance::run_orphan_store_sweep(
-                                profile_database,
-                                &profile_root,
-                                orphan_store_gc_days,
-                            )
-                            .await
-                        } else {
-                            true
-                        };
-                    let debris_succeeded =
-                        if let Some(retention_days) = retention.incident_debris_retention_days {
-                            super::store_maintenance::run_incident_debris_sweep(
-                                profile_database,
-                                &profile_root,
-                                retention_days,
-                            )
-                            .await
-                        } else {
-                            true
-                        };
-                    // Sealed code-index generations are ordinary files that no
-                    // database retention pass reclaims, and they must be
-                    // collected whether or not the semantic lane is active.
-                    let mut code_generations_succeeded = true;
-                    for graph in &project_graphs {
-                        code_generations_succeeded &=
-                            super::store_maintenance::run_code_generation_retention(graph).await;
-                    }
-                    let mut compaction_succeeded = true;
-                    if let Some(compaction) = &retention.compaction {
-                        compaction_succeeded &= super::store_maintenance::run_global_compaction(
-                            profile_database,
-                            compaction,
-                        )
-                        .await;
-                        for graph in &project_graphs {
-                            compaction_succeeded &=
-                                super::store_maintenance::run_project_compaction(
-                                    graph.db(),
-                                    compaction,
-                                )
-                                .await;
-                            // Every tracked branch other than the one this
-                            // handle has mounted. Individual branches remain
-                            // independent, while any skip keeps this cadence
-                            // retry-eligible.
-                            compaction_succeeded &=
-                                super::store_maintenance::run_branch_compaction(graph, compaction)
-                                    .await;
-                        }
-                    }
-                    session_succeeded
-                        && orphan_succeeded
-                        && debris_succeeded
-                        && code_generations_succeeded
-                        && compaction_succeeded
-                })
-                .await;
-            if succeeded {
-                *last_maintenance = Some(Instant::now());
-            }
         }
     }
 

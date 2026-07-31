@@ -4,7 +4,7 @@
 //! reachable from `tracedecay migrate storage-report` without a live daemon
 //! or any [`crate::global_db::RegisteredGlobalDb`] writer authority.
 //!
-//! # Why this does not use `sqlite_read_snapshot`
+//! # Why this does not snapshot stores in place
 //!
 //! The registry read does, because it is one small file and needs a
 //! consistent view of `code_projects`. The *per-store size sampling*
@@ -17,14 +17,14 @@
 //! entire promise is being cheap enough to run on a full profile.
 //!
 //! So sizes come from filesystem metadata (exact, no locks, no I/O beyond
-//! `stat`) and free-page counts from a short read-only connection. If that
-//! connection fails — busy, corrupt, or a WAL database with no `-shm` to map
-//! read-only — the free-page fields are reported as `None` rather than
-//! guessed at, and the store still reports its size. Nothing here opens a
-//! writable handle or mutates a byte.
+//! `stat`) and free-page counts from a short read-only connection. The one
+//! registry snapshot uses an OS-temporary scratch directory, never a child of
+//! the profile it inspects. If a free-page connection fails — busy, corrupt,
+//! or a WAL database with no `-shm` to map read-only — its fields are `None`
+//! rather than guessed at, and the store still reports its size.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::code_index_generations::{
@@ -73,6 +73,11 @@ pub struct StorageReport {
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
+    /// A direct, read-only census of every regular file under the profile
+    /// root. The daemon's bounded per-page response leaves this absent; the
+    /// explicit storage-report command attaches it after paging completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_profile_size: Option<FullProfileSizeV1>,
     pub coverage: StorageReportCoverage,
 }
 
@@ -110,6 +115,15 @@ pub enum ProfileTotalCoverageStateV1 {
     Partial,
 }
 
+/// Full-profile filesystem census. Symlinks and unreadable entries are never
+/// followed or silently treated as zero; they make the total a lower bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct FullProfileSizeV1 {
+    pub state: ProfileTotalCoverageStateV1,
+    pub total_bytes: u64,
+    pub unavailable_entry_count: usize,
+}
+
 /// Profile-wide on-disk total, with any family it could not size named.
 ///
 /// A partial total must never read as the profile size. Plan 38 sizes the
@@ -138,6 +152,23 @@ impl StorageReport {
         let accounted_bytes = registered_store_bytes
             .saturating_add(self.global_db_bytes)
             .saturating_add(self.unregistered_bytes);
+
+        if let Some(full_profile_size) = self.full_profile_size {
+            let excluded_families = (full_profile_size.unavailable_entry_count > 0).then(|| {
+                format!(
+                    "{} unreadable or non-regular profile entries",
+                    full_profile_size.unavailable_entry_count
+                )
+            });
+            return ProfileTotalSizeV1 {
+                state: full_profile_size.state,
+                accounted_bytes: full_profile_size.total_bytes,
+                registered_store_bytes,
+                global_db_bytes: self.global_db_bytes,
+                unregistered_bytes: self.unregistered_bytes,
+                excluded_families: excluded_families.into_iter().collect(),
+            };
+        }
 
         let mut excluded_families = Vec::new();
         if self.coverage.state == StorageReportCoverageState::Partial {
@@ -209,21 +240,36 @@ pub struct CodeGenerationRetentionAvailabilityEntry {
 /// registered project's graph database, then scanning `projects/` bottom-up
 /// for directories with no matching registry row. Read-only throughout.
 pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<StorageReport> {
-    let scratch_root = profile_root.join("scratch").join("sqlite-read");
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
+    // Capture the profile's physical footprint before opening any SQLite
+    // readers. A report must describe the profile supplied by its caller, not
+    // implementation-dependent SQLite sidecar churn caused while collecting
+    // the remaining diagnostic fields.
+    let full_profile_root = profile_root.to_path_buf();
+    let full_profile_size =
+        tokio::task::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
+            .await
+            .map_err(|error| report_error("join full profile size scan", error))?;
     let mut registered_ids = HashSet::new();
     let mut stores = Vec::new();
     let mut code_generation_retention = Vec::new();
     let mut code_generation_retention_availability = Vec::new();
 
     if global_db_path.exists() {
-        // The snapshot layer creates only the final scratch component, so its
-        // parent must already exist -- otherwise every report against a
-        // profile root without a `scratch/` directory (including any
-        // `--profile-root` the owner points at) fails on NotFound.
-        std::fs::create_dir_all(&scratch_root)
-            .map_err(|error| report_error("prepare read-snapshot scratch", error))?;
-        let snapshot = crate::sqlite_read_snapshot::open_in(&global_db_path, &scratch_root)
+        let scratch = tempfile::tempdir()
+            .map_err(|error| report_error("create external read-snapshot scratch", error))?;
+        validate_external_scratch(profile_root, scratch.path())
+            .map_err(|error| report_error("validate read-snapshot scratch placement", error))?;
+        // Snapshot authority takes a lock beside its source database. Back up
+        // the live family to the external scratch first so the authority lock,
+        // the immutable reader, and every temporary artifact stay outside the
+        // profile being reported. Copy bytes rather than opening the live
+        // family: a read-only SQLite open against a WAL database can still
+        // materialize a missing SHM sidecar.
+        let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
+        copy_sqlite_family(&global_db_path, &snapshot_source)
+            .map_err(|error| report_error("copy global.db family for read-only report", error))?;
+        let snapshot = crate::sqlite_read_snapshot::open_in(&snapshot_source, scratch.path())
             .await
             .map_err(|error| report_error("open global.db read snapshot", error))?;
         let connection = snapshot.connection();
@@ -259,7 +305,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
 
     let (unregistered_dir_count, unregistered_bytes) =
         scan_unregistered_dirs(profile_root, &registered_ids);
-    let global_db_bytes = std::fs::metadata(&global_db_path).map_or(0, |metadata| metadata.len());
+    let global_db_bytes = database_family_bytes(&global_db_path);
 
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
@@ -269,6 +315,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes,
+        full_profile_size: Some(full_profile_size),
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -284,8 +331,7 @@ pub(crate) async fn build_storage_report_page_from_registered_global_db(
     limit: usize,
 ) -> crate::errors::Result<StorageReport> {
     let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
-    let global_db_bytes = std::fs::metadata(profile_root.join(GLOBAL_DB_FILENAME))
-        .map_or(0, |metadata| metadata.len());
+    let global_db_bytes = database_family_bytes(&profile_root.join(GLOBAL_DB_FILENAME));
     let cursor = cursor.unwrap_or(PROJECT_CURSOR_PREFIX);
     if let Some(after_project_id) = cursor.strip_prefix(PROJECT_CURSOR_PREFIX) {
         let mut projects = global_db
@@ -446,7 +492,8 @@ pub fn build_project_storage_report(
         code_generation_retention_availability,
         unregistered_dir_count: 0,
         unregistered_bytes: 0,
-        global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
+        global_db_bytes: database_family_bytes(&global_db_path),
+        full_profile_size: None,
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -604,20 +651,7 @@ fn sample_store_size(graph_db_path: &Path) -> Option<StoreSizeSample> {
     }
     // Filesystem metadata over the whole family: what the owner actually sees
     // consumed on disk, including a WAL that has not been checkpointed.
-    let mut total_bytes = 0u64;
-    for suffix in ["", "-wal", "-shm"] {
-        let member = if suffix.is_empty() {
-            graph_db_path.to_path_buf()
-        } else {
-            let mut name = graph_db_path.as_os_str().to_os_string();
-            name.push(suffix);
-            std::path::PathBuf::from(name)
-        };
-        if let Ok(metadata) = std::fs::metadata(&member) {
-            total_bytes = total_bytes.saturating_add(metadata.len());
-        }
-    }
-
+    let total_bytes = database_family_bytes(graph_db_path);
     let (free_bytes, free_page_ratio) = match sample_free_pages(graph_db_path) {
         Some((free_bytes, ratio)) => (Some(free_bytes), Some(ratio)),
         None => (None, None),
@@ -627,6 +661,58 @@ fn sample_store_size(graph_db_path: &Path) -> Option<StoreSizeSample> {
         free_bytes,
         free_page_ratio,
     })
+}
+
+fn database_family_bytes(database_path: &Path) -> u64 {
+    let mut total_bytes = 0u64;
+    for suffix in ["", "-wal", "-shm"] {
+        let member = if suffix.is_empty() {
+            database_path.to_path_buf()
+        } else {
+            let mut name = database_path.as_os_str().to_os_string();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        if let Ok(metadata) = std::fs::metadata(&member) {
+            total_bytes = total_bytes.saturating_add(metadata.len());
+        }
+    }
+    total_bytes
+}
+
+/// Copies a SQLite main/WAL/SHM family without opening the source path. The
+/// caller opens only `destination`, which prevents reporting from creating
+/// sidecars under the profile it is inspecting.
+fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let source_member = sqlite_family_member(source, suffix);
+        if !source_member.is_file() {
+            continue;
+        }
+        std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
+    }
+    Ok(())
+}
+
+fn validate_external_scratch(profile_root: &Path, scratch_root: &Path) -> std::io::Result<()> {
+    let profile = profile_root.canonicalize()?;
+    let scratch = scratch_root.canonicalize()?;
+    if scratch.starts_with(profile) {
+        return Err(std::io::Error::other(
+            "read-snapshot scratch must be outside the inspected profile",
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        database_path.to_path_buf()
+    } else {
+        let mut name = database_path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
 }
 
 /// Reads the free-page pragmas over a strictly read-only connection with a
@@ -687,6 +773,64 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
     (count, bytes)
 }
 
+/// Count every regular file under a profile root without following symlinks.
+/// Failures remain visible as a partial lower bound instead of a successful
+/// zero-size family.
+pub(crate) fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
+    fn walk(path: &Path, total_bytes: &mut u64, unavailable_entry_count: &mut usize) {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => {
+                *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => {
+                    *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
+                walk(&entry.path(), total_bytes, unavailable_entry_count);
+            } else if file_type.is_file() {
+                match entry.metadata() {
+                    Ok(metadata) => {
+                        *total_bytes = total_bytes.saturating_add(metadata.len());
+                    }
+                    Err(_) => {
+                        *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                    }
+                }
+            } else {
+                *unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
+        }
+    }
+
+    let mut total_bytes = 0u64;
+    let mut unavailable_entry_count = 0usize;
+    walk(profile_root, &mut total_bytes, &mut unavailable_entry_count);
+    FullProfileSizeV1 {
+        state: if unavailable_entry_count == 0 {
+            ProfileTotalCoverageStateV1::Complete
+        } else {
+            ProfileTotalCoverageStateV1::Partial
+        },
+        total_bytes,
+        unavailable_entry_count,
+    }
+}
+
 fn report_error(
     operation: &'static str,
     error: impl std::fmt::Display,
@@ -700,6 +844,9 @@ fn report_error(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crate::db::engine::TestConnection;
 
@@ -832,6 +979,56 @@ mod tests {
             .unwrap();
     }
 
+    fn profile_tree_bytes(root: &Path) -> u64 {
+        std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .fold(0u64, |total, entry| {
+                let file_type = entry.file_type().unwrap();
+                if file_type.is_dir() {
+                    total.saturating_add(profile_tree_bytes(&entry.path()))
+                } else if file_type.is_file() {
+                    total.saturating_add(entry.metadata().unwrap().len())
+                } else {
+                    total
+                }
+            })
+    }
+
+    fn profile_entries(root: &Path) -> BTreeSet<PathBuf> {
+        fn collect(root: &Path, current: &Path, entries: &mut BTreeSet<PathBuf>) {
+            for entry in std::fs::read_dir(current).unwrap().flatten() {
+                let path = entry.path();
+                entries.insert(path.strip_prefix(root).unwrap().to_path_buf());
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, entries);
+                }
+            }
+        }
+
+        let mut entries = BTreeSet::new();
+        collect(root, root, &mut entries);
+        entries
+    }
+
+    fn sqlite_family_bytes(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        ["", "-wal", "-shm"]
+            .into_iter()
+            .filter_map(|suffix| {
+                let member = if suffix.is_empty() {
+                    path.to_path_buf()
+                } else {
+                    let mut name = path.as_os_str().to_os_string();
+                    name.push(suffix);
+                    PathBuf::from(name)
+                };
+                member
+                    .is_file()
+                    .then(|| (member.clone(), std::fs::read(member).unwrap()))
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn report_sizes_every_registered_store_and_counts_unregistered_dirs() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -853,6 +1050,87 @@ mod tests {
         assert!(report.stores[0].total_bytes > 0);
         assert_eq!(report.unregistered_dir_count, 1);
         assert!(report.unregistered_bytes >= 2048);
+    }
+
+    #[tokio::test]
+    async fn full_profile_total_includes_session_and_generation_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        seed_graph_db(&profile_root, "proj_a");
+
+        std::fs::write(profile_root.join("sessions.db"), vec![1u8; 2_048]).unwrap();
+        let generations = profile_root
+            .join("projects")
+            .join("proj_a")
+            .join("code-index-v1")
+            .join("fixture")
+            .join(CODE_GENERATIONS_DIRECTORY);
+        std::fs::create_dir_all(&generations).unwrap();
+        std::fs::write(generations.join("generation-active.json"), vec![2u8; 4_096]).unwrap();
+        std::fs::write(generations.join("generation-pinned.json"), vec![3u8; 1_024]).unwrap();
+
+        let expected_bytes = profile_tree_bytes(&profile_root);
+        let report = build_storage_report(&profile_root).await.unwrap();
+        let total = report.profile_total_size();
+
+        assert_eq!(total.state, ProfileTotalCoverageStateV1::Complete);
+        assert_eq!(
+            total.accounted_bytes, expected_bytes,
+            "a full profile total must include session and code-generation files, \
+             not only registered graph databases"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_profile_report_creates_no_entries_under_the_profile_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        seed_graph_db(&profile_root, "proj_a");
+        let before = profile_entries(&profile_root);
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(
+            report.profile_total_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        assert_eq!(
+            profile_entries(&profile_root),
+            before,
+            "read-only reporting must not add scratch or other entries to a live profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_report_preserves_the_exact_live_global_database_family() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[("proj_a", "/repos/a")]).await;
+        let global_db = profile_root.join(GLOBAL_DB_FILENAME);
+        let before = sqlite_family_bytes(&global_db);
+
+        build_storage_report(&profile_root).await.unwrap();
+
+        assert_eq!(
+            sqlite_family_bytes(&global_db),
+            before,
+            "reporting must never create, change, or delete a source SQLite family member"
+        );
+    }
+
+    #[test]
+    fn scratch_validation_rejects_a_transient_directory_inside_the_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let transient = profile.join("transient");
+        std::fs::create_dir_all(&transient).unwrap();
+
+        assert!(validate_external_scratch(&profile, &transient).is_err());
     }
 
     /// The report must never freeze a store family to size it: a snapshot

@@ -12,8 +12,9 @@ use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
-use super::super::{branch_admin::StoreAdministration, log_daemon_event};
-use super::GitWatcherInner;
+#[cfg(unix)]
+use super::git_watch::GitWatcherInner;
+use super::{branch_admin::StoreAdministration, log_daemon_event};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -191,6 +192,20 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
         return true;
     }
 
+    // Hold the canonical graph writer lane from the pin read through durable
+    // filesystem publication. A vector-generation writer cannot publish a new
+    // readable source between this inventory snapshot and deletion.
+    let writer = match graph
+        .db()
+        .begin_write_transaction("code generation retention pin fence")
+        .await
+    {
+        Ok(writer) => writer,
+        Err(_) => {
+            log_code_generation_retention_degraded("vector_writer_lane_unavailable");
+            return false;
+        }
+    };
     let vector_readable_sources =
         match DatabaseVectorGenerationStoreV1::open_legacy_migration(graph.db()).await {
             Ok(store) => match store.read_legacy_inventory().await {
@@ -223,6 +238,10 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
         )
     })
     .await;
+    if writer.rollback().await.is_err() {
+        log_code_generation_retention_degraded("vector_writer_lane_release_failed");
+        return false;
+    }
 
     match report {
         Ok(Ok(report)) => {
