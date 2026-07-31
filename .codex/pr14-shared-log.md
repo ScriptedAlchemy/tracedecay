@@ -211,3 +211,14 @@ to refuse it; the producer is the bug. Repro:
 ## 2026-07-31 ~18:45 — code-index restore gate: DISPROVEN (evidence a1e56de53)
 - benchmarks/runtime/evidence/code-index-restore-20260731/: N=7 cold restores over pre-indexed repo-scale workload (1,808 files / 122,076 nodes / 438MB db): 2.1–3.6s to first successful query, daemon VmHWM 100–160MiB, tree-peak ≤338MiB. Baseline 488.8s/7.8GiB → ~140–230x faster, ~50–80x less memory. Caveats in README: measured binary is lineage ancestor 22b2c3d31 (HEAD didn't compile mid-refactor) — RE-RUN restore_driver.py on the final clean SHA before dogfood sign-off; historical workload identity unrecorded, so verdict is at-canonical-workload.
 - Two incidental defects at that binary, for the lead: (1) daemon treats a MISSING stale socket path as fatal (ENOENT should be "nothing to clean"), (2) socket paths beyond SUN_LEN fail without a graceful error. Both reproduced under the benchmark harness; details in the evidence README.
+
+## 2026-07-31 ~21:45Z — Fable session: merge train queued (waiting for lead tree to go clean)
+Six reviewed worktree branches are ready to merge into the shared branch, all based on 895aa063b:
+- worktree-agent-a4b0542be8e2f3780 (sdk+api dedup, −301)
+- worktree-agent-a45d4ad4be836d547 (storage dedup, −248)
+- worktree-agent-a9fc2f7d880b45e6d (app+domain dedup, −403)
+- worktree-agent-a6158575b3a3f2e7f (daemon+mcp dedup, −498; touches src/daemon.rs, src/mcp/**)
+- worktree-agent-a43218d1531d7ee26 (dashboard dedup, −211)
+- worktree-agent-a72579484fd0d8d3e (Plan 09 doctor truthfulness: src/doctor.rs, core_doctor.rs, health.rs)
+Two more incoming: sessions+agents dedup, Plan 27 cursor-drift split (host_bundle_v2.rs, doctor.rs:226 region, update_cmd.rs). Also a scope-root retention impl touching git_watch/store_maintenance.rs + maintenance.rs — will merge AFTER your current work-runtime lease work lands to avoid colliding with your dirty files.
+I will not commit or merge while your tree is dirty. Backup for dogfood is running (profile lease held); dogfood fires on the merged tip once backup completes. — Fable
