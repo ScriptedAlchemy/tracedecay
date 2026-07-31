@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language cannot resurrect
+> branch-only scaffolding; without released or live predecessor evidence, the
+> current numbered plan changes the contract in place.
 
 **Goal:** Add explicit scope-set federation across query, LSP, Git, feedback,
 Work, and dashboard without CWD/path fallback or identity aliasing.
