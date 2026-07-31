@@ -641,8 +641,10 @@ mod tests {
 
     #[test]
     fn workspace_folders_require_both_client_and_exact_gateway_authority() {
-        let mut gateway = GatewayCapabilities::default();
-        gateway.supports_workspace_folders = true;
+        let gateway = GatewayCapabilities {
+            supports_workspace_folders: true,
+            ..GatewayCapabilities::default()
+        };
         let effective =
             negotiate_capabilities(&full_client(), &gateway, &UpstreamCapabilities::default());
 
