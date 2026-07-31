@@ -433,34 +433,6 @@ impl HookScopeBindingV1 {
     }
 }
 
-/// Exact typed envelope bytes are encoded by the transport implementation;
-/// callers supply only bounded framing metadata here, never arbitrary bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookSpoolEntryV1 {
-    pub envelope: HookEventEnvelopeV2,
-    pub encoded_len: u32,
-    pub checksum: [u8; 32],
-    pub queued_at: UtcMicros,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookSpoolUsageV1 {
-    pub host_records: u32,
-    pub host_bytes: u64,
-    pub session_records: u32,
-    pub session_bytes: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImmediateSendOutcomeV1 {
-    Accepted,
-    Unavailable,
-    TimedOut,
-    Backpressured,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpoolAppendOutcomeV1 {
     Accepted,
@@ -510,52 +482,6 @@ pub enum HookContractError {
     GuidanceBudgetExceeded,
 }
 
-/// Validate a prospective append against every host and producer/session
-/// quota. Existing records are never overwritten or silently evicted.
-pub fn admit_spool_entry(
-    entry: HookSpoolEntryV1,
-    binding: &HookScopeBindingV1,
-    usage: HookSpoolUsageV1,
-    now: UtcMicros,
-    verify_checksum: impl FnOnce(&HookSpoolEntryV1) -> bool,
-) -> Result<HookSpoolEntryV1, HookContractError> {
-    entry.envelope.validate(binding)?;
-    let bytes = u64::from(entry.encoded_len);
-    if entry.encoded_len == 0 || entry.encoded_len as usize > MAX_HOOK_PAYLOAD_BYTES {
-        return Err(HookContractError::SpoolBudgetExceeded);
-    }
-    if now.0.saturating_sub(entry.queued_at.0) > MAX_SPOOL_AGE_MICROS {
-        return Err(HookContractError::SpoolExpired);
-    }
-    if !verify_checksum(&entry) {
-        return Err(HookContractError::SpoolChecksumInvalid);
-    }
-    let host_records = usage
-        .host_records
-        .checked_add(1)
-        .ok_or(HookContractError::SpoolFull)?;
-    let host_bytes = usage
-        .host_bytes
-        .checked_add(bytes)
-        .ok_or(HookContractError::SpoolFull)?;
-    let session_records = usage
-        .session_records
-        .checked_add(1)
-        .ok_or(HookContractError::SpoolFull)?;
-    let session_bytes = usage
-        .session_bytes
-        .checked_add(bytes)
-        .ok_or(HookContractError::SpoolFull)?;
-    if host_records > MAX_SPOOL_RECORDS_PER_HOST
-        || host_bytes > MAX_SPOOL_BYTES_PER_HOST
-        || session_records > MAX_SPOOL_RECORDS_PER_SESSION
-        || session_bytes > MAX_SPOOL_BYTES_PER_SESSION
-    {
-        return Err(HookContractError::SpoolFull);
-    }
-    Ok(entry)
-}
-
 pub fn validate_replay_batch(record_count: u16, byte_count: u32) -> Result<(), HookContractError> {
     if record_count == 0
         || record_count > MAX_REPLAY_BATCH_RECORDS
@@ -565,29 +491,6 @@ pub fn validate_replay_batch(record_count: u16, byte_count: u32) -> Result<(), H
         return Err(HookContractError::ReplayBatchExceeded);
     }
     Ok(())
-}
-
-/// Host-neutral send-or-spool control flow. Implementations provide bounded
-/// IPC and append-only spool adapters; this function performs no other work.
-pub fn send_or_spool(
-    envelope: &HookEventEnvelopeV2,
-    binding: &HookScopeBindingV1,
-    send: impl FnOnce(&HookEventEnvelopeV2) -> ImmediateSendOutcomeV1,
-    spool: impl FnOnce(&HookEventEnvelopeV2) -> SpoolAppendOutcomeV1,
-) -> Result<HookTransportDispositionV1, HookContractError> {
-    envelope.validate(binding)?;
-    let disposition = match send(envelope) {
-        ImmediateSendOutcomeV1::Accepted => HookTransportDispositionV1::Accepted,
-        ImmediateSendOutcomeV1::Unavailable
-        | ImmediateSendOutcomeV1::TimedOut
-        | ImmediateSendOutcomeV1::Backpressured => match spool(envelope) {
-            SpoolAppendOutcomeV1::Accepted => HookTransportDispositionV1::AcceptedForReplay,
-            SpoolAppendOutcomeV1::Full | SpoolAppendOutcomeV1::Unavailable => {
-                HookTransportDispositionV1::CatchupRequired
-            }
-        },
-    };
-    Ok(disposition)
 }
 
 /// Render only sensitivity-safe text already approved by the application.
@@ -698,91 +601,6 @@ mod tests {
             HookEventSupportV1::Native,
             "the checked-in Cursor afterFileEdit capture proves this native family"
         );
-    }
-
-    #[test]
-    fn every_spool_quota_is_enforced_without_eviction() {
-        let entry = HookSpoolEntryV1 {
-            envelope: envelope(),
-            encoded_len: 64,
-            checksum: [14; 32],
-            queued_at: UtcMicros(10),
-        };
-        let usage = HookSpoolUsageV1 {
-            session_records: MAX_SPOOL_RECORDS_PER_SESSION,
-            ..HookSpoolUsageV1::default()
-        };
-        assert_eq!(
-            admit_spool_entry(entry, &binding(), usage, UtcMicros(11), |_| true).unwrap_err(),
-            HookContractError::SpoolFull
-        );
-    }
-
-    #[test]
-    fn corrupt_spool_record_is_rejected() {
-        let entry = HookSpoolEntryV1 {
-            envelope: envelope(),
-            encoded_len: 64,
-            checksum: [14; 32],
-            queued_at: UtcMicros(10),
-        };
-        assert_eq!(
-            admit_spool_entry(
-                entry,
-                &binding(),
-                HookSpoolUsageV1::default(),
-                UtcMicros(11),
-                |_| false,
-            )
-            .unwrap_err(),
-            HookContractError::SpoolChecksumInvalid
-        );
-    }
-
-    #[test]
-    fn unavailable_daemon_spools_but_does_not_claim_daemon_acceptance() {
-        assert_eq!(
-            send_or_spool(
-                &envelope(),
-                &binding(),
-                |_| ImmediateSendOutcomeV1::Unavailable,
-                |_| SpoolAppendOutcomeV1::Accepted
-            ),
-            Ok(HookTransportDispositionV1::AcceptedForReplay)
-        );
-    }
-
-    #[test]
-    fn spool_failure_requires_authoritative_catchup() {
-        assert_eq!(
-            send_or_spool(
-                &envelope(),
-                &binding(),
-                |_| ImmediateSendOutcomeV1::TimedOut,
-                |_| SpoolAppendOutcomeV1::Full
-            ),
-            Ok(HookTransportDispositionV1::CatchupRequired)
-        );
-    }
-
-    #[test]
-    fn invalid_envelope_never_reaches_transport() {
-        let mut envelope = envelope();
-        envelope.binding_token = [99; 32];
-        let mut called = false;
-        assert_eq!(
-            send_or_spool(
-                &envelope,
-                &binding(),
-                |_| {
-                    called = true;
-                    ImmediateSendOutcomeV1::Accepted
-                },
-                |_| SpoolAppendOutcomeV1::Accepted,
-            ),
-            Err(HookContractError::BindingMismatch)
-        );
-        assert!(!called);
     }
 
     #[test]
