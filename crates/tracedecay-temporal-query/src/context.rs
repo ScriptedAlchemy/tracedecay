@@ -24,22 +24,9 @@ const MAX_CONTEXT_OUTPUT_BYTES: u64 = 1024 * 1024;
 pub trait VersionedTokenEstimator {
     fn version(&self) -> &str;
 
-    /// Streaming assembly policy. Defaults to whitespace-word counting so
-    /// existing `estimate`-only implementors remain source-compatible.
+    /// Streaming assembly policy.
     fn token_policy(&self) -> TokenPolicy {
         TokenPolicy::Whitespace
-    }
-
-    /// Compatibility shim retained for pre-`TokenPolicy` whitespace estimators.
-    /// Canonical assembly streams via [`Self::token_policy`] and does not call
-    /// this method.
-    fn estimate(&self, text: &str) -> u64 {
-        match self.token_policy() {
-            TokenPolicy::Whitespace => text.split_whitespace().count() as u64,
-            TokenPolicy::Characters => text.chars().count() as u64,
-            TokenPolicy::Substring(pattern) => text.matches(pattern).count() as u64,
-            TokenPolicy::JsonDocument => u64::from(!(text.starts_with('{') && text.ends_with('}'))),
-        }
     }
 }
 
