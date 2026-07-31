@@ -34,6 +34,22 @@ pub const QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN: &str = "tracedecay.query-fall
 const RETRIEVAL_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.retrieval-scope.v1";
 const RETRIEVAL_SNAPSHOT_DIGEST_DOMAIN: &str = "tracedecay.retrieval-snapshot.v1";
 
+/// Reject retrieval identities that are empty, untrimmed, over 512 bytes, or
+/// carry control characters.
+fn validate_retrieval_identity(
+    value: &str,
+    field: &'static str,
+) -> Result<(), RetrievalContractError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(RetrievalContractError::InvalidIdentity { field });
+    }
+    Ok(())
+}
+
 macro_rules! retrieval_string_id {
     ($($name:ident),+ $(,)?) => {$(
         #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
@@ -44,15 +60,7 @@ macro_rules! retrieval_string_id {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, RetrievalContractError> {
                 let value = value.into();
-                if value.is_empty()
-                    || value.trim() != value
-                    || value.len() > 512
-                    || value.chars().any(char::is_control)
-                {
-                    return Err(RetrievalContractError::InvalidIdentity {
-                        field: stringify!($name),
-                    });
-                }
+                validate_retrieval_identity(&value, stringify!($name))?;
                 Ok(Self(value))
             }
 
@@ -61,7 +69,7 @@ macro_rules! retrieval_string_id {
             }
 
             pub fn validate(&self) -> Result<(), RetrievalContractError> {
-                Self::new(self.0.clone()).map(|_| ())
+                validate_retrieval_identity(&self.0, stringify!($name))
             }
         }
 
@@ -139,18 +147,23 @@ digest_id!(
 #[serde(transparent)]
 pub struct QueryMac(String);
 
+fn validate_query_mac(value: &str) -> Result<(), RetrievalContractError> {
+    let valid = value.strip_prefix("hmac-sha256:").is_some_and(|encoded| {
+        encoded.len() == 64
+            && encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if !valid {
+        return Err(RetrievalContractError::InvalidIdentity { field: "QueryMac" });
+    }
+    Ok(())
+}
+
 impl QueryMac {
     pub fn new(value: impl Into<String>) -> Result<Self, RetrievalContractError> {
         let value = value.into();
-        let valid = value.strip_prefix("hmac-sha256:").is_some_and(|encoded| {
-            encoded.len() == 64
-                && encoded
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        });
-        if !valid {
-            return Err(RetrievalContractError::InvalidIdentity { field: "QueryMac" });
-        }
+        validate_query_mac(&value)?;
         Ok(Self(value))
     }
 
@@ -159,7 +172,7 @@ impl QueryMac {
     }
 
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_query_mac(&self.0)
     }
 }
 

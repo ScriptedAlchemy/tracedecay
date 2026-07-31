@@ -17,18 +17,23 @@ const ROOT_GENERATION_DIGEST_DOMAIN_V1: &str = "tracedecay.multi-root.generation
 #[serde(transparent)]
 pub struct ScopeSetId(String);
 
+fn validate_scope_set_id(value: &str) -> Result<(), DomainError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical {
+            field: "scope set id",
+        });
+    }
+    Ok(())
+}
+
 impl ScopeSetId {
     pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
         let value = value.into();
-        if value.is_empty()
-            || value.trim() != value
-            || value.len() > 512
-            || value.chars().any(char::is_control)
-        {
-            return Err(DomainError::NonCanonical {
-                field: "scope set id",
-            });
-        }
+        validate_scope_set_id(&value)?;
         Ok(Self(value))
     }
 
@@ -37,7 +42,7 @@ impl ScopeSetId {
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
-        Self::new(self.0.clone()).map(|_| ())
+        validate_scope_set_id(&self.0)
     }
 }
 
