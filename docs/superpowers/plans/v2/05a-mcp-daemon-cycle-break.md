@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language cannot resurrect
+> branch-only scaffolding; without released or live predecessor evidence, the
+> current numbered plan changes the contract in place.
 
 **Goal:** Remove MCP imports of daemon internals and daemon imports of MCP
 handlers through one typed invocation boundary.
@@ -52,8 +55,9 @@ acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Migrate handler families independently behind compatibility adapters.
-Rollback by reverting a family; no data migration. The historical Gate B
+Move handler families independently. Use a compatibility adapter only for an
+evidenced released caller; branch-local callers move in place. Rollback by
+reverting a family; no data migration. The historical Gate B
 experiment used a warm MCP-handler edit comparison or dependency test plus
 timing disposition; it is not current acceptance. Delete concrete cross-imports and
 test-only executors only after every production construction path uses the
