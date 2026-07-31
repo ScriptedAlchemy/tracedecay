@@ -43,22 +43,9 @@ pub mod workflow_coordination;
 pub mod workflow_runtime;
 
 mod error;
+mod surface_binding;
 
-/// The single wire spelling of a binding surface, as it appears inside every
-/// `binding.{surface}.{operation}.v1` identifier this crate mints.
-pub(crate) const fn surface_name(
-    surface: tracedecay_tool_catalog::BindingSurface,
-) -> &'static str {
-    use tracedecay_tool_catalog::BindingSurface;
-
-    match surface {
-        BindingSurface::Cli => "cli",
-        BindingSurface::Mcp => "mcp",
-        BindingSurface::Http => "http",
-        BindingSurface::Lsp => "lsp",
-        BindingSurface::Dashboard => "dashboard",
-    }
-}
+pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
 pub use advisory::*;
 pub use api_migration::*;

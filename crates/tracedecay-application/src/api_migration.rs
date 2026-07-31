@@ -6,19 +6,19 @@ use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
-    CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract,
-    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
-    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
-    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    AuthorityRequirement, AvailabilityContract, BindingSurface, CancellationContract,
+    CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
+    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
+    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::{
-    ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, ResultContractRef,
+    ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation,
+    ResultContractRef, current_bindings_with_slug,
 };
 
 const API_MIGRATION_PLAN_DIGEST_DOMAIN_V1: &str = "tracedecay.application.api-migration-plan.v1";
@@ -779,22 +779,12 @@ pub fn api_migration_handler_descriptors()
 pub fn api_migration_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let operation = api_migration_plan_operation()?;
-    let mut bindings = Vec::new();
-    let mut binding_ids = Vec::new();
-    for (surface, name) in [(BindingSurface::Cli, "cli"), (BindingSurface::Mcp, "mcp")] {
-        let binding_id = BindingId::new(format!("binding.{name}.api-migration-plan.v1"))?;
-        bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
-            binding_id: binding_id.clone(),
-            capability_id: operation.capability_id().clone(),
-            surface,
-            operation: SurfaceOperationName::new("api_migration_plan")?,
-            protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
-            required_features: Vec::new(),
-            status: BindingStatus::Current,
-            alias_of: None,
-        })?);
-        binding_ids.push(binding_id);
-    }
+    let (bindings, binding_ids) = current_bindings_with_slug(
+        operation.capability_id(),
+        "api_migration_plan",
+        "api-migration-plan",
+        [BindingSurface::Cli, BindingSurface::Mcp],
+    )?;
     let capability = CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: operation.capability_id().clone(),
         use_case_id: operation.use_case_id().clone(),
