@@ -41,7 +41,7 @@ use crate::sessions::shared::{
 };
 use crate::sessions::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotAdmissionRunner, SnapshotCaptureOutcome, bounded_snapshot_input_len,
+    SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
     non_durable_snapshot_record, read_snapshot_text_bounded,
 };
 #[cfg(test)]
@@ -334,7 +334,7 @@ fn collect_user_workspace_session_files(
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
-pub(crate) async fn capture_kiro_snapshot_observations(
+pub async fn capture_kiro_snapshot_observations(
     facade: &HostAdmissionFacade<'_>,
     source: &KiroSource,
     project_root: &Path,
@@ -342,52 +342,28 @@ pub(crate) async fn capture_kiro_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
-    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
-    let discovery = source.discover_transcript_paths(
-        project_root,
-        TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
-    );
-    if discovery.is_truncated() {
-        runner.defer();
-    }
-    for path in discovery.paths {
-        let input_bytes = source.snapshot_input_bytes(&path)?;
-        runner
-            .admit_batch(facade, input_bytes, &scope, cancellation, || {
-                let Some(parsed) =
-                    source.parse_snapshot(&path, StoredCursor::default(), project_root, None)?
-                else {
-                    return Ok(None);
-                };
-                let generation =
-                    ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
-                let records = normalize_kiro_snapshot_observations(&parsed.messages)?;
-                Ok(Some((generation, records)))
-            })
-            .await?;
-    }
-    Ok(runner.finish())
-}
-
-/// Kiro snapshot admission through an already registered host facade.
-pub async fn admit_kiro_snapshot_observations(
-    facade: &HostAdmissionFacade<'_>,
-    source: &KiroSource,
-    project_root: &Path,
-    scope: ObservationScopeV1,
-    max_new_bytes: Option<u64>,
-    cancellation: &ObservationCancellation,
-) -> TranscriptIngestResult<()> {
-    capture_kiro_snapshot_observations(
+    capture_snapshot_observations(
         facade,
-        source,
-        project_root,
         scope,
-        max_new_bytes,
         cancellation,
+        max_new_bytes,
+        source.discover_transcript_paths(
+            project_root,
+            TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
+        ),
+        |path| source.snapshot_input_bytes(path),
+        |path| {
+            let Some(parsed) =
+                source.parse_snapshot(path, StoredCursor::default(), project_root, None)?
+            else {
+                return Ok(None);
+            };
+            let generation = ObservationSourceGenerationV1::new(parsed.new_cursor.position.max(1))?;
+            let records = normalize_kiro_snapshot_observations(&parsed.messages)?;
+            Ok(Some((generation, records)))
+        },
     )
     .await
-    .map(|_| ())
 }
 
 fn ensure_bounded_snapshot(path: &Path, byte_cap: u64) -> TranscriptIngestResult<()> {
