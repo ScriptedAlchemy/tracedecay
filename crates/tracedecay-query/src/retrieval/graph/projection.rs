@@ -19,6 +19,7 @@ use tracedecay_domain::{
 use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
+    contract_error,
 };
 
 #[derive(Clone, Debug)]
@@ -52,24 +53,24 @@ impl CodeGraphEvidenceAdapterV1 {
     ) -> Result<Self, RetrievalPortError> {
         generation
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if let Some(repository_id) = &repository_id {
             repository_id
                 .validate()
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                .map_err(contract_error)?;
         }
         freshness
             .source_namespace
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         freshness
             .source_instance
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         freshness
             .policy_revision
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
 
         let mut symbols = BTreeMap::new();
         for chunk in chunks {
@@ -152,9 +153,9 @@ impl CodeGraphEvidenceAdapterV1 {
             retriever_revision: ComponentRevision::new(
                 crate::retrieval::QUERY_GRAPH_RETRIEVER_REVISION_V1,
             )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            .map_err(contract_error)?,
             score_domain: ScoreDomainId::new(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1)
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                .map_err(contract_error)?,
             adjacency: Arc::new(adjacency),
             symbols: Arc::new(symbols),
         })
@@ -240,12 +241,12 @@ impl CodeGraphEvidenceAdapterV1 {
                     let evidence_id = format!("code-symbol:{}", edge.to_occurrence.as_str());
                     let anchor_id = retrieval_anchor(evidence_id.clone())?;
                     let logical_evidence_id = LogicalEvidenceId::new(evidence_id)
-                        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                        .map_err(contract_error)?;
                     let candidate = CompactCandidate {
                         anchor_id,
                         logical_evidence_id,
                         source_occurrence_id: SourceOccurrenceId::new(occurrence.clone())
-                            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                            .map_err(contract_error)?,
                         file_occurrence_id: Some(binding_meta.file.clone()),
                         source_namespace: self.freshness.source_namespace.clone(),
                         repository_id: self.repository_id.clone(),
@@ -396,7 +397,7 @@ fn graph_score_micros(path_len: usize, authority: EdgeAuthorityV1) -> u64 {
 }
 
 fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortError> {
-    RetrievalAnchorId::new(value).map_err(|error| RetrievalPortError::Contract(error.to_string()))
+    RetrievalAnchorId::new(value).map_err(contract_error)
 }
 
 /// Shared freshness envelope for daemon-owned production graph/exact/lexical
@@ -407,9 +408,9 @@ pub fn production_code_index_freshness(
 ) -> Result<SourceFreshness, RetrievalPortError> {
     Ok(SourceFreshness {
         source_namespace: tracedecay_domain::SourceNamespace::new("ns.code.daemon")
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            .map_err(contract_error)?,
         source_instance: tracedecay_domain::SourceInstanceKey::new("instance.code-index.daemon")
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            .map_err(contract_error)?,
         source_watermark: Some(1),
         projection_watermark: Some(1),
         observed_at,

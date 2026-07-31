@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -34,6 +34,7 @@ use super::lifecycle::{
     failed_backend_fallback_report, generated_run_id, task_run_gate, task_skip_reason,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger};
+use super::scheduler::AutomationTaskLock;
 use super::skill_writer::{
     activation_policy as skill_writer_activation_policy, validate_and_apply_skill_proposals,
 };
@@ -632,6 +633,28 @@ pub async fn run_combined_review_with_backend_and_retrieval(
     run_combined_review_for_retrieval(cg, config, backend, retrieval, options).await
 }
 
+/// Gate one combined-review sub-task and hand its scheduler lock back to the
+/// caller, so the lock lives for the caller's whole run rather than this
+/// helper's frame.
+///
+/// `Ok(Err(dispatch))` is the not-due answer the caller returns verbatim.
+async fn acquire_combined_task_lock(
+    config: &AutomationConfig,
+    dashboard_root: &Path,
+    sessions_db: &RegisteredGlobalDb,
+    task: AgentTaskKind,
+    trigger: AutomationTrigger,
+    not_due_reason: &'static str,
+) -> Result<std::result::Result<Option<AutomationTaskLock>, CombinedReviewDispatch>> {
+    let (gate, _) = task_run_gate(config, dashboard_root, sessions_db, task, trigger).await?;
+    Ok(match gate {
+        SchedulerGate::Proceed(lock) => Ok(lock),
+        SchedulerGate::Skip(_) => Err(CombinedReviewDispatch::NotCombined {
+            reason: not_due_reason,
+        }),
+    })
+}
+
 async fn run_combined_review_for_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -678,37 +701,31 @@ async fn run_combined_review_for_retrieval(
         }
     };
 
-    let (reflector_gate, _) = task_run_gate(
+    let _reflector_lock = match acquire_combined_task_lock(
         config,
         &dashboard_root,
         sessions_db.as_ref(),
         AgentTaskKind::SessionReflector,
         options.trigger,
+        "session_reflector_not_due",
     )
-    .await?;
-    let _reflector_lock = match reflector_gate {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(_) => {
-            return Ok(CombinedReviewDispatch::NotCombined {
-                reason: "session_reflector_not_due",
-            });
-        }
+    .await?
+    {
+        Ok(lock) => lock,
+        Err(dispatch) => return Ok(dispatch),
     };
-    let (skill_gate, _) = task_run_gate(
+    let _skill_lock = match acquire_combined_task_lock(
         config,
         &dashboard_root,
         sessions_db.as_ref(),
         AgentTaskKind::SkillWriter,
         options.trigger,
+        "skill_writer_not_due",
     )
-    .await?;
-    let _skill_lock = match skill_gate {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(_) => {
-            return Ok(CombinedReviewDispatch::NotCombined {
-                reason: "skill_writer_not_due",
-            });
-        }
+    .await?
+    {
+        Ok(lock) => lock,
+        Err(dispatch) => return Ok(dispatch),
     };
     if let Err(err) =
         super::outcomes::refresh_fact_outcomes(&dashboard_root, &memory, current_timestamp()).await

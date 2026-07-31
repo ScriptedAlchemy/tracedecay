@@ -629,6 +629,28 @@ fn durable_request(
     }
 }
 
+/// The state triple every pre-effect receipt records about the attempted edit.
+///
+/// These three always travel together: the expected state the request was
+/// admitted against, the predicted post-edit state when a preview produced
+/// one, and the candidate files the edit would touch.
+struct PreEffectState {
+    expected: ManifestDigest,
+    predicted: Option<ManifestDigest>,
+    candidate_files: Vec<String>,
+}
+
+impl PreEffectState {
+    /// The state of an edit rejected before any preview ran.
+    fn unpreviewed(expected: ManifestDigest) -> Self {
+        Self {
+            expected,
+            predicted: None,
+            candidate_files: Vec::new(),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_pre_effect_result(
     durability: &SourceEditDurability,
@@ -637,12 +659,15 @@ fn persist_pre_effect_result(
     authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
     input_digest: &ManifestDigest,
     outcome: SourceEditOutcome,
-    expected_state: ManifestDigest,
-    predicted_state: Option<ManifestDigest>,
-    candidate_files: Vec<String>,
+    state: PreEffectState,
     termination: EffectTermination,
     control_observation: Option<CancellationObservation>,
 ) -> Result<SourceEditApplicationResult> {
+    let PreEffectState {
+        expected: expected_state,
+        predicted: predicted_state,
+        candidate_files,
+    } = state;
     if let Some(stored) = durability.load_receipt(&request.idempotency_key)? {
         if stored.input_digest != *input_digest {
             return Err(config_error(
@@ -684,6 +709,72 @@ fn failed_pre_effect_outcome() -> SourceEditOutcome {
     SourceEditOutcome::Failed {
         message: "source edit failed before the effect".to_owned(),
     }
+}
+
+/// Record a pre-effect failure: the one termination shape every guard between
+/// admission and the effect uses.
+fn fail_pre_effect(
+    durability: &SourceEditDurability,
+    operation: &ApplicationOperation,
+    request: &SourceEditEffectRequestV1,
+    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    input_digest: &ManifestDigest,
+    state: PreEffectState,
+) -> Result<SourceEditApplicationResult> {
+    persist_pre_effect_result(
+        durability,
+        operation,
+        request,
+        authority,
+        input_digest,
+        failed_pre_effect_outcome(),
+        state,
+        EffectTermination::Failed,
+        None,
+    )
+}
+
+/// The live outcome for a control stop, with the stage-specific wording.
+fn control_stop_outcome(
+    termination: EffectTermination,
+    cancelled_message: &str,
+    timed_out_message: &str,
+) -> SourceEditOutcome {
+    match termination {
+        EffectTermination::Cancelled => SourceEditOutcome::Cancelled {
+            message: cancelled_message.to_owned(),
+        },
+        EffectTermination::TimedOut => SourceEditOutcome::TimedOut {
+            message: timed_out_message.to_owned(),
+        },
+        _ => unreachable!("source edit control only yields cancellation or timeout"),
+    }
+}
+
+/// Retain the journal and report an unreconciled effect.
+///
+/// The journal stays `Prepared` on purpose: the effect may have crossed its
+/// atomic rename boundary, so reconciliation — never an implicit retry — owns
+/// the outcome.
+fn persist_unknown(
+    durability: &SourceEditDurability,
+    journal: &SourceEditJournalV1,
+    live_outcome: SourceEditOutcome,
+    verification: Option<SourceEditVerificationV1>,
+) -> Result<SourceEditApplicationResult> {
+    let record = unknown_record(journal)?;
+    durability.persist_receipt(&record)?;
+    Ok(record.into_live_application_result(live_outcome, verification))
+}
+
+/// Whether a rechecked admission still carries the receipt and proof the
+/// request was admitted with.
+fn authority_still_matches(
+    authority: &tracedecay_application::SourceEditAuthorizationAdmissionV1,
+    request: &SourceEditEffectRequestV1,
+) -> bool {
+    same_source_edit_authority(&authority.receipt, &request.authority)
+        && authority.proof == request.proof
 }
 
 pub async fn execute_source_edit<A>(
@@ -741,15 +832,11 @@ where
     if let Some(stop) =
         control.and_then(|control| control.checkpoint(CancellationStage::BeforeAdmission))
     {
-        let outcome = match stop.termination {
-            EffectTermination::Cancelled => SourceEditOutcome::Cancelled {
-                message: "source edit was cancelled before admission".to_owned(),
-            },
-            EffectTermination::TimedOut => SourceEditOutcome::TimedOut {
-                message: "source edit timed out before admission".to_owned(),
-            },
-            _ => unreachable!("source edit control only yields cancellation or timeout"),
-        };
+        let outcome = control_stop_outcome(
+            stop.termination,
+            "source edit was cancelled before admission",
+            "source edit timed out before admission",
+        );
         return persist_pre_effect_result(
             &durability,
             operation,
@@ -757,9 +844,7 @@ where
             &requested_authority,
             &input_digest,
             outcome,
-            request.expected_state.clone(),
-            None,
-            Vec::new(),
+            PreEffectState::unpreviewed(request.expected_state.clone()),
             stop.termination,
             Some(stop.observation),
         );
@@ -770,59 +855,39 @@ where
     {
         Ok(admission) => admission,
         Err(_) => {
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &requested_authority,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                None,
-                Vec::new(),
-                EffectTermination::Failed,
-                None,
+                PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
     };
     if admission.receipt != request.authority || admission.proof != request.proof {
-        return persist_pre_effect_result(
+        return fail_pre_effect(
             &durability,
             operation,
             &request,
             &requested_authority,
             &input_digest,
-            failed_pre_effect_outcome(),
-            request.expected_state.clone(),
-            None,
-            Vec::new(),
-            EffectTermination::Failed,
-            None,
+            PreEffectState::unpreviewed(request.expected_state.clone()),
         );
     }
     let current_authority = match authorization
         .recheck_effect(&request.context, operation, &admission, now_micros())
         .await
     {
-        Ok(authority)
-            if same_source_edit_authority(&authority.receipt, &request.authority)
-                && authority.proof == request.proof =>
-        {
-            authority
-        }
+        Ok(authority) if authority_still_matches(&authority, &request) => authority,
         Ok(_) => {
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &requested_authority,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                None,
-                Vec::new(),
-                EffectTermination::Failed,
-                None,
+                PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
         Err(error) => {
@@ -831,18 +896,13 @@ where
             {
                 return Err(application_problem(error));
             }
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &admission,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                None,
-                Vec::new(),
-                EffectTermination::Failed,
-                None,
+                PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
     };
@@ -854,18 +914,13 @@ where
     let preview = match resolve_source_edit_preview(graph, request.edit.clone()).await {
         Ok(preview) => preview,
         Err(_) => {
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &current_authority,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                None,
-                Vec::new(),
-                EffectTermination::Failed,
-                None,
+                PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
     };
@@ -877,11 +932,13 @@ where
             &current_authority,
             &input_digest,
             preview.outcome,
-            preview
-                .expected_state
-                .unwrap_or_else(|| request.expected_state.clone()),
-            preview.predicted_state,
-            preview.candidate_files,
+            PreEffectState {
+                expected: preview
+                    .expected_state
+                    .unwrap_or_else(|| request.expected_state.clone()),
+                predicted: preview.predicted_state,
+                candidate_files: preview.candidate_files,
+            },
             EffectTermination::Failed,
             None,
         );
@@ -895,33 +952,28 @@ where
         .expected_state
         .ok_or_else(|| config_error("successful source edit preview omitted expected state"))?;
     if !request.edit.dry_run() && current_state != request.expected_state {
-        return persist_pre_effect_result(
+        return fail_pre_effect(
             &durability,
             operation,
             &request,
             &current_authority,
             &input_digest,
-            failed_pre_effect_outcome(),
-            request.expected_state.clone(),
-            Some(predicted_state),
-            candidate_files,
-            EffectTermination::Failed,
-            None,
+            PreEffectState {
+                expected: request.expected_state.clone(),
+                predicted: Some(predicted_state),
+                candidate_files,
+            },
         );
     }
     if request.edit.dry_run() {
         if let Some(stop) =
             control.and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         {
-            let outcome = match stop.termination {
-                EffectTermination::Cancelled => SourceEditOutcome::Cancelled {
-                    message: "source edit preview was cancelled".to_owned(),
-                },
-                EffectTermination::TimedOut => SourceEditOutcome::TimedOut {
-                    message: "source edit preview timed out".to_owned(),
-                },
-                _ => unreachable!("source edit control only yields cancellation or timeout"),
-            };
+            let outcome = control_stop_outcome(
+                stop.termination,
+                "source edit preview was cancelled",
+                "source edit preview timed out",
+            );
             return persist_pre_effect_result(
                 &durability,
                 operation,
@@ -929,9 +981,11 @@ where
                 &current_authority,
                 &input_digest,
                 outcome,
-                current_state,
-                Some(predicted_state),
-                candidate_files,
+                PreEffectState {
+                    expected: current_state,
+                    predicted: Some(predicted_state),
+                    candidate_files,
+                },
                 stop.termination,
                 Some(stop.observation),
             );
@@ -940,25 +994,19 @@ where
             .recheck_effect(&request.context, operation, &admission, now_micros())
             .await
         {
-            Ok(authority)
-                if same_source_edit_authority(&authority.receipt, &request.authority)
-                    && authority.proof == request.proof =>
-            {
-                authority
-            }
+            Ok(authority) if authority_still_matches(&authority, &request) => authority,
             _ => {
-                return persist_pre_effect_result(
+                return fail_pre_effect(
                     &durability,
                     operation,
                     &request,
                     &current_authority,
                     &input_digest,
-                    failed_pre_effect_outcome(),
-                    current_state,
-                    Some(predicted_state),
-                    candidate_files,
-                    EffectTermination::Failed,
-                    None,
+                    PreEffectState {
+                        expected: current_state,
+                        predicted: Some(predicted_state),
+                        candidate_files,
+                    },
                 );
             }
         };
@@ -969,9 +1017,11 @@ where
             &current_authority,
             &input_digest,
             preview.outcome,
-            current_state,
-            Some(predicted_state),
-            candidate_files,
+            PreEffectState {
+                expected: current_state,
+                predicted: Some(predicted_state),
+                candidate_files,
+            },
             EffectTermination::Completed,
             None,
         );
@@ -983,59 +1033,51 @@ where
         .recheck_effect(&request.context, operation, &admission, now_micros())
         .await
     {
-        Ok(authority)
-            if same_source_edit_authority(&authority.receipt, &request.authority)
-                && authority.proof == request.proof =>
-        {
-            authority
-        }
+        Ok(authority) if authority_still_matches(&authority, &request) => authority,
         _ => {
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &current_authority,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                Some(predicted_state),
-                candidate_files,
-                EffectTermination::Failed,
-                None,
+                PreEffectState {
+                    expected: request.expected_state.clone(),
+                    predicted: Some(predicted_state),
+                    candidate_files,
+                },
             );
         }
     };
     let recaptured_state = match source_edit_state_digest(graph.project_root(), &candidate_files) {
         Ok(state) => state,
         Err(_) => {
-            return persist_pre_effect_result(
+            return fail_pre_effect(
                 &durability,
                 operation,
                 &request,
                 &current_authority,
                 &input_digest,
-                failed_pre_effect_outcome(),
-                request.expected_state.clone(),
-                Some(predicted_state),
-                candidate_files,
-                EffectTermination::Failed,
-                None,
+                PreEffectState {
+                    expected: request.expected_state.clone(),
+                    predicted: Some(predicted_state),
+                    candidate_files,
+                },
             );
         }
     };
     if recaptured_state != request.expected_state {
-        return persist_pre_effect_result(
+        return fail_pre_effect(
             &durability,
             operation,
             &request,
             &current_authority,
             &input_digest,
-            failed_pre_effect_outcome(),
-            request.expected_state.clone(),
-            Some(predicted_state),
-            candidate_files,
-            EffectTermination::Failed,
-            None,
+            PreEffectState {
+                expected: request.expected_state.clone(),
+                predicted: Some(predicted_state),
+                candidate_files,
+            },
         );
     }
 
@@ -1069,15 +1111,11 @@ where
     if let Some(stop) =
         control.and_then(|control| control.checkpoint(CancellationStage::BeforeEffect))
     {
-        let live_outcome = match stop.termination {
-            EffectTermination::Cancelled => SourceEditOutcome::Cancelled {
-                message: "source edit was cancelled before the effect".to_owned(),
-            },
-            EffectTermination::TimedOut => SourceEditOutcome::TimedOut {
-                message: "source edit timed out before the effect".to_owned(),
-            },
-            _ => unreachable!("source edit control only yields cancellation or timeout"),
-        };
+        let live_outcome = control_stop_outcome(
+            stop.termination,
+            "source edit was cancelled before the effect",
+            "source edit timed out before the effect",
+        );
         let record = interrupted_record(&journal, &live_outcome, stop)?;
         durability.persist_receipt(&record)?;
         durability.clear_journal()?;
@@ -1100,9 +1138,7 @@ where
                     error.to_string().chars().take(1024).collect::<String>()
                 ),
             };
-            let record = unknown_record(&journal)?;
-            durability.persist_receipt(&record)?;
-            return Ok(record.into_live_application_result(live_outcome, None));
+            return persist_unknown(&durability, &journal, live_outcome, None);
         }
     };
     let mut control_observation = control
@@ -1114,17 +1150,13 @@ where
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
         };
-        let record = unknown_record(&journal)?;
-        durability.persist_receipt(&record)?;
-        return Ok(record.into_live_application_result(live_outcome, None));
+        return persist_unknown(&durability, &journal, live_outcome, None);
     }
     if !outcome.success() && committed_state != journal.expected_state {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the edit reported failure after candidate state changed".to_owned(),
         };
-        let record = unknown_record(&journal)?;
-        durability.persist_receipt(&record)?;
-        return Ok(record.into_live_application_result(live_outcome, None));
+        return persist_unknown(&durability, &journal, live_outcome, None);
     }
     let verification = if request.edit.verify() && outcome.success() {
         let files = outcome.candidate_files();
@@ -1156,9 +1188,7 @@ where
                 message: "API migration verification rollback did not restore the previewed state"
                     .to_owned(),
             };
-            let record = unknown_record(&journal)?;
-            durability.persist_receipt(&record)?;
-            return Ok(record.into_live_application_result(live_outcome, verification));
+            return persist_unknown(&durability, &journal, live_outcome, verification);
         }
     }
 

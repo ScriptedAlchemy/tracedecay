@@ -678,7 +678,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             write_kiro_native_fixture(home, &project);
             let source = tracedecay::sessions::kiro::KiroSource::with_home(home);
             assert_eq!(source.transcript_paths(&project).len(), 1, "Kiro discovery");
-            tracedecay::sessions::kiro::admit_kiro_snapshot_observations(
+            let capture = tracedecay::sessions::kiro::capture_kiro_snapshot_observations(
                 &facade,
                 &source,
                 &project,
@@ -690,6 +690,14 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
             )
             .await
             .unwrap();
+            assert!(
+                capture.stats.messages_upserted > 0,
+                "Kiro native fixture must admit observations"
+            );
+            assert!(
+                !capture.deferred_by_byte_cap,
+                "Kiro native fixture must not defer on the byte cap"
+            );
             HostAdmissionScope::Project
         }
         other => panic!("unexpected provider {other}"),

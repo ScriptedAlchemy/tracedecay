@@ -43,6 +43,14 @@ pub enum RetrievalPortError {
     Contract(String),
 }
 
+/// Lift any displayable validation failure into `RetrievalPortError::Contract`.
+///
+/// Lanes reject on the *rendered* detail of the underlying contract error, so
+/// this is the single conversion every `map_err` in the retrieval lanes uses.
+pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortError {
+    RetrievalPortError::Contract(error.to_string())
+}
+
 /// Read-only port over whole-exact-term postings for one frozen code
 /// generation.
 ///

@@ -402,41 +402,6 @@ async fn payload_diagnostics(
     }))
 }
 
-#[allow(dead_code)]
-async fn count_unreferenced_payload_metadata(
-    conn: &(impl Executor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let referenced_refs = referenced_payload_refs(conn, provider, session_id).await?;
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref
-             FROM lcm_external_payloads
-             WHERE provider = ?1
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    let mut unreferenced = 0_i64;
-    while let Some(row) = rows.next().await? {
-        let payload_ref: String = row.get(0)?;
-        if !referenced_refs.contains(&payload_ref) {
-            unreferenced += 1;
-        }
-    }
-    Ok(unreferenced)
-}
-
-#[allow(dead_code)]
-async fn referenced_payload_refs(
-    conn: &(impl Executor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<BTreeSet<String>, LcmError> {
-    gc::referenced_payload_refs(conn, provider, session_id).await
-}
-
 async fn fts_diagnostics(
     conn: &(impl Executor + ?Sized),
     provider: &str,

@@ -11,8 +11,9 @@ use serde_json::json;
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_jsonc_file, load_jsonc_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry, load_jsonc_file,
+    load_jsonc_file_strict, uninstall_mcp_server_entry,
 };
 
 /// Kilo CLI agent.
@@ -129,83 +130,26 @@ impl AgentIntegration for KiloIntegration {
 // ---------------------------------------------------------------------------
 
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    let backup = backup_config_file(config_path)?;
-    let mut settings = match load_jsonc_file_strict(config_path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    settings["mcp"]["tracedecay"] = json!({
-        "type": "local",
-        "command": [tracedecay_bin, "serve"],
-        "enabled": true
-    });
-
-    safe_write_json_file(config_path, &settings, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
-        config_path.display()
-    );
-    Ok(())
+    install_mcp_server_entry(
+        config_path,
+        "mcp",
+        json!({
+            "type": "local",
+            "command": [tracedecay_bin, "serve"],
+            "enabled": true
+        }),
+        "Kilo CLI",
+        load_jsonc_file_strict,
+    )
 }
 
 fn uninstall_mcp_server(config_path: &Path) {
-    if !config_path.exists() {
-        eprintln!("  {} not found, skipping", config_path.display());
-        return;
-    }
-
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return;
-    };
-    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        // Try JSONC parsing
-        let mut settings = super::parse_jsonc(&contents);
-        let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
-            return;
-        };
-        let removed = servers.remove("tracedecay").is_some();
-        if removed && backup_and_write_json(config_path, &settings) {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-                config_path.display()
-            );
-        }
-        return;
-    };
-
-    let Some(servers) = settings.get_mut("mcp").and_then(|v| v.as_object_mut()) else {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return;
-    };
-
-    let removed = servers.remove("tracedecay").is_some();
-    if !removed {
-        eprintln!(
-            "  No tracedecay MCP server in {}, skipping",
-            config_path.display()
-        );
-        return;
-    }
-
-    if backup_and_write_json(config_path, &settings) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
-            config_path.display()
-        );
-    }
+    uninstall_mcp_server_entry(
+        config_path,
+        "mcp",
+        load_jsonc_file,
+        McpUninstallPolicy::default(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -213,28 +157,16 @@ fn uninstall_mcp_server(config_path: &Path) {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let config_path = kilo_config_path(home);
-
-    if !config_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent kilo` if you use Kilo CLI",
-            config_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_jsonc_file(&config_path);
-    let server = settings.get("mcp").and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "MCP server registered in {}",
-            config_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent kilo`",
-            config_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &kilo_config_path(home),
+        "mcp",
+        load_jsonc_file,
+        &McpDoctorLabels {
+            agent_id: "kilo",
+            product: "Kilo CLI",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }
