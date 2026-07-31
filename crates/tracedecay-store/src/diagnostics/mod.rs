@@ -2,9 +2,67 @@ use std::error::Error;
 
 use tracedecay_domain::{CodeGenerationId, DomainError, GenerationDiagnosticV1, RetrievalAnchorId};
 
+pub mod codec;
 mod ports;
 
+pub use codec::{
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
+    DiagnosticRecordStateKindV1, diagnostic_evidence_class_name, diagnostic_producer_kind_name,
+    diagnostic_severity_name, diagnostic_state_columns, parse_diagnostic_evidence_class,
+    parse_diagnostic_producer_kind, parse_diagnostic_severity,
+};
 pub use ports::DiagnosticStore;
+
+/// One admitted request to transition every current record of a prior
+/// generation into the superseded state, back-pointing at its successor.
+///
+/// Supersession is a distinct lane from clean publication: publication clears
+/// the records a newer clean generation replaced, while supersession records
+/// that a specific prior generation was superseded by a specific successor and
+/// keeps the logical finding chain walkable. Validating the pair here means a
+/// storage engine cannot be handed a self-supersession.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticGenerationSupersessionV1 {
+    prior_generation: CodeGenerationId,
+    successor_generation: CodeGenerationId,
+}
+
+impl DiagnosticGenerationSupersessionV1 {
+    pub fn new(
+        prior_generation: CodeGenerationId,
+        successor_generation: CodeGenerationId,
+    ) -> DiagnosticStoreResult<Self> {
+        let request = Self {
+            prior_generation,
+            successor_generation,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn validate(&self) -> DiagnosticStoreResult<()> {
+        self.prior_generation
+            .validate()
+            .map_err(DiagnosticStoreError::Contract)?;
+        self.successor_generation
+            .validate()
+            .map_err(DiagnosticStoreError::Contract)?;
+        if self.prior_generation == self.successor_generation {
+            return Err(DiagnosticStoreError::SelfSupersession {
+                generation: self.prior_generation.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn prior_generation(&self) -> &CodeGenerationId {
+        &self.prior_generation
+    }
+
+    pub fn successor_generation(&self) -> &CodeGenerationId {
+        &self.successor_generation
+    }
+}
 
 /// A complete durable diagnostic snapshot admitted from the normal sanitized
 /// clean-generation pipeline.
@@ -134,6 +192,8 @@ pub enum DiagnosticStoreError {
     NonCurrentRecord { anchor: RetrievalAnchorId },
     #[error("diagnostic anchor {anchor} occurs more than once in a clean snapshot")]
     DuplicateAnchor { anchor: RetrievalAnchorId },
+    #[error("diagnostic generation {generation} cannot supersede itself")]
+    SelfSupersession { generation: CodeGenerationId },
     #[error("diagnostic contract validation failed")]
     Contract(#[source] DomainError),
     #[error("diagnostic storage operation {operation} failed")]

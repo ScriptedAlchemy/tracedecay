@@ -5,8 +5,9 @@ use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 
 use crate::{
     AnchoredObservationWrite, ConfigurationCommitV1, EvidenceAssemblyWriteV1, FactWriteBatch,
-    GitIndexTransactionRecordV1, ObservationCursorAdvance, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    DiagnosticGenerationSupersessionV1, GitIndexTransactionRecordV1, ObservationCursorAdvance,
+    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
+    SanitizedCleanDiagnosticSnapshotV1,
     SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1, SourceCommitV1,
     TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
@@ -803,6 +804,7 @@ pub enum RepositoryWritePayloadV1 {
     Observation(Box<AnchoredObservationWrite>),
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
+    DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
     EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
     ExternalSource(Box<SourceCommitV1>),
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
@@ -823,6 +825,7 @@ impl RepositoryWritePayloadV1 {
             Self::Observation(_) => "commit observation",
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::Diagnostics(_) => "publish diagnostics",
+            Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
             Self::EvidenceAssembly(_) => "publish evidence assembly",
             Self::ExternalSource(_) => "commit external source",
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
@@ -846,6 +849,7 @@ impl RepositoryWritePayloadV1 {
             Self::Observation(_) | Self::ObservationCursorAdvance(_) => "observation",
             Self::Fact(_)
             | Self::Diagnostics(_)
+            | Self::DiagnosticSupersession(_)
             | Self::EvidenceAssembly(_)
             | Self::RetrievalAnchorDisposition(_)
             | Self::RetrievalAnchorDerivative(_) => "project",
@@ -871,7 +875,7 @@ impl RepositoryWritePayloadV1 {
                     StoreShardScopeV1::ProfileMemory | StoreShardScopeV1::Project { .. }
                 )
             }
-            Self::Diagnostics(_) => {
+            Self::Diagnostics(_) | Self::DiagnosticSupersession(_) => {
                 matches!(scope, StoreShardScopeV1::Project { .. })
             }
             Self::EvidenceAssembly(_) => matches!(
@@ -946,6 +950,11 @@ impl RepositoryWritePayloadV1 {
                 }
             }),
             Self::ExternalSource(commit) => commit.validate().map_err(|_| {
+                StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
+                    payload: self.name(),
+                }
+            }),
+            Self::DiagnosticSupersession(request) => request.validate().map_err(|_| {
                 StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                     payload: self.name(),
                 }

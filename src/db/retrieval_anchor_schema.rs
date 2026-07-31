@@ -15,18 +15,11 @@ const LEGACY_ALIASES_TABLE: &str = "retrieval_anchor_aliases_owner_unbound_v1";
 const DISPOSITIONS_TABLE: &str = "retrieval_anchor_dispositions";
 const LEGACY_DISPOSITIONS_TABLE: &str = "retrieval_anchor_dispositions_terminal_v0";
 
-const ANCHORS_SCHEMA: &str = "
-    CREATE TABLE IF NOT EXISTS retrieval_anchors (
-        anchor_id TEXT PRIMARY KEY CHECK(length(anchor_id) > 0),
-        anchor_json TEXT NOT NULL CHECK(json_valid(anchor_json)),
-        owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-        projection_generation TEXT NOT NULL CHECK(length(projection_generation) > 0)
-    );
-    -- SQLite requires an exact unique parent key for the composite owner-bound
-    -- alias and evidence foreign keys, even though anchor_id is itself unique.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_anchors_owner
-        ON retrieval_anchors(anchor_id, owner_json);
-";
+/// The canonical anchor DDL lives in `tracedecay-store` because the concrete
+/// executors in the rusqlite runtime crate write the same table and must see
+/// the same constraints; installing a private copy here is how a fixture ends
+/// up weaker than production.
+const ANCHORS_SCHEMA: &str = tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL;
 
 const ALIASES_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS retrieval_anchor_aliases (

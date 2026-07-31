@@ -24,6 +24,7 @@ pub mod projection;
 pub mod remote_recovery;
 pub mod retrieval_anchor;
 pub mod runtime;
+pub mod schema;
 pub mod session;
 pub mod transcript;
 
@@ -35,8 +36,13 @@ pub use configuration::{
     ConfigurationRevisionStore, ConfigurationStoreError, ConfigurationStoreResult,
 };
 pub use diagnostics::{
-    DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1, DiagnosticStore,
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
+    DiagnosticGenerationSupersessionV1, DiagnosticPublicationDispositionV1,
+    DiagnosticPublicationReceiptV1, DiagnosticRecordStateKindV1, DiagnosticStore,
     DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
+    diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
+    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
+    parse_diagnostic_severity,
 };
 pub use evidence_assembly::{
     CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
@@ -153,6 +159,7 @@ pub use retrieval_anchor::{
     RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
 };
 pub use runtime::*;
+pub use schema::{GENERATION_DIAGNOSTICS_SCHEMA_DDL, RETRIEVAL_ANCHORS_SCHEMA_DDL};
 pub use session::{
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,
