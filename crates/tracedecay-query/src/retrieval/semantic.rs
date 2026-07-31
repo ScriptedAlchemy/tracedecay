@@ -1,4 +1,4 @@
-//! Quarantined PR10 exact-flat semantic retrieval lane.
+//! Exact-flat semantic retrieval lane.
 //!
 //! The lane consumes only an admitted embedding projection, a request-local
 //! query-embedding port, and an immutable vector-generation read port. It
@@ -160,11 +160,6 @@ impl EphemeralQueryEmbeddingV1 {
             projection,
             values,
         })
-    }
-
-    #[allow(dead_code)] // Plan 31 semantic retrieval accessor — staged
-    pub(crate) fn values(&self) -> &[f32] {
-        &self.values
     }
 }
 
