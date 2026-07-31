@@ -167,11 +167,13 @@ impl GitHubProviderPermissionVerifierV1 {
         if !exact_permissions.contains(&GitHubReadPermissionV1::PullRequests) {
             return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate;
         }
+        let Some(secret) =
+            GitHubReadOnlyCredentialSecretV1::from_zeroizing(Zeroizing::new(secret.to_owned()))
+        else {
+            return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate;
+        };
         GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
-            secret: GitHubReadOnlyCredentialSecretV1::from_zeroizing(Zeroizing::new(
-                secret.to_owned(),
-            ))
-            .expect("keyring secret was validated before provider verification"),
+            secret,
             exact_permissions,
         }
     }

@@ -97,8 +97,7 @@ where
             config,
             observation_db,
             project_root,
-            NonZeroUsize::new(DEFAULT_WORK_EXECUTION_CAPACITY)
-                .expect("default work execution capacity is non-zero"),
+            NonZeroUsize::new(DEFAULT_WORK_EXECUTION_CAPACITY).unwrap_or(NonZeroUsize::MIN),
         )
     }
 
