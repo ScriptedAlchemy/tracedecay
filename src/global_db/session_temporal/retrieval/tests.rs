@@ -246,7 +246,7 @@ impl RegisteredTemporalRead {
         detail_count
     }
 
-    async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: usize) -> Vec<String> {
+    async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: i32) -> Vec<String> {
         let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
             .await
             .expect("query must execute");
