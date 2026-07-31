@@ -147,6 +147,52 @@ impl AnchorDispositionStateV1 {
             _ => Err(invalid("unknown anchor disposition state")),
         }
     }
+
+    /// Whether appending `next` on top of `current` is legal, where `None`
+    /// means the anchor has no disposition history yet.
+    ///
+    /// This is the one canonical disposition state machine. Two SQLite engines
+    /// append to `retrieval_anchor_dispositions` — the root authority in
+    /// `src/db/retrieval_anchor_authority.rs` and the `RetrievalAnchorExecutor`
+    /// in the rusqlite-runtime crate — and an anchor may be written by either
+    /// during the migration. If the two disagree about a transition, the same
+    /// anchor becomes reachable or unreachable depending on which writer it
+    /// happened to pass through. Each engine still renders its own refusal
+    /// message; only the decision is shared.
+    ///
+    /// The rules: `Redacted`, `Expired`, and `Deleted` are terminal, so no
+    /// transition leaves them. `Superseded` may only advance to `Deleted` — a
+    /// superseded anchor can be erased but never resurrected. `Active`,
+    /// `Quarantined`, `Unavailable`, and a fresh anchor accept any next state,
+    /// which is what lets a quarantine or an outage be reversed.
+    pub fn transition_allowed(current: Option<Self>, next: Self) -> bool {
+        match current {
+            Some(Self::Redacted | Self::Expired | Self::Deleted) => false,
+            Some(Self::Superseded) => next == Self::Deleted,
+            Some(Self::Active | Self::Quarantined | Self::Unavailable) | None => true,
+        }
+    }
+
+    /// Whether entering this state tombstones the anchor's reverse lineage.
+    ///
+    /// `Quarantined` and `Unavailable` are deliberately excluded: both are
+    /// recoverable, and tombstoning their derivatives would make the recovery
+    /// lossy. The complementary read-side rule is
+    /// [`serves_derivatives`](Self::serves_derivatives).
+    pub const fn suppresses_derivatives(self) -> bool {
+        matches!(
+            self,
+            Self::Superseded | Self::Redacted | Self::Expired | Self::Deleted
+        )
+    }
+
+    /// Whether an anchor in this disposition may publish or serve lineage.
+    ///
+    /// `None` means no disposition has ever been recorded, which is servable:
+    /// an anchor is active until something says otherwise.
+    pub fn serves_derivatives(current: Option<Self>) -> bool {
+        matches!(current, None | Some(Self::Active))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,6 +522,93 @@ mod tests {
         FactOwnerV1::Project {
             project_id: ProjectId::new("project.fixture").unwrap(),
         }
+    }
+
+    const ALL_STATES: [AnchorDispositionStateV1; 7] = [
+        AnchorDispositionStateV1::Active,
+        AnchorDispositionStateV1::Superseded,
+        AnchorDispositionStateV1::Redacted,
+        AnchorDispositionStateV1::Expired,
+        AnchorDispositionStateV1::Quarantined,
+        AnchorDispositionStateV1::Deleted,
+        AnchorDispositionStateV1::Unavailable,
+    ];
+
+    /// Pins the full transition matrix. Both SQLite writers call this one
+    /// function, so this test is the only place the matrix is asserted; a
+    /// divergence between the two engines is now impossible by construction,
+    /// and a deliberate change to the matrix has to be made here.
+    #[test]
+    fn the_disposition_matrix_is_exhaustively_pinned() {
+        for next in ALL_STATES {
+            assert!(
+                AnchorDispositionStateV1::transition_allowed(None, next),
+                "a fresh anchor must accept {next:?}"
+            );
+            for terminal in [
+                AnchorDispositionStateV1::Redacted,
+                AnchorDispositionStateV1::Expired,
+                AnchorDispositionStateV1::Deleted,
+            ] {
+                assert!(
+                    !AnchorDispositionStateV1::transition_allowed(Some(terminal), next),
+                    "{terminal:?} is terminal and must refuse {next:?}"
+                );
+            }
+            for recoverable in [
+                AnchorDispositionStateV1::Active,
+                AnchorDispositionStateV1::Quarantined,
+                AnchorDispositionStateV1::Unavailable,
+            ] {
+                assert!(
+                    AnchorDispositionStateV1::transition_allowed(Some(recoverable), next),
+                    "{recoverable:?} is recoverable and must accept {next:?}"
+                );
+            }
+            assert_eq!(
+                AnchorDispositionStateV1::transition_allowed(
+                    Some(AnchorDispositionStateV1::Superseded),
+                    next
+                ),
+                next == AnchorDispositionStateV1::Deleted,
+                "a superseded anchor may only be deleted, never resurrected"
+            );
+        }
+    }
+
+    #[test]
+    fn only_unrecoverable_states_suppress_lineage() {
+        for state in ALL_STATES {
+            let suppresses = state.suppresses_derivatives();
+            assert_eq!(
+                suppresses,
+                matches!(
+                    state,
+                    AnchorDispositionStateV1::Superseded
+                        | AnchorDispositionStateV1::Redacted
+                        | AnchorDispositionStateV1::Expired
+                        | AnchorDispositionStateV1::Deleted
+                ),
+                "{state:?} classified against the wrong lineage rule"
+            );
+            // Suppression is permanent, so anything that suppresses must also
+            // refuse to serve; the converse does not hold, because a
+            // recoverable outage stops serving without tombstoning.
+            assert!(
+                !suppresses || !AnchorDispositionStateV1::serves_derivatives(Some(state)),
+                "{state:?} tombstones lineage yet still claims to serve it"
+            );
+        }
+        assert!(AnchorDispositionStateV1::serves_derivatives(None));
+        assert!(AnchorDispositionStateV1::serves_derivatives(Some(
+            AnchorDispositionStateV1::Active
+        )));
+        assert!(!AnchorDispositionStateV1::serves_derivatives(Some(
+            AnchorDispositionStateV1::Quarantined
+        )));
+        assert!(!AnchorDispositionStateV1::serves_derivatives(Some(
+            AnchorDispositionStateV1::Unavailable
+        )));
     }
 
     #[test]
