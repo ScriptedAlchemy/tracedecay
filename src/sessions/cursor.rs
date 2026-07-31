@@ -28,10 +28,6 @@ use crate::application::observation::ObservationCancellation;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
-#[cfg(test)]
-use crate::sessions::jsonl_observation_admission::{
-    canonical_message_role, canonical_native_observation_id, canonical_u64,
-};
 use crate::sessions::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations, namespace_replacement_message_ids, preflight_and_parse_new,

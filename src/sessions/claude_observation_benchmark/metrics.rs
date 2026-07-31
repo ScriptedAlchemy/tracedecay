@@ -1,6 +1,5 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
 use std::time::Instant;
 
 use super::MEASURED_REPETITIONS;

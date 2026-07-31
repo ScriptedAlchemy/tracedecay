@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 pub(crate) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub(crate) use tracedecay_capture::codex::normalize_codex_observation;
