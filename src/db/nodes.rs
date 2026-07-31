@@ -2,7 +2,7 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
-use super::rows::row_to_node;
+use super::rows::{NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{
     build_qmark_placeholders, collect_rowid_pages, collect_rows, opt_str, push_int,
     push_opt_quoted, push_quoted,
@@ -350,10 +350,11 @@ impl Database {
         let mut rows = self
             .engine_conn()
             .query(
-                "SELECT id, kind, name, qualified_name, file_path,
-                        start_line, end_line, start_column, end_column,
-                        docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes WHERE id = ?1",
+                concat!(
+                    "SELECT ",
+                    node_select_columns!(),
+                    " FROM nodes WHERE id = ?1"
+                ),
                 params![id],
             )
             .await
@@ -391,10 +392,7 @@ impl Database {
         // on profiles.
         let placeholders = build_qmark_placeholders(ids.len());
         let sql = format!(
-            "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-             FROM nodes WHERE id IN ({placeholders})",
+            "SELECT {NODE_SELECT_COLUMNS} FROM nodes WHERE id IN ({placeholders})",
         );
         let param_values: Vec<Value> = ids.iter().map(|id| Value::Text(id.clone())).collect();
         let mut rows = self
@@ -413,10 +411,11 @@ impl Database {
         let mut rows = self
             .engine_conn()
             .query(
-                "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes WHERE file_path = ?1 ORDER BY start_line",
+                concat!(
+                    "SELECT ",
+                    node_select_columns!(),
+                    " FROM nodes WHERE file_path = ?1 ORDER BY start_line"
+                ),
                 params![file_path],
             )
             .await
@@ -435,10 +434,11 @@ impl Database {
         let mut rows = self
             .engine_conn()
             .query(
-                "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes WHERE parent_id = ?1 ORDER BY start_line",
+                concat!(
+                    "SELECT ",
+                    node_select_columns!(),
+                    " FROM nodes WHERE parent_id = ?1 ORDER BY start_line"
+                ),
                 params![parent_id],
             )
             .await
@@ -492,10 +492,7 @@ impl Database {
         let mut rows = self
             .engine_conn()
             .query(
-                "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes WHERE kind = ?1",
+                concat!("SELECT ", node_select_columns!(), " FROM nodes WHERE kind = ?1"),
                 params![kind.as_str()],
             )
             .await
@@ -514,10 +511,11 @@ impl Database {
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
         collect_rowid_pages(
             &self.engine_conn(),
-            "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id, rowid
-             FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            concat!(
+                "SELECT ",
+                node_select_columns!(),
+                ", rowid FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
+            ),
             NODE_COLUMNS,
             row_to_node,
             "get_all_nodes",
