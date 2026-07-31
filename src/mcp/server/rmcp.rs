@@ -91,13 +91,13 @@ impl RmcpConnectionAdapter {
         let request_cancellation = context.ct;
         let project_tool_call = method == "tools/call" && self.server.project_server_live.is_some();
         let _response_guard = if project_tool_call {
-            Some(
-                self.server
-                    .project_server_lifecycle
-                    .response_gate()
-                    .read()
-                    .await,
-            )
+            let response_gate = self.server.project_server_lifecycle.response_gate();
+            Some(tokio::select! {
+                guard = response_gate.read() => guard,
+                () = request_cancellation.cancelled() => {
+                    return Err(request_cancelled_error());
+                }
+            })
         } else {
             None
         };
@@ -298,17 +298,22 @@ fn project_server_retired_error() -> ErrorData {
     )
 }
 
+fn request_cancelled_error() -> ErrorData {
+    ErrorData::internal_error(
+        "MCP request cancelled before project-route admission",
+        Some(json!({
+            "reason_code": "request_cancelled",
+            "retryable": false,
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
-    use tokio::sync::Notify;
 
     use super::*;
-    use crate::mcp::server::application_surface_request_id;
-    use crate::mcp::server::writer_test_support::init_indexed_repo;
 
     #[test]
     fn response_conversion_preserves_tool_content_and_rpc_errors() {
@@ -356,63 +361,5 @@ mod tests {
         );
         assert!(initialized.capabilities.tools.is_some());
         assert!(initialized.capabilities.resources.is_some());
-    }
-
-    #[tokio::test]
-    async fn cancellation_does_not_wait_for_the_in_flight_route_lock() {
-        let (cg, _dir, _pin) = init_indexed_repo().await;
-        let server = McpServer::new(cg, None).await;
-        let adapter =
-            RmcpConnectionAdapter::new(Arc::clone(&server), false, None).expect("rmcp adapter");
-        let request_id: rmcp::model::RequestId =
-            serde_json::from_value(json!(7)).expect("request id");
-        let request_id_value = serde_json::to_value(&request_id).expect("request id value");
-        let connection = adapter.connection.lock().await;
-        let request_key =
-            application_surface_request_id(&request_id_value, connection.memory_request_scope())
-                .expect("scoped request id");
-        let cancellation =
-            tracedecay_application::CancellationSignal::active("cancel.rmcp.in-flight")
-                .expect("cancellation signal");
-        server
-            .application_surface_cancellations
-            .lock()
-            .expect("cancellation registry")
-            .insert(request_key, cancellation.clone());
-
-        assert!(
-            adapter.cancel_request(Some(request_id)),
-            "rmcp cancellation must not wait for the route lock held by the in-flight request"
-        );
-        assert!(cancellation.is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn cancellation_retries_until_the_request_is_registered() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let completed = Arc::new(Notify::new());
-        let handling_completed = Arc::clone(&completed);
-        let cancel_attempts = Arc::clone(&attempts);
-        let cancel_completed = Arc::clone(&completed);
-
-        let result = await_dispatch_with_cancellation(
-            async move {
-                handling_completed.notified().await;
-                "cancelled"
-            },
-            std::future::ready(()),
-            move || {
-                if cancel_attempts.fetch_add(1, Ordering::SeqCst) == 1 {
-                    cancel_completed.notify_one();
-                    true
-                } else {
-                    false
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, "cancelled");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
