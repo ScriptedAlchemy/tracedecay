@@ -78,6 +78,12 @@ impl StaleBranchDbRecordV1 {
 /// Exact code-generation retention census. `superseded_*` reports every sealed
 /// generation except the active pointer target; `collectable_*` is the subset
 /// outside the vector-readable live set and rollback floor.
+///
+/// `stranded_scope_*` counts a disjoint storage class one level up: whole
+/// `code-index-v1/<scope>/` directories whose canonical project root no longer
+/// exists. They are not superseded generations of *this* scope — they are bytes
+/// no scope-local census can reach at all — so they are reported alongside the
+/// generation totals rather than folded into them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationRetentionRecordV1 {
@@ -86,6 +92,19 @@ pub struct CodeGenerationRetentionRecordV1 {
     pub superseded_generation_bytes: StorageByteSizeV1,
     pub collectable_generation_count: u64,
     pub collectable_generation_bytes: StorageByteSizeV1,
+    /// Scope roots under the shared `code-index-v1/` parent that no live
+    /// canonical project root names. Absent (zero) when the reporter could not
+    /// prove the live-root set, which is also when nothing may be collected.
+    #[serde(default)]
+    pub stranded_scope_count: u64,
+    #[serde(default = "zero_storage_bytes")]
+    pub stranded_scope_bytes: StorageByteSizeV1,
+}
+
+/// `serde(default)` needs a value, and `StorageByteSizeV1` deliberately has no
+/// `Default` impl; zero bytes is the only meaningful absence here.
+fn zero_storage_bytes() -> StorageByteSizeV1 {
+    StorageByteSizeV1::ZERO
 }
 
 impl CodeGenerationRetentionRecordV1 {
@@ -95,6 +114,9 @@ impl CodeGenerationRetentionRecordV1 {
             || (self.superseded_generation_count == 0 && self.superseded_generation_bytes.get() > 0)
             || (self.collectable_generation_count == 0
                 && self.collectable_generation_bytes.get() > 0)
+            // Same invariant one level up: bytes are never reported without the
+            // scopes that hold them.
+            || (self.stranded_scope_count == 0 && self.stranded_scope_bytes.get() > 0)
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "code generation retention totals",
@@ -106,6 +128,14 @@ impl CodeGenerationRetentionRecordV1 {
     #[must_use]
     pub fn has_collectable_generations(&self) -> bool {
         self.collectable_generation_count > 0 || self.collectable_generation_bytes.get() > 0
+    }
+
+    /// True when whole scope roots are unreachable by any scope-local retention
+    /// pass. This is a storage problem even when the generation census inside
+    /// the live scope is perfectly clean.
+    #[must_use]
+    pub fn has_stranded_scopes(&self) -> bool {
+        self.stranded_scope_count > 0
     }
 }
 
@@ -226,6 +256,8 @@ mod tests {
             superseded_generation_bytes: StorageByteSizeV1(3_000),
             collectable_generation_count: 4,
             collectable_generation_bytes: StorageByteSizeV1(2_000),
+            stranded_scope_count: 0,
+            stranded_scope_bytes: StorageByteSizeV1(0),
         };
 
         assert!(record.validate().is_err());
@@ -239,8 +271,60 @@ mod tests {
             superseded_generation_bytes: StorageByteSizeV1(1_000),
             collectable_generation_count: 0,
             collectable_generation_bytes: StorageByteSizeV1(1),
+            stranded_scope_count: 0,
+            stranded_scope_bytes: StorageByteSizeV1(0),
         };
 
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn code_generation_retention_rejects_stranded_bytes_without_stranded_scopes() {
+        let record = CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 0,
+            superseded_generation_bytes: StorageByteSizeV1(0),
+            collectable_generation_count: 0,
+            collectable_generation_bytes: StorageByteSizeV1(0),
+            stranded_scope_count: 0,
+            stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+        };
+
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn stranded_scopes_are_a_problem_even_with_a_clean_generation_census() {
+        let record = CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 3,
+            superseded_generation_bytes: StorageByteSizeV1(3_000),
+            collectable_generation_count: 0,
+            collectable_generation_bytes: StorageByteSizeV1(0),
+            stranded_scope_count: 2,
+            stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+        };
+
+        assert!(record.validate().is_ok());
+        assert!(!record.has_collectable_generations());
+        assert!(record.has_stranded_scopes());
+    }
+
+    #[test]
+    fn stranded_scope_totals_default_to_zero_for_records_without_them() {
+        let record: CodeGenerationRetentionRecordV1 = serde_json::from_str(
+            r#"{
+                "store": "code-index-v1",
+                "superseded_generation_count": 3,
+                "superseded_generation_bytes": 3000,
+                "collectable_generation_count": 1,
+                "collectable_generation_bytes": 1000
+            }"#,
+        )
+        .expect("records predating scope reconciliation stay readable");
+
+        assert_eq!(record.stranded_scope_count, 0);
+        assert_eq!(record.stranded_scope_bytes, StorageByteSizeV1(0));
+        assert!(!record.has_stranded_scopes());
     }
 }
