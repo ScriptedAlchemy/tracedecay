@@ -106,12 +106,16 @@ duplicating business logic.
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
 - **PR11 — compatibility:** retain a deprecated name as a `SurfaceBinding`
-  only when `origin/master` or a published package/release proves a supported
-  caller; a direct compatibility test alone is not release evidence.
-  Branch-local names are replaced in place. Once an evidence-backed name is
-  removed under policy, it returns the same unknown-operation problem as any
-  unknown name; authorized callers may separately use ordinary discovery
-  guidance. No retired-name tombstone registry or compatibility ledger exists.
+  when `origin/master`, a published package/release, an independently deployed
+  client, or a live host installation proves a supported caller; a direct
+  compatibility test alone is not release evidence. Pure source-only names are
+  replaced in place. A branch-era callable name that may have reached dogfood
+  clients or installed host files remains a binding until a separately
+  authorized installed-host/profile census proves absence. Once an
+  evidence-backed name is removed under policy, it returns the same
+  unknown-operation problem as any unknown name; authorized callers may
+  separately use ordinary discovery guidance. No retired-name tombstone
+  registry or compatibility ledger exists.
 - **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard

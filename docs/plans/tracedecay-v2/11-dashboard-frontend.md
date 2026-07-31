@@ -28,11 +28,13 @@ and persisted deep links retain compatibility and migration obligations; all
 other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
-That compatibility applies only to URLs/deep links evidenced on
-`origin/master`, in a published release, or in live persisted navigation.
-Branch-local routes, DTOs, and design tokens change to their final shape in
-place; references and tests on this branch do not create aliases or migration
-windows.
+That compatibility applies to URLs/deep links evidenced on `origin/master`, in
+a published release, or in live persisted navigation. Pure transient DTOs and
+source-only design tokens change to their final shape in place. A branch-era
+route may already be retained by dogfood navigation, saved views, bookmarks,
+or installed host surfaces, so its alias/migration remains until a separately
+authorized live/profile navigation census proves absence; references and tests
+alone are not persistence evidence.
 
 Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
 holographic, lcm, graph, code-diagnostics, savings, settings as separate
