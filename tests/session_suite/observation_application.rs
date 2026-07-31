@@ -869,7 +869,6 @@ async fn cross_provider_capture_duplicate_conflict_cancel_non_durable_malformed_
         assert_eq!(replay_before_restart.observations().len(), 2, "{provider}");
         let counts_before_restart = table_counts(&runtime).await;
         drop(application);
-        drop(store);
         drop(runtime);
 
         // Commit-before-ack / crash-restart: reopen and retry the original capture.

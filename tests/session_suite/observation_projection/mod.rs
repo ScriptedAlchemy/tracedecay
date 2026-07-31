@@ -435,7 +435,6 @@ async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempD
     );
     persist(&store, candidate, None).await;
     drain_projection_queue(&store).await;
-    drop(store);
     drop(runtime);
 
     let audited = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))

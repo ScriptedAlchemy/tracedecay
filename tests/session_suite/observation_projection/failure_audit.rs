@@ -54,7 +54,6 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         );
 
         drop(raw_conn);
-        drop(store);
         drop(runtime);
 
         let reopened_runtime = profile_runtime(&tmp).await;
@@ -258,7 +257,6 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     )
     .await;
     drain_projection_queue(&store).await;
-    drop(store);
     drop(runtime);
 
     let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))

@@ -483,7 +483,6 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
     )
     .await;
     drain_projection_queue(&store).await;
-    drop(store);
     drop(runtime);
 
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
@@ -521,7 +520,6 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
-    drop(store);
     drop(reopened_runtime);
 
     let restarted_runtime = profile_runtime(&tmp).await;
@@ -533,7 +531,6 @@ async fn v2_projection_survives_restart_safe_v3_migration_and_rollback() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
-    drop(store);
     drop(restarted_runtime);
 
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
@@ -930,7 +927,6 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
     assert!(matches!(error, ProjectionStoreError::Storage { .. }));
     assert_eq!(projection_counts(&tmp).await, (1, 257, 257, 1, 0, 1));
     drop(raw_conn);
-    drop(store);
     drop(runtime);
     checkpoint_database(&tmp).await;
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
@@ -1232,7 +1228,6 @@ async fn cross_provider_projection_duplicate_reorder_conflict_and_restart_are_id
         );
         let provenance_before = projection_provenance_rows(&tmp).await;
         let counts_before = projection_counts(&tmp).await;
-        drop(store);
         drop(runtime);
 
         let runtime = profile_runtime(&tmp).await;

@@ -2157,7 +2157,6 @@ async fn cross_provider_duplicate_conflict_reorder_non_durable_malformed_frame_a
             .await
             .unwrap();
         assert_eq!(replay_before_restart.len(), 2, "{provider}");
-        drop(store);
         drop(runtime);
 
         // Crash/restart + commit-before-ack: reopen and retry the original write.

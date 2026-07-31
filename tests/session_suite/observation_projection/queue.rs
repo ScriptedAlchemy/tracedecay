@@ -87,7 +87,6 @@ async fn v3_projection_persists_stable_multi_output_ordinals() {
         panic!("observation should project");
     };
     assert_eq!(projected.output_count(), 4);
-    drop(store);
     drop(runtime);
 
     let conn = rusqlite::Connection::open(database_path).unwrap();
