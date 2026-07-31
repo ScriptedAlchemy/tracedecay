@@ -1135,24 +1135,19 @@ pub(crate) async fn invoke_multi_root_surface_request(
     cancellation: tracedecay_application::CancellationSignal,
     body: Value,
 ) -> Result<Value, ApplicationSurfaceAdapterError> {
-    let http_operation = HttpApplicationOperation::ALL
-        .into_iter()
-        .find(|candidate| application_operation_for_http(*candidate) == operation)
-        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
-    let invoke = application_invoker_for_surface(
-        executor,
+    let request = parse_application_surface_request(operation, body)?;
+    let dispatched = resolve_application_surface_dispatch_with_controls(
         BindingSurface::Http,
-        std::slice::from_ref(&operation),
-    )?;
-    let response = invoke(HttpApplicationRequest {
-        operation: http_operation,
+        operation,
         request_id,
+        request,
         page,
-        deadline: Some(deadline),
+        Some(deadline),
         cancellation,
-        body,
-    })
-    .await;
+        RequestedOutputFormat::Json,
+    )?;
+    let response =
+        execute_application_surface(operation, dispatched, Some(executor.as_ref())).await?;
     let envelope = response
         .result
         .map_err(|_| ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
