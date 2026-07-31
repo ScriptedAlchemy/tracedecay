@@ -230,6 +230,40 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
   }
 }
 
+/**
+ * The sentence a control carries about what this scope means for it.
+ *
+ * One exhaustive switch for all of them. The two refusing states are answered
+ * with the authority's own `reason` — reworded per call site they would drift
+ * apart, and the reason is the same fact everywhere — while `writable` is the
+ * only state whose wording is genuinely local, because what is being written
+ * differs (a scheduler toggle, a remediation) and the target has to be named.
+ *
+ * `writable` is answered rather than thrown on even where a call site cannot
+ * reach it: producing a sentence is what this is for.
+ */
+export function scopeWriteSentence(
+  writability: ScopeWritability,
+  sentences: {
+    writable: (target: string) => string;
+    /** For a site that frames the refusal before repeating it. Defaults to the
+     * reason alone. */
+    refused?: (reason: string) => string;
+  },
+): string {
+  switch (writability.state) {
+    case 'writable':
+      return sentences.writable(writability.target);
+    case 'read_only':
+    case 'unknown':
+      return sentences.refused ? sentences.refused(writability.reason) : writability.reason;
+    default: {
+      const exhaustive: never = writability;
+      return exhaustive;
+    }
+  }
+}
+
 /** The `status` the project gateway answers a refused write with. */
 export const READ_ONLY_SCOPE_STATUS = 'read_only_project';
 
@@ -314,21 +348,15 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
  *
  * `/api/projects` and `/api/dashboard` are never rewritten — the registry is
  * the thing that lists projects, and the chrome is above all of them — so the
- * same URL is fetched under every scope. Keying those by scope anyway split one
- * answer into a cache entry per project: switching project refetched a listing
- * that had not changed, four surfaces reading the registry each held their own
- * copy of it, and an entry warmed under one scope was invisible under the next.
+ * same URL is fetched under every scope, and keying them by scope splits one
+ * answer into an entry per project.
  *
- * A question about the ROUTE, which is the part that took a correction: asking
- * instead whether `scopedUrl` had rewritten this particular request read as the
- * same thing and is not. `scopedUrl` rewrites nothing at all under the
- * all-projects scope, so every route collapsed into the unscoped bucket there
- * and stopped agreeing with `scopeKey` — which is how `useSchedulerControl`
- * came to write a fresh scheduler reading into a key no reader was watching,
- * leaving the button showing the state that had just been changed.
- *
- * So a scoped route keys by scope in every scope, including `all`, and only the
- * genuinely unscoped routes share one entry.
+ * The question is about the ROUTE, not about whether `scopedUrl` rewrote this
+ * particular request: `scopedUrl` rewrites nothing under the all-projects
+ * scope, so asking it collapses every route into the unscoped bucket there and
+ * stops agreeing with `scopeKey` — which lets a writer put a fresh reading into
+ * a key no reader is watching. So a scoped route keys by scope in every scope,
+ * including `all`, and only the genuinely unscoped routes share one entry.
  */
 export function requestScopeKey(scope: DashboardScope, url: string): string {
   return unscopedRoute(url) ? UNSCOPED_CACHE_KEY : scopeKey(scope);

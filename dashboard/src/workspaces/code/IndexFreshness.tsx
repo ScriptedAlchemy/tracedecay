@@ -34,7 +34,7 @@ import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
-import { elideStart } from '../../ui/format.ts';
+import { elideStart, formatMicrosUtc } from '../../ui/format.ts';
 
 export function IndexFreshness() {
   const scope = useScope((s) => s.scope);
@@ -178,6 +178,5 @@ function Row({
  * the epoch, and printing `1970-01-01` for one would read as a real, very old
  * observation. */
 function formatMicros(micros: number | null): string {
-  if (micros == null) return 'not reported';
-  return new Date(Math.floor(micros / 1000)).toISOString();
+  return formatMicrosUtc(micros, { nullAs: 'not reported' });
 }

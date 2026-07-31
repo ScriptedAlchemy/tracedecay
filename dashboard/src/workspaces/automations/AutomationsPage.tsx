@@ -11,7 +11,7 @@ import {
   useSchedulerControl,
   type SchedulerControlResult,
 } from '../../data/query/automation.ts';
-import type { ScopeWritability } from '../../data/scope/store.ts';
+import { scopeWriteSentence, type ScopeWritability } from '../../data/scope/store.ts';
 import {
   AutomationSchedulerStatusV1Schema,
   type AutomationSchedulerStatusV1,
@@ -653,29 +653,13 @@ function controlFailure(result: SchedulerControlResult | undefined): string | nu
     // No request was made, so the phrasing has to be about this dashboard
     // declining rather than the daemon refusing.
     case 'not_dispatched':
-      return scopeRefusalSentence(result.writability);
+      return scopeWriteSentence(result.writability, {
+        writable: (target) =>
+          `Nothing was sent, though writes to ${target} are accepted — reload to re-read the scheduler.`,
+        refused: (reason) => `Nothing was sent. ${reason}`,
+      });
     default: {
       const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
-}
-
-/** Why a control did not dispatch, from the scope authority's own reading.
- *
- * Exhaustive so a fourth writability state cannot reach a control as silence.
- * `writable` is unreachable by construction — the control only produces a
- * `not_dispatched` for the other two — but it is answered rather than thrown
- * on, because a sentence is what this function is for. */
-function scopeRefusalSentence(writability: ScopeWritability): string {
-  switch (writability.state) {
-    case 'writable':
-      return `Nothing was sent, though writes to ${writability.target} are accepted — reload to re-read the scheduler.`;
-    case 'read_only':
-    case 'unknown':
-      return `Nothing was sent. ${writability.reason}`;
-    default: {
-      const exhaustive: never = writability;
       return exhaustive;
     }
   }
@@ -747,7 +731,9 @@ function SchedulerControl({
         // be allowed to wrap inside it rather than push itself off the edge.
         className="min-w-0 text-2xs text-text-secondary"
       >
-        {scopeControlReason(writability)}
+        {scopeWriteSentence(writability, {
+          writable: (target) => `Applies to ${target}.`,
+        })}
       </span>
       {failure ? (
         <span role="status" className="text-2xs text-text-secondary">
@@ -756,24 +742,6 @@ function SchedulerControl({
       ) : null}
     </div>
   );
-}
-
-/** The scope sentence a control carries beside itself.
- *
- * Exhaustive: a new writability state must choose its wording here rather than
- * defaulting to an unexplained enabled or disabled button. */
-function scopeControlReason(writability: ScopeWritability): string {
-  switch (writability.state) {
-    case 'writable':
-      return `Applies to ${writability.target}.`;
-    case 'read_only':
-    case 'unknown':
-      return writability.reason;
-    default: {
-      const exhaustive: never = writability;
-      return exhaustive;
-    }
-  }
 }
 
 function SchedulerBadge({ status, paused }: { status: string; paused: boolean }) {

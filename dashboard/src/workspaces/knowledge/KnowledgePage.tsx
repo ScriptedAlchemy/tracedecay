@@ -7,7 +7,7 @@ import {
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
@@ -389,7 +389,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
             </span>
             <Meter
               fraction={ceiling > 0 ? band.count / ceiling : null}
-              className="h-1 min-w-0 flex-1"
+              className="min-w-0 flex-1"
               tone={band.count === 0 ? 'bg-transparent' : undefined}
             />
             <span
@@ -651,7 +651,7 @@ function FactListRow({
         {showTrustRail ? (
           <Meter
             fraction={trust}
-            className="h-[3px]"
+            height="row"
             tone={
               trust >= 0.7 ? 'bg-accent' : trust >= 0.4 ? 'bg-accent/60' : 'bg-accent/30'
             }
@@ -677,18 +677,13 @@ function FactListRow({
           {fact.category}
         </span>
       ) : null}
-      <span className="flex w-20 shrink-0 flex-col items-end gap-1 max-md:hidden">
-        <span className="td-value text-2xs leading-none text-text-secondary" data-cell="numeric">
-          {recalls}
-          <span className="td-unit ml-1">rc</span>
-        </span>
-        <Meter
-          fraction={recallCeiling > 0 ? recalls / recallCeiling : null}
-          className="h-[3px] w-full"
-          align="right"
-          tone="bg-text-muted"
-        />
-      </span>
+      <FigureRail
+        value={recalls}
+        unit="rc"
+        fraction={recallCeiling > 0 ? recalls / recallCeiling : null}
+        tone="bg-text-muted"
+        className="max-md:hidden"
+      />
     </DataRow>
   );
 }
@@ -756,7 +751,6 @@ function CategoryBar({ row, ceiling }: { row: MemoryCategoryCount; ceiling: numb
       </div>
       <Meter
         fraction={fraction}
-        className="h-1"
         ariaLabel={`${row.category}: ${row.count.toLocaleString()} facts`}
       />
     </div>

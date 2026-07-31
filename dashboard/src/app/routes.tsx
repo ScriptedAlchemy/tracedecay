@@ -50,8 +50,6 @@ export const WORKSPACES = [
     import('../workspaces/work/WorkPage.tsx').then((m) => ({ default: m.WorkPage }))),
 ] as const;
 
-export type WorkspacePath = (typeof WORKSPACES)[number]['path'];
-
 /** Brain is the index surface: the all-projects aggregate. */
 const BrainIndex = WORKSPACES[0].Page;
 

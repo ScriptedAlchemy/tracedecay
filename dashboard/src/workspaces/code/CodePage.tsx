@@ -8,13 +8,14 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart, splitCount } from '../../ui/format.ts';
-import { ambiguityNote, annotateHubs, describeSubgraph } from './hubs.ts';
+import { ambiguityNote, annotateHubs, describeSubgraph, displayName } from './hubs.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import type { LegacyResult } from '../../data/query/legacy.ts';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
@@ -127,16 +128,10 @@ export function CodePage() {
           />
           <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
             {(data) => {
-              // Every total here is measured. `LegacyBoundary` runs this only
-              // for `outcome: 'ok'` — a 2xx whose body satisfied the schema —
-              // and every other reading, including the 500 this route raises
-              // when the query fails, is rendered by the boundary as the
-              // failure it was. So the old guard was wrong twice: it claimed
-              // the response "cannot distinguish zero data from a query
-              // failure" when the boundary above had already distinguished
-              // them, and being an `||` it withheld all three figures whenever
-              // any one of them was zero. A freshly indexed project with
-              // symbols but no resolved edges saw its node count suppressed.
+              // Every total here is measured: `LegacyBoundary` runs this only
+              // for `outcome: 'ok'`, and renders every other reading — including
+              // the 500 this route raises on a failed query — as the failure it
+              // was. So a zero here is a real zero and is printed as one.
               const kinds = (data.nodes_by_kind ?? [])
                 .slice(0, 12)
                 .map((k) => ({ label: k.kind, value: k.count, hint: 'nodes' }));
@@ -429,39 +424,23 @@ function TraceChunkFallback({
   );
 }
 
-/** Default view when no search is active: the graph's most connected symbols.
+/** Default view when no search is active: the graph's most connected symbols,
+ * drawn as two joined instruments.
  *
- * This used to be thirteen full-width rows — kind chip, name, magnitude rail,
- * path — which is a table, and a table is the one form that throws away
- * everything interesting about this particular data. Every row was the same
- * size, so the fact that the busiest symbol carries nearly five times the
- * connections of the twelfth was encoded only in a 20px bar at the far right
- * of each line; the shape of the drop was invisible; and thirteen identical
- * bands ate roughly sixty percent of the workspace to say one sorted thing.
+ *   the SPINE   every hub as a mark on one shared degree axis, so position is
+ *               the measurement and the shape of the drop is directly visible.
+ *               Hue is the symbol's kind, from the same `kindColor` rule the
+ *               canvas above paints with.
  *
- * It is replaced by two joined instruments in under half the height:
+ *   the FIELD   the same hubs as cards on a dense grid, where the NAME's type
+ *               size falls with rank — magnitude read as typography, costing
+ *               no horizontal column.
  *
- *   the SPINE   every hub as a mark on one shared degree axis. Position is
- *               the measurement, so the run-away leader, the steep fall and
- *               the near-ties that bunch at the low end are all directly
- *               visible — a comparison thirteen separate right-aligned bars
- *               could never support. Hue is the symbol's kind, taken from the
- *               very same `kindColor` rule the canvas above paints with, so
- *               the two halves are one system rather than a picture with a
- *               table under it.
- *
- *   the FIELD   the same hubs as compact cards on a dense grid, where the
- *               NAME's type size falls with rank. Magnitude is read as
- *               typography — the busiest symbol is literally the largest text
- *               on the surface — which is the magnitude rail's idea carried
- *               to its conclusion, and it costs no horizontal column at all.
- *
- * Truthfulness: the endpoint (`graph_queries::top_connected_rows`) serves the
- * top twelve rows and exactly five fields — id, name, kind, file_path,
- * degree. So the spine is honestly captioned as those hubs only, its axis is
- * anchored at zero and labelled with the real extremes, and nothing here
- * claims to be the whole graph's degree distribution, which this payload
- * simply does not contain. Search reaches everything else. */
+ * The endpoint (`graph_queries::top_connected_rows`) serves the top twelve rows
+ * and five fields. So the spine is captioned as those hubs only, its axis is
+ * anchored at zero and labelled with the real extremes, and nothing here claims
+ * to be the whole graph's degree distribution — which this payload does not
+ * contain. Search reaches everything else. */
 function TopConnectedList({
   overviewPending,
   overviewResult,
@@ -469,14 +448,13 @@ function TopConnectedList({
   selected,
 }: {
   overviewPending: boolean;
-  overviewResult: Parameters<typeof LegacyBoundary>[0]['result'];
+  overviewResult: LegacyResult<GraphOverviewPayload> | undefined;
   onSelect: (node: GraphNode) => void;
   selected: TraceFocus | null;
 }) {
   return (
     <LegacyBoundary title="Code" pending={overviewPending} result={overviewResult}>
-      {(data) => {
-        const payload = data as GraphOverviewPayload;
+      {(payload) => {
         const hubs = payload.top_connected;
         if (hubs.length === 0)
           return (
@@ -699,7 +677,7 @@ function HubField({
       ) : null}
 
       <ol className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-        {annotated.map(({ hub: node, module, file, ambiguous }, rank) => (
+        {annotated.map(({ hub: node, display, module, file, ambiguous }, rank) => (
           <li
             key={node.id ?? rank}
             className={cn(
@@ -714,6 +692,7 @@ function HubField({
           >
             <HubCard
               node={node}
+              display={display}
               rank={rank}
               module={module}
               file={file}
@@ -728,15 +707,9 @@ function HubField({
   );
 }
 
-/** The hub's own name is the headline. `qualified_name` is not served by this
- * endpoint at all, so the fallback chain is honest about what exists. */
-function displayName(node: TraceFocus | undefined): string {
-  if (!node) return '—';
-  return node.name ?? node.qualified_name ?? node.id;
-}
-
 function HubCard({
   node,
+  display,
   rank,
   module,
   file,
@@ -745,6 +718,8 @@ function HubCard({
   onSelect,
 }: {
   node: GraphNode;
+  /** The headline, already resolved by `annotateHubs`. */
+  display: string;
   rank: number;
   /** Directory the symbol lives in, trailing slash included. */
   module: string;
@@ -793,7 +768,7 @@ function HubCard({
           className={cn('min-w-0 flex-1 truncate text-text-primary', nameTier(rank))}
           title={node.qualified_name ?? undefined}
         >
-          {displayName(node)}
+          {display}
         </span>
         {/* The leader's own count steps up with its name: the one symbol the
          * eye lands on first should not have to report itself in the same
@@ -809,16 +784,11 @@ function HubCard({
           <span className="td-unit ml-1">deg</span>
         </span>
       </span>
-      {/* The context line, which used to be a 3xs grey path elided from its
-        * front and pushed to the far right of the card, where it read as
-        * decoration rather than as the thing that identifies the symbol. The
-        * FILE now carries the line at the same size as the kind beside it, and
-        * the directory trails it quietly — because between two cards both
-        * called `path`, "graph_api.rs" is the answer and
-        * "…/dashboard/graph_api.rs" is the same answer with the middle of a
-        * path in front of it. When the name is genuinely ambiguous inside this
-        * set the file steps up to the primary text colour: it is then not
-        * context, it is the identifier. */}
+      {/* The context line. The FILE leads it at the same size as the kind
+        * beside it, with the directory trailing quietly: between two cards both
+        * called `path`, "graph_api.rs" is the answer. When the name is
+        * genuinely ambiguous inside this set the file steps up to the primary
+        * text colour — it is then not context, it is the identifier. */}
       <span className="flex min-w-0 items-baseline gap-2 pl-6 leading-tight">
         <span className="td-legend max-w-20 shrink-0 truncate">{node.kind}</span>
         {/* The file is capped at three fifths of the line and truncates inside
@@ -862,24 +832,18 @@ function SymbolRow({
        * four columns left the name -- the thing being listed -- with no width
        * at all. */}
       <span className="td-legend w-20 shrink-0 truncate max-md:hidden">{node.kind}</span>
+      {/* Qualified name first, deliberately the reverse of `displayName`: the
+       * search route does serve it, and in a list of matches the module path
+       * is what separates two hits that share a bare name. */}
       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
         {node.qualified_name ?? node.name ?? node.id}
       </span>
       {node.degree != null ? (
-        <span className="flex w-20 shrink-0 flex-col items-end gap-1">
-          <span
-            className="td-value text-2xs leading-none text-text-secondary"
-            data-cell="numeric"
-          >
-            {node.degree}
-            <span className="td-unit ml-1">deg</span>
-          </span>
-          <Meter
-            fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
-            className="h-[3px] w-full"
-            align="right"
-          />
-        </span>
+        <FigureRail
+          value={node.degree}
+          unit="deg"
+          fraction={degreeCeiling > 0 ? node.degree / degreeCeiling : null}
+        />
       ) : null}
       <span
         className="td-value w-52 shrink-0 truncate text-right text-2xs text-text-muted max-md:hidden"

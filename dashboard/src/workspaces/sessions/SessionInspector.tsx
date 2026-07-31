@@ -266,7 +266,7 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
         </span>
       </span>
       {retained != null ? (
-        <Meter fraction={retained} className="h-[3px] w-full" />
+        <Meter fraction={retained} height="row" className="w-full" />
       ) : null}
       <span className="line-clamp-3 text-3xs leading-snug text-text-secondary">
         {node.summary}

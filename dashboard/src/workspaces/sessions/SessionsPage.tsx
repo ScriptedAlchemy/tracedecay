@@ -8,7 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
-import { Meter, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
@@ -275,22 +275,12 @@ export function SessionsPage() {
                         {id}
                       </span>
                       {count !== undefined ? (
-                        <span className="flex w-24 shrink-0 flex-col items-end gap-1">
-                          <span
-                            className="td-value text-2xs leading-none text-text-secondary"
-                            data-cell="numeric"
-                          >
-                            {String(count)}
-                            <span className="td-unit ml-1">msg</span>
-                          </span>
-                          <Meter
-                            fraction={
-                              heaviest > 0 ? Number(count) / heaviest : null
-                            }
-                            className="h-[3px] w-full"
-                            align="right"
-                          />
-                        </span>
+                        <FigureRail
+                          value={String(count)}
+                          unit="msg"
+                          width="wide"
+                          fraction={heaviest > 0 ? Number(count) / heaviest : null}
+                        />
                       ) : null}
                       <span
                         className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
