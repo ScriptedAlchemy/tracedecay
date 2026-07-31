@@ -283,9 +283,11 @@ feedback requires exact saved-content or clean-generation identity.
   and schema inventories, standalone milestone gates, giant lifecycle ×
   provider fixture matrices, and placeholder benchmark packets.
 - Remove reserved PR15/PR17 fields from PR13 schemas. Later callable
-  operations add their inputs to the unreleased final shape in place; a new
-  contract version is introduced only after release or persistence evidence
-  establishes a predecessor.
+  operations add inputs to the current writer shape while retained decoders
+  accept potentially installed prior revisions. Release, persistence, an
+  independently deployed client, or a live host installation establishes a
+  versioned predecessor; the authorized installed-client/host census gates
+  decoder and negotiation retirement.
 - Remove adapter-local findings, proximity fanout/dedupe, suggestion streams,
   task linking, and evidence stores. The canonical owners above remain.
 - Do not remove or reduce any pillar, surface, lifecycle/provider state,

@@ -39,10 +39,12 @@ longer remain available as hidden fallbacks.
    operations. CLI, MCP, hooks, dashboard, LSP bridge, HTTP, and SDK adapters
    translate requests but do not own storage, policy, query, scheduling,
    diagnostics, or lifecycle behavior.
-3. Stable public compatibility aliases with release evidence are bound to those same canonical
-   operations and preserve semantic and lifecycle equivalence. Temporary
-   aliases identify their consumer, owner, exact deletion condition, and latest
-   delivery slice and are removed in PR19 after that consumer migrates.
+3. Stable public compatibility aliases with release evidence are bound to the
+   same canonical operations and preserve semantic and lifecycle equivalence.
+   Source-only temporary aliases identify their internal consumer, owner, exact
+   deletion condition, and latest delivery slice and are removed after that
+   consumer migrates. Callable branch-era aliases remain canonical delegates
+   until an authorized installed-client/host census proves absence.
 4. One atomic release cutover publishes the verified V2 store/schema epoch and
    V2 composition root. Before cutover V1 is authoritative; after cutover one
    fenced V2 daemon owns each mutable shard and stale binaries or clients fail

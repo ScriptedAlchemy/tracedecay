@@ -408,10 +408,10 @@ shadow gate counts as delivery.
   fixture corpora, generated provider/catalog registries, declaration parity,
   and repeated authority prose.
 - Keep every capability above in the production loop. Compatibility aliases
-  may delegate to canonical operations only with release evidence and own no
-  logic. Pure source-only aliases are removed in place; branch-era callable
-  aliases remain until an authorized installed-client/host census proves
-  absence. PR18 freezes rather than invents lifecycle behavior.
+  backed by release evidence or retained pending the installed-client/host
+  census delegate to canonical operations and own no logic. Pure source-only
+  aliases are removed in place; branch-era callable aliases remain until the
+  census proves absence. PR18 freezes rather than invents lifecycle behavior.
 
 ## Direct acceptance
 
