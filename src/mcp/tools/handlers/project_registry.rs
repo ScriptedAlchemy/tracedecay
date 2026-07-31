@@ -94,7 +94,7 @@ pub(crate) enum ProjectRegistryListingOutcome {
 /// Closed set of single-project context results.
 #[derive(Clone, Debug)]
 pub(crate) enum ProjectRegistryContextOutcome {
-    Context(ProjectRegistryContextView),
+    Context(Box<ProjectRegistryContextView>),
     /// The registry answered, and no registered project matches the selector.
     NotFound {
         registry_path: PathBuf,

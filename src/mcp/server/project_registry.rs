@@ -138,7 +138,7 @@ impl DaemonProjectRegistryReadService {
         };
         let active_id = self.active_project_id(&active_project_root).await?;
         let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
-        Ok(ProjectRegistryContextOutcome::Context(
+        Ok(ProjectRegistryContextOutcome::Context(Box::new(
             ProjectRegistryContextView {
                 registry_path,
                 is_active,
@@ -146,7 +146,7 @@ impl DaemonProjectRegistryReadService {
                 aliases: serialize_records(&context.aliases)?,
                 stores: serialize_records(&context.stores)?,
             },
-        ))
+        )))
     }
 }
 

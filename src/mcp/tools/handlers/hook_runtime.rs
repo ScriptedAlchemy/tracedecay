@@ -356,17 +356,13 @@ enum HookV2BindingAdmission {
 
 const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;
 
-fn retained_hook_v2_delivery_claims() -> &'static StdMutex<
-    BTreeMap<([u8; 16], [u8; 16]), crate::agents::context_scout_v2::ContextScoutDurableClaimV1>,
-> {
-    static CLAIMS: OnceLock<
-        StdMutex<
-            BTreeMap<
-                ([u8; 16], [u8; 16]),
-                crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
-            >,
-        >,
-    > = OnceLock::new();
+type HookV2DeliveryClaimKey = ([u8; 16], [u8; 16]);
+type HookV2DeliveryClaims = StdMutex<
+    BTreeMap<HookV2DeliveryClaimKey, crate::agents::context_scout_v2::ContextScoutDurableClaimV1>,
+>;
+
+fn retained_hook_v2_delivery_claims() -> &'static HookV2DeliveryClaims {
+    static CLAIMS: OnceLock<HookV2DeliveryClaims> = OnceLock::new();
     CLAIMS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
@@ -374,14 +370,14 @@ fn retain_hook_v2_delivery_claim(
     project_id: [u8; 16],
     claim: crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
     now: UtcMicros,
-) -> std::result::Result<(), crate::agents::context_scout_v2::ContextScoutDurableClaimV1> {
+) -> std::result::Result<(), Box<crate::agents::context_scout_v2::ContextScoutDurableClaimV1>> {
     let key = (project_id, claim.entry.envelope.envelope_id);
     let Ok(mut claims) = retained_hook_v2_delivery_claims().lock() else {
-        return Err(claim);
+        return Err(Box::new(claim));
     };
     claims.retain(|_, claim| claim.lease.expires_at.0 > now.0);
     if claims.contains_key(&key) || claims.len() >= MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS {
-        return Err(claim);
+        return Err(Box::new(claim));
     }
     claims.insert(key, claim);
     Ok(())
@@ -837,9 +833,12 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
+        let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
         if !admit_native_context_scout_lifecycle(
             project_sessions,
-            ProviderId::new(envelope.producer.hook_key()).expect("static Hook V2 provider id"),
+            provider,
             native_lifecycle,
             range,
         )
@@ -934,7 +933,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
                         }
                     },
                     Err(claim) => {
-                        let _ = owner.requeue(claim).await;
+                        let _ = owner.requeue(*claim).await;
                         Value::Null
                     }
                 }
