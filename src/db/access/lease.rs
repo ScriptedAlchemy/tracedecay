@@ -121,7 +121,7 @@ pub(crate) fn enter_owned_maintenance_database_scope(
     Ok(OwnedMaintenanceDatabaseScope {
         profile_root,
         token,
-        lifecycle,
+        _lifecycle: lifecycle,
     })
 }
 
