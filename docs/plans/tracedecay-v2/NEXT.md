@@ -22,8 +22,9 @@ next direct user journeys. Numbered plans own the detailed semantics.
 - Default release artifacts include the supported semantic runtime and pass
   real package, install, startup, and host-integration journeys.
 - The implemented dashboard checkpoint is retained. Remaining dashboard work
-  is the direct Plan 11 performance, renderer, browser, accessibility, and
-  usability journeys rather than reconstruction of old frontend scaffolding.
+  is the direct Plan 11 renderer, browser, accessibility, and usability
+  journeys rather than reconstruction of old frontend scaffolding; the
+  performance and payload budgets were withdrawn by owner decision 2026-07-31.
 
 ## Current blockers
 
@@ -38,9 +39,10 @@ next direct user journeys. Numbered plans own the detailed semantics.
 - The repository still has unresolved test and CI failures. Focused local
   success does not establish product acceptance; normal repository CI must
   execute the affected journeys non-vacuously.
-- PR14 remains open on the direct Plan 11 performance, renderer fallback,
-  sustained-update, real-browser, assistive-technology, and usability
-  journeys.
+- PR14 remains open on the direct Plan 11 renderer fallback, real-browser,
+  assistive-technology, and usability journeys. The performance,
+  sustained-update, and payload budgets were withdrawn by owner decision
+  2026-07-31 and no longer block acceptance.
 
 ## Next direct journeys
 
@@ -62,7 +64,7 @@ next direct user journeys. Numbered plans own the detailed semantics.
 5. **Flagship dashboard.** Start from a real feedback finding, navigate to
    exact evidence, diagnose a real injected fault, perform an authorized
    setting or remediation action, observe the resulting state, and complete
-   the Plan 11 browser, accessibility, performance, and usability journeys.
+   the Plan 11 browser, accessibility, and usability journeys.
 6. **Repository verification.** Run focused direct product tests for changed
    behavior and ordinary Linux, macOS, and Windows CI. Treat missing,
    skipped, empty-filter, partial, or timed-out coverage as unresolved.

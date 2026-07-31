@@ -564,9 +564,11 @@ typed unavailable, while a real daemon-hosted Settings mutation proves apply,
 durable reread, and stale-revision rejection. Exact test names and counts are
 run output, not roadmap status.
 
-Acceptance remains open on the Plan 11 performance budgets, renderer
-parity/fallback measurement, sustained update behavior, real-Chrome visual
-review, manual assistive-technology completion, and the usability study.
+Acceptance remains open on the Plan 11 renderer parity/fallback behavior,
+real-Chrome visual review, manual assistive-technology completion, and the
+usability study. The Plan 11 performance and payload budgets and the
+sustained-update rates were withdrawn by owner decision 2026-07-31; Plan 11
+records the withdrawal.
 
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
