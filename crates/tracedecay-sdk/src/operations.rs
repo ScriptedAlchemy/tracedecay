@@ -17,17 +17,12 @@ macro_rules! typed_operation {
         $name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal,
         $schema:literal, $revision:literal
     ) => {
-        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-        pub struct $name;
-        impl TypedOperation for $name {
-            type Request = $module::Request;
-            type Result = $module::Result;
-            const OPERATION_ID: &'static str = $operation;
-            const ROUTE: &'static str = $route;
-            const BINDING_ID: &'static str = $binding;
-            const RESULT_SCHEMA_ID: &'static str = $schema;
-            const RESULT_SCHEMA_REVISION: u32 = $revision;
-        }
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)] pub struct $name; impl
+        TypedOperation for $name { type Request = $module ::Request; type Result =
+        $module ::Result; const OPERATION_ID : &'static str = $operation; const ROUTE :
+        &'static str = $route; const BINDING_ID : &'static str = $binding; const
+        RESULT_SCHEMA_ID : &'static str = $schema; const RESULT_SCHEMA_REVISION : u32 =
+        $revision; }
     };
 }
 #[allow(clippy::all)]
@@ -39,12 +34,18 @@ pub mod work_accept_proposal {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -104,7 +105,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -155,7 +156,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -257,7 +258,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -362,7 +363,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -401,12 +402,18 @@ pub mod work_accept_proposal {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -441,7 +448,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -492,7 +499,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -543,7 +550,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -594,7 +601,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -645,7 +652,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -696,7 +703,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -781,7 +788,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -964,7 +971,7 @@ pub mod work_accept_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -1000,13 +1007,9 @@ pub mod work_accept_proposal {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkAcceptProposal,
-    work_accept_proposal,
-    "operation.work.accept_proposal",
-    "/application/work/accept-proposal",
-    "binding.http.work.accept_proposal",
-    "schema.work.accept_proposal.result",
-    1
+    WorkAcceptProposal, work_accept_proposal, "operation.work.accept_proposal",
+    "/application/work/accept-proposal", "binding.http.work.accept_proposal",
+    "schema.work.accept_proposal.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_accept_task {
@@ -1017,12 +1020,18 @@ pub mod work_accept_task {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -1099,7 +1108,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -1204,7 +1213,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -1243,12 +1252,18 @@ pub mod work_accept_task {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -1283,7 +1298,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -1334,7 +1349,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -1385,7 +1400,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -1436,7 +1451,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -1487,7 +1502,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -1538,7 +1553,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -1623,7 +1638,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -1806,7 +1821,7 @@ pub mod work_accept_task {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -1842,13 +1857,9 @@ pub mod work_accept_task {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkAcceptTask,
-    work_accept_task,
-    "operation.work.accept_task",
-    "/application/work/accept-task",
-    "binding.http.work.accept_task",
-    "schema.work.accept_task.result",
-    1
+    WorkAcceptTask, work_accept_task, "operation.work.accept_task",
+    "/application/work/accept-task", "binding.http.work.accept_task",
+    "schema.work.accept_task.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_admit_execution {
@@ -1859,12 +1870,18 @@ pub mod work_admit_execution {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -1941,7 +1958,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -2046,7 +2063,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -2085,12 +2102,18 @@ pub mod work_admit_execution {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -2125,7 +2148,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -2176,7 +2199,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -2227,7 +2250,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -2278,7 +2301,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -2329,7 +2352,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -2380,7 +2403,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -2465,7 +2488,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -2648,7 +2671,7 @@ pub mod work_admit_execution {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -2684,13 +2707,9 @@ pub mod work_admit_execution {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkAdmitExecution,
-    work_admit_execution,
-    "operation.work.admit_execution",
-    "/application/work/admit-execution",
-    "binding.http.work.admit_execution",
-    "schema.work.admit_execution.result",
-    1
+    WorkAdmitExecution, work_admit_execution, "operation.work.admit_execution",
+    "/application/work/admit-execution", "binding.http.work.admit_execution",
+    "schema.work.admit_execution.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attach_runtime_evidence {
@@ -2701,12 +2720,18 @@ pub mod work_attach_runtime_evidence {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -2788,7 +2813,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -2839,7 +2864,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -2924,7 +2949,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -3029,7 +3054,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -3068,12 +3093,18 @@ pub mod work_attach_runtime_evidence {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -3108,7 +3139,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -3159,7 +3190,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -3210,7 +3241,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -3261,7 +3292,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -3312,7 +3343,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -3363,7 +3394,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -3448,7 +3479,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -3631,7 +3662,7 @@ pub mod work_attach_runtime_evidence {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -3667,13 +3698,11 @@ pub mod work_attach_runtime_evidence {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkAttachRuntimeEvidence,
-    work_attach_runtime_evidence,
+    WorkAttachRuntimeEvidence, work_attach_runtime_evidence,
     "operation.work.attach_runtime_evidence",
     "/application/work/attach-runtime-evidence",
     "binding.http.work.attach_runtime_evidence",
-    "schema.work.attach_runtime_evidence.result",
-    1
+    "schema.work.attach_runtime_evidence.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_acquire_lease {
@@ -3684,12 +3713,18 @@ pub mod work_attempt_acquire_lease {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -3724,7 +3759,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -3775,7 +3810,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -3826,7 +3861,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -3877,7 +3912,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -3928,7 +3963,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -3979,7 +4014,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -4030,7 +4065,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -4081,7 +4116,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -4132,7 +4167,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -4217,7 +4252,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -4511,7 +4546,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -4924,7 +4959,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -5004,7 +5039,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -5043,12 +5078,18 @@ pub mod work_attempt_acquire_lease {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -5083,7 +5124,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -5134,7 +5175,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -5185,7 +5226,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -5236,7 +5277,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -5287,7 +5328,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -5338,7 +5379,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -5443,7 +5484,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -5669,7 +5710,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -5697,7 +5738,9 @@ pub mod work_attempt_acquire_lease {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -5708,7 +5751,9 @@ pub mod work_attempt_acquire_lease {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -5725,7 +5770,9 @@ pub mod work_attempt_acquire_lease {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -5919,7 +5966,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -6062,17 +6109,20 @@ pub mod work_attempt_acquire_lease {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -6181,7 +6231,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -6287,7 +6337,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -6456,13 +6506,10 @@ pub mod work_attempt_acquire_lease {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -6496,7 +6543,7 @@ pub mod work_attempt_acquire_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -6520,7 +6567,9 @@ pub mod work_attempt_acquire_lease {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -6532,7 +6581,9 @@ pub mod work_attempt_acquire_lease {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -6627,33 +6678,21 @@ pub mod work_attempt_acquire_lease {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptAcquireLeaseRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptAcquireLease,
-    work_attempt_acquire_lease,
-    "operation.work.attempt_acquire_lease",
-    "/application/work/attempt/acquire-lease",
+    WorkAttemptAcquireLease, work_attempt_acquire_lease,
+    "operation.work.attempt_acquire_lease", "/application/work/attempt/acquire-lease",
     "binding.http.work.attempt_acquire_lease",
-    "schema.work.attempt_acquire_lease.result",
-    1
+    "schema.work.attempt_acquire_lease.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_cancel {
@@ -6664,12 +6703,18 @@ pub mod work_attempt_cancel {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -6704,7 +6749,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -6755,7 +6800,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -6806,7 +6851,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -6980,7 +7025,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -7144,7 +7189,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -7183,12 +7228,18 @@ pub mod work_attempt_cancel {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -7223,7 +7274,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -7274,7 +7325,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -7325,7 +7376,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -7376,7 +7427,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -7427,7 +7478,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -7478,7 +7529,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -7583,7 +7634,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -7809,7 +7860,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -7837,7 +7888,9 @@ pub mod work_attempt_cancel {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -7848,7 +7901,9 @@ pub mod work_attempt_cancel {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -7865,7 +7920,9 @@ pub mod work_attempt_cancel {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -8059,7 +8116,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -8202,17 +8259,20 @@ pub mod work_attempt_cancel {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -8321,7 +8381,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -8427,7 +8487,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -8596,13 +8656,10 @@ pub mod work_attempt_cancel {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -8636,7 +8693,7 @@ pub mod work_attempt_cancel {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -8660,7 +8717,9 @@ pub mod work_attempt_cancel {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -8672,7 +8731,9 @@ pub mod work_attempt_cancel {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -8767,33 +8828,20 @@ pub mod work_attempt_cancel {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptCancelRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptCancel,
-    work_attempt_cancel,
-    "operation.work.attempt_cancel",
-    "/application/work/attempt/cancel",
-    "binding.http.work.attempt_cancel",
-    "schema.work.attempt_cancel.result",
-    1
+    WorkAttemptCancel, work_attempt_cancel, "operation.work.attempt_cancel",
+    "/application/work/attempt/cancel", "binding.http.work.attempt_cancel",
+    "schema.work.attempt_cancel.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_finish {
@@ -8804,12 +8852,18 @@ pub mod work_attempt_finish {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -8844,7 +8898,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -8895,7 +8949,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -8946,7 +9000,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -9033,10 +9087,10 @@ pub mod work_attempt_finish {
         }
         /**Seals the outcome the provider itself reported.
 
-        This carries no terminal: the caller does not get to say how the attempt
-        ended, because the digest would then be whatever the caller invented rather
-        than a hash of the evidence the provider produced. The runtime claims the
-        settlement, seals its evidence as an artifact, and derives the terminal.*/
+This carries no terminal: the caller does not get to say how the attempt
+ended, because the digest would then be whatever the caller invented rather
+than a hash of the evidence the provider produced. The runtime claims the
+settlement, seals its evidence as an artifact, and derives the terminal.*/
         ///
         /// <details><summary>JSON schema</summary>
         ///
@@ -9210,7 +9264,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -9249,12 +9303,18 @@ pub mod work_attempt_finish {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -9289,7 +9349,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -9340,7 +9400,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -9391,7 +9451,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -9442,7 +9502,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -9493,7 +9553,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -9544,7 +9604,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -9649,7 +9709,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -9875,7 +9935,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -9903,7 +9963,9 @@ pub mod work_attempt_finish {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -9914,7 +9976,9 @@ pub mod work_attempt_finish {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -9931,7 +9995,9 @@ pub mod work_attempt_finish {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -10125,7 +10191,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -10268,17 +10334,20 @@ pub mod work_attempt_finish {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -10387,7 +10456,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -10493,7 +10562,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -10662,13 +10731,10 @@ pub mod work_attempt_finish {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -10702,7 +10768,7 @@ pub mod work_attempt_finish {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -10726,7 +10792,9 @@ pub mod work_attempt_finish {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -10738,7 +10806,9 @@ pub mod work_attempt_finish {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -10833,33 +10903,20 @@ pub mod work_attempt_finish {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptFinishRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptFinish,
-    work_attempt_finish,
-    "operation.work.attempt_finish",
-    "/application/work/attempt/finish",
-    "binding.http.work.attempt_finish",
-    "schema.work.attempt_finish.result",
-    1
+    WorkAttemptFinish, work_attempt_finish, "operation.work.attempt_finish",
+    "/application/work/attempt/finish", "binding.http.work.attempt_finish",
+    "schema.work.attempt_finish.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_publish_artifact {
@@ -10870,12 +10927,18 @@ pub mod work_attempt_publish_artifact {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -10910,7 +10973,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -10961,7 +11024,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -11012,7 +11075,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -11063,7 +11126,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -11114,7 +11177,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -11354,7 +11417,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -11393,12 +11456,18 @@ pub mod work_attempt_publish_artifact {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -11433,7 +11502,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -11484,7 +11553,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -11535,7 +11604,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -11586,7 +11655,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -11637,7 +11706,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -11688,7 +11757,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -11793,7 +11862,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -12019,7 +12088,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -12047,7 +12116,9 @@ pub mod work_attempt_publish_artifact {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -12058,7 +12129,9 @@ pub mod work_attempt_publish_artifact {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -12075,7 +12148,9 @@ pub mod work_attempt_publish_artifact {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -12269,7 +12344,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -12412,17 +12487,20 @@ pub mod work_attempt_publish_artifact {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -12531,7 +12609,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -12637,7 +12715,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -12806,13 +12884,10 @@ pub mod work_attempt_publish_artifact {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -12846,7 +12921,7 @@ pub mod work_attempt_publish_artifact {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -12870,7 +12945,9 @@ pub mod work_attempt_publish_artifact {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -12882,7 +12959,9 @@ pub mod work_attempt_publish_artifact {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -12977,33 +13056,22 @@ pub mod work_attempt_publish_artifact {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptPublishArtifactRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptPublishArtifact,
-    work_attempt_publish_artifact,
+    WorkAttemptPublishArtifact, work_attempt_publish_artifact,
     "operation.work.attempt_publish_artifact",
     "/application/work/attempt/publish-artifact",
     "binding.http.work.attempt_publish_artifact",
-    "schema.work.attempt_publish_artifact.result",
-    1
+    "schema.work.attempt_publish_artifact.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_publish_progress {
@@ -13014,12 +13082,18 @@ pub mod work_attempt_publish_progress {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -13054,7 +13128,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -13105,7 +13179,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -13156,7 +13230,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -13393,7 +13467,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -13432,12 +13506,18 @@ pub mod work_attempt_publish_progress {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -13472,7 +13552,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -13523,7 +13603,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -13574,7 +13654,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -13625,7 +13705,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -13676,7 +13756,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -13727,7 +13807,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -13832,7 +13912,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -14058,7 +14138,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -14086,7 +14166,9 @@ pub mod work_attempt_publish_progress {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -14097,7 +14179,9 @@ pub mod work_attempt_publish_progress {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -14114,7 +14198,9 @@ pub mod work_attempt_publish_progress {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -14308,7 +14394,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -14451,17 +14537,20 @@ pub mod work_attempt_publish_progress {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -14570,7 +14659,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -14676,7 +14765,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -14845,13 +14934,10 @@ pub mod work_attempt_publish_progress {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -14885,7 +14971,7 @@ pub mod work_attempt_publish_progress {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -14909,7 +14995,9 @@ pub mod work_attempt_publish_progress {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -14921,7 +15009,9 @@ pub mod work_attempt_publish_progress {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -15016,33 +15106,22 @@ pub mod work_attempt_publish_progress {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptPublishProgressRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptPublishProgress,
-    work_attempt_publish_progress,
+    WorkAttemptPublishProgress, work_attempt_publish_progress,
     "operation.work.attempt_publish_progress",
     "/application/work/attempt/publish-progress",
     "binding.http.work.attempt_publish_progress",
-    "schema.work.attempt_publish_progress.result",
-    1
+    "schema.work.attempt_publish_progress.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_recover {
@@ -15053,12 +15132,18 @@ pub mod work_attempt_recover {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -15093,7 +15178,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -15144,7 +15229,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -15195,7 +15280,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -15399,7 +15484,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -15456,7 +15541,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -15480,7 +15565,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -15492,7 +15579,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -15520,12 +15609,18 @@ pub mod work_attempt_recover {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -15560,7 +15655,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -15611,7 +15706,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -15662,7 +15757,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -15713,7 +15808,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -15764,7 +15859,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -15815,7 +15910,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -15920,7 +16015,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -16146,7 +16241,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -16174,7 +16269,9 @@ pub mod work_attempt_recover {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -16185,7 +16282,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -16202,7 +16301,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -16396,7 +16497,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -16539,17 +16640,20 @@ pub mod work_attempt_recover {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -16658,7 +16762,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -16764,7 +16868,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -16933,13 +17037,10 @@ pub mod work_attempt_recover {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -16973,7 +17074,7 @@ pub mod work_attempt_recover {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -16997,7 +17098,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -17009,7 +17112,9 @@ pub mod work_attempt_recover {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -17104,33 +17209,20 @@ pub mod work_attempt_recover {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptRecoverRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptRecover,
-    work_attempt_recover,
-    "operation.work.attempt_recover",
-    "/application/work/attempt/recover",
-    "binding.http.work.attempt_recover",
-    "schema.work.attempt_recover.result",
-    1
+    WorkAttemptRecover, work_attempt_recover, "operation.work.attempt_recover",
+    "/application/work/attempt/recover", "binding.http.work.attempt_recover",
+    "schema.work.attempt_recover.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_renew_lease {
@@ -17141,12 +17233,18 @@ pub mod work_attempt_renew_lease {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -17181,7 +17279,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -17232,7 +17330,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -17283,7 +17381,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -17487,7 +17585,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -17526,12 +17624,18 @@ pub mod work_attempt_renew_lease {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -17566,7 +17670,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -17617,7 +17721,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -17668,7 +17772,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -17719,7 +17823,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -17770,7 +17874,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -17821,7 +17925,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -17926,7 +18030,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -18152,7 +18256,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -18180,7 +18284,9 @@ pub mod work_attempt_renew_lease {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -18191,7 +18297,9 @@ pub mod work_attempt_renew_lease {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -18208,7 +18316,9 @@ pub mod work_attempt_renew_lease {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -18402,7 +18512,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -18545,17 +18655,20 @@ pub mod work_attempt_renew_lease {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -18664,7 +18777,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -18770,7 +18883,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -18939,13 +19052,10 @@ pub mod work_attempt_renew_lease {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -18979,7 +19089,7 @@ pub mod work_attempt_renew_lease {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -19003,7 +19113,9 @@ pub mod work_attempt_renew_lease {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -19015,7 +19127,9 @@ pub mod work_attempt_renew_lease {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -19110,33 +19224,20 @@ pub mod work_attempt_renew_lease {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptRenewLeaseRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptRenewLease,
-    work_attempt_renew_lease,
-    "operation.work.attempt_renew_lease",
-    "/application/work/attempt/renew-lease",
-    "binding.http.work.attempt_renew_lease",
-    "schema.work.attempt_renew_lease.result",
-    1
+    WorkAttemptRenewLease, work_attempt_renew_lease,
+    "operation.work.attempt_renew_lease", "/application/work/attempt/renew-lease",
+    "binding.http.work.attempt_renew_lease", "schema.work.attempt_renew_lease.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_start {
@@ -19147,12 +19248,18 @@ pub mod work_attempt_start {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -19187,7 +19294,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -19238,7 +19345,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -19289,7 +19396,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -19340,7 +19447,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -19391,7 +19498,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -19631,7 +19738,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -19771,13 +19878,10 @@ pub mod work_attempt_start {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -19811,7 +19915,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -19835,7 +19939,9 @@ pub mod work_attempt_start {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -19847,7 +19953,9 @@ pub mod work_attempt_start {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -19875,12 +19983,18 @@ pub mod work_attempt_start {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -19915,7 +20029,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -19966,7 +20080,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -20017,7 +20131,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -20068,7 +20182,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -20119,7 +20233,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -20170,7 +20284,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -20275,7 +20389,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -20501,7 +20615,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -20529,7 +20643,9 @@ pub mod work_attempt_start {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -20540,7 +20656,9 @@ pub mod work_attempt_start {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -20557,7 +20675,9 @@ pub mod work_attempt_start {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -20751,7 +20871,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -20894,17 +21014,20 @@ pub mod work_attempt_start {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -21013,7 +21136,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -21119,7 +21242,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -21288,13 +21411,10 @@ pub mod work_attempt_start {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -21328,7 +21448,7 @@ pub mod work_attempt_start {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -21352,7 +21472,9 @@ pub mod work_attempt_start {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -21364,7 +21486,9 @@ pub mod work_attempt_start {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -21459,33 +21583,20 @@ pub mod work_attempt_start {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptStartRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptStart,
-    work_attempt_start,
-    "operation.work.attempt_start",
-    "/application/work/attempt/start",
-    "binding.http.work.attempt_start",
-    "schema.work.attempt_start.result",
-    1
+    WorkAttemptStart, work_attempt_start, "operation.work.attempt_start",
+    "/application/work/attempt/start", "binding.http.work.attempt_start",
+    "schema.work.attempt_start.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_attempt_terminalize {
@@ -21496,12 +21607,18 @@ pub mod work_attempt_terminalize {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -21536,7 +21653,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -21587,7 +21704,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -21638,7 +21755,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -21689,7 +21806,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -21947,7 +22064,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -22053,20 +22170,11 @@ pub mod work_attempt_terminalize {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub mod result {
@@ -22076,12 +22184,18 @@ pub mod work_attempt_terminalize {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -22116,7 +22230,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct AttemptId(pub ::std::string::String);
@@ -22167,7 +22281,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -22218,7 +22332,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -22269,7 +22383,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProviderId(pub ::std::string::String);
@@ -22320,7 +22434,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -22371,7 +22485,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -22476,7 +22590,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkArtifactId(pub ::std::string::String);
@@ -22702,7 +22816,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkAttemptStateV1 {
             #[serde(rename = "leased")]
@@ -22730,7 +22844,9 @@ pub mod work_attempt_terminalize {
                     Self::Leased => f.write_str("leased"),
                     Self::Running => f.write_str("running"),
                     Self::CancellationRequested => f.write_str("cancellation_requested"),
-                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationAcknowledged => {
+                        f.write_str("cancellation_acknowledged")
+                    }
                     Self::CancellationEscalated => f.write_str("cancellation_escalated"),
                     Self::RecoveryRequired => f.write_str("recovery_required"),
                     Self::Succeeded => f.write_str("succeeded"),
@@ -22741,7 +22857,9 @@ pub mod work_attempt_terminalize {
         }
         impl ::std::str::FromStr for WorkAttemptStateV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "leased" => Ok(Self::Leased),
                     "running" => Ok(Self::Running),
@@ -22758,7 +22876,9 @@ pub mod work_attempt_terminalize {
         }
         impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -22952,7 +23072,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCancellationRequestId(pub ::std::string::String);
@@ -23095,17 +23215,20 @@ pub mod work_attempt_terminalize {
             #[serde(rename = "escalated")]
             Escalated(WorkCancellationEscalationV1),
         }
-        impl ::std::convert::From<WorkCancellationRequestV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationRequestV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationRequestV1) -> Self {
                 Self::Requested(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationAcknowledgementV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationAcknowledgementV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationAcknowledgementV1) -> Self {
                 Self::Acknowledged(value)
             }
         }
-        impl ::std::convert::From<WorkCancellationEscalationV1> for WorkCancellationStateV1 {
+        impl ::std::convert::From<WorkCancellationEscalationV1>
+        for WorkCancellationStateV1 {
             fn from(value: WorkCancellationEscalationV1) -> Self {
                 Self::Escalated(value)
             }
@@ -23214,7 +23337,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkLeaseId(pub ::std::string::String);
@@ -23320,7 +23443,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkProviderRouteId(pub ::std::string::String);
@@ -23489,13 +23612,10 @@ pub mod work_attempt_terminalize {
                 source_attempt_id: AttemptId,
             },
             #[serde(rename = "restarted")]
-            Restarted {
-                reason: WorkRestartReasonV1,
-                source_attempt_id: AttemptId,
-            },
+            Restarted { reason: WorkRestartReasonV1, source_attempt_id: AttemptId },
             /**The attempt cannot continue and must be recovered. A first attempt
-            lost before it ever resumed anything has no predecessor, so the source
-            is absent rather than pointing at the attempt itself.*/
+lost before it ever resumed anything has no predecessor, so the source
+is absent rather than pointing at the attempt itself.*/
             #[serde(rename = "recovery_required")]
             RecoveryRequired {
                 reason: WorkRestartReasonV1,
@@ -23529,7 +23649,7 @@ pub mod work_attempt_terminalize {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum WorkRestartReasonV1 {
             #[serde(rename = "lease_lost")]
@@ -23553,7 +23673,9 @@ pub mod work_attempt_terminalize {
         }
         impl ::std::str::FromStr for WorkRestartReasonV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "lease_lost" => Ok(Self::LeaseLost),
                     "provider_unavailable" => Ok(Self::ProviderUnavailable),
@@ -23565,7 +23687,9 @@ pub mod work_attempt_terminalize {
         }
         impl ::std::convert::TryFrom<&str> for WorkRestartReasonV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
@@ -23660,33 +23784,20 @@ pub mod work_attempt_terminalize {
         #[serde(tag = "outcome")]
         pub enum WorkTerminalEvidenceV1 {
             #[serde(rename = "succeeded")]
-            Succeeded {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Succeeded { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "failed")]
-            Failed {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Failed { evidence_digest: ManifestDigest, observed_at: UtcMicros },
             #[serde(rename = "cancelled")]
-            Cancelled {
-                evidence_digest: ManifestDigest,
-                observed_at: UtcMicros,
-            },
+            Cancelled { evidence_digest: ManifestDigest, observed_at: UtcMicros },
         }
     }
     pub type Request = request::WorkAttemptTerminalizeRequestV1;
     pub type Result = result::WorkAttemptResponseV1;
 }
 typed_operation!(
-    WorkAttemptTerminalize,
-    work_attempt_terminalize,
-    "operation.work.attempt_terminalize",
-    "/application/work/attempt/terminalize",
-    "binding.http.work.attempt_terminalize",
-    "schema.work.attempt_terminalize.result",
-    1
+    WorkAttemptTerminalize, work_attempt_terminalize,
+    "operation.work.attempt_terminalize", "/application/work/attempt/terminalize",
+    "binding.http.work.attempt_terminalize", "schema.work.attempt_terminalize.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_create {
@@ -23697,12 +23808,18 @@ pub mod work_create {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -23787,7 +23904,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -23892,7 +24009,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -23937,12 +24054,18 @@ pub mod work_create {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -23977,7 +24100,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -24028,7 +24151,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -24079,7 +24202,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -24130,7 +24253,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -24181,7 +24304,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -24232,7 +24355,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -24317,7 +24440,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -24500,7 +24623,7 @@ pub mod work_create {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -24536,13 +24659,8 @@ pub mod work_create {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkCreate,
-    work_create,
-    "operation.work.create",
-    "/application/work/create",
-    "binding.http.work.create",
-    "schema.work.create.result",
-    1
+    WorkCreate, work_create, "operation.work.create", "/application/work/create",
+    "binding.http.work.create", "schema.work.create.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_delta {
@@ -24553,12 +24671,18 @@ pub mod work_delta {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -24593,7 +24717,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -24691,12 +24815,18 @@ pub mod work_delta {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -24731,7 +24861,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -24782,7 +24912,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -24833,7 +24963,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -24884,7 +25014,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -24935,7 +25065,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -24986,7 +25116,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -25037,7 +25167,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -25122,7 +25252,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -25594,7 +25724,7 @@ pub mod work_delta {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -25630,13 +25760,8 @@ pub mod work_delta {
     pub type Result = result::WorkProjectionDeltaV1;
 }
 typed_operation!(
-    WorkDelta,
-    work_delta,
-    "operation.work.delta",
-    "/application/work/delta",
-    "binding.http.work.delta",
-    "schema.work.delta.result",
-    1
+    WorkDelta, work_delta, "operation.work.delta", "/application/work/delta",
+    "binding.http.work.delta", "schema.work.delta.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_replan_dependencies {
@@ -25647,12 +25772,18 @@ pub mod work_replan_dependencies {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -25739,7 +25870,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -25844,7 +25975,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -25877,7 +26008,9 @@ pub mod work_replan_dependencies {
         }
         /// Generation of default values for serde.
         pub mod defaults {
-            pub(super) fn replan_dependencies_command_dependencies() -> Vec<super::TaskId> {
+            pub(super) fn replan_dependencies_command_dependencies() -> Vec<
+                super::TaskId,
+            > {
                 vec![]
             }
         }
@@ -25889,12 +26022,18 @@ pub mod work_replan_dependencies {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -25929,7 +26068,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -25980,7 +26119,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -26031,7 +26170,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -26082,7 +26221,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -26133,7 +26272,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -26184,7 +26323,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -26269,7 +26408,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -26452,7 +26591,7 @@ pub mod work_replan_dependencies {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -26488,13 +26627,9 @@ pub mod work_replan_dependencies {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkReplanDependencies,
-    work_replan_dependencies,
-    "operation.work.replan_dependencies",
-    "/application/work/replan-dependencies",
-    "binding.http.work.replan_dependencies",
-    "schema.work.replan_dependencies.result",
-    1
+    WorkReplanDependencies, work_replan_dependencies,
+    "operation.work.replan_dependencies", "/application/work/replan-dependencies",
+    "binding.http.work.replan_dependencies", "schema.work.replan_dependencies.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_review_proposal {
@@ -26505,12 +26640,18 @@ pub mod work_review_proposal {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -26545,7 +26686,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -26596,7 +26737,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -26679,8 +26820,8 @@ pub mod work_review_proposal {
             pub task_id: TaskId,
         }
         /**A proposal review records a non-accepting disposition. Acceptance remains a
-        separate command so callers cannot accidentally collapse review into
-        approval.*/
+separate command so callers cannot accidentally collapse review into
+approval.*/
         ///
         /// <details><summary>JSON schema</summary>
         ///
@@ -26705,7 +26846,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         pub enum ReviewProposalDispositionV1 {
             #[serde(rename = "rejected")]
@@ -26723,7 +26864,9 @@ pub mod work_review_proposal {
         }
         impl ::std::str::FromStr for ReviewProposalDispositionV1 {
             type Err = self::error::ConversionError;
-            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn from_str(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 match value {
                     "rejected" => Ok(Self::Rejected),
                     "superseded" => Ok(Self::Superseded),
@@ -26733,11 +26876,14 @@ pub mod work_review_proposal {
         }
         impl ::std::convert::TryFrom<&str> for ReviewProposalDispositionV1 {
             type Error = self::error::ConversionError;
-            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            fn try_from(
+                value: &str,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
                 value.parse()
             }
         }
-        impl ::std::convert::TryFrom<&::std::string::String> for ReviewProposalDispositionV1 {
+        impl ::std::convert::TryFrom<&::std::string::String>
+        for ReviewProposalDispositionV1 {
             type Error = self::error::ConversionError;
             fn try_from(
                 value: &::std::string::String,
@@ -26745,7 +26891,8 @@ pub mod work_review_proposal {
                 value.parse()
             }
         }
-        impl ::std::convert::TryFrom<::std::string::String> for ReviewProposalDispositionV1 {
+        impl ::std::convert::TryFrom<::std::string::String>
+        for ReviewProposalDispositionV1 {
             type Error = self::error::ConversionError;
             fn try_from(
                 value: ::std::string::String,
@@ -26803,7 +26950,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -26908,7 +27055,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorkCommandId(pub ::std::string::String);
@@ -26947,12 +27094,18 @@ pub mod work_review_proposal {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -26987,7 +27140,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -27038,7 +27191,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -27089,7 +27242,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -27140,7 +27293,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -27191,7 +27344,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -27242,7 +27395,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -27327,7 +27480,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -27510,7 +27663,7 @@ pub mod work_review_proposal {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -27546,13 +27699,9 @@ pub mod work_review_proposal {
     pub type Result = result::WorkProjection;
 }
 typed_operation!(
-    WorkReviewProposal,
-    work_review_proposal,
-    "operation.work.review_proposal",
-    "/application/work/review-proposal",
-    "binding.http.work.review_proposal",
-    "schema.work.review_proposal.result",
-    1
+    WorkReviewProposal, work_review_proposal, "operation.work.review_proposal",
+    "/application/work/review-proposal", "binding.http.work.review_proposal",
+    "schema.work.review_proposal.result", 1
 );
 #[allow(clippy::all)]
 pub mod work_snapshot {
@@ -27563,12 +27712,18 @@ pub mod work_snapshot {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -27618,12 +27773,18 @@ pub mod work_snapshot {
             pub struct ConversionError(::std::borrow::Cow<'static, str>);
             impl ::std::error::Error for ConversionError {}
             impl ::std::fmt::Display for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Display::fmt(&self.0, f)
                 }
             }
             impl ::std::fmt::Debug for ConversionError {
-                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                fn fmt(
+                    &self,
+                    f: &mut ::std::fmt::Formatter<'_>,
+                ) -> Result<(), ::std::fmt::Error> {
                     ::std::fmt::Debug::fmt(&self.0, f)
                 }
             }
@@ -27658,7 +27819,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ActorId(pub ::std::string::String);
@@ -27709,7 +27870,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ManifestDigest(pub ::std::string::String);
@@ -27760,7 +27921,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectId(pub ::std::string::String);
@@ -27811,7 +27972,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProjectionGenerationId(pub ::std::string::String);
@@ -27862,7 +28023,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct ProposalId(pub ::std::string::String);
@@ -27913,7 +28074,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RepositoryId(pub ::std::string::String);
@@ -27964,7 +28125,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct RunId(pub ::std::string::String);
@@ -28049,7 +28210,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct TaskId(pub ::std::string::String);
@@ -28507,7 +28668,7 @@ pub mod work_snapshot {
             Hash,
             Ord,
             PartialEq,
-            PartialOrd,
+            PartialOrd
         )]
         #[serde(transparent)]
         pub struct WorktreeId(pub ::std::string::String);
@@ -28543,13 +28704,8 @@ pub mod work_snapshot {
     pub type Result = result::WorkProjectionSnapshotV1;
 }
 typed_operation!(
-    WorkSnapshot,
-    work_snapshot,
-    "operation.work.snapshot",
-    "/application/work/snapshot",
-    "binding.http.work.snapshot",
-    "schema.work.snapshot.result",
-    1
+    WorkSnapshot, work_snapshot, "operation.work.snapshot", "/application/work/snapshot",
+    "binding.http.work.snapshot", "schema.work.snapshot.result", 1
 );
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BaseOperationCapability {
@@ -28557,7 +28713,9 @@ pub struct BaseOperationCapability {
     pub route: String,
     pub disposition: ExecutableUnavailableDispositionV1,
 }
-pub fn base_operation_capabilities() -> impl ExactSizeIterator<Item = BaseOperationCapability> {
+pub fn base_operation_capabilities() -> impl ExactSizeIterator<
+    Item = BaseOperationCapability,
+> {
     HttpApplicationOperation::ALL
         .iter()
         .copied()

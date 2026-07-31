@@ -719,9 +719,14 @@ fn render_python_operations(
     for operation in operations {
         writeln!(
             out,
+            // Call the bare class, not `OperationDescriptor[..Request, ..Result](..)`:
+            // instantiating the subscripted alias of a frozen+slots dataclass
+            // crashes CPython 3.10's typing.__call__ when it stamps
+            // __orig_class__, and the surrounding cast erases the parameters
+            // anyway, so the subscript bought nothing at runtime or for types.
             "    {name:?}: cast(\n\
              \x20       OperationDescriptor[object, object],\n\
-             \x20       OperationDescriptor[{type_name}Request, {type_name}Result](\n\
+             \x20       OperationDescriptor(\n\
              \x20       operation={name:?}, operation_id={operation_id:?}, route={route:?},\n\
              \x20       binding_id={binding:?}, result_schema_id={result_schema_id:?},\n\
              \x20       result_schema_revision={result_revision},\n\
@@ -730,7 +735,6 @@ fn render_python_operations(
              \x20       ),\n\
              \x20   ),",
             name = operation.name,
-            type_name = operation.type_name,
             operation_id = operation.operation_id,
             route = operation.route,
             binding = operation.binding,

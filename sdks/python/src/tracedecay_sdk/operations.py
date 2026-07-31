@@ -1811,7 +1811,7 @@ class OperationDescriptor(Generic[RequestT, ResultT]):
 WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     "work_accept_proposal": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAcceptProposalRequest, OperationWorkAcceptProposalResult](
+        OperationDescriptor(
         operation="work_accept_proposal", operation_id="operation.work.accept_proposal", route="/application/work/accept-proposal",
         binding_id="binding.http.work.accept_proposal", result_schema_id="schema.work.accept_proposal.result",
         result_schema_revision=1,
@@ -1821,7 +1821,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_accept_task": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAcceptTaskRequest, OperationWorkAcceptTaskResult](
+        OperationDescriptor(
         operation="work_accept_task", operation_id="operation.work.accept_task", route="/application/work/accept-task",
         binding_id="binding.http.work.accept_task", result_schema_id="schema.work.accept_task.result",
         result_schema_revision=1,
@@ -1831,7 +1831,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_admit_execution": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAdmitExecutionRequest, OperationWorkAdmitExecutionResult](
+        OperationDescriptor(
         operation="work_admit_execution", operation_id="operation.work.admit_execution", route="/application/work/admit-execution",
         binding_id="binding.http.work.admit_execution", result_schema_id="schema.work.admit_execution.result",
         result_schema_revision=1,
@@ -1841,7 +1841,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attach_runtime_evidence": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttachRuntimeEvidenceRequest, OperationWorkAttachRuntimeEvidenceResult](
+        OperationDescriptor(
         operation="work_attach_runtime_evidence", operation_id="operation.work.attach_runtime_evidence", route="/application/work/attach-runtime-evidence",
         binding_id="binding.http.work.attach_runtime_evidence", result_schema_id="schema.work.attach_runtime_evidence.result",
         result_schema_revision=1,
@@ -1851,7 +1851,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_acquire_lease": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptAcquireLeaseRequest, OperationWorkAttemptAcquireLeaseResult](
+        OperationDescriptor(
         operation="work_attempt_acquire_lease", operation_id="operation.work.attempt_acquire_lease", route="/application/work/attempt/acquire-lease",
         binding_id="binding.http.work.attempt_acquire_lease", result_schema_id="schema.work.attempt_acquire_lease.result",
         result_schema_revision=1,
@@ -1861,7 +1861,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_cancel": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptCancelRequest, OperationWorkAttemptCancelResult](
+        OperationDescriptor(
         operation="work_attempt_cancel", operation_id="operation.work.attempt_cancel", route="/application/work/attempt/cancel",
         binding_id="binding.http.work.attempt_cancel", result_schema_id="schema.work.attempt_cancel.result",
         result_schema_revision=1,
@@ -1871,7 +1871,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_finish": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptFinishRequest, OperationWorkAttemptFinishResult](
+        OperationDescriptor(
         operation="work_attempt_finish", operation_id="operation.work.attempt_finish", route="/application/work/attempt/finish",
         binding_id="binding.http.work.attempt_finish", result_schema_id="schema.work.attempt_finish.result",
         result_schema_revision=1,
@@ -1881,7 +1881,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_publish_artifact": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptPublishArtifactRequest, OperationWorkAttemptPublishArtifactResult](
+        OperationDescriptor(
         operation="work_attempt_publish_artifact", operation_id="operation.work.attempt_publish_artifact", route="/application/work/attempt/publish-artifact",
         binding_id="binding.http.work.attempt_publish_artifact", result_schema_id="schema.work.attempt_publish_artifact.result",
         result_schema_revision=1,
@@ -1891,7 +1891,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_publish_progress": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptPublishProgressRequest, OperationWorkAttemptPublishProgressResult](
+        OperationDescriptor(
         operation="work_attempt_publish_progress", operation_id="operation.work.attempt_publish_progress", route="/application/work/attempt/publish-progress",
         binding_id="binding.http.work.attempt_publish_progress", result_schema_id="schema.work.attempt_publish_progress.result",
         result_schema_revision=1,
@@ -1901,7 +1901,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_recover": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptRecoverRequest, OperationWorkAttemptRecoverResult](
+        OperationDescriptor(
         operation="work_attempt_recover", operation_id="operation.work.attempt_recover", route="/application/work/attempt/recover",
         binding_id="binding.http.work.attempt_recover", result_schema_id="schema.work.attempt_recover.result",
         result_schema_revision=1,
@@ -1911,7 +1911,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_renew_lease": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptRenewLeaseRequest, OperationWorkAttemptRenewLeaseResult](
+        OperationDescriptor(
         operation="work_attempt_renew_lease", operation_id="operation.work.attempt_renew_lease", route="/application/work/attempt/renew-lease",
         binding_id="binding.http.work.attempt_renew_lease", result_schema_id="schema.work.attempt_renew_lease.result",
         result_schema_revision=1,
@@ -1921,7 +1921,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_start": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptStartRequest, OperationWorkAttemptStartResult](
+        OperationDescriptor(
         operation="work_attempt_start", operation_id="operation.work.attempt_start", route="/application/work/attempt/start",
         binding_id="binding.http.work.attempt_start", result_schema_id="schema.work.attempt_start.result",
         result_schema_revision=1,
@@ -1931,7 +1931,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_attempt_terminalize": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkAttemptTerminalizeRequest, OperationWorkAttemptTerminalizeResult](
+        OperationDescriptor(
         operation="work_attempt_terminalize", operation_id="operation.work.attempt_terminalize", route="/application/work/attempt/terminalize",
         binding_id="binding.http.work.attempt_terminalize", result_schema_id="schema.work.attempt_terminalize.result",
         result_schema_revision=1,
@@ -1941,7 +1941,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_create": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkCreateRequest, OperationWorkCreateResult](
+        OperationDescriptor(
         operation="work_create", operation_id="operation.work.create", route="/application/work/create",
         binding_id="binding.http.work.create", result_schema_id="schema.work.create.result",
         result_schema_revision=1,
@@ -1951,7 +1951,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_delta": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkDeltaRequest, OperationWorkDeltaResult](
+        OperationDescriptor(
         operation="work_delta", operation_id="operation.work.delta", route="/application/work/delta",
         binding_id="binding.http.work.delta", result_schema_id="schema.work.delta.result",
         result_schema_revision=1,
@@ -1961,7 +1961,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_replan_dependencies": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkReplanDependenciesRequest, OperationWorkReplanDependenciesResult](
+        OperationDescriptor(
         operation="work_replan_dependencies", operation_id="operation.work.replan_dependencies", route="/application/work/replan-dependencies",
         binding_id="binding.http.work.replan_dependencies", result_schema_id="schema.work.replan_dependencies.result",
         result_schema_revision=1,
@@ -1971,7 +1971,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_review_proposal": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkReviewProposalRequest, OperationWorkReviewProposalResult](
+        OperationDescriptor(
         operation="work_review_proposal", operation_id="operation.work.review_proposal", route="/application/work/review-proposal",
         binding_id="binding.http.work.review_proposal", result_schema_id="schema.work.review_proposal.result",
         result_schema_revision=1,
@@ -1981,7 +1981,7 @@ WORK_OPERATIONS: Final[dict[str, OperationDescriptor[object, object]]] = {
     ),
     "work_snapshot": cast(
         OperationDescriptor[object, object],
-        OperationDescriptor[OperationWorkSnapshotRequest, OperationWorkSnapshotResult](
+        OperationDescriptor(
         operation="work_snapshot", operation_id="operation.work.snapshot", route="/application/work/snapshot",
         binding_id="binding.http.work.snapshot", result_schema_id="schema.work.snapshot.result",
         result_schema_revision=1,
