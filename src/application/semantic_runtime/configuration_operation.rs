@@ -13,7 +13,7 @@ use tracedecay_domain::{
 use super::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
     SemanticAcceptedProfileAuthorityPortV1, SemanticActivationCoordinationErrorV1,
-    SemanticActivationReceiptV1, SemanticRollbackReceiptV1, SemanticRuntimeFuture,
+    SemanticRuntimeFuture,
 };
 use crate::application::configuration::{
     ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
@@ -281,26 +281,6 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
-    #[allow(dead_code)] // query semantic bootstrap port — preserve authority surface
-    pub(crate) async fn bootstrap_query(
-        &self,
-        configuration: ConfigurationCurrentStateV1,
-        accepted_profile_digest: &ManifestDigest,
-    ) -> Result<(), SemanticActivationCoordinationErrorV1> {
-        let accepted = self
-            .accepted_profiles
-            .resolve(accepted_profile_digest)
-            .await
-            .map_err(map_authority_error)?;
-        self.configuration
-            .bootstrap_query_retrieval_profile(
-                configuration,
-                accepted.accepted_profile,
-                &accepted.runtime,
-            )
-            .await
-    }
-
     pub(crate) async fn activate(
         &self,
         request: SemanticProtectedActivationOperationV1,
@@ -362,9 +342,6 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .await?;
             return Ok(SemanticAppliedActivationV1 {
                 configuration_receipt: applied.configuration_receipt,
-                semantic_receipt: applied
-                    .semantic_receipt
-                    .and_then(|receipt| receipt.restored_activation),
             });
         }
         if request.selected_profile.accepted_profile_digest == expected.expected_active_digest {
@@ -380,7 +357,6 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
             return Ok(SemanticAppliedActivationV1 {
                 configuration_receipt: receipt,
-                semantic_receipt: None,
             });
         }
         let current = self
@@ -398,8 +374,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 &expected.expected_configuration_revision,
             )
             .await?;
-        let semantic_receipt = self
-            .configuration
+        self.configuration
             .stage_and_activate_semantic(
                 base_pin,
                 preview.current,
@@ -415,7 +390,6 @@ impl ProductionSemanticConfigurationOperationV1 {
             .await?;
         Ok(SemanticAppliedActivationV1 {
             configuration_receipt: preview.receipt,
-            semantic_receipt: Some(semantic_receipt),
         })
     }
 
@@ -459,7 +433,6 @@ impl ProductionSemanticConfigurationOperationV1 {
                 .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
             return Ok(SemanticAppliedRollbackV1 {
                 configuration_receipt: receipt,
-                semantic_receipt: None,
             });
         }
         let restored_digest = expected
@@ -481,8 +454,7 @@ impl ProductionSemanticConfigurationOperationV1 {
                 &expected.expected_configuration_revision,
             )
             .await?;
-        let semantic_receipt = self
-            .configuration
+        self.configuration
             .stage_and_rollback_semantic(
                 base_pin,
                 preview.current,
@@ -497,7 +469,6 @@ impl ProductionSemanticConfigurationOperationV1 {
             .await?;
         Ok(SemanticAppliedRollbackV1 {
             configuration_receipt: preview.receipt,
-            semantic_receipt: Some(semantic_receipt),
         })
     }
 }
@@ -603,13 +574,10 @@ pub(crate) struct SemanticProtectedRollbackOperationV1 {
 
 pub(crate) struct SemanticAppliedActivationV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
-    #[allow(dead_code)] // activation outcome field — preserve authority surface
-    pub semantic_receipt: Option<SemanticActivationReceiptV1>,
 }
 
 pub(crate) struct SemanticAppliedRollbackV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
-    pub semantic_receipt: Option<SemanticRollbackReceiptV1>,
 }
 
 async fn current_configuration_state(
