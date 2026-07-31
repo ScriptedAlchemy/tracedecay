@@ -386,6 +386,16 @@ struct SealedPublishedGenerationEnvelopeV1 {
     generation: PersistedPublishedGenerationV1,
 }
 
+#[derive(Deserialize)]
+struct SealedPublishedGenerationFormatProbeV1 {
+    generation: PersistedPublishedGenerationFormatProbeV1,
+}
+
+#[derive(Deserialize)]
+struct PersistedPublishedGenerationFormatProbeV1 {
+    format_revision: u32,
+}
+
 #[derive(Serialize)]
 struct SealedPublishedGenerationEnvelopeRefV1<'a> {
     state_digest: &'a ManifestDigest,
@@ -756,17 +766,17 @@ impl CodeIndexPublishedGenerationV1 {
     /// Restore a complete sealed generation and repeat every canonical
     /// generation, chunk, graph, capability, and projection receipt check.
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        if !Self::sealed_format_is_compatible(bytes)? {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            ));
+        }
         let envelope: SealedPublishedGenerationEnvelopeV1 =
             serde_json::from_slice(bytes).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation decoding failed: {error}"
                 ))
             })?;
-        if envelope.generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            ));
-        }
         let expected_digest = canonical_sha256(&envelope.generation)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if expected_digest != envelope.state_digest {
@@ -822,6 +832,16 @@ impl CodeIndexPublishedGenerationV1 {
         };
         generation.validate()?;
         Ok(generation)
+    }
+
+    pub fn sealed_format_is_compatible(bytes: &[u8]) -> Result<bool, CodeIndexProductionErrorV1> {
+        let probe: SealedPublishedGenerationFormatProbeV1 =
+            serde_json::from_slice(bytes).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation format probe failed: {error}"
+                ))
+            })?;
+        Ok(probe.generation.format_revision == SEALED_GENERATION_FORMAT_REVISION_V1)
     }
 
     fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
