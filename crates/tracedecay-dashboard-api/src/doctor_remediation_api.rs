@@ -20,11 +20,10 @@ pub type DoctorRemediationPreviewRequestV1 =
     tracedecay_api::remediation::DoctorRemediationPreviewRequestV1<DoctorRemediationTargetV1>;
 pub type DoctorRemediationApplyRequestV1 =
     tracedecay_api::remediation::DoctorRemediationApplyRequestV1<DoctorRemediationTargetV1>;
-pub type DoctorRemediationPayloadV1 =
-    tracedecay_api::remediation::DoctorRemediationPayloadV1<
-        DoctorRemediationOperationV1,
-        DoctorRemediationDispatchErrorV1,
-    >;
+pub type DoctorRemediationPayloadV1 = tracedecay_api::remediation::DoctorRemediationPayloadV1<
+    DoctorRemediationOperationV1,
+    DoctorRemediationDispatchErrorV1,
+>;
 
 pub async fn preview(
     State(state): State<DashboardState>,

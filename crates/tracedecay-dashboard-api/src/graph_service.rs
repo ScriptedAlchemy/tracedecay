@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::types::{FileRecord, GraphStats};
+use tracedecay_domain::code_intelligence::{FileRecord, GraphStats};
 
 use super::DashboardState;
 use super::graph_queries;
@@ -413,9 +413,7 @@ async fn degree_summary(state: &DashboardState) -> Result<Arc<DegreeSummary>, St
     Ok(summary)
 }
 
-pub async fn overview_payload(
-    state: &DashboardState,
-) -> Result<GraphOverviewPayloadV1, String> {
+pub async fn overview_payload(state: &DashboardState) -> Result<GraphOverviewPayloadV1, String> {
     let (stats, files, summary) = tokio::join!(
         state.mem_db.get_stats(),
         state.mem_db.get_all_files(),
@@ -801,8 +799,8 @@ pub async fn path_payload(
 mod tests {
     use std::collections::HashMap;
 
-    use crate::types::{FileRecord, GraphStats};
     use serde_json::json;
+    use tracedecay_domain::code_intelligence::{FileRecord, GraphStats};
 
     use super::overview_metrics;
 

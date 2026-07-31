@@ -33,9 +33,7 @@ pub type FeedbackStatusReader =
 
 /// Erases the daemon registry behind a read-only, root-addressed application
 /// authority. Dashboard state receives no feedback database or provider owner.
-pub fn feedback_status_reader(
-    runtimes: DaemonFeedbackRuntimeRegistrar,
-) -> FeedbackStatusReader {
+pub fn feedback_status_reader(runtimes: DaemonFeedbackRuntimeRegistrar) -> FeedbackStatusReader {
     Arc::new(move |project_root| {
         let runtimes = runtimes.clone();
         Box::pin(async move {

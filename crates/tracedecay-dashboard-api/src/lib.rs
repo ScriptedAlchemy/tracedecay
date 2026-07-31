@@ -177,14 +177,12 @@ pub type DoctorReportReadFuture = Pin<
             + 'static,
     >,
 >;
-pub type DoctorReportReader =
-    Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
+pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub struct AdmittedDoctorReportV1 {
     pub report: tracedecay_application::doctor::DoctorReportV1,
-    pub table_growth_evidence:
-        Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+    pub table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
 }
 
 impl AdmittedDoctorReportV1 {
@@ -257,8 +255,7 @@ pub struct DashboardState {
     pub savings_db_path: String,
     pub project_root: PathBuf,
     /// Live read port over the daemon-owned code-index scheduler registry.
-    pub code_index_freshness_reader:
-        Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     /// Root-addressed read over the daemon-mounted canonical feedback
     /// observation owner. Selected projects reuse the resolver but resolve
     /// their own exact project root on every call.

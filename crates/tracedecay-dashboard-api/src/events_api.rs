@@ -508,10 +508,7 @@ impl EventStreamState {
 }
 
 /// `GET /api/events`
-pub async fn events(
-    State(state): State<DashboardState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> impl IntoResponse {
     let scope = scope_from_state(&state);
     let run_id = format!("run-{}-{}", std::process::id(), now_micros());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(CHANNEL_CAPACITY);
@@ -1281,9 +1278,7 @@ mod tests {
         )
         .await
         .expect("project init");
-        let mut dash = crate::build_state(&cg)
-            .await
-            .expect("dashboard state");
+        let mut dash = crate::build_state(&cg).await.expect("dashboard state");
         dash.savings_db = Some(std::sync::Arc::clone(cg.profile_database()));
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());

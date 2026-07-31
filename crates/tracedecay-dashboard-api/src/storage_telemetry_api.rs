@@ -1119,9 +1119,7 @@ mod tests {
             .await
             .expect("authoritative graph page counts");
         let graph_total_bytes = page_size.saturating_mul(page_count);
-        let state = crate::build_state(&cg)
-            .await
-            .expect("dashboard state");
+        let state = crate::build_state(&cg).await.expect("dashboard state");
         (project, state, graph_total_bytes)
     }
 

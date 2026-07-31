@@ -139,10 +139,7 @@ pub async fn fetch_facts(
         .collect())
 }
 
-pub async fn fetch_entities(
-    state: &DashboardState,
-    limit: i64,
-) -> Result<Vec<Value>, String> {
+pub async fn fetch_entities(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
     let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
     let overview = dashboard_overview(state, 1, limit.min(1000)).await?;
     Ok(overview

@@ -166,10 +166,7 @@ pub async fn update(
     skill_payload(&profile_root, skill).await
 }
 
-pub async fn approve(
-    State(state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn approve(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     let profile_root = profile_root_or_error()?;
     let skill = approve_managed_skill(&profile_root, &id)
         .await
@@ -189,24 +186,15 @@ pub async fn discard_update(
     skill_payload(&profile_root, skill).await
 }
 
-pub async fn disable(
-    State(state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn disable(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     set_state(&state, &id, ManagedSkillState::Disabled).await
 }
 
-pub async fn archive(
-    State(state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn archive(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     set_state(&state, &id, ManagedSkillState::Archived).await
 }
 
-pub async fn restore(
-    State(state): State<DashboardState>,
-    Path(id): Path<String>,
-) -> ApiResult {
+pub async fn restore(State(state): State<DashboardState>, Path(id): Path<String>) -> ApiResult {
     set_state(&state, &id, ManagedSkillState::PendingApproval).await
 }
 
