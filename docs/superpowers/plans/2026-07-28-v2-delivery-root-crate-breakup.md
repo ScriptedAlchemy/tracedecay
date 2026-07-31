@@ -7,6 +7,9 @@
 > plan. Do not recreate its task checklists, file inventories, branch/worktree/SHA
 > or commit protocol, Gate A/B, timing/JUnit receipts, exact test names/counts,
 > generated-byte/source-shape checks, PR closure gates, or platform gate lattice.
+> Historical version, alias, deprecation, or migration language applies only
+> where `origin/master`, a published package/release, or live persistence
+> proves a predecessor; otherwise the current contract changes in place.
 
 **Outcome contributed:** This plan recorded a leaves-first root-crate breakup,
 measured iteration-cost experiments, and direct, truthful product-journey goals
