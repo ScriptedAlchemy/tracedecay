@@ -45,6 +45,7 @@ pub(crate) struct RepositoryProvenanceAdmissionContext {
 }
 
 impl RepositoryProvenanceAdmissionContext {
+    #[cfg(test)]
     pub(crate) fn new(
         project_root: PathBuf,
         project_id: ProjectId,

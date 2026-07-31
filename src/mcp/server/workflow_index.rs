@@ -1,7 +1,7 @@
 //! Daemon-backed workflow-index reads for the [`WorkflowIndexReadPort`]
 //! implementation.
 //!
-//! This module owns the ProjectSessions handle so MCP handlers do not. It opens
+//! This module owns the `ProjectSessions` handle so MCP handlers do not. It opens
 //! the snapshot through [`GlobalDbWorkflowStore`], which is the one adapter that
 //! refuses a non-ProjectSessions shard scope before a read snapshot exists;
 //! nothing here reaches past that gate to build a reader itself.
@@ -27,7 +27,7 @@ fn workflow_error(err: WorkflowIndexError) -> WorkflowReadError {
 }
 
 pub(crate) struct DaemonWorkflowIndexReadService {
-    /// The active project's retained ProjectSessions authority. Reads borrow
+    /// The active project's retained `ProjectSessions` authority. Reads borrow
     /// this handle and never discover or open another store.
     database: Arc<RegisteredGlobalDb>,
 }

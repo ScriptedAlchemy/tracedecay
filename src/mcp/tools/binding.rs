@@ -211,7 +211,10 @@ mod tests {
     /// otherwise the tool would reach dispatch with no owner at all.
     #[test]
     fn group_less_rows_are_owned_by_a_surface_predicate() {
-        for entry in MCP_TOOL_BINDINGS.iter().filter(|entry| entry.group.is_none()) {
+        for entry in MCP_TOOL_BINDINGS
+            .iter()
+            .filter(|entry| entry.group.is_none())
+        {
             let claimed = ApplicationSurfaceOperation::from_tool_name(entry.name).is_some()
                 || RetainedSurfaceOperation::from_name(entry.name).is_some();
             assert!(claimed, "{} has no group and no surface owner", entry.name);

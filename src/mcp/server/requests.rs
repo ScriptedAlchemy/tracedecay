@@ -34,9 +34,10 @@ struct ToolTokenAccounting {
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
 ) -> tracedecay_application::InvocationTarget {
-    route
-        .map(|route| tracedecay_application::InvocationTarget::Resolved(route.scope.clone()))
-        .unwrap_or(tracedecay_application::InvocationTarget::CurrentProject)
+    route.map_or(
+        tracedecay_application::InvocationTarget::CurrentProject,
+        |route| tracedecay_application::InvocationTarget::Resolved(route.scope.clone()),
+    )
 }
 
 pub(super) fn accounting_project_root<'a>(

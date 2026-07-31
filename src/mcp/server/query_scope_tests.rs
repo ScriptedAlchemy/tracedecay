@@ -59,7 +59,10 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         "the same exact root resolves the same scope, digest included"
     );
     assert_eq!(
-        scope.reference.as_ref().map(|reference| reference.as_str()),
+        scope
+            .reference
+            .as_ref()
+            .map(tracedecay_domain::RefId::as_str),
         Some("refs/heads/main"),
     );
 

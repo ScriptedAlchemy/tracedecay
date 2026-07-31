@@ -1,6 +1,9 @@
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::Poll;
 use std::time::Instant;
 

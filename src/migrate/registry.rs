@@ -922,6 +922,7 @@ impl RootLivenessV1 {
 
     /// Combine sibling roots of one identity: any live root wins, then any
     /// unverifiable root, and absence only when every root was proven absent.
+    #[must_use]
     pub fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Live, _) | (_, Self::Live) => Self::Live,

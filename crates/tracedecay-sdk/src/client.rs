@@ -268,10 +268,10 @@ impl Client {
                     status: Some(status.as_u16()),
                     message: "cancellation problem envelope has no value".into(),
                 })?;
-            return Err(ClientError::Problem(ProblemError::new(
+            return Err(ClientError::Problem(Box::new(ProblemError::new(
                 status.as_u16(),
                 envelope,
-            )?));
+            )?)));
         }
         let value: OperationCancellation =
             serde_json::from_value(body).map_err(|error| ClientError::Protocol {
@@ -383,10 +383,10 @@ impl Client {
                         status: Some(status.as_u16()),
                         message: "problem envelope has no value".into(),
                     })?;
-                Err(ClientError::Problem(ProblemError::new(
+                Err(ClientError::Problem(Box::new(ProblemError::new(
                     status.as_u16(),
                     value,
-                )?))
+                )?)))
             }
             _ => Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
@@ -651,19 +651,10 @@ pub struct StreamResume {
 }
 
 /// Streaming and reconnection policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamOptions {
     pub resume: Option<StreamResume>,
     pub max_reconnects: usize,
-}
-
-impl Default for StreamOptions {
-    fn default() -> Self {
-        Self {
-            resume: None,
-            max_reconnects: 0,
-        }
-    }
 }
 
 /// One decoded SSE frame.
@@ -740,10 +731,10 @@ impl OperationStream {
                         status: Some(status.as_u16()),
                         message: "stream problem envelope has no value".into(),
                     })?;
-                return Err(ClientError::Problem(ProblemError::new(
+                return Err(ClientError::Problem(Box::new(ProblemError::new(
                     status.as_u16(),
                     envelope,
-                )?));
+                )?)));
             }
             return Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
@@ -1272,7 +1263,7 @@ pub enum ClientError {
         status: Option<u16>,
         message: String,
     },
-    Problem(ProblemError),
+    Problem(Box<ProblemError>),
 }
 
 impl ClientError {

@@ -430,10 +430,7 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
         Ok(())
     }
 
-    pub(super) fn finish(
-        self,
-        status: PageStatus,
-    ) -> Result<BoundedPage<T>, TemporalPortError> {
+    pub(super) fn finish(self, status: PageStatus) -> Result<BoundedPage<T>, TemporalPortError> {
         if status == PageStatus::More && self.items.is_empty() {
             return Err(TemporalPortError::Read {
                 operation: "produce bounded page",

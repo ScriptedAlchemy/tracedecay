@@ -1,6 +1,6 @@
 //! Typed contract for daemon-owned workflow-index reads.
 //!
-//! MCP owns selector parsing and rendering; the daemon owns the ProjectSessions
+//! MCP owns selector parsing and rendering; the daemon owns the `ProjectSessions`
 //! store and the shard-scope gate in front of it. Handlers in this tree
 //! therefore name a [`WorkflowIndexReadPort`] instead of a `RegisteredGlobalDb`.
 //!
