@@ -611,13 +611,14 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     assert_eq!(first.items, ["first"]);
     assert_eq!(first.total, 3);
     assert_eq!(first.next_cursor, second.next_cursor);
+    assert_eq!(first.expires_at, Some(UtcMicros(900_000_010)));
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
     let first_wire = first_cursor
-        .strip_prefix("ccq1.")
+        .strip_prefix("ccq2.")
         .expect("versioned prepared-query cursor");
     let second_wire = second_cursor
-        .strip_prefix("ccq1.")
+        .strip_prefix("ccq2.")
         .expect("versioned prepared-query cursor");
     assert_eq!(
         hex::decode(first_wire).expect("first cursor bytes"),
@@ -628,11 +629,23 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     assert_eq!(routing.generation, generation());
     assert_eq!(routing.expires_at, UtcMicros(900_000_010));
 
-    let resumed = PreparedQueryV1::prepare(authority, request, Some(&first_cursor))
+    assert_eq!(
+        PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
+            .expect("authenticated prepared-query continuation")
+            .paginate(&bindings, items.clone(), 2, UtcMicros(100)),
+        Err(tracedecay_query::retrieval::PreparedQueryErrorV1::Invalid)
+    );
+    let resumed = PreparedQueryV1::prepare(authority.clone(), request.clone(), Some(&first_cursor))
         .expect("authenticated prepared-query continuation")
-        .paginate(&bindings, items, 1, UtcMicros(100))
+        .paginate(&bindings, items.clone(), 1, UtcMicros(100))
         .expect("resumed prepared-query page");
+    let replayed = PreparedQueryV1::prepare(authority, request, Some(&first_cursor))
+        .expect("stateless continuation remains restart-stable")
+        .paginate(&bindings, items, 1, UtcMicros(100))
+        .expect("stateless continuation can be retried");
     assert_eq!(resumed.items, ["second"]);
+    assert_eq!(replayed.items, resumed.items);
+    assert_eq!(replayed.next_cursor, resumed.next_cursor);
     assert_eq!(resumed.total, 3);
     let resumed_cursor = resumed.next_cursor.expect("second continuation cursor");
     assert_eq!(

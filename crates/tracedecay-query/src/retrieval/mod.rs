@@ -20,6 +20,7 @@ pub mod fusion;
 pub mod graph;
 pub mod hydrate;
 pub mod lexical;
+mod ordering;
 pub mod ports;
 pub mod pr9_authority;
 pub mod prepared_query;

@@ -463,6 +463,7 @@ fn bounded_result<T>(
     coverage: tracedecay_domain::RetrieverCoverage,
     finished_at: tracedecay_domain::UtcMicros,
     partial_reason: Option<OmissionReason>,
+    cursor_expires_at: Option<UtcMicros>,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let returned = page.items.len() as u64;
     let represented = page.total.unwrap_or(returned);
@@ -508,11 +509,7 @@ fn bounded_result<T>(
     )
     .unwrap_or_else(|_| panic!("bounded code query page"));
     page_state.cursor.clone_from(&page.next_cursor);
-    page_state.expires_at = page
-        .next_cursor
-        .as_ref()
-        .and_then(|cursor| inspect_prepared_query_cursor(cursor.as_str()).ok())
-        .map(|cursor| cursor.expires_at);
+    page_state.expires_at = cursor_expires_at;
     let evidence = RetrievalEvidence {
         page: page_state,
         payload: Some(page),
@@ -888,6 +885,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
     });
     match pagination {
         Ok(pagination) => {
+            let cursor_expires_at = pagination.expires_at;
             let next_cursor = pagination
                 .next_cursor
                 .map(OpaqueCursor::new)
@@ -904,7 +902,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
                 page.pr9_fallback,
             )
             .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
-            bounded_result(page, coverage, finished_at, None)
+            bounded_result(page, coverage, finished_at, None, cursor_expires_at)
         }
         Err(error) => rejected_cursor(finished_at, generation, error),
     }
@@ -2251,6 +2249,7 @@ mod tests {
             },
             tracedecay_domain::UtcMicros(1),
             None,
+            None,
         );
         let RetrievalPortOutcome::Completed(evidence) = outcome else {
             panic!("uncapped complete lane stays complete");
@@ -2273,6 +2272,7 @@ mod tests {
                 ..Default::default()
             },
             tracedecay_domain::UtcMicros(1),
+            None,
             None,
         );
         let RetrievalPortOutcome::Partial(evidence) = outcome else {
@@ -2300,6 +2300,7 @@ mod tests {
                 ..Default::default()
             },
             UtcMicros(1),
+            None,
             None,
         );
         let RetrievalPortOutcome::Completed(evidence) = outcome else {

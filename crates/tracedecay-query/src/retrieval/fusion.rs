@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     CandidateContribution, CandidateSetDigest, CompactCandidate, ComponentRevision,
-    EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FreshnessCompatibilityV1,
-    FusedCandidate, FusionProfile, LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId,
+    EphemeralSanitizedQueryViewV1, ExactClass, FixedPointScore, FusedCandidate, FusionProfile,
+    LogicalEvidenceId, OccurrenceProvenance, PrivacyDomainId,
     PublicRetrieverStatus, QueryDigest, QueryMac, QueryNormalizationRevision, RankedCandidate,
     RankingDecision, RankingDecisionKind, RetrievalAnchorId, RetrievalContractError,
     RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
@@ -30,6 +30,9 @@ use zeroize::Zeroizing;
 
 use super::dedupe::{DedupeDecisionV1, DeterministicDedupe};
 use super::diversity::{DeterministicDiversity, DiversityDecisionV1, DiversityStageError};
+use super::ordering::{
+    compare_fused, exact_class_rank, ordered_occurrence_ids, source_validity_rank,
+};
 
 const QUERY_DIGEST_MAC_DOMAIN: &str = "tracedecay.retrieval-query-mac.v1";
 const RETRIEVAL_CURSOR_MAC_DOMAIN: &str = "tracedecay.retrieval-cursor-mac.v1";
@@ -324,6 +327,9 @@ impl RetrievalCursorKeyringV1 {
             privacy_domain: &'a PrivacyDomainId,
             authentication_key_id: &'a RetrievalCursorKeyId,
             key_epoch: u64,
+            principal: &'a tracedecay_domain::PrincipalId,
+            scope: &'a tracedecay_domain::RetrievalScope,
+            temporal_mode: tracedecay_domain::TemporalModeV1,
             profile_id: &'a tracedecay_domain::FusionProfileId,
             snapshot_freshness_digest: &'a tracedecay_domain::FreshnessVectorDigest,
             authorization_revision: &'a tracedecay_domain::AuthorizationRevision,
@@ -334,6 +340,9 @@ impl RetrievalCursorKeyringV1 {
             privacy_domain: &self.privacy_domain,
             authentication_key_id: key_id,
             key_epoch,
+            principal: &request.principal,
+            scope: &request.scope,
+            temporal_mode: request.temporal_mode,
             profile_id: &request.profile_id,
             snapshot_freshness_digest: &request.snapshot.freshness_digest,
             authorization_revision: &request.snapshot.authorization_revision,
@@ -1018,16 +1027,6 @@ impl DeterministicFusionStage for DeterministicFixedPointFusion {
     }
 }
 
-pub(super) fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
-    exact_class_rank(left.exact_class)
-        .cmp(&exact_class_rank(right.exact_class))
-        .then_with(|| right.utility_micros.cmp(&left.utility_micros))
-        .then_with(|| source_validity_rank(right).cmp(&source_validity_rank(left)))
-        .then_with(|| left.anchor_id.cmp(&right.anchor_id))
-        .then_with(|| left.logical_evidence_id.cmp(&right.logical_evidence_id))
-        .then_with(|| ordered_occurrence_ids(left).cmp(&ordered_occurrence_ids(right)))
-}
-
 fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> Ordering {
     left.anchor_id
         .cmp(&right.anchor_id)
@@ -1065,40 +1064,6 @@ fn strongest_exact_class(left: ExactClass, right: ExactClass) -> ExactClass {
     } else {
         right
     }
-}
-
-fn exact_class_rank(class: ExactClass) -> u8 {
-    match class {
-        ExactClass::ExactMessage => 0,
-        ExactClass::ExactLiteralPhrase => 1,
-        ExactClass::Approximate => 2,
-    }
-}
-
-fn source_validity_rank(candidate: &FusedCandidate) -> u8 {
-    candidate
-        .freshness
-        .iter()
-        .map(|freshness| match freshness.compatibility {
-            FreshnessCompatibilityV1::Current => 4,
-            FreshnessCompatibilityV1::Unknown => 3,
-            FreshnessCompatibilityV1::Stale => 2,
-            FreshnessCompatibilityV1::Missing => 1,
-            FreshnessCompatibilityV1::Incompatible => 0,
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-fn ordered_occurrence_ids(candidate: &FusedCandidate) -> Vec<SourceOccurrenceId> {
-    let mut occurrences = candidate
-        .occurrences
-        .iter()
-        .map(|occurrence| occurrence.source_occurrence_id.clone())
-        .collect::<Vec<_>>();
-    occurrences.sort();
-    occurrences.dedup();
-    occurrences
 }
 
 fn occurrence_cmp(left: &OccurrenceProvenance, right: &OccurrenceProvenance) -> Ordering {
