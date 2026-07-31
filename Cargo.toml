@@ -7,6 +7,7 @@ members = [
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
     "crates/tracedecay-domain",
+    "crates/tracedecay-global-db",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
     "crates/tracedecay-lsp",
@@ -237,6 +238,7 @@ tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-host-integration = { path = "crates/tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
+tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
@@ -353,6 +355,8 @@ static_assertions = "1.1.0"
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
+# Same policy for the extracted global-db harness the root test suite drives.
+tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
