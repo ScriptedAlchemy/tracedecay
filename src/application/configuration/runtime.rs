@@ -18,7 +18,6 @@ use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros, canonical_sha256
 
 use crate::application::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
-    SemanticRuntimeIntegrationPortV1,
 };
 use crate::config::{
     ConfigurationDaemonClient, OpenedRuntimeConfiguration, PinnedRuntimeConfiguration,
@@ -54,8 +53,6 @@ pub struct ProjectConfigurationRuntime {
     target: RuntimeConfigurationTarget,
     configuration_database: Arc<RegisteredGlobalDb>,
     authorities: Arc<ConfigurationAuthoritySlots>,
-    #[allow(dead_code)] // Plan 20 config control-plane — staged
-    control_plane: SharedConfigurationControlPlane,
     client: Arc<ProductionConfigurationDaemonClient>,
     semantic_runtime: OnceLock<Arc<ProductionSemanticActivationCoordinatorV1>>,
     user_settings: Arc<ProductionUserSettingsDaemonClient>,
@@ -129,7 +126,6 @@ impl ProjectConfigurationRuntime {
                 target,
                 configuration_database: registered_database,
                 authorities,
-                control_plane,
                 client,
                 semantic_runtime: OnceLock::new(),
                 user_settings: Arc::new(ProductionUserSettingsDaemonClient),
@@ -155,11 +151,6 @@ impl ProjectConfigurationRuntime {
         authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
     ) -> Result<()> {
         self.authorities.install(scopes, authorization)
-    }
-
-    #[allow(dead_code)] // Plan 20 config control-plane — staged
-    pub(crate) fn control_plane(&self) -> SharedConfigurationControlPlane {
-        Arc::clone(&self.control_plane)
     }
 
     pub(crate) fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
@@ -200,16 +191,6 @@ impl ProjectConfigurationRuntime {
     ) -> Result<()> {
         let _ = self.semantic_runtime.set(runtime);
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn semantic_runtime(
-        &self,
-    ) -> Option<Arc<dyn SemanticRuntimeIntegrationPortV1 + Send + Sync>> {
-        self.semantic_runtime
-            .get()
-            .cloned()
-            .map(|runtime| runtime as Arc<dyn SemanticRuntimeIntegrationPortV1 + Send + Sync>)
     }
 
     pub(crate) fn semantic_activation_coordinator(
