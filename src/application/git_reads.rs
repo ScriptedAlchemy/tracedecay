@@ -21,9 +21,14 @@ use crate::git_intelligence::{GitBlameRequest, GitHistoryRequest, NativeGitIntel
 use crate::git_query::{
     GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
 };
+// The historical outcome projection moved down beside the adapter that
+// produces it; both this owner and the extracted search evaluator mount the
+// same values.
+pub use tracedecay_application::historical_query::{
+    HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+};
 use tracedecay_application::historical_query::{
-    HistoricalGitQueryAdapter, HistoricalQueryError, HistoricalQueryRequestV1,
-    HistoricalQueryResultV1, HistoricalSourceAuthorizationV1,
+    HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -240,29 +245,6 @@ fn git_unavailable_reason(reason: GitReadUnavailableReasonV1) -> ScopeUnavailabl
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HistoricalGitReadUnavailableReasonV1 {
-    AuthorityAbsent,
-    ScopeMismatch,
-    NotAuthorized,
-    ReadFailed,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-// Boxing Complete would ripple through admission/match sites; size gap is accepted.
-#[allow(clippy::large_enum_variant)]
-pub enum HistoricalGitReadOutcomeV1 {
-    Complete {
-        scope: ResolvedScope,
-        result: HistoricalQueryResultV1,
-    },
-    Unavailable {
-        reason: HistoricalGitReadUnavailableReasonV1,
-    },
-}
-
 /// One production-mounted read authority for an exact admitted checkout.
 pub struct GitReadAuthorityV1 {
     project_root: PathBuf,
@@ -400,21 +382,8 @@ impl GitReadAuthorityV1 {
                 scope: self.scope.clone(),
                 result,
             },
-            Err(
-                HistoricalQueryError::MissingAuthorization
-                | HistoricalQueryError::InvalidAuthorization
-                | HistoricalQueryError::UnauthorizedCommit(_)
-                | HistoricalQueryError::UnauthorizedPath(_),
-            ) => HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::NotAuthorized,
-            },
-            Err(
-                HistoricalQueryError::ScopeMismatch | HistoricalQueryError::ProviderScopeMismatch,
-            ) => HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
-            },
-            Err(_) => HistoricalGitReadOutcomeV1::Unavailable {
-                reason: HistoricalGitReadUnavailableReasonV1::ReadFailed,
+            Err(error) => HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::from_query_error(&error),
             },
         }
     }
