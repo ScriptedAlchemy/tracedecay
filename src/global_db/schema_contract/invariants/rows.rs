@@ -40,19 +40,6 @@ const BOUNDED_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "session temporal authority ownership is invalid",
 ];
 
-/// Expensive audits that must stay exhaustive-only (explicit classification).
-#[allow(dead_code)] // retained for exhaustive-only Doctor audits
-const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
-    "observation projection provenance contains a receipt mismatch",
-    "workflow projection contains an observation receipt mismatch",
-    "observation projection disposition contains a receipt mismatch",
-    "observation projection checkpoints contains a negative sequence",
-    "projection checkpoint exceeds the committed observation frontier",
-    "global database contains a foreign-key violation",
-    "session summary authority is mutable or crosses sessions",
-    "session temporal receipts or cursor keys are mutable",
-];
-
 const OBSERVATION_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "committed observation references a missing receipt",
     "committed observation contains invalid authority JSON",
@@ -466,6 +453,18 @@ pub(super) async fn validate_mutable_invariant_rows(
 mod tests {
     use super::*;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+
+    /// Expensive audits that must stay exhaustive-only (explicit classification).
+    const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
+        "observation projection provenance contains a receipt mismatch",
+        "workflow projection contains an observation receipt mismatch",
+        "observation projection disposition contains a receipt mismatch",
+        "observation projection checkpoints contains a negative sequence",
+        "projection checkpoint exceeds the committed observation frontier",
+        "global database contains a foreign-key violation",
+        "session summary authority is mutable or crosses sessions",
+        "session temporal receipts or cursor keys are mutable",
+    ];
 
     fn session_temporal_bounded_violations() -> &'static [&'static str] {
         &[
