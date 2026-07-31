@@ -852,9 +852,6 @@ fn classify_mcp_tool_dispatch_group(
     tool_name: &str,
     application_invocation_executor_available: bool,
 ) -> Option<McpToolDispatchGroup> {
-    if application_surface::MULTI_ROOT_TOOL_NAMES.contains(&tool_name) {
-        return Some(McpToolDispatchGroup::ApplicationSurface);
-    }
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
         let defer_diagnostics_without_executor = operation
             == ApplicationSurfaceOperation::DiagnosticsRead
@@ -1233,19 +1230,6 @@ async fn dispatch_application_surface_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
-    if application_surface::MULTI_ROOT_TOOL_NAMES.contains(&tool_name) {
-        return Some(
-            application_surface::handle_multi_root(
-                tool_name,
-                args,
-                options.application_invocation_executor,
-                options.application_request_id.clone(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await,
-        );
-    }
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
     if operation == ApplicationSurfaceOperation::DiagnosticsRead
         && options.application_invocation_executor.is_none()
@@ -1864,12 +1848,31 @@ mod tests {
             }
         }
 
-        for tool_name in ["tracedecay_not_registered", "tracedecay_lcm_not_registered"] {
+        for tool_name in [
+            "tracedecay_not_registered",
+            "tracedecay_lcm_not_registered",
+            "tracedecay_multi_root_scope_set_read",
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            "tracedecay_multi_root_execute",
+        ] {
             assert!(!advertised.contains(tool_name));
             assert_eq!(
                 classify_mcp_tool_dispatch_group(tool_name, true),
                 None,
                 "{tool_name} must fail closed"
+            );
+            let rejected = handle_tool_call_with_registry_and_implicit_project(
+                &cg,
+                tool_name,
+                json!({}),
+                None,
+                None,
+                options.clone(),
+            )
+            .await;
+            assert!(
+                rejected.is_err(),
+                "{tool_name} must reject handler dispatch"
             );
         }
     }

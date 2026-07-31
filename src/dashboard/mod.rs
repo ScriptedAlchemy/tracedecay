@@ -1580,17 +1580,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "standalone_backend"
     };
     let standalone_automation = automation_mode == "standalone_backend";
-    let multi_root = state.authorized_scope_set.as_ref().map_or_else(
-        || {
-            tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-                "authorized scope set is not mounted",
-            )
-        },
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::mounted,
-    );
-    let multi_root_available = matches!(
-        &multi_root,
-        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::Mounted { .. }
+    let multi_root = tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
+        "multi-root capability is quarantined",
     );
     Json(json!({
         "name": "tracedecay-dashboard",
@@ -1628,7 +1619,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             // Settings tab: aggregated project/user config editing plus
             // read-only environment and storage-path display.
             "settings": true,
-            "multi_root": multi_root_available,
+            "multi_root": false,
         },
         "automation": {
             "enabled": automation.enabled,
@@ -1727,9 +1718,16 @@ mod authority_tests {
 
         let expected_path = cg.dashboard_db_path().display().to_string();
         let state = build_state(&cg).await.expect("dashboard state");
+        let Json(capabilities) = capabilities(State(state.clone())).await;
 
         assert_eq!(state.mem_db_path, expected_path);
         assert_eq!(state._database_guards.len(), 1);
+        assert_eq!(capabilities["multi_root"]["status"], "unavailable");
+        assert_eq!(
+            capabilities["multi_root"]["reason"],
+            "multi-root capability is quarantined"
+        );
+        assert_eq!(capabilities["features"]["multi_root"], false);
         assert!(
             state.code_diagnostics_authority.is_none(),
             "direct dashboard must not construct an analyzer authority"

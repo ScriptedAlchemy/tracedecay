@@ -25,51 +25,6 @@ pub(crate) struct VersionCheckState {
     pub(crate) checked_at: Option<Instant>,
 }
 
-/// Owns response admission, revocation, and forced cancellation for one
-/// daemon-retained project server.
-#[derive(Clone)]
-pub(crate) struct ProjectServerResponseLifecycle {
-    response_gate: Arc<tokio::sync::RwLock<()>>,
-    response_revoked: crate::application::context::CancellationToken,
-    request_abort: crate::application::context::CancellationToken,
-}
-
-impl Default for ProjectServerResponseLifecycle {
-    fn default() -> Self {
-        Self {
-            response_gate: Arc::new(tokio::sync::RwLock::new(())),
-            response_revoked: crate::application::context::CancellationToken::new(),
-            request_abort: crate::application::context::CancellationToken::new(),
-        }
-    }
-}
-
-impl ProjectServerResponseLifecycle {
-    pub(crate) fn revoke(&self) {
-        self.response_revoked.cancel();
-    }
-
-    pub(crate) async fn wait_for_request_drain(&self) {
-        let _guard = self.response_gate.write().await;
-    }
-
-    pub(crate) fn abort_requests(&self) {
-        self.request_abort.cancel();
-    }
-
-    pub(crate) fn response_gate(&self) -> &Arc<tokio::sync::RwLock<()>> {
-        &self.response_gate
-    }
-
-    pub(crate) fn response_revoked(&self) -> &crate::application::context::CancellationToken {
-        &self.response_revoked
-    }
-
-    pub(crate) fn request_abort(&self) -> &crate::application::context::CancellationToken {
-        &self.request_abort
-    }
-}
-
 /// Runs the project and user transcript portions of startup recovery against
 /// daemon-retained authorities. Project recovery is independent: a missing
 /// user or registry authority skips only the user sweep.
@@ -206,20 +161,16 @@ async fn run_startup_session_catch_up_with_home(
 }
 
 impl McpServer {
-    pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
-        self.project_server_lifecycle.clone()
-    }
-
     pub(crate) fn revoke_project_server_responses(&self) {
-        self.project_server_lifecycle.revoke();
+        self.project_server_response_revoked.cancel();
     }
 
     pub(crate) async fn wait_for_project_server_request_drain(&self) {
-        self.project_server_lifecycle.wait_for_request_drain().await;
+        let _guard = self.project_server_response_gate.write().await;
     }
 
     pub(crate) fn abort_project_server_requests(&self) {
-        self.project_server_lifecycle.abort_requests();
+        self.project_server_request_abort.cancel();
         if let Ok(cancellations) = self.application_surface_cancellations.lock() {
             let now = crate::mcp::server::requests::mcp_now_micros();
             for cancellation in cancellations.values() {

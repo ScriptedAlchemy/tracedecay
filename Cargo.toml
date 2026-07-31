@@ -309,7 +309,6 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring
 rustls-pemfile = "2.2.0"
 hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio", "service"] }
-rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

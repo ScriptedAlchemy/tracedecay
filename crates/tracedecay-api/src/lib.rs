@@ -229,9 +229,14 @@ pub enum HttpAdapterError {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
     use super::http::invalid_request_problem;
     use super::{
-        CanonicalInvocationResult, HttpApplicationOperation, HttpApplicationOwnerKind, HttpSseEvent,
+        CanonicalInvocationResult, HttpApplicationOperation, HttpApplicationOwnerKind,
+        HttpSseEvent, application_router,
     };
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
@@ -276,6 +281,50 @@ mod tests {
             HttpApplicationOperation::DiagnosticsRead.owner_kind(),
             HttpApplicationOwnerKind::Primitive
         );
+        for operation in [
+            "multi_root_scope_set_read",
+            "multi_root_scope_set_compare_and_swap",
+            "multi_root_execute",
+        ] {
+            assert!(
+                HttpApplicationOperation::from_catalog_name(operation).is_none(),
+                "{operation} must not be catalog-addressable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn application_router_does_not_mount_multi_root_routes() {
+        let app = application_router(|request: super::HttpApplicationRequest| async move {
+            CanonicalInvocationResult::<serde_json::Value>::new(
+                BindingId::new("binding.http.test.v1").expect("binding"),
+                Err(ApplicationProblemEnvelope::new(
+                    ResultContractRef::new(SchemaId::new("schema.test.result").expect("schema"), 1)
+                        .expect("contract"),
+                    request.request_id,
+                    ApplicationProblem::unavailable(
+                        SafeDiagnostic::new("test.unavailable", "Unavailable").expect("diagnostic"),
+                    ),
+                )),
+            )
+        });
+
+        for path in [
+            "/multi-root/scope-set/read",
+            "/multi-root/scope-set/compare-and-swap",
+            "/multi-root/execute",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .body(Body::empty())
+                        .expect("HTTP request"),
+                )
+                .await
+                .expect("router response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[test]
