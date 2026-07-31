@@ -42,10 +42,12 @@ measurement, privacy, lifecycle, platform, and regression behavior below.
 
 The Plan 26 Work/topology event family is absent from `origin/master` and a
 published release. Its `V1` suffixes alone do not imply a V2 sibling. Transient
-emission DTOs may change in place, but event files, stored observability rows,
-accounting projections, checkpoints, and receipts may exist through dogfood;
-their compatibility reader and migration/recovery obligations remain until a
-separately authorized registered-store/profile census proves absence.
+source-only/internal emission helpers may change in place. Wire-visible event
+revisions retain negotiated readers and writers until an authorized
+installed-client/host census proves absence. Event files, stored observability
+rows, accounting projections, checkpoints, and receipts may exist through
+dogfood; their compatibility reader and migration/recovery obligations remain
+until the registered-store/profile census proves absence.
 
 ## Outcome
 
