@@ -21,6 +21,7 @@ use tracedecay_tool_catalog::{
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::surface_name;
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
@@ -405,16 +406,6 @@ fn operation_suffix(operation: &str) -> &str {
     operation
         .strip_prefix("configuration_")
         .unwrap_or(operation)
-}
-
-const fn surface_name(surface: BindingSurface) -> &'static str {
-    match surface {
-        BindingSurface::Cli => "cli",
-        BindingSurface::Mcp => "mcp",
-        BindingSurface::Http => "http",
-        BindingSurface::Lsp => "lsp",
-        BindingSurface::Dashboard => "dashboard",
-    }
 }
 
 #[cfg(test)]

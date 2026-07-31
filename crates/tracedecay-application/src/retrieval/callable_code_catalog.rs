@@ -13,6 +13,7 @@ use tracedecay_tool_catalog::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::surface_name;
 
 use super::callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
@@ -101,14 +102,8 @@ pub fn callable_code_catalog_contribution()
             BindingSurface::Mcp,
             BindingSurface::Http,
         ] {
-            let surface_name = match surface {
-                BindingSurface::Cli => "cli",
-                BindingSurface::Mcp => "mcp",
-                BindingSurface::Http => "http",
-                BindingSurface::Lsp => "lsp",
-                BindingSurface::Dashboard => "dashboard",
-            };
-            let binding_id = BindingId::new(format!("binding.{surface_name}.{operation}.v1"))?;
+            let binding_id =
+                BindingId::new(format!("binding.{}.{operation}.v1", surface_name(surface)))?;
             bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
                 binding_id: binding_id.clone(),
                 capability_id: code_query_capability_id(kind)?,
