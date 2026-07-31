@@ -11,7 +11,7 @@ use tracedecay_application::{
     TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError,
     WorkflowExecutionAuthorityPort, WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1,
-    WorkflowExecutionTruthV1, WorkflowFanOutCheckpointV1, WorkflowRecoveryDirectiveV1,
+    WorkflowExecutionTruthV1, WorkflowFanOutCheckpointV1,
 };
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
@@ -606,26 +606,29 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             let admission = if &stored.plan_digest == plan_digest {
                 WorkflowExecutionAdmissionV1::Replay(terminal)
             } else {
-                WorkflowExecutionAdmissionV1::StaleFence
+                WorkflowExecutionAdmissionV1::PlanConflict
             };
             let _ = transaction.rollback();
             return Ok(admission);
         }
 
-        if &stored.plan_digest != plan_digest
-            || stored.fence.lease.lease_id() != fence.lease.lease_id()
-            || stored.fence.lease.epoch().get() >= fence.lease.epoch().get()
+        if &stored.plan_digest != plan_digest {
+            let _ = transaction.rollback();
+            return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
+        }
+        if stored.fence.lease.lease_id() != fence.lease.lease_id()
+            || (stored.fence != *fence
+                && stored.fence.lease.epoch().get() >= fence.lease.epoch().get())
         {
             let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::StaleFence);
+            return Ok(WorkflowExecutionAdmissionV1::StaleLease);
         }
 
-        update_execution_fence(&transaction, identity, fence)?;
+        if stored.fence != *fence {
+            update_execution_fence(&transaction, identity, fence)?;
+        }
         let admission = match stored.checkpoint {
-            Some(checkpoint) => WorkflowExecutionAdmissionV1::Recover {
-                checkpoint,
-                directive: WorkflowRecoveryDirectiveV1::ResumeIncomplete,
-            },
+            Some(checkpoint) => WorkflowExecutionAdmissionV1::Recover { checkpoint },
             None => WorkflowExecutionAdmissionV1::Execute,
         };
         transaction.commit().map_err(execution_unavailable)?;

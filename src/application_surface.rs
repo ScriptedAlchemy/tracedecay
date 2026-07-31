@@ -24,7 +24,7 @@ use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
     HttpApplicationRequest, MultiRootHttpOperation, MultiRootHttpRequest, WorkOperation,
-    application_problem_response, sse_response,
+    WorkflowOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -49,7 +49,7 @@ use tracedecay_application::{
     WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
     WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
     WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -87,7 +87,10 @@ use crate::catalog_composition::{
     compose_application_catalog_with,
 };
 use crate::daemon::work_runtime::WorkAttemptInvocationV1;
-use crate::daemon::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
+use crate::daemon::{
+    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkflowApplicationInvocationV1,
+    WorkflowApplicationOutcomeV1,
+};
 use crate::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
@@ -1430,6 +1433,38 @@ where
     .into_http_response()
 }
 
+fn workflow_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    validate_workflow_catalog_bindings()?;
+    Ok(tracedecay_api::workflow_application_router(
+        WorkflowExecutorOwner { executor },
+    ))
+}
+
+fn validate_workflow_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
+    let registry = tracedecay_application::workflow_executable_binding_registry()
+        .map_err(ApplicationSurfaceAdapterError::CatalogValidation)?;
+    for operation in WorkflowOperation::ALL {
+        let operation_id =
+            tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned())
+                .map_err(ApplicationSurfaceAdapterError::Identifier)?;
+        let Some(binding) = registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+        else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        if route_path != operation.application_route_path() {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        }
+    }
+    Ok(())
+}
+
 /// Refuse to mount Work unless the catalog advertises every descriptor
 /// operation at exactly the path this build answers on.
 ///
@@ -1464,6 +1499,70 @@ pub(crate) struct WorkExecutorOwner {
     pub(crate) executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 }
 
+#[derive(Clone)]
+pub(crate) struct WorkflowExecutorOwner {
+    pub(crate) executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+}
+
+impl tracedecay_api::WorkflowApplicationOwner for WorkflowExecutorOwner {
+    fn invoke_workflow(
+        &self,
+        request: tracedecay_api::WorkflowHttpRequest,
+    ) -> tracedecay_api::WorkflowInvocationFuture {
+        Box::pin(invoke_workflow_operation(
+            Arc::clone(&self.executor),
+            request,
+        ))
+    }
+}
+
+async fn invoke_workflow_operation(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    request: tracedecay_api::WorkflowHttpRequest,
+) -> Response {
+    let tracedecay_api::WorkflowHttpRequest {
+        operation,
+        request_id,
+        controls,
+        body,
+    } = request;
+    match operation {
+        WorkflowOperation::ExecuteFanOut => {
+            let Ok(decoded) = serde_json::from_value::<WorkflowFanOutRequestV1>(body) else {
+                return tracedecay_api::workflow_invalid_request_response(request_id);
+            };
+            let invocation = crate::daemon::DaemonInvocationRequest::workflow_application(
+                request_id.as_str(),
+                WorkflowApplicationInvocationV1::ExecuteFanOut(decoded),
+                crate::daemon_client::invocation_now_micros(),
+                controls.deadline.clone(),
+                controls.cancellation.context(),
+            );
+            invoke_registered_http::<WorkflowExecutionTruthV1, _>(
+                executor,
+                operation,
+                request_id,
+                controls,
+                invocation,
+                |outcome| match outcome {
+                    crate::daemon::DaemonInvocationOutcome::WorkflowApplication {
+                        scope,
+                        outcome:
+                            WorkflowApplicationOutcomeV1::ExecuteFanOut(
+                                tracedecay_application::ApplicationOutcome::Effect(outcome),
+                            ),
+                    } => Some((
+                        scope,
+                        tracedecay_application::ApplicationOutcome::Effect(outcome),
+                    )),
+                    _ => None,
+                },
+            )
+            .await
+        }
+    }
+}
+
 impl tracedecay_api::WorkApplicationOwner for WorkExecutorOwner {
     fn invoke_work(
         &self,
@@ -1496,7 +1595,7 @@ async fn invoke_work_operation(
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
-            invoke_work_http::<$output>(
+            invoke_registered_http::<$output, _>(
                 executor,
                 operation,
                 request_id,
@@ -1526,7 +1625,7 @@ async fn invoke_work_operation(
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
-            invoke_work_http::<WorkAttemptResponseV1>(
+            invoke_registered_http::<WorkAttemptResponseV1, _>(
                 executor,
                 operation,
                 request_id,
@@ -1624,9 +1723,49 @@ fn work_adapter_unavailable(request_id: RequestId, code: &str, message: &str) ->
 /// Core and attempt operations differ only in which daemon payload carries them
 /// and which outcome they answer with, so both arrive here: one binding lookup,
 /// one cancellation policy, one problem taxonomy.
-async fn invoke_work_http<T>(
+trait RegisteredHttpOperation: Copy {
+    fn operation_id_str(self) -> &'static str;
+    fn is_read_only(self) -> bool;
+    fn registry(
+        self,
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError>;
+}
+
+impl RegisteredHttpOperation for WorkOperation {
+    fn operation_id_str(self) -> &'static str {
+        WorkOperation::operation_id_str(self)
+    }
+
+    fn is_read_only(self) -> bool {
+        WorkOperation::is_read_only(self)
+    }
+
+    fn registry(
+        self,
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+        tracedecay_application::work_executable_binding_registry()
+    }
+}
+
+impl RegisteredHttpOperation for WorkflowOperation {
+    fn operation_id_str(self) -> &'static str {
+        WorkflowOperation::operation_id_str(self)
+    }
+
+    fn is_read_only(self) -> bool {
+        false
+    }
+
+    fn registry(
+        self,
+    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, CatalogValidationError> {
+        tracedecay_application::workflow_executable_binding_registry()
+    }
+}
+
+async fn invoke_registered_http<T, O>(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-    operation: WorkOperation,
+    operation: O,
     request_id: RequestId,
     controls: HttpApplicationControls,
     invocation: crate::daemon::DaemonInvocationRequest,
@@ -1639,8 +1778,9 @@ async fn invoke_work_http<T>(
 ) -> Response
 where
     T: Serialize,
+    O: RegisteredHttpOperation,
 {
-    let registry = match tracedecay_application::work_executable_binding_registry() {
+    let registry = match operation.registry() {
         Ok(registry) => registry,
         Err(_) => {
             return work_adapter_unavailable(
@@ -1650,16 +1790,17 @@ where
             );
         }
     };
-    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
-        Ok(operation_id) => operation_id,
-        Err(_) => {
-            return work_adapter_unavailable(
-                request_id,
-                "work.operation_identity_unavailable",
-                "The Work operation identity is unavailable",
-            );
-        }
-    };
+    let operation_id =
+        match tracedecay_tool_catalog::OperationId::new(operation.operation_id_str().to_owned()) {
+            Ok(operation_id) => operation_id,
+            Err(_) => {
+                return work_adapter_unavailable(
+                    request_id,
+                    "work.operation_identity_unavailable",
+                    "The Work operation identity is unavailable",
+                );
+            }
+        };
     let Some(binding) = registry
         .get(&operation_id)
         .and_then(|availability| availability.binding())
@@ -1819,6 +1960,7 @@ pub fn http_application_router_with_executor(
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     let event_executor = Arc::clone(&executor);
     let work_router = work_application_router_with_executor(Arc::clone(&executor))?;
+    let workflow_router = workflow_application_router_with_executor(Arc::clone(&executor))?;
     Ok(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
@@ -1826,6 +1968,7 @@ pub fn http_application_router_with_executor(
             &APPLICATION_SURFACE_OPERATIONS,
         )?)
         .merge(work_router)
+        .merge(workflow_router)
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&cancellations),
             application_http_context,

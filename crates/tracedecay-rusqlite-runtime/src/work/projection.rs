@@ -1,8 +1,17 @@
 //! Bounded, generation-bound projection snapshot and delta reads.
 
+use super::events::load_registered_projection;
 use super::*;
 
 impl WorkProjectionReadPort for WorkSqliteStorage {
+    fn exact_snapshot(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+    ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
+        exact_snapshot_registered(&self.handle, authority, task_id)
+    }
+
     fn snapshot(
         &self,
         authority: &WorkAuthority,
@@ -19,6 +28,30 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
     ) -> Result<WorkProjectionDeltaV1, WorkProjectionPortError> {
         delta_registered(&self.handle, authority, cursor, page_size)
     }
+}
+
+pub(crate) fn exact_snapshot_registered(
+    handle: &MigrationSqlHandle,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
+    let generation_id = projection_generation(authority)?;
+    let sequence = WorkProjectionSequenceV1::new(registered_owner_cursor(handle, authority)?);
+    let projection =
+        load_registered_projection(handle, authority, task_id).map_err(|error| match error {
+            WorkStorageError::NotFoundOrNotAuthorized
+            | WorkStorageError::VersionConflict
+            | WorkStorageError::IdempotencyConflict => WorkProjectionPortError::Unavailable,
+            WorkStorageError::Unavailable => WorkProjectionPortError::Unavailable,
+        })?;
+    WorkProjectionSnapshotV1::new(
+        generation_id,
+        sequence,
+        vec![projection],
+        WorkProjectionCoverageV1::complete(1, 1)
+            .map_err(|_| WorkProjectionPortError::Unavailable)?,
+    )
+    .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
 pub(crate) fn snapshot_registered(

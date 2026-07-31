@@ -2,18 +2,17 @@
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildExecutionOutcomeV1, WorkflowChildRecordV1,
+    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildRecordV1,
     WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
     WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1, WorkflowExecutionTruthV1,
-    WorkflowFanOutCheckpointV1, WorkflowFanOutInputV1, WorkflowRecoveryDirectiveV1,
-    WorkflowSynthesisTruthV1,
+    WorkflowFanOutCheckpointV1,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkflowDefinitionId,
-    WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1,
-    WorktreeId, canonical_sha256,
+    UtcMicros, WorkAttemptIdentityV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
@@ -29,8 +28,14 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
+/// A distinct, valid `sha256:`-tagged digest per input byte.
+///
+/// Callers pick arbitrary ASCII letters as mnemonics, but a `ManifestDigest`
+/// only accepts lowercase hex (`0-9a-f`); encoding the byte's own value as
+/// two hex digits keeps every mnemonic both valid and mutually distinct.
 fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    let hex_byte = format!("{:02x}", u32::from(byte) & 0xff);
+    ManifestDigest::new(format!("sha256:{}", hex_byte.repeat(32))).unwrap()
 }
 
 fn definition(version: u64, operation: &str) -> WorkflowDefinitionV1 {
@@ -103,21 +108,20 @@ fn checkpoint(plan: ManifestDigest) -> WorkflowFanOutCheckpointV1 {
         plan_digest: plan,
         children: vec![WorkflowChildRecordV1 {
             task_id: id::<TaskId>("task.workflow.runtime-store.child"),
-            input: WorkflowFanOutInputV1 {
-                identity: "child-a".to_owned(),
-                input_digest: digest('1'),
-            },
-            outcome: WorkflowChildExecutionOutcomeV1::Succeeded {
-                output_digest: digest('2'),
-            },
+            attempt_identity: WorkAttemptIdentityV1::new(
+                id::<TaskId>("task.workflow.runtime-store.child"),
+                id::<RunId>("run.workflow.runtime-store"),
+                id::<AttemptId>("attempt.workflow.runtime-store.child"),
+            )
+            .unwrap(),
         }],
     }
 }
 
 fn terminal_truth() -> WorkflowExecutionTruthV1 {
-    WorkflowExecutionTruthV1::Synthesized(WorkflowSynthesisTruthV1::Complete {
-        output_digest: digest('3'),
-    })
+    WorkflowExecutionTruthV1::Completed {
+        checkpoint: checkpoint(plan_digest('5')),
+    }
 }
 
 #[test]
@@ -317,16 +321,16 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
     );
     assert_eq!(
         WorkflowExecutionAuthorityPort::begin(&authority, &identity, &stale_fence, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::StaleFence
+        WorkflowExecutionAdmissionV1::StaleLease
     );
     assert_eq!(
         WorkflowExecutionAuthorityPort::begin(&authority, &identity, &other_lease, &plan).unwrap(),
-        WorkflowExecutionAdmissionV1::StaleFence
+        WorkflowExecutionAdmissionV1::StaleLease
     );
     assert_eq!(
         WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &digest('6'))
             .unwrap(),
-        WorkflowExecutionAdmissionV1::StaleFence
+        WorkflowExecutionAdmissionV1::PlanConflict
     );
 
     let checkpoint = checkpoint(plan.clone());
@@ -347,7 +351,6 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
         WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &plan).unwrap(),
         WorkflowExecutionAdmissionV1::Recover {
             checkpoint: checkpoint.clone(),
-            directive: WorkflowRecoveryDirectiveV1::ResumeIncomplete,
         }
     );
 
@@ -371,7 +374,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
             &digest('7'),
         )
         .unwrap(),
-        WorkflowExecutionAdmissionV1::StaleFence
+        WorkflowExecutionAdmissionV1::PlanConflict
     );
 
     let store = store.restart("workflow-execution");

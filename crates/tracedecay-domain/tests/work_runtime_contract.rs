@@ -3,15 +3,16 @@ use std::collections::BTreeSet;
 use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId,
-    RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
+    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
+    ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
     WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
     WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1, WorkEvent,
-    WorkEventKind, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProjection,
-    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
-    WorkTerminalEvidenceV1, WorkVersion, WorktreeId,
+    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
+    WorkEffectStateV1, WorkEvent, WorkEventKind, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
+    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProjection, WorkProjectionCoverageV1,
+    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1,
+    WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -52,6 +53,39 @@ fn binding() -> WorkAttemptProjectionBindingV1 {
         id::<ProjectionGenerationId>("generation.work.runtime"),
         WorkProjectionSequenceV1::new(7),
         WorkVersion::new(3).unwrap(),
+    )
+    .unwrap()
+}
+
+fn requested_route() -> WorkProviderRouteV1 {
+    route(
+        "provider.work.codex-app-server",
+        "route.work.codex-app-server.v1",
+    )
+}
+
+fn execution(
+    attempt_identity: WorkAttemptIdentityV1,
+    projection_binding: WorkAttemptProjectionBindingV1,
+) -> WorkExecutionEnvelopeV1 {
+    WorkExecutionEnvelopeV1::new(
+        attempt_identity,
+        projection_binding,
+        id::<WorkflowOperationRef>("operation.work.execute-provider"),
+        requested_route(),
+        WorkProviderBackendV1::CodexAppServer,
+        "gpt-test".to_owned(),
+        digest('c'),
+        id::<ProjectId>("project.work.runtime"),
+        id::<RepositoryId>("repository.work.runtime"),
+        id::<WorktreeId>("worktree.work.runtime"),
+        "/tmp/work-runtime".to_owned(),
+        Some(id::<RefId>("refs/heads/work-runtime")),
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        UtcMicros(1_000_000),
+        1,
+        WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
+        WorkEffectStateV1::Observational,
     )
     .unwrap()
 }
@@ -116,16 +150,19 @@ fn projection() -> WorkProjection {
 }
 
 fn running() -> WorkAttemptV1 {
+    let identity = identity();
+    let binding = binding();
     WorkAttemptV1::new(
-        identity(),
-        binding(),
+        identity.clone(),
+        binding.clone(),
+        execution(identity, binding),
         lease(1),
         WorkAttemptStateV1::Running,
         None,
         Vec::new(),
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
-        route("provider.work.requested", "route.work.requested"),
+        requested_route(),
         Some(route("provider.work.actual", "route.work.actual")),
         None,
     )
@@ -141,21 +178,24 @@ fn attempt_identity_fence_and_projection_binding_are_validated() {
     let attempt = running();
     attempt.validate_projection(&projection()).unwrap();
 
+    let wrong_identity = WorkAttemptIdentityV1::new(
+        id("task.work.other"),
+        id("run.work.runtime"),
+        id("attempt.work.runtime.1"),
+    )
+    .unwrap();
+    let wrong_binding = binding();
     let wrong_task = WorkAttemptV1::new(
-        WorkAttemptIdentityV1::new(
-            id("task.work.other"),
-            id("run.work.runtime"),
-            id("attempt.work.runtime.1"),
-        )
-        .unwrap(),
-        binding(),
+        wrong_identity.clone(),
+        wrong_binding.clone(),
+        execution(wrong_identity, wrong_binding),
         lease(1),
         WorkAttemptStateV1::Running,
         None,
         Vec::new(),
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
-        route("provider.work.requested", "route.work.requested"),
+        requested_route(),
         Some(route("provider.work.actual", "route.work.actual")),
         None,
     )
@@ -183,16 +223,19 @@ fn progress_artifacts_and_provider_routes_are_bounded_and_explicit() {
         64,
     )
     .unwrap();
+    let attempt_identity = identity();
+    let projection_binding = binding();
     let attempt = WorkAttemptV1::new(
-        identity(),
-        binding(),
+        attempt_identity.clone(),
+        projection_binding.clone(),
+        execution(attempt_identity, projection_binding),
         lease(1),
         WorkAttemptStateV1::Running,
         Some(tracedecay_domain::WorkAttemptProgressV1::new(4, 10).unwrap()),
         vec![artifact],
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
-        route("provider.work.requested", "route.work.requested"),
+        requested_route(),
         Some(route("provider.work.actual", "route.work.actual")),
         None,
     )
@@ -286,16 +329,19 @@ fn recovery_and_terminal_evidence_match_attempt_state() {
         source_attempt_id: id("attempt.work.runtime.0"),
         reason: WorkRestartReasonV1::LeaseLost,
     };
+    let attempt_identity = identity();
+    let projection_binding = binding();
     let restarted = WorkAttemptV1::new(
-        identity(),
-        binding(),
+        attempt_identity.clone(),
+        projection_binding.clone(),
+        execution(attempt_identity, projection_binding),
         lease(2),
         WorkAttemptStateV1::Running,
         None,
         Vec::new(),
         WorkCancellationStateV1::None,
         recovery,
-        route("provider.work.requested", "route.work.requested"),
+        requested_route(),
         Some(route("provider.work.actual", "route.work.actual")),
         None,
     )
@@ -374,16 +420,19 @@ fn generated_runtime_schema_names_are_stable() {
 #[test]
 fn a_first_attempt_can_require_recovery_without_naming_a_predecessor() {
     let attempt = |recovery| {
+        let attempt_identity = identity();
+        let projection_binding = binding();
         WorkAttemptV1::new(
-            identity(),
-            binding(),
+            attempt_identity.clone(),
+            projection_binding.clone(),
+            execution(attempt_identity, projection_binding),
             lease(2),
             WorkAttemptStateV1::RecoveryRequired,
             None,
             Vec::new(),
             WorkCancellationStateV1::None,
             recovery,
-            route("provider.work.requested", "route.work.requested"),
+            requested_route(),
             None,
             None,
         )

@@ -14,11 +14,12 @@ use tracedecay_application::{
     WorkProviderSettlementV1, WorkStoragePort,
 };
 use tracedecay_domain::{
-    AttemptId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
     WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationRequestV1,
-    WorkCancellationStateV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, canonical_sha256,
+    WorkCancellationStateV1, WorkExecutionEnvelopeV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1,
+    canonical_sha256,
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
@@ -26,10 +27,12 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 
 mod codex_provider;
+mod native_cli;
 #[cfg(all(test, unix))]
 mod tests;
 
-use codex_provider::CodexAppServerWorkProviderV1;
+pub(crate) use codex_provider::CODEX_PROVIDER_ID;
+use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
 
 /// Provider executions one daemon project runtime may run at once.
 const DEFAULT_WORK_EXECUTION_CAPACITY: usize = 4;
@@ -74,10 +77,11 @@ where
 {
     authority: WorkAuthority,
     storage: S,
-    queue: Arc<WorkExecutionQueueV1<CodexAppServerWorkProviderV1<S>>>,
+    queue: Arc<WorkExecutionQueueV1<NativeWorkProviderV1<S>>>,
     execution: WorkExecutionService<S>,
     observation_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
+    configuration_digest: ManifestDigest,
 }
 
 impl<S> DaemonWorkRuntimeV1<S>
@@ -88,6 +92,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
     ) -> Self {
@@ -95,6 +100,7 @@ where
             authority,
             storage,
             config,
+            configuration_digest,
             observation_db,
             project_root,
             NonZeroUsize::new(DEFAULT_WORK_EXECUTION_CAPACITY).unwrap_or(NonZeroUsize::MIN),
@@ -105,12 +111,20 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
         capacity: NonZeroUsize,
     ) -> Self {
-        let provider =
-            CodexAppServerWorkProviderV1::new(storage.clone(), authority.clone(), config);
+        let provider = NativeWorkProviderV1::new(
+            storage.clone(),
+            authority.clone(),
+            NativeWorkProviderConfigV1::from_registered(
+                config,
+                configuration_digest.clone(),
+                project_root.clone(),
+            ),
+        );
         Self {
             authority,
             storage: storage.clone(),
@@ -121,6 +135,7 @@ where
             execution: WorkExecutionService::new(storage),
             observation_db,
             project_root,
+            configuration_digest,
         }
     }
 
@@ -138,6 +153,10 @@ where
         self.queue.in_flight()
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.queue.bounds().capacity()
+    }
+
     /// Stops and joins every execution before the runtime is dropped.
     pub(crate) fn shutdown(&self) -> usize {
         self.queue.reap()
@@ -149,8 +168,7 @@ where
     ) -> Result<WorkAttemptResponseV1, WorkExecutionError> {
         let attempt = match request {
             WorkAttemptInvocationV1::AcquireLease(request) => {
-                let route = self.provider_route()?;
-                if request.requested_route != route {
+                if !self.queue.supports_route(&request.requested_route)? {
                     return Err(WorkProviderExecutionError::Rejected(
                         "requested Work provider route is not mounted".to_owned(),
                     )
@@ -163,8 +181,13 @@ where
                     )
                     .into());
                 }
-                self.acquire_lease(&request.snapshot, request.identity, request.lease)
-                    .await?
+                self.acquire_lease(
+                    &request.snapshot,
+                    request.identity,
+                    request.execution,
+                    request.lease,
+                )
+                .await?
             }
             WorkAttemptInvocationV1::RenewLease(request) => {
                 self.renew_lease(&request.identity, &request.expected, request.replacement)?
@@ -205,16 +228,30 @@ where
         &self,
         snapshot: &WorkProjectionSnapshotV1,
         identity: WorkAttemptIdentityV1,
+        execution: WorkExecutionEnvelopeV1,
         lease: WorkLeaseFenceV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
         let binding = self.binding(snapshot, identity.task_id())?;
+        if execution.project_id() != self.authority.project_id()
+            || execution.repository_id() != self.authority.repository_id()
+            || execution.worktree_id() != self.authority.worktree_id()
+            || execution.configuration_digest() != &self.configuration_digest
+            || std::path::Path::new(execution.worktree_root()) != self.project_root
+        {
+            return Err(WorkProviderExecutionError::Rejected(
+                "Work execution envelope does not match the registered authority".to_owned(),
+            )
+            .into());
+        }
+        let requested_route = execution.route().clone();
         let leased = self.execution.acquire_lease(
             &self.authority,
             snapshot,
             identity,
             binding,
+            execution,
             lease,
-            self.provider_route()?,
+            requested_route,
         )?;
         self.publish_activity("leased").await;
         Ok(leased)
@@ -232,13 +269,31 @@ where
         lease: &WorkLeaseFenceV1,
         recovery: WorkRecoveryStateV1,
     ) -> Result<WorkAttemptV1, WorkExecutionError> {
-        let running = self.execution.start(
-            &self.authority,
-            identity,
-            lease,
-            recovery,
-            self.provider_route()?,
-        )?;
+        let requested_route = self
+            .attempt(identity)?
+            .ok_or(WorkExecutionError::NotFound)?
+            .requested_route()
+            .clone();
+        let running =
+            self.execution
+                .start(&self.authority, identity, lease, recovery, requested_route)?;
+        // Re-check the published projection before the queue takes a slot. A
+        // superseded proposal or replanned version must not consume capacity
+        // under a lease that was exact when acquired and is exact no longer.
+        let current = self
+            .storage
+            .projection(&self.authority, identity.task_id())
+            .map_err(|error| match error {
+                WorkStorageError::NotFoundOrNotAuthorized => WorkExecutionError::NotFound,
+                WorkStorageError::Unavailable => WorkProviderExecutionError::Unavailable(
+                    "Work projection authority is unavailable".to_owned(),
+                )
+                .into(),
+                WorkStorageError::VersionConflict | WorkStorageError::IdempotencyConflict => {
+                    WorkExecutionError::TerminalConflict
+                }
+            })?;
+        running.validate_projection(&current)?;
         let queue = Arc::clone(&self.queue);
         let admitted = running.clone();
         tokio::task::spawn_blocking(move || queue.admit(&admitted))
@@ -355,6 +410,10 @@ where
                 }
                 WorkProviderSettlementV1::Failed { message } => WorkTerminalEvidenceV1::failed(
                     failed_evidence_digest(identity, &message, observed_at)?,
+                    observed_at,
+                )?,
+                WorkProviderSettlementV1::TimedOut => WorkTerminalEvidenceV1::timed_out(
+                    timed_out_evidence_digest(identity, observed_at)?,
                     observed_at,
                 )?,
             }
@@ -554,6 +613,7 @@ const fn attempt_state_key(state: WorkAttemptStateV1) -> &'static str {
         WorkAttemptStateV1::RecoveryRequired => "recovery_required",
         WorkAttemptStateV1::Succeeded => "succeeded",
         WorkAttemptStateV1::Failed => "failed",
+        WorkAttemptStateV1::TimedOut => "timed_out",
         WorkAttemptStateV1::Cancelled => "cancelled",
     }
 }
@@ -575,6 +635,18 @@ fn failed_evidence_digest(
         "tracedecay.work.codex.failed.v1",
         identity,
         message,
+        observed_at,
+    ))
+    .map_err(map_evidence_error)
+}
+
+fn timed_out_evidence_digest(
+    identity: &WorkAttemptIdentityV1,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_domain::ManifestDigest, WorkProviderExecutionError> {
+    canonical_sha256(&(
+        "tracedecay.work.provider.timed-out.v1",
+        identity,
         observed_at,
     ))
     .map_err(map_evidence_error)

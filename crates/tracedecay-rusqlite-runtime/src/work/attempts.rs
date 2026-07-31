@@ -611,6 +611,7 @@ pub(crate) fn validate_attempt_transition(
                 .any(|artifact| !candidate.artifacts().contains(artifact))
             || candidate.cancellation() != previous.cancellation()
             || candidate.recovery() != previous.recovery()
+            || candidate.execution() != previous.execution()
             || candidate.actual_route() != previous.actual_route()
             || candidate.terminal() != previous.terminal()
         {
@@ -619,6 +620,7 @@ pub(crate) fn validate_attempt_transition(
         WorkAttemptV1::new(
             previous.identity().clone(),
             previous.projection_binding().clone(),
+            previous.execution().clone(),
             candidate.lease().clone(),
             candidate.state(),
             candidate.progress(),
@@ -691,6 +693,7 @@ pub(crate) fn attempt_state(state: WorkAttemptStateV1) -> &'static str {
         WorkAttemptStateV1::RecoveryRequired => "recovery_required",
         WorkAttemptStateV1::Succeeded => "succeeded",
         WorkAttemptStateV1::Failed => "failed",
+        WorkAttemptStateV1::TimedOut => "timed_out",
         WorkAttemptStateV1::Cancelled => "cancelled",
     }
 }

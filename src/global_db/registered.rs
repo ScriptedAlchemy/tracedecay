@@ -50,6 +50,46 @@ impl RegisteredWorkApplicationServicesV1 {
     }
 }
 
+/// PR17 workflow definition/activation and task-handoff-token services over
+/// the same registered Work migration-SQL channel as [`RegisteredWorkApplicationServicesV1`].
+/// This is not a second Work authority: [`WorkflowSqliteAuthority`] installs its
+/// tables through the exact handle `WorkSqliteStorage` owns.
+///
+/// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
+pub(crate) struct RegisteredWorkflowApplicationServicesV1 {
+    authority: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    definitions: tracedecay_application::WorkflowDefinitionService<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    >,
+    handoffs: tracedecay_application::TaskHandoffService<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    >,
+}
+
+impl RegisteredWorkflowApplicationServicesV1 {
+    pub(crate) fn authority(
+        &self,
+    ) -> tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
+        self.authority.clone()
+    }
+
+    pub(crate) fn definitions(
+        &self,
+    ) -> &tracedecay_application::WorkflowDefinitionService<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    > {
+        &self.definitions
+    }
+
+    pub(crate) fn handoffs(
+        &self,
+    ) -> &tracedecay_application::TaskHandoffService<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    > {
+        &self.handoffs
+    }
+}
+
 impl RegisteredGlobalDb {
     /// Migrates an already-published runtime before validating and exposing
     /// the registered global database facade. No path is reopened.
@@ -305,10 +345,35 @@ impl RegisteredGlobalDb {
         })
     }
 
+    /// Attaches the PR17 workflow-definition/task-handoff authority over the
+    /// registered Work migration-SQL handle. Installs `workflow_*` tables
+    /// idempotently through the same handle `work_storage` validates.
+    pub(crate) fn workflow_storage(
+        &self,
+    ) -> crate::errors::Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
+        let storage = self.work_storage()?;
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_work_storage(&storage)
+            .map_err(|error| {
+                registered_error("attach registered workflow storage", format!("{error:?}"))
+            })
+    }
+
+    pub(crate) fn workflow_application_services(
+        &self,
+    ) -> crate::errors::Result<RegisteredWorkflowApplicationServicesV1> {
+        let authority = self.workflow_storage()?;
+        Ok(RegisteredWorkflowApplicationServicesV1 {
+            authority: authority.clone(),
+            definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
+            handoffs: tracedecay_application::TaskHandoffService::new(authority),
+        })
+    }
+
     pub(crate) fn work_runtime(
         self: &Arc<Self>,
         authority: tracedecay_domain::WorkAuthority,
         config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+        configuration_digest: tracedecay_domain::ManifestDigest,
         project_root: std::path::PathBuf,
     ) -> crate::errors::Result<
         crate::daemon::work_runtime::DaemonWorkRuntimeV1<
@@ -320,6 +385,7 @@ impl RegisteredGlobalDb {
             authority,
             storage,
             config,
+            configuration_digest,
             Arc::clone(self),
             project_root,
         ))

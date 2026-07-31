@@ -10,9 +10,11 @@ use tracedecay_application::{
     ReviewProposalCommand, WorkService,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-    RepositoryId, RunId, TaskId, WorkCancellationRequestId, WorkFenceEpochV1, WorkLeaseId,
-    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkVersion, WorktreeId,
+    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
+    RepositoryId, RunId, TaskId, WorkCancellationRequestId, WorkEffectStateV1,
+    WorkExecutionBudgetV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseId,
+    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProviderBackendV1, WorkVersion,
+    WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -291,10 +293,46 @@ impl Harness {
                 model: None,
                 timeout,
             },
+            digest('c'),
             Arc::clone(&self.observation_db),
             self.project_root.clone(),
             NonZeroUsize::new(capacity).unwrap(),
         )
+    }
+
+    fn execution(&self, identity: WorkAttemptIdentityV1) -> WorkExecutionEnvelopeV1 {
+        let projection = self
+            .snapshot
+            .projections()
+            .iter()
+            .find(|projection| projection.task_id() == identity.task_id())
+            .unwrap();
+        WorkExecutionEnvelopeV1::new(
+            identity,
+            WorkAttemptProjectionBindingV1::new(
+                self.snapshot.generation_id().clone(),
+                self.snapshot.sequence(),
+                projection.version(),
+                projection.accepted_proposal().cloned().unwrap(),
+            )
+            .unwrap(),
+            id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            NativeWorkProviderV1::<WorkSqliteStorage>::codex_app_server_route().unwrap(),
+            WorkProviderBackendV1::CodexAppServer,
+            "codex-work-fixture".to_owned(),
+            digest('c'),
+            self.authority.project_id().clone(),
+            self.authority.repository_id().clone(),
+            self.authority.worktree_id().clone(),
+            self.project_root.to_string_lossy().into_owned(),
+            None,
+            id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+            UtcMicros(i64::MAX),
+            1,
+            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
+            WorkEffectStateV1::Observational,
+        )
+        .unwrap()
     }
 
     fn path(&self, name: &str) -> std::path::PathBuf {
@@ -320,7 +358,12 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
 
     let successful_identity = identity(&task_id, "success");
     runtime
-        .acquire_lease(&snapshot, successful_identity.clone(), lease(1))
+        .acquire_lease(
+            &snapshot,
+            successful_identity.clone(),
+            harness.execution(successful_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -383,7 +426,12 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
 
     let cancelled_identity = identity(&task_id, "cancelled");
     runtime
-        .acquire_lease(&snapshot, cancelled_identity.clone(), lease(1))
+        .acquire_lease(
+            &snapshot,
+            cancelled_identity.clone(),
+            harness.execution(cancelled_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -410,7 +458,12 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
 
     let resumed_identity = identity(&task_id, "resumed");
     runtime
-        .acquire_lease(&snapshot, resumed_identity.clone(), lease(1))
+        .acquire_lease(
+            &snapshot,
+            resumed_identity.clone(),
+            harness.execution(resumed_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -435,7 +488,12 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
 
     let restarted_identity = identity(&task_id, "restarted");
     runtime
-        .acquire_lease(&snapshot, restarted_identity.clone(), lease(1))
+        .acquire_lease(
+            &snapshot,
+            restarted_identity.clone(),
+            harness.execution(restarted_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -460,7 +518,12 @@ async fn codex_runtime_covers_fence_terminal_cancel_resume_recovery_and_sse() {
 
     let recovery_identity = identity(&task_id, "recovery");
     runtime
-        .acquire_lease(&snapshot, recovery_identity.clone(), lease(1))
+        .acquire_lease(
+            &snapshot,
+            recovery_identity.clone(),
+            harness.execution(recovery_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -517,7 +580,12 @@ async fn codex_cancel_terminates_and_reaps_stubborn_process_tree() {
     let runtime = harness.runtime(&fixture, Duration::from_secs(2), 4);
     let attempt_identity = identity(&harness.task_id, "stubborn-cancel");
     runtime
-        .acquire_lease(&harness.snapshot, attempt_identity.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            attempt_identity.clone(),
+            harness.execution(attempt_identity.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -557,7 +625,12 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
 
     let occupying = identity(&harness.task_id, "saturating");
     runtime
-        .acquire_lease(&harness.snapshot, occupying.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            occupying.clone(),
+            harness.execution(occupying.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -568,7 +641,12 @@ async fn saturated_work_queue_refuses_new_executions_and_keeps_the_durable_inten
 
     let refused = identity(&harness.task_id, "refused");
     runtime
-        .acquire_lease(&harness.snapshot, refused.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            refused.clone(),
+            harness.execution(refused.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     let error = runtime
@@ -620,7 +698,12 @@ async fn a_rejected_transition_starts_no_provider_execution() {
 
     let fenced = identity(&harness.task_id, "fenced");
     runtime
-        .acquire_lease(&harness.snapshot, fenced.clone(), lease(2))
+        .acquire_lease(
+            &harness.snapshot,
+            fenced.clone(),
+            harness.execution(fenced.clone()),
+            lease(2),
+        )
         .await
         .unwrap();
 
@@ -660,7 +743,12 @@ async fn a_restarted_runtime_replays_terminals_and_never_invents_success() {
 
     let orphaned = identity(&harness.task_id, "orphaned");
     before
-        .acquire_lease(&harness.snapshot, orphaned.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            orphaned.clone(),
+            harness.execution(orphaned.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     before
@@ -715,7 +803,12 @@ async fn cancelling_a_provider_that_already_completed_still_terminates_as_cancel
 
     let raced = identity(&harness.task_id, "raced-cancel");
     runtime
-        .acquire_lease(&harness.snapshot, raced.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            raced.clone(),
+            harness.execution(raced.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     runtime
@@ -756,7 +849,12 @@ async fn a_cancellation_resolves_without_an_execution_this_process_owns() {
 
     let stranded = identity(&harness.task_id, "foreign-cancel");
     owner
-        .acquire_lease(&harness.snapshot, stranded.clone(), lease(1))
+        .acquire_lease(
+            &harness.snapshot,
+            stranded.clone(),
+            harness.execution(stranded.clone()),
+            lease(1),
+        )
         .await
         .unwrap();
     owner
@@ -797,7 +895,12 @@ async fn terminalizing_an_attempt_releases_its_execution_slot() {
     for suffix in ["one", "two", "three"] {
         let attempt = identity(&harness.task_id, suffix);
         runtime
-            .acquire_lease(&harness.snapshot, attempt.clone(), lease(1))
+            .acquire_lease(
+                &harness.snapshot,
+                attempt.clone(),
+                harness.execution(attempt.clone()),
+                lease(1),
+            )
             .await
             .unwrap();
         runtime

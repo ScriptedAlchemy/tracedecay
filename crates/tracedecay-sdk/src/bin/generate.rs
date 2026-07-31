@@ -9,7 +9,9 @@ use quote::ToTokens;
 use schemars::schema::RootSchema;
 use serde_json::Value;
 use tracedecay_api::HttpApplicationOperation;
-use tracedecay_application::work_executable_binding_registry;
+use tracedecay_application::{
+    work_executable_binding_registry, workflow_executable_binding_registry,
+};
 use tracedecay_tool_catalog::{
     BindingId, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
     ExecutableUnavailableDispositionV1, RouteExposureV1,
@@ -77,7 +79,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn canonical_application_registry() -> Result<ExecutableBindingRegistryV1, Box<dyn Error>> {
-    Ok(work_executable_binding_registry()?)
+    let work = work_executable_binding_registry()?;
+    let workflow = workflow_executable_binding_registry()?;
+    Ok(ExecutableBindingRegistryV1::new(
+        work.iter().chain(workflow.iter()).cloned().collect(),
+    )?)
 }
 
 fn canonical_operations(

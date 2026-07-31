@@ -5099,6 +5099,17 @@ impl HostAdmissionTestRuntimeV1 {
             .await)
     }
 
+    /// Bind the registered PR17 workflow/handoff authority for the mounted
+    /// project. Every call reopens through the live registered database, so
+    /// dropping and re-admitting the runtime at the same profile root
+    /// exercises the same durable restart journey as the rest of Work.
+    #[doc(hidden)]
+    pub fn project_workflow_storage_for_test(
+        &self,
+    ) -> crate::errors::Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
+        self.project_database_for_test()?.workflow_storage()
+    }
+
     #[doc(hidden)]
     pub async fn project_session_for_test(
         &self,
