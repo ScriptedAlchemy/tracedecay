@@ -1082,13 +1082,11 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         ));
     }
 
-    // Build node ID lookup
     let node_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
     let node_map: HashMap<&str, &crate::types::Node> =
         nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let id_set: HashSet<&str> = node_ids.iter().map(std::string::String::as_str).collect();
 
-    // Get internal edges (dependency edges between these nodes)
     let edges = cg.get_internal_edges(&node_ids).await?;
 
     // Build adjacency list and in-degree map for Kahn's algorithm.
@@ -1322,7 +1320,6 @@ pub(super) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         }));
     }
 
-    // Build output levels
     let levels_json: Vec<Value> = levels
         .iter()
         .enumerate()
