@@ -289,52 +289,16 @@ pub(crate) struct SourceEditReconciliationInvocationV1 {
 pub(crate) type SourceEditReconciliationExecutor =
     Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
-pub(crate) type RetainedProjectGraphFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = crate::errors::Result<Option<Arc<TraceDecay>>>>
-            + Send
-            + 'static,
-    >,
->;
-
-#[derive(Clone)]
-pub(crate) struct RetainedProjectGraphRequest {
-    pub(crate) owner: Option<crate::global_db::ProjectRegistryContext>,
-    pub(crate) registered_root: PathBuf,
-    pub(crate) requested_worktree_root: PathBuf,
-    pub(crate) requested_git_common_dir: Option<PathBuf>,
-    pub(crate) requested_branch: Option<String>,
-}
-
-impl RetainedProjectGraphRequest {
-    pub(crate) fn for_registered_project(
-        owner: crate::global_db::ProjectRegistryContext,
-        requested_worktree_root: PathBuf,
-    ) -> Self {
-        Self {
-            registered_root: PathBuf::from(&owner.project.canonical_root),
-            requested_git_common_dir: crate::worktree::git_common_dir(&requested_worktree_root),
-            requested_branch: crate::branch::current_branch(&requested_worktree_root),
-            requested_worktree_root,
-            owner: Some(owner),
-        }
-    }
-
-    pub(crate) fn for_mounted_root(root: PathBuf) -> Self {
-        Self {
-            requested_git_common_dir: crate::worktree::git_common_dir(&root),
-            requested_branch: crate::branch::current_branch(&root),
-            registered_root: root.clone(),
-            requested_worktree_root: root,
-            owner: None,
-        }
-    }
-}
-
 /// Type-erased read bridge to a graph already mounted by the daemon. Project
 /// selectors must not reconstruct graph ownership from registry paths.
-pub(crate) type RetainedProjectGraphResolver =
-    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
+///
+/// The contract is owned by `tracedecay-dashboard-api` (its sole consumer is
+/// dashboard project selection, which holds it as an injected field); the MCP
+/// server and the daemon supply the implementation. These aliases keep the
+/// historical `crate::mcp::server::…` paths resolving.
+pub(crate) use tracedecay_dashboard_api::project_graph::{
+    RetainedProjectGraphFuture, RetainedProjectGraphRequest, RetainedProjectGraphResolver,
+};
 
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
