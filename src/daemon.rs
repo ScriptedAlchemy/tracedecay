@@ -1200,6 +1200,7 @@ mod remote_https;
 #[cfg(test)]
 mod remote_https_tests;
 pub(crate) mod remote_protocol;
+mod remote_runtime;
 mod semantic_evaluation;
 pub(crate) use core_admission::*;
 pub use core_client::*;
@@ -1347,6 +1348,20 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let remote_query_runtime =
+        remote_runtime::start_daemon_remote_query_runtime(&profile_root).await?;
+    log_daemon_event(
+        "daemon_remote_query",
+        &[
+            ("state", format!("{:?}", remote_query_runtime.state())),
+            (
+                "endpoint",
+                remote_query_runtime
+                    .endpoint()
+                    .map_or_else(|| "unconfigured".to_owned(), |endpoint| endpoint.to_string()),
+            ),
+        ],
+    );
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
@@ -1405,6 +1420,11 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let _ = timeout(
         DAEMON_TASK_ABORT_DEADLINE,
         http_application_service.shutdown(),
+    )
+    .await;
+    let _ = timeout(
+        DAEMON_TASK_ABORT_DEADLINE,
+        remote_query_runtime.shutdown(),
     )
     .await;
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
@@ -1507,6 +1527,20 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let remote_query_runtime =
+        remote_runtime::start_daemon_remote_query_runtime(&profile_root).await?;
+    log_daemon_event(
+        "daemon_remote_query",
+        &[
+            ("state", format!("{:?}", remote_query_runtime.state())),
+            (
+                "endpoint",
+                remote_query_runtime
+                    .endpoint()
+                    .map_or_else(|| "unconfigured".to_owned(), |endpoint| endpoint.to_string()),
+            ),
+        ],
+    );
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
@@ -1586,6 +1620,11 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         let _ = timeout(
             DAEMON_TASK_ABORT_DEADLINE,
             http_application_service.shutdown(),
+        )
+        .await;
+        let _ = timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            remote_query_runtime.shutdown(),
         )
         .await;
         engine.shutdown_project_open_tasks().await;

@@ -2,18 +2,18 @@
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError,
-    WorkflowExecutionAuthorityPort, WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1,
-    WorkflowExecutionTruthV1, WorkflowFanOutCheckpointV1, WorkflowFanOutInputV1,
-    WorkflowChildExecutionOutcomeV1, WorkflowChildRecordV1, WorkflowRecoveryDirectiveV1,
+    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildExecutionOutcomeV1, WorkflowChildRecordV1,
+    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
+    WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
+    WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1, WorkflowExecutionTruthV1,
+    WorkflowFanOutCheckpointV1, WorkflowFanOutInputV1, WorkflowRecoveryDirectiveV1,
     WorkflowSynthesisTruthV1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, UtcMicros,
-    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1, WorktreeId,
-    canonical_sha256,
+    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
+    UtcMicros, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkflowDefinitionId,
+    WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
 
@@ -62,6 +62,7 @@ fn handoff_scope() -> TaskHandoffScopeV1 {
         1,
         id::<WorkflowStepId>("prepare"),
         id::<TaskId>("task.workflow.runtime-store.prepare"),
+        id::<ThreadId>("thread.workflow.runtime-store"),
         id::<RunId>("run.workflow.runtime-store"),
         id::<ActorId>("actor.workflow.source"),
         id::<ActorId>("actor.workflow.target"),
@@ -104,10 +105,10 @@ fn checkpoint(plan: ManifestDigest) -> WorkflowFanOutCheckpointV1 {
             task_id: id::<TaskId>("task.workflow.runtime-store.child"),
             input: WorkflowFanOutInputV1 {
                 identity: "child-a".to_owned(),
-                input_digest: digest('i'),
+                input_digest: digest('1'),
             },
             outcome: WorkflowChildExecutionOutcomeV1::Succeeded {
-                output_digest: digest('o'),
+                output_digest: digest('2'),
             },
         }],
     }
@@ -115,7 +116,7 @@ fn checkpoint(plan: ManifestDigest) -> WorkflowFanOutCheckpointV1 {
 
 fn terminal_truth() -> WorkflowExecutionTruthV1 {
     WorkflowExecutionTruthV1::Synthesized(WorkflowSynthesisTruthV1::Complete {
-        output_digest: digest('t'),
+        output_digest: digest('3'),
     })
 }
 
@@ -215,6 +216,12 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
             )
             .unwrap();
         assert!(!payload.contains(&secret));
+        let persisted: TaskHandoffScopeV1 = serde_json::from_str(&payload).unwrap();
+        assert_eq!(persisted, scope);
+        assert_eq!(
+            persisted.thread_id().as_str(),
+            "thread.workflow.runtime-store"
+        );
         let count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM workflow_handoffs_v1 WHERE scope_payload LIKE ?1",
@@ -225,8 +232,20 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         assert_eq!(count, 0);
     });
 
-    let mut wrong_scope = scope.clone();
-    wrong_scope.task_id = id("task.workflow.runtime-store.other");
+    let wrong_scope = TaskHandoffScopeV1::new(
+        scope.project_id().clone(),
+        scope.repository_id().clone(),
+        scope.worktree_id().clone(),
+        scope.definition_id().clone(),
+        scope.definition_version(),
+        scope.step_id().clone(),
+        id::<TaskId>("task.workflow.runtime-store.other"),
+        scope.thread_id().clone(),
+        scope.run_id().clone(),
+        scope.from_actor_id().clone(),
+        scope.to_actor_id().clone(),
+    )
+    .unwrap();
     assert_eq!(
         TaskHandoffAuthorityPort::consume(
             &authority,
@@ -238,13 +257,8 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         TaskHandoffConsumeOutcome::ScopeMismatch
     );
     assert_eq!(
-        TaskHandoffAuthorityPort::consume(
-            &authority,
-            &digest('z'),
-            &scope,
-            UtcMicros(15),
-        )
-        .unwrap(),
+        TaskHandoffAuthorityPort::consume(&authority, &digest('4'), &scope, UtcMicros(15),)
+            .unwrap(),
         TaskHandoffConsumeOutcome::Missing
     );
 
@@ -268,23 +282,13 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     );
 
     assert_eq!(
-        TaskHandoffAuthorityPort::consume(
-            &authority,
-            grant.token_digest(),
-            &scope,
-            UtcMicros(19),
-        )
-        .unwrap(),
+        TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(19),)
+            .unwrap(),
         TaskHandoffConsumeOutcome::Consumed
     );
     assert_eq!(
-        TaskHandoffAuthorityPort::consume(
-            &authority,
-            grant.token_digest(),
-            &scope,
-            UtcMicros(19),
-        )
-        .unwrap(),
+        TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(19),)
+            .unwrap(),
         TaskHandoffConsumeOutcome::Replay
     );
 }
@@ -294,7 +298,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
     let store = RegisteredWorkStore::start("workflow-execution");
     let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
     let identity = execution_identity();
-    let plan = plan_digest('p');
+    let plan = plan_digest('5');
     let first_fence = fence(1, "attempt.workflow.runtime-store.1");
     let newer_fence = fence(2, "attempt.workflow.runtime-store.2");
     let stale_fence = fence(1, "attempt.workflow.runtime-store.stale");
@@ -320,7 +324,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
         WorkflowExecutionAdmissionV1::StaleFence
     );
     assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &digest('x'))
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &newer_fence, &digest('6'))
             .unwrap(),
         WorkflowExecutionAdmissionV1::StaleFence
     );
@@ -364,7 +368,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
             &authority,
             &identity,
             &fence(3, "attempt.workflow.runtime-store.3"),
-            &digest('q'),
+            &digest('7'),
         )
         .unwrap(),
         WorkflowExecutionAdmissionV1::StaleFence
@@ -417,13 +421,8 @@ fn definition_and_handoff_survive_registered_store_restart() {
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
     assert_eq!(
-        TaskHandoffAuthorityPort::consume(
-            &authority,
-            grant.token_digest(),
-            &scope,
-            UtcMicros(11),
-        )
-        .unwrap(),
+        TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(11),)
+            .unwrap(),
         TaskHandoffConsumeOutcome::Consumed
     );
 
@@ -440,13 +439,8 @@ fn definition_and_handoff_survive_registered_store_restart() {
         Some(1)
     );
     assert_eq!(
-        TaskHandoffAuthorityPort::consume(
-            &authority,
-            grant.token_digest(),
-            &scope,
-            UtcMicros(12),
-        )
-        .unwrap(),
+        TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(12),)
+            .unwrap(),
         TaskHandoffConsumeOutcome::Replay
     );
 }

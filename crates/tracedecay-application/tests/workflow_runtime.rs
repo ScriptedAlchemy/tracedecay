@@ -12,9 +12,9 @@ use tracedecay_application::{
     WorkflowSynthesisTruthV1,
 };
 use tracedecay_domain::{
-    AttemptId, ManifestDigest, ProjectId, RunId, TaskId, UtcMicros, WorkCommandId, WorkFenceEpochV1,
-    WorkLeaseFenceV1, WorkLeaseId, WorkflowDefinitionV1, WorkflowFanOutV1, WorkflowOperationRef,
-    WorkflowOutputName, WorkflowStepId, WorkflowStepV1,
+    AttemptId, ManifestDigest, ProjectId, RunId, TaskId, UtcMicros, WorkCommandId,
+    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkflowDefinitionV1, WorkflowFanOutV1,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStepV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -452,7 +452,8 @@ fn stale_fence_is_rejected_and_interrupted_children_resume_without_replay() {
         checkpoint
             .children
             .iter()
-            .all(|child| !child.input.identity.is_empty() && child.input.input_digest.validate().is_ok()),
+            .all(|child| !child.input.identity.is_empty()
+                && child.input.input_digest.validate().is_ok()),
         "checkpoints must retain input digests; raw event rows are not backfill"
     );
 }
@@ -504,11 +505,8 @@ fn pre_dispatch_cancellation_completes_terminal_without_children_or_synthesis() 
     let authority = FakeAuthority::default();
     let children = FakeChildren::default();
     let synthesis = FakeSynthesis::default();
-    let service = WorkflowFanOutRuntimeService::new(
-        authority.clone(),
-        children.clone(),
-        synthesis.clone(),
-    );
+    let service =
+        WorkflowFanOutRuntimeService::new(authority.clone(), children.clone(), synthesis.clone());
     let mut cancelled = request(vec![input("a", '1'), input("b", '2')], 1);
     cancelled.cancellation =
         CancellationContext::cancelled("cancel.workflow.runtime", UtcMicros(11)).unwrap();
@@ -522,7 +520,10 @@ fn pre_dispatch_cancellation_completes_terminal_without_children_or_synthesis() 
     assert!(children.calls.lock().unwrap().is_empty());
     assert!(synthesis.joins.lock().unwrap().is_empty());
     assert_eq!(authority.state.lock().unwrap().completes, 1);
-    assert_eq!(authority.state.lock().unwrap().terminal.as_ref(), Some(&truth));
+    assert_eq!(
+        authority.state.lock().unwrap().terminal.as_ref(),
+        Some(&truth)
+    );
 
     // A fresh admission under a new fence (not a replay of cancelled terminal)
     // must proceed with active cancellation and the delegated max_parallel bound.
@@ -666,10 +667,7 @@ fn max_parallel_bound_propagates_with_deterministic_child_identities() {
     service.execute(req.clone()).unwrap();
     assert_eq!(children.batches.lock().unwrap()[0].0, 2);
     assert_eq!(children.batches.lock().unwrap()[0].1, 2);
-    assert_eq!(
-        children.batches.lock().unwrap()[0].2,
-        active_cancellation()
-    );
+    assert_eq!(children.batches.lock().unwrap()[0].2, active_cancellation());
 
     let first_ids = children.calls.lock().unwrap().clone();
     let children = FakeChildren::default();

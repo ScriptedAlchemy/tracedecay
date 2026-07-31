@@ -244,6 +244,24 @@ pub struct RemoteBrainHttpsService {
 }
 
 impl RemoteBrainHttpsService {
+    pub async fn bind_query_protocol<Port>(
+        config: &RemoteBrainHttpsConfigV1,
+        port: Port,
+    ) -> Result<Self, RemoteBrainHttpsError>
+    where
+        Port: RemoteEnrollmentProtocolPortV1
+            + RemoteProtocolPortV1<RemoteQueryRequestV1, Output = RemoteQueryResultV1>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let router =
+            tracedecay_api::remote::remote_query_protocol_router::<Port, RemoteQueryRequestV1>(
+                port,
+            );
+        Self::bind(config, router).await
+    }
+
     /// Mount exactly the canonical Remote Brain protocol router on this TLS
     /// listener. Local dashboard/application routes are intentionally absent.
     pub async fn bind_protocol<Port>(

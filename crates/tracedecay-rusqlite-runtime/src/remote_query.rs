@@ -395,3 +395,58 @@ impl RuntimeRequestProbeV1 for QueryProbe {
         *decision
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe(
+        cancellation: CancellationSignal,
+        maximum_elapsed: Duration,
+    ) -> QueryProbe {
+        QueryProbe {
+            cancellation: RuntimeCancellationIdentityV1 {
+                cancellation_id: RuntimeCancellationIdV1::new("cancel.remote-query-test").unwrap(),
+                generation: 1,
+            },
+            deadline: RuntimeDeadlineV1 {
+                deadline_id: RuntimeDeadlineIdV1::new("deadline.remote-query-test").unwrap(),
+            },
+            application_cancellation: cancellation,
+            started: Instant::now(),
+            maximum_elapsed,
+            decision: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn query_probe_reports_cancellation_monotonically() {
+        let cancellation = CancellationSignal::active("cancel.remote-query-test").unwrap();
+        cancellation.cancel(UtcMicros(1));
+        let probe = probe(cancellation, Duration::from_secs(1));
+        assert_eq!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::Cancelled)
+        );
+        assert_eq!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::Cancelled)
+        );
+    }
+
+    #[test]
+    fn query_probe_reports_elapsed_deadline_monotonically() {
+        let probe = probe(
+            CancellationSignal::active("cancel.remote-query-timeout-test").unwrap(),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::DeadlineExceeded)
+        );
+        assert_eq!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::DeadlineExceeded)
+        );
+    }
+}

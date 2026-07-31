@@ -166,7 +166,9 @@ fn encode_definition(
     serde_json::to_string(definition).map_err(|_| definition_codec_unavailable())
 }
 
-fn decode_definition(payload: &str) -> Result<WorkflowDefinitionV1, WorkflowDefinitionAuthorityError> {
+fn decode_definition(
+    payload: &str,
+) -> Result<WorkflowDefinitionV1, WorkflowDefinitionAuthorityError> {
     serde_json::from_str(payload).map_err(|_| definition_codec_unavailable())
 }
 
@@ -211,7 +213,10 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .map_err(|_| definition_codec_unavailable())?;
         let payload = encode_definition(definition)?;
         let digest = definition_digest(definition)?;
-        let transaction = self.handle.begin_immediate().map_err(definition_unavailable)?;
+        let transaction = self
+            .handle
+            .begin_immediate()
+            .map_err(definition_unavailable)?;
         let existing = query_tx(
             &transaction,
             "SELECT payload, payload_digest FROM workflow_definitions_v1
@@ -312,9 +317,12 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         expected_version: Option<u64>,
         replacement_version: u64,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
-        let replacement = version_i64(replacement_version)
-            .map_err(|_| definition_codec_unavailable())?;
-        let transaction = self.handle.begin_immediate().map_err(definition_unavailable)?;
+        let replacement =
+            version_i64(replacement_version).map_err(|_| definition_codec_unavailable())?;
+        let transaction = self
+            .handle
+            .begin_immediate()
+            .map_err(definition_unavailable)?;
         let rows = query_tx(
             &transaction,
             "SELECT active_version FROM workflow_activations_v1 WHERE definition_id = ?1",
@@ -355,8 +363,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     fn issue(&self, grant: &TaskHandoffGrantV1) -> Result<(), TaskHandoffAuthorityError> {
-        let scope_payload =
-            encode_json(&grant.scope).map_err(|_| handoff_codec_unavailable())?;
+        let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let transaction = self.handle.begin_immediate().map_err(handoff_unavailable)?;
         let existing = query_tx(
             &transaction,
@@ -378,8 +385,8 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             vec![
                 MigrationSqlValue::Text(grant.token_digest().as_str().to_owned()),
                 MigrationSqlValue::Text(scope_payload),
-                MigrationSqlValue::Integer(grant.issued_at.0),
-                MigrationSqlValue::Integer(grant.expires_at.0),
+                MigrationSqlValue::Integer(grant.issued_at().0),
+                MigrationSqlValue::Integer(grant.expires_at().0),
             ],
         )
         .map_err(handoff_unavailable)?;
@@ -407,22 +414,19 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Missing);
         };
-        let scope_payload =
-            migration_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
+        let scope_payload = migration_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
         let scope: TaskHandoffScopeV1 =
             decode_json(scope_payload).map_err(|_| handoff_codec_unavailable())?;
         if &scope != expected_scope {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::ScopeMismatch);
         }
-        let expires_at =
-            migration_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
+        let expires_at = migration_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
         if consumed_at.0 >= expires_at {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Expired);
         }
-        let consumed =
-            migration_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
+        let consumed = migration_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
         if consumed != 0 {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Replay);
@@ -493,8 +497,7 @@ fn load_execution(
             .to_owned(),
     )
     .map_err(|_| execution_codec_unavailable())?;
-    let fence_epoch =
-        migration_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
+    let fence_epoch = migration_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
     let fence = WorkflowExecutionFenceV1 {
         attempt_id,
         lease: WorkLeaseFenceV1::new(
@@ -595,9 +598,7 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
         let stored = load_execution(&transaction, identity)?;
         let Some(stored) = stored else {
             insert_execution(&transaction, identity, fence, plan_digest)?;
-            transaction
-                .commit()
-                .map_err(execution_unavailable)?;
+            transaction.commit().map_err(execution_unavailable)?;
             return Ok(WorkflowExecutionAdmissionV1::Execute);
         };
 
@@ -627,9 +628,7 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             },
             None => WorkflowExecutionAdmissionV1::Execute,
         };
-        transaction
-            .commit()
-            .map_err(execution_unavailable)?;
+        transaction.commit().map_err(execution_unavailable)?;
         Ok(admission)
     }
 
