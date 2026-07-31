@@ -1,0 +1,52 @@
+[package]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT"
+description = "Agent host integrations and self-improvement automation for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+build = "build.rs"
+
+[lib]
+doctest = false
+
+[features]
+default = []
+# Exact token counting for automation artifact budgeting (tiktoken BPE).
+# Mirrors the root crate's `token-counting` feature; forwarded by the root.
+token-counting = ["dep:tiktoken-rs"]
+# Test-only transport wiring; mirrors the root crate's `test-transport`.
+test-transport = []
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+dirs = "6"
+fs2 = "0.4"
+hex = "0.4"
+regex = "1.12.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tiktoken-rs = { version = "0.12", optional = true }
+tokio = { version = "1", features = ["full"] }
+toml = "1"
+toml_edit = "0.25.13"
+tracing = "0.1"
+url = "2"
+yaml-edit = { version = "0.2.3", default-features = false }
+
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
