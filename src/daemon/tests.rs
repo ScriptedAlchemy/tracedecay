@@ -34,6 +34,7 @@ mod logging;
 mod multi_root_journey;
 mod ownership;
 mod replay;
+mod rmcp_route;
 mod restart_proxy;
 mod scheduler_config;
 mod scheduler_shutdown;
