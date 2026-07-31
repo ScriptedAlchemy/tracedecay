@@ -1135,12 +1135,7 @@ impl Database {
     // Visible outside the crate: integration suites in `tests/` are external
     // crates and exercise this fixture path directly.
     #[doc(hidden)]
-    pub async fn execute_write<P>(
-        &self,
-        operation: &str,
-        sql: &str,
-        params: P,
-    ) -> Result<u64>
+    pub async fn execute_write<P>(&self, operation: &str, sql: &str, params: P) -> Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {

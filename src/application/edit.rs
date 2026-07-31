@@ -2224,7 +2224,8 @@ fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<Stri
 fn source_edit_state_digest(root: &Path, files: &[String]) -> Result<ManifestDigest> {
     let mut states = Vec::with_capacity(files.len());
     for relative in files {
-        let state = match crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))? {
+        let state = match crate::tracedecay::read_source_edit_candidate(root, Path::new(relative))?
+        {
             Some(bytes) => Some(hash_source_edit_content(&bytes)?),
             None => None,
         };

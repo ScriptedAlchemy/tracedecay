@@ -833,4 +833,3 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
         }
     );
 }
-
