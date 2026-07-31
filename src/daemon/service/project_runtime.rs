@@ -1,28 +1,15 @@
-//! One runtime per canonical project.
-//!
-//! The daemon used to keep a separate map for each kind of thing a project
-//! owns: one for its callable-code authorization, one for its feedback runtime,
-//! one for its cycle, one for its cycle input, one for primitives, one for
-//! configuration, one for Work, one for the LSP owner, three for advisory, one
-//! for semantic scheduling. Every registration, lookup, and shutdown named the
-//! project once per map, so a project could exist in some of them and not
-//! others, and shutdown was a sequence of mirrored branches whose order had to
-//! be maintained by hand.
-//!
-//! [`ProjectRuntimeRegistryV1`] holds one [`ProjectRuntime`] per project root
-//! instead. Each kind of component is a typed slot on it, reached through the
-//! [`ProjectRuntimeComponent`] trait rather than through a map of its own, so
-//! registering, reading, updating, and expiring a component are the same few
-//! operations whatever the component is, and a project's components are
-//! published and withdrawn under a single lock. Shutdown takes the whole map
-//! once and runs one ordered sequence over it.
+//! One typed runtime registry entry per canonical project.
+//! Publication and shutdown operate on each project's components as a unit.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 
-use tokio::sync::Mutex;
+use tokio::sync::watch;
+use tracedecay_lsp::FeedbackCycleRuntimePort;
 
 use crate::application::feedback::Pr12FeedbackCycleRuntime;
 use crate::application::feedback::concrete::Pr12FeedbackRuntime;
@@ -34,6 +21,85 @@ use super::invocation::{
     RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
 };
+
+mod reaper;
+mod shutdown;
+use reaper::RuntimeReaper;
+use shutdown::ShutdownState;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TestFirst(u8);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TestSecond(u8);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TestOmitted(u8);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestLifecycleEvent {
+    Construct { slot: u8, mark: u8 },
+    Stage(u8),
+    Publish,
+    Drop { slot: u8, mark: u8 },
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestLifecycleSpy {
+    events: std::sync::Mutex<Vec<TestLifecycleEvent>>,
+    live: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl TestLifecycleSpy {
+    fn record(&self, event: TestLifecycleEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event);
+    }
+
+    fn events(&self) -> Vec<TestLifecycleEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct RecordingComponent<const SLOT: u8> {
+    mark: u8,
+    spy: Arc<TestLifecycleSpy>,
+}
+
+#[cfg(test)]
+impl<const SLOT: u8> RecordingComponent<SLOT> {
+    fn new(mark: u8, spy: Arc<TestLifecycleSpy>) -> Self {
+        spy.live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        spy.record(TestLifecycleEvent::Construct { slot: SLOT, mark });
+        Self { mark, spy }
+    }
+}
+
+#[cfg(test)]
+impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
+    fn drop(&mut self) {
+        self.spy.record(TestLifecycleEvent::Drop {
+            slot: SLOT,
+            mark: self.mark,
+        });
+        self.spy
+            .live
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Everything one canonical project's daemon runtime owns.
 ///
@@ -52,6 +118,48 @@ pub(crate) struct ProjectRuntime {
     advisory_cycle_invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
     advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
+    reservations: Vec<TypeId>,
+    #[cfg(test)]
+    test_first: Option<TestFirst>,
+    #[cfg(test)]
+    test_second: Option<TestSecond>,
+    #[cfg(test)]
+    test_omitted: Option<TestOmitted>,
+    #[cfg(test)]
+    recording_first: Option<RecordingComponent<1>>,
+    #[cfg(test)]
+    recording_second: Option<RecordingComponent<2>>,
+}
+
+impl ProjectRuntime {
+    fn has_components(&self) -> bool {
+        self.callable_code.is_some()
+            || self.feedback.is_some()
+            || self.feedback_cycle.is_some()
+            || self.feedback_cycle_input.is_some()
+            || self.primitive.is_some()
+            || self.configuration.is_some()
+            || self.work.is_some()
+            || self.lsp_owner.is_some()
+            || self.advisory.is_some()
+            || self.advisory_cycle_invoker.is_some()
+            || self.advisory_hook_orchestrator.is_some()
+            || self.semantic.is_some()
+            || {
+                #[cfg(test)]
+                {
+                    self.test_first.is_some()
+                        || self.test_second.is_some()
+                        || self.test_omitted.is_some()
+                        || self.recording_first.is_some()
+                        || self.recording_second.is_some()
+                }
+                #[cfg(not(test))]
+                {
+                    false
+                }
+            }
+    }
 }
 
 /// One typed component of a project runtime.
@@ -95,6 +203,180 @@ project_runtime_components!(
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
 
+#[cfg(test)]
+project_runtime_components!(
+    TestFirst => test_first,
+    TestSecond => test_second,
+    TestOmitted => test_omitted,
+    RecordingComponent<1> => recording_first,
+    RecordingComponent<2> => recording_second,
+);
+
+#[derive(Clone, Copy)]
+struct ReservedProjectRuntimeSlot {
+    type_id: TypeId,
+    occupied: fn(&ProjectRuntime) -> bool,
+}
+
+#[derive(Clone, Default)]
+struct ProjectRuntimeReservation {
+    slots: Vec<ReservedProjectRuntimeSlot>,
+}
+
+impl ProjectRuntimeReservation {
+    fn reserve<C>(&mut self)
+    where
+        C: ProjectRuntimeComponent,
+    {
+        let type_id = TypeId::of::<C>();
+        if self.slots.iter().any(|slot| slot.type_id == type_id) {
+            return;
+        }
+        self.slots.push(ReservedProjectRuntimeSlot {
+            type_id,
+            occupied: |runtime| C::peek(runtime).is_some(),
+        });
+    }
+
+    fn contains<C>(&self) -> bool
+    where
+        C: ProjectRuntimeComponent,
+    {
+        let type_id = TypeId::of::<C>();
+        self.slots.iter().any(|slot| slot.type_id == type_id)
+    }
+
+    fn conflicts_with(&self, runtime: &ProjectRuntime) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| (slot.occupied)(runtime) || runtime.reservations.contains(&slot.type_id))
+    }
+
+    fn conflicts_with_components(&self, runtime: &ProjectRuntime) -> bool {
+        self.slots.iter().any(|slot| (slot.occupied)(runtime))
+    }
+
+    fn is_complete(&self, runtime: &ProjectRuntime) -> bool {
+        self.slots.iter().all(|slot| (slot.occupied)(runtime))
+    }
+
+    fn has_same_slots(&self, other: &Self) -> bool {
+        self.slots.len() == other.slots.len()
+            && self.slots.iter().all(|slot| {
+                other
+                    .slots
+                    .iter()
+                    .any(|other| other.type_id == slot.type_id)
+            })
+    }
+
+    fn type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.slots.iter().map(|slot| slot.type_id)
+    }
+}
+
+/// Components prepared for one all-or-nothing project-runtime publication.
+///
+/// Typed slots are reserved under the registry lock, construction runs after
+/// releasing it, and every staged component becomes reachable under one final
+/// lock acquisition. A conflict leaves every incumbent and staged component
+/// untouched.
+pub(crate) struct ProjectRuntimePublication {
+    staged: ProjectRuntime,
+    reservation: ProjectRuntimeReservation,
+    #[cfg(test)]
+    lifecycle_spy: Option<Arc<TestLifecycleSpy>>,
+}
+
+impl ProjectRuntimePublication {
+    fn new(reservation: ProjectRuntimeReservation) -> Self {
+        Self {
+            staged: ProjectRuntime::default(),
+            reservation,
+            #[cfg(test)]
+            lifecycle_spy: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn record_lifecycle_with(&mut self, spy: Arc<TestLifecycleSpy>) {
+        self.lifecycle_spy = Some(spy);
+    }
+
+    /// Stages one component. A bundle cannot name the same typed slot twice.
+    pub(crate) fn stage<C>(&mut self, component: C) -> Result<(), ProjectRuntimeAlreadyRegistered>
+    where
+        C: ProjectRuntimeComponent,
+    {
+        if !self.reservation.contains::<C>() {
+            return Err(ProjectRuntimeAlreadyRegistered);
+        }
+        let slot = C::slot(&mut self.staged);
+        if slot.is_some() {
+            return Err(ProjectRuntimeAlreadyRegistered);
+        }
+        *slot = Some(component);
+        Ok(())
+    }
+
+    fn conflicts_with(&self, incumbent: &ProjectRuntime) -> bool {
+        self.reservation.conflicts_with_components(incumbent)
+    }
+
+    fn commit_into(
+        mut self,
+        incumbent: &mut ProjectRuntime,
+    ) -> Result<(), ProjectRuntimeAlreadyRegistered> {
+        #[cfg(test)]
+        if let Some(spy) = &self.lifecycle_spy {
+            spy.record(TestLifecycleEvent::Publish);
+        }
+        if !self.reservation.is_complete(&self.staged) || self.conflicts_with(incumbent) {
+            return Err(ProjectRuntimeAlreadyRegistered);
+        }
+        macro_rules! move_all_components {
+            ($source:ident, $target:ident) => {{
+                macro_rules! move_component {
+                    ($field:ident) => {
+                        if $source.$field.is_some() {
+                            $target.$field = $source.$field.take();
+                        }
+                    };
+                }
+                move_component!(callable_code);
+                move_component!(feedback);
+                move_component!(feedback_cycle);
+                move_component!(feedback_cycle_input);
+                move_component!(primitive);
+                move_component!(configuration);
+                move_component!(work);
+                move_component!(lsp_owner);
+                move_component!(advisory);
+                move_component!(advisory_cycle_invoker);
+                move_component!(advisory_hook_orchestrator);
+                move_component!(semantic);
+                #[cfg(test)]
+                {
+                    move_component!(test_first);
+                    move_component!(test_second);
+                    move_component!(recording_first);
+                    move_component!(recording_second);
+                }
+            }};
+        }
+        let mut prepared = ProjectRuntime::default();
+        let staged = &mut self.staged;
+        move_all_components!(staged, prepared);
+        assert!(
+            !staged.has_components(),
+            "every staged runtime component must be published"
+        );
+        let prepared = &mut prepared;
+        move_all_components!(prepared, incumbent);
+        Ok(())
+    }
+}
+
 /// The per-project components one request may need, resolved together.
 ///
 /// Dispatch used to reach for these one at a time, taking a lock per component
@@ -107,6 +389,7 @@ pub(super) struct ProjectRequestRuntimesV1 {
     pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
     pub(super) advisory_cycle_invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
     pub(super) configuration: Option<RegisteredConfigurationRuntime>,
+    pub(super) work: Option<RegisteredWorkRuntime>,
     pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
 }
 
@@ -117,40 +400,385 @@ pub(super) struct ProjectRequestRuntimesV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProjectRuntimeAlreadyRegistered;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectRuntimeRegistryError {
+    AlreadyRegistered,
+    Closed,
+}
+
+pub(crate) enum FeedbackCyclePublicationError {
+    Registry(ProjectRuntimeRegistryError),
+    RouterUnavailable,
+}
+
+impl From<ProjectRuntimeRegistryError> for FeedbackCyclePublicationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        Self::Registry(error)
+    }
+}
+
+impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
+    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
+        Self::AlreadyRegistered
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct ProjectRuntimeRegistryV1 {
-    runtimes: Arc<Mutex<BTreeMap<PathBuf, ProjectRuntime>>>,
+    runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
+    reservation_changed: watch::Sender<u64>,
+    reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
+    shutdown_reaper: RuntimeReaper,
+    closed: Arc<AtomicBool>,
+    shutdown_started: Arc<AtomicBool>,
+    shutdown_complete: watch::Sender<ShutdownState>,
+    #[cfg(test)]
+    commit_starting: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    #[cfg(test)]
+    drain_waiting: Arc<StdMutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+}
+
+impl Default for ProjectRuntimeRegistryV1 {
+    fn default() -> Self {
+        let (reservation_changed, _) = watch::channel(0);
+        let (shutdown_complete, _) = watch::channel(ShutdownState::Pending);
+        Self {
+            runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
+            reservation_changed,
+            reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
+            shutdown_reaper: RuntimeReaper::new("tracedecay-runtime-shutdown-reaper"),
+            closed: Arc::new(AtomicBool::new(false)),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            shutdown_complete,
+            #[cfg(test)]
+            commit_starting: Arc::new(StdMutex::new(None)),
+            #[cfg(test)]
+            drain_waiting: Arc::new(StdMutex::new(None)),
+        }
+    }
+}
+
+struct ProjectRuntimeReservationLease {
+    registry: ProjectRuntimeRegistryV1,
+    project_root: PathBuf,
+    reservation: ProjectRuntimeReservation,
+    active: bool,
+}
+
+impl ProjectRuntimeReservationLease {
+    async fn release(mut self) {
+        self.release_inner().await;
+        self.active = false;
+    }
+
+    async fn commit(
+        mut self,
+        publication: ProjectRuntimePublication,
+    ) -> Result<(), ProjectRuntimeRegistryError> {
+        #[cfg(test)]
+        if let Some(commit_starting) = self
+            .registry
+            .commit_starting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            commit_starting.send(()).expect("commit-starting receiver");
+        }
+        let mut runtimes = self.registry.lock_runtimes();
+        let runtime = runtimes.entry(self.project_root.clone()).or_default();
+        let result = if self.registry.closed.load(Ordering::Acquire) {
+            Err(ProjectRuntimeRegistryError::Closed)
+        } else if self.reservation.has_same_slots(&publication.reservation) {
+            publication.commit_into(runtime).map_err(Into::into)
+        } else {
+            Err(ProjectRuntimeRegistryError::AlreadyRegistered)
+        };
+        runtime.reservations.retain(|type_id| {
+            !self
+                .reservation
+                .type_ids()
+                .any(|reserved| reserved == *type_id)
+        });
+        let remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+        if remove_project {
+            runtimes.remove(&self.project_root);
+        }
+        drop(runtimes);
+        self.active = false;
+        self.registry.signal_reservation_changed();
+        result
+    }
+
+    async fn release_inner(&self) {
+        let mut runtimes = self.registry.lock_runtimes();
+        Self::release_reservation(&mut runtimes, &self.project_root, &self.reservation);
+        drop(runtimes);
+        self.registry.signal_reservation_changed();
+    }
+
+    fn release_reservation(
+        runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>,
+        project_root: &Path,
+        reservation: &ProjectRuntimeReservation,
+    ) {
+        if let Some(runtime) = runtimes.get_mut(project_root) {
+            runtime
+                .reservations
+                .retain(|type_id| !reservation.type_ids().any(|reserved| reserved == *type_id));
+            let remove_project = runtime.reservations.is_empty() && !runtime.has_components();
+            if remove_project {
+                runtimes.remove(project_root);
+            }
+        }
+    }
+}
+
+impl Drop for ProjectRuntimeReservationLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut runtimes = self.registry.lock_runtimes();
+        ProjectRuntimeReservationLease::release_reservation(
+            &mut runtimes,
+            &self.project_root,
+            &self.reservation,
+        );
+        drop(runtimes);
+        self.registry.signal_reservation_changed();
+    }
 }
 
 impl ProjectRuntimeRegistryV1 {
+    fn lock_runtimes(&self) -> MutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
+        self.runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn signal_reservation_changed(&self) {
+        let (version, changed) = &*self.reservation_blocking_changed;
+        let mut version = version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *version = version.wrapping_add(1);
+        changed.notify_all();
+        drop(version);
+        self.reservation_changed
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    async fn reserve(
+        &self,
+        project_root: PathBuf,
+        reservation: ProjectRuntimeReservation,
+    ) -> Result<ProjectRuntimeReservationLease, ProjectRuntimeRegistryError> {
+        let mut runtimes = self.lock_runtimes();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ProjectRuntimeRegistryError::Closed);
+        }
+        let runtime = runtimes.entry(project_root.clone()).or_default();
+        if reservation.conflicts_with(runtime) {
+            return Err(ProjectRuntimeRegistryError::AlreadyRegistered);
+        }
+        runtime.reservations.extend(reservation.type_ids());
+        drop(runtimes);
+        Ok(ProjectRuntimeReservationLease {
+            registry: self.clone(),
+            project_root,
+            reservation,
+            active: true,
+        })
+    }
+
     /// Publish a component, refusing if this project already has a live one.
     pub(crate) async fn register<C>(
         &self,
         project_root: PathBuf,
         component: C,
-    ) -> Result<(), ProjectRuntimeAlreadyRegistered>
+    ) -> Result<(), ProjectRuntimeRegistryError>
     where
         C: ProjectRuntimeComponent,
     {
-        let mut runtimes = self.runtimes.lock().await;
-        let slot = C::slot(runtimes.entry(project_root).or_default());
-        if slot.is_some() {
-            return Err(ProjectRuntimeAlreadyRegistered);
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed);
+                }
+                let runtime = runtimes.entry(project_root.clone()).or_default();
+                if !runtime.reservations.contains(&TypeId::of::<C>()) {
+                    let slot = C::slot(runtime);
+                    if slot.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered);
+                    }
+                    *slot = Some(component);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed);
+            }
         }
-        *slot = Some(component);
-        Ok(())
     }
 
     /// Publish a component over whatever was there.
     ///
     /// Only for components whose caller has already established that the
     /// replacement carries the same authority as the incumbent.
-    pub(crate) async fn publish<C>(&self, project_root: PathBuf, component: C)
+    pub(crate) async fn publish<C>(
+        &self,
+        project_root: PathBuf,
+        component: C,
+    ) -> Result<(), ProjectRuntimeRegistryError>
     where
         C: ProjectRuntimeComponent,
     {
-        let mut runtimes = self.runtimes.lock().await;
-        *C::slot(runtimes.entry(project_root).or_default()) = Some(component);
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed);
+                }
+                let runtime = runtimes.entry(project_root.clone()).or_default();
+                if !runtime.reservations.contains(&TypeId::of::<C>()) {
+                    *C::slot(runtime) = Some(component);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed);
+            }
+        }
+    }
+
+    async fn publish_atomically_after_preflight<T, E, F, Fut>(
+        &self,
+        project_root: PathBuf,
+        reservation: ProjectRuntimeReservation,
+        build: F,
+    ) -> Result<T, E>
+    where
+        E: From<ProjectRuntimeAlreadyRegistered> + From<ProjectRuntimeRegistryError>,
+        F: FnOnce(ProjectRuntimePublication) -> Fut,
+        Fut: Future<Output = Result<(ProjectRuntimePublication, T), E>>,
+    {
+        let lease = self
+            .reserve(project_root, reservation.clone())
+            .await
+            .map_err(E::from)?;
+        let publication = ProjectRuntimePublication::new(reservation);
+        match build(publication).await {
+            Ok((publication, output)) => {
+                lease.commit(publication).await.map_err(E::from)?;
+                Ok(output)
+            }
+            Err(error) => {
+                lease.release().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Publishes feedback admission as one registry transaction.
+    ///
+    /// The feedback slots are reserved before `build` starts because opening a
+    /// feedback runtime persists its producer boot. Construction runs without
+    /// the registry lock, while the reservation prevents a racing writer from
+    /// occupying any staged slot before the atomic commit.
+    pub(crate) async fn publish_feedback_atomically<T, E, F, Fut>(
+        &self,
+        project_root: PathBuf,
+        build: F,
+    ) -> Result<T, E>
+    where
+        E: From<ProjectRuntimeAlreadyRegistered> + From<ProjectRuntimeRegistryError>,
+        F: FnOnce(ProjectRuntimePublication) -> Fut,
+        Fut: Future<Output = Result<(ProjectRuntimePublication, T), E>>,
+    {
+        let mut reservation = ProjectRuntimeReservation::default();
+        reservation.reserve::<RegisteredCallableCodeRuntime>();
+        reservation.reserve::<RegisteredFeedbackRuntime>();
+        reservation.reserve::<Arc<SwitchableFeedbackCycleRuntimeV1>>();
+        self.publish_atomically_after_preflight(project_root, reservation, build)
+            .await
+    }
+
+    pub(crate) async fn publish_feedback_cycle_atomically(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<Pr12FeedbackCycleRuntime>,
+        production_input: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<(), FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let incumbent = runtimes.entry(project_root.clone()).or_default();
+                let reserved = incumbent.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<Arc<Pr12FeedbackCycleRuntime>>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                });
+                if !reserved {
+                    if incumbent.feedback_cycle.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
+                    }
+                    if let Some(router) = &incumbent.feedback_cycle_input {
+                        router
+                            .replace(production_input)
+                            .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    } else {
+                        incumbent.feedback_cycle_input = Some(Arc::new(
+                            SwitchableFeedbackCycleRuntimeV1::new(production_input),
+                        ));
+                    }
+                    incumbent.feedback_cycle = Some(runtime);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
+    }
+
+    pub(crate) async fn replace_feedback_cycle_input_atomically(
+        &self,
+        project_root: &Path,
+        input: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<(), FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let Some(incumbent) = runtimes.get_mut(project_root) else {
+                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
+                };
+                if !incumbent
+                    .reservations
+                    .contains(&TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>())
+                {
+                    return incumbent
+                        .feedback_cycle_input
+                        .as_ref()
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
+                        .replace(input)
+                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable);
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
     }
 
     /// Withdraw a component, returning it if it was there.
@@ -158,10 +786,19 @@ impl ProjectRuntimeRegistryV1 {
     where
         C: ProjectRuntimeComponent,
     {
-        let mut runtimes = self.runtimes.lock().await;
-        runtimes
-            .get_mut(project_root)
-            .and_then(|runtime| C::slot(runtime).take())
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                let runtime = runtimes.get_mut(project_root)?;
+                if !runtime.reservations.contains(&TypeId::of::<C>()) {
+                    return C::slot(runtime).take();
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return None;
+            }
+        }
     }
 
     pub(crate) async fn get<C>(&self, project_root: &Path) -> Option<C>
@@ -177,7 +814,7 @@ impl ProjectRuntimeRegistryV1 {
         C: ProjectRuntimeComponent,
         F: FnOnce(&C) -> T,
     {
-        let runtimes = self.runtimes.lock().await;
+        let runtimes = self.lock_runtimes();
         runtimes.get(project_root).and_then(C::peek).map(read)
     }
 
@@ -198,16 +835,31 @@ impl ProjectRuntimeRegistryV1 {
     ) -> Result<(), E>
     where
         C: ProjectRuntimeComponent,
+        E: From<ProjectRuntimeRegistryError>,
         R: FnOnce(&mut C) -> Result<(), E>,
         B: FnOnce() -> Result<C, E>,
     {
-        let mut runtimes = self.runtimes.lock().await;
-        let slot = C::slot(runtimes.entry(project_root).or_default());
-        match slot.as_mut() {
-            Some(incumbent) => reconcile(incumbent),
-            None => {
-                *slot = Some(build()?);
-                Ok(())
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let runtime = runtimes.entry(project_root.clone()).or_default();
+                if !runtime.reservations.contains(&TypeId::of::<C>()) {
+                    let slot = C::slot(runtime);
+                    return match slot.as_mut() {
+                        Some(incumbent) => reconcile(incumbent),
+                        None => {
+                            *slot = Some(build()?);
+                            Ok(())
+                        }
+                    };
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
             }
         }
     }
@@ -226,7 +878,7 @@ impl ProjectRuntimeRegistryV1 {
         let Some(project_root) = project_root else {
             return ProjectRequestRuntimesV1::default();
         };
-        let runtimes = self.runtimes.lock().await;
+        let runtimes = self.lock_runtimes();
         let runtime = runtimes.get(project_root);
         let feedback = runtime.and_then(|runtime| runtime.feedback.as_ref());
         ProjectRequestRuntimesV1 {
@@ -235,6 +887,7 @@ impl ProjectRuntimeRegistryV1 {
             advisory_cycle_invoker: runtime
                 .and_then(|runtime| runtime.advisory_cycle_invoker.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
+            work: runtime.and_then(|runtime| runtime.work.clone()),
             lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(
                 &runtimes,
                 project_root,
@@ -277,302 +930,50 @@ impl ProjectRuntimeRegistryV1 {
     where
         C: ProjectRuntimeComponent + Clone,
     {
-        let runtimes = self.runtimes.lock().await;
+        let runtimes = self.lock_runtimes();
         let mut held = runtimes.values().filter_map(C::peek);
         let only = held.next()?;
         held.next().is_none().then(|| only.clone())
     }
 
-    /// Shut every project runtime down and leave the registry empty.
-    ///
-    /// The ordering constraints below are the ones that used to be spread
-    /// across a dozen branches of the daemon's expiry path:
-    ///
-    /// - a production advisory input retains its LSP factory, whose feedback
-    ///   adapter retains the switchable cycle router, so every router is
-    ///   pointed at an unavailable runtime before any feedback runtime is
-    ///   dropped — otherwise that cycle keeps the project graph and database
-    ///   runtimes alive past shutdown;
-    /// - a Work runtime owns live provider processes, so each is stopped and
-    ///   joined rather than merely detached;
-    /// - a semantic handle is published in a process-wide table, so it is
-    ///   unregistered and cancelled rather than dropped.
-    pub(crate) async fn shut_down_all(&self) {
-        let runtimes = std::mem::take(&mut *self.runtimes.lock().await);
-
-        for runtime in runtimes.values() {
-            let (Some(router), Some(feedback)) = (&runtime.feedback_cycle_input, &runtime.feedback)
-            else {
-                continue;
-            };
-            let _ = router.replace(Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
-                feedback.project_id().clone(),
-                feedback.source_observation_port(),
-            )));
-        }
-
-        for (project_root, runtime) in runtimes {
-            if let Some(work) = runtime.work {
-                let work_runtime = work.into_runtime();
-                let _ = tokio::task::spawn_blocking(move || work_runtime.shutdown()).await;
-            }
-            if let Some(semantic) = runtime.semantic {
-                crate::application::semantic_runtime::unregister_project_semantic_runtime(
-                    &project_root,
-                );
-                semantic.cancel();
-            }
-        }
+    #[cfg(test)]
+    pub(crate) async fn is_empty(&self) -> bool {
+        self.lock_runtimes().is_empty()
     }
 
     #[cfg(test)]
-    pub(crate) async fn is_empty(&self) -> bool {
-        self.runtimes.lock().await.is_empty()
+    pub(super) async fn feedback_publication_state(
+        &self,
+        project_root: &Path,
+    ) -> (bool, bool, bool) {
+        let runtimes = self.lock_runtimes();
+        let runtime = runtimes.get(project_root);
+        (
+            runtime.is_some_and(|runtime| runtime.callable_code.is_some()),
+            runtime.is_some_and(|runtime| runtime.feedback.is_some()),
+            runtime.is_some_and(|runtime| runtime.feedback_cycle_input.is_some()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn arm_commit_starting(&self, commit_starting: tokio::sync::oneshot::Sender<()>) {
+        *self
+            .commit_starting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(commit_starting);
+    }
+
+    #[cfg(test)]
+    pub(super) fn arm_shutdown_drain_waiting(
+        &self,
+        drain_waiting: tokio::sync::oneshot::Sender<()>,
+    ) {
+        *self
+            .drain_waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(drain_waiting);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-
-    /// Any component exercises the registry the same way, so these use the one
-    /// component that is cheap to construct rather than a test-only slot.
-    type Component = Arc<dyn Any + Send + Sync>;
-
-    fn component(mark: u32) -> Component {
-        Arc::new(mark)
-    }
-
-    fn mark(component: &Component) -> Option<u32> {
-        component.downcast_ref::<u32>().copied()
-    }
-
-    fn root(name: &str) -> PathBuf {
-        PathBuf::from("/projects").join(name)
-    }
-
-    #[tokio::test]
-    async fn a_second_registration_is_refused_and_leaves_the_incumbent_live() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-
-        registry
-            .register(project.clone(), component(1))
-            .await
-            .expect("the first registration owns the empty slot");
-        let refused = registry.register(project.clone(), component(2)).await;
-
-        assert_eq!(refused, Err(ProjectRuntimeAlreadyRegistered));
-        assert_eq!(
-            registry
-                .get::<Component>(&project)
-                .await
-                .as_ref()
-                .and_then(mark),
-            Some(1),
-            "a refused registration must not detach the live component"
-        );
-    }
-
-    #[tokio::test]
-    async fn publishing_replaces_the_incumbent() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-
-        registry.publish(project.clone(), component(1)).await;
-        registry.publish(project.clone(), component(2)).await;
-
-        assert_eq!(
-            registry
-                .get::<Component>(&project)
-                .await
-                .as_ref()
-                .and_then(mark),
-            Some(2)
-        );
-    }
-
-    #[tokio::test]
-    async fn withdrawing_hands_the_component_back_exactly_once() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-        registry.publish(project.clone(), component(1)).await;
-
-        let withdrawn = registry.withdraw::<Component>(&project).await;
-
-        assert_eq!(withdrawn.as_ref().and_then(mark), Some(1));
-        assert!(!registry.holds::<Component>(&project).await);
-        assert!(registry.withdraw::<Component>(&project).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn one_project_s_components_are_not_another_s() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        registry.publish(root("alpha"), component(1)).await;
-
-        assert!(!registry.holds::<Component>(&root("beta")).await);
-        assert!(registry.get::<Component>(&root("beta")).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn a_sole_component_is_only_answered_while_exactly_one_project_holds_it() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        assert!(registry.sole::<Component>().await.is_none(), "none held");
-
-        registry.publish(root("alpha"), component(1)).await;
-        assert_eq!(
-            registry.sole::<Component>().await.as_ref().and_then(mark),
-            Some(1)
-        );
-
-        registry.publish(root("beta"), component(2)).await;
-        assert!(
-            registry.sole::<Component>().await.is_none(),
-            "answering while two projects hold one would attach a request to \
-             whichever project sorted first"
-        );
-    }
-
-    #[tokio::test]
-    async fn reconciling_an_occupied_slot_never_builds_a_replacement() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-        registry.publish(project.clone(), component(1)).await;
-        let builds = AtomicUsize::new(0);
-
-        let accepted = registry
-            .register_or_reconcile::<Component, (), _, _>(
-                project.clone(),
-                |_| Ok(()),
-                || {
-                    builds.fetch_add(1, Ordering::SeqCst);
-                    Ok(component(2))
-                },
-            )
-            .await;
-
-        assert_eq!(accepted, Ok(()));
-        assert_eq!(
-            builds.load(Ordering::SeqCst),
-            0,
-            "a component that owns processes must not be constructed just to \
-             be dropped on the reconcile path"
-        );
-        assert_eq!(
-            registry
-                .get::<Component>(&project)
-                .await
-                .as_ref()
-                .and_then(mark),
-            Some(1)
-        );
-    }
-
-    #[tokio::test]
-    async fn reconciling_an_empty_slot_builds_once_and_keeps_the_build_error() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-
-        let failed = registry
-            .register_or_reconcile::<Component, &str, _, _>(
-                project.clone(),
-                |_| Ok(()),
-                || Err("the provider runtime would not open"),
-            )
-            .await;
-        assert_eq!(failed, Err("the provider runtime would not open"));
-        assert!(
-            !registry.holds::<Component>(&project).await,
-            "a failed build must not leave a slot claimed"
-        );
-
-        let built = registry
-            .register_or_reconcile::<Component, &str, _, _>(
-                project.clone(),
-                |_| Ok(()),
-                || Ok(component(1)),
-            )
-            .await;
-        assert_eq!(built, Ok(()));
-        assert_eq!(
-            registry
-                .get::<Component>(&project)
-                .await
-                .as_ref()
-                .and_then(mark),
-            Some(1)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_refusing_reconcile_keeps_the_incumbent() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-        registry.publish(project.clone(), component(1)).await;
-
-        let refused = registry
-            .register_or_reconcile::<Component, &str, _, _>(
-                project.clone(),
-                |_| Err("a different authority is already registered"),
-                || Ok(component(2)),
-            )
-            .await;
-
-        assert_eq!(refused, Err("a different authority is already registered"));
-        assert_eq!(
-            registry
-                .get::<Component>(&project)
-                .await
-                .as_ref()
-                .and_then(mark),
-            Some(1)
-        );
-    }
-
-    #[tokio::test]
-    async fn reading_answers_only_for_a_project_that_holds_the_component() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        let project = root("alpha");
-        registry.publish(project.clone(), component(7)).await;
-
-        assert_eq!(
-            registry.read::<Component, _, _>(&project, mark).await,
-            Some(Some(7))
-        );
-        assert!(
-            registry
-                .read::<Component, _, _>(&root("beta"), |_| ())
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        registry.publish(root("alpha"), component(1)).await;
-
-        for project_root in [None, Some(root("beta").as_path())] {
-            let resolved = registry.request_runtimes(project_root, None).await;
-            assert!(resolved.feedback.is_none());
-            assert!(resolved.feedback_owner.is_none());
-            assert!(resolved.advisory_cycle_invoker.is_none());
-            assert!(resolved.configuration.is_none());
-            assert!(resolved.lsp_owner.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn shutting_down_empties_the_registry() {
-        let registry = ProjectRuntimeRegistryV1::default();
-        registry.publish(root("alpha"), component(1)).await;
-        registry.publish(root("beta"), component(2)).await;
-
-        registry.shut_down_all().await;
-
-        assert!(registry.is_empty().await);
-        assert!(!registry.holds::<Component>(&root("alpha")).await);
-    }
-}
+mod tests;

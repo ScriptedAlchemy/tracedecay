@@ -100,9 +100,9 @@ class InstalledPackageConformance(unittest.TestCase):
 
                 external_wheel = os.environ.get("TRACEDECAY_SDK_WHEEL")
                 if external_wheel:
-                    # Publish-lane callers build the wheel exactly once and pass
-                    # it in here so conformance exercises the identical bytes
-                    # that later get published, rather than a fresh rebuild.
+                    # CI callers may build the wheel once and pass it in so
+                    # conformance exercises that exact local artifact rather
+                    # than a fresh rebuild.
                     wheels = [Path(external_wheel).resolve()]
                     self.assertTrue(
                         wheels[0].is_file(), f"missing prebuilt wheel: {wheels[0]}"

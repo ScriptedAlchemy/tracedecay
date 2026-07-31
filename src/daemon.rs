@@ -6552,6 +6552,11 @@ async fn production_project_server(
                     .await
                 {
                     Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
+                    Err(DaemonSemanticRuntimeRegistrationError::RegistryClosed) => {
+                        return Err(TraceDecayError::Config {
+                            message: "semantic runtime registration failed: the daemon project runtime registry is closed".to_owned(),
+                        });
+                    }
                 }
                 log_full_setup_phase("semantic_runtime_registered");
                 if let Some(dependent_owners) = dependent_owners {

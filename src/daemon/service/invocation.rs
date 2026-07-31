@@ -13,6 +13,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -80,7 +82,10 @@ use tracedecay_policy::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
-use super::project_runtime::ProjectRuntimeRegistryV1;
+use super::project_runtime::{
+    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
+    ProjectRuntimeRegistryV1,
+};
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
@@ -4489,7 +4494,7 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
 }
 
 impl SwitchableFeedbackCycleRuntimeV1 {
-    fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
+    pub(super) fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
         Self {
             current: RwLock::new(current),
         }
@@ -4916,6 +4921,8 @@ pub(super) struct RegisteredConfigurationRuntime {
 pub(crate) enum DaemonFeedbackRuntimeRegistrationError {
     #[error("a PR12 feedback runtime is already mounted for this project database")]
     AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
+    RegistryClosed,
     #[error("the PR12 feedback runtime must be mounted before its cycle")]
     MissingRuntime,
     #[error("the PR12 feedback runtime could not be opened")]
@@ -4926,16 +4933,97 @@ pub(crate) enum DaemonFeedbackRuntimeRegistrationError {
     Policy(#[from] ApplicationContractError),
 }
 
+impl From<ProjectRuntimeAlreadyRegistered> for DaemonFeedbackRuntimeRegistrationError {
+    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
+        Self::AlreadyRegistered
+    }
+}
+
+impl From<ProjectRuntimeRegistryError> for DaemonFeedbackRuntimeRegistrationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
+            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+        }
+    }
+}
+
+impl From<FeedbackCyclePublicationError> for DaemonFeedbackRuntimeRegistrationError {
+    fn from(error: FeedbackCyclePublicationError) -> Self {
+        match error {
+            FeedbackCyclePublicationError::Registry(error) => error.into(),
+            FeedbackCyclePublicationError::RouterUnavailable => Self::MissingRuntime,
+        }
+    }
+}
+
+impl From<ProjectRuntimeRegistryError> for TraceDecayError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        Self::Config {
+            message: match error {
+                ProjectRuntimeRegistryError::AlreadyRegistered => {
+                    "a project runtime component is already registered".to_owned()
+                }
+                ProjectRuntimeRegistryError::Closed => {
+                    "the daemon project runtime registry is closed".to_owned()
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+struct DaemonFeedbackPublicationTestGate {
+    publication_ready: StdMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    continue_publication: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[cfg(test)]
+impl DaemonFeedbackPublicationTestGate {
+    async fn wait(&self) {
+        self.publication_ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("publication-ready sender")
+            .send(())
+            .expect("publication-ready receiver");
+        let continue_publication = self
+            .continue_publication
+            .lock()
+            .await
+            .take()
+            .expect("continue-publication receiver");
+        continue_publication
+            .await
+            .expect("continue-publication sender");
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonFeedbackRuntimeRegistrar {
     service: DaemonInvocationService,
+    #[cfg(test)]
+    producer_constructions: Arc<AtomicUsize>,
+    #[cfg(test)]
+    publication_gate: Option<Arc<DaemonFeedbackPublicationTestGate>>,
 }
 
 impl DaemonFeedbackRuntimeRegistrar {
     pub(crate) fn new(service: &DaemonInvocationService) -> Self {
         Self {
             service: service.clone(),
+            #[cfg(test)]
+            producer_constructions: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            publication_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_publication_gate(mut self, gate: Arc<DaemonFeedbackPublicationTestGate>) -> Self {
+        self.publication_gate = Some(gate);
+        self
     }
 
     /// Resolve the read store from the feedback runtime mounted for this exact
@@ -4959,62 +5047,53 @@ impl DaemonFeedbackRuntimeRegistrar {
         access: ProjectSourceAccessSnapshot,
         configuration: Arc<ProjectConfigurationRuntime>,
     ) -> Result<ProjectFeedbackStore, DaemonFeedbackRuntimeRegistrationError> {
-        if self
-            .service
-            .project_runtimes
-            .holds::<RegisteredFeedbackRuntime>(&project_root)
-            .await
-        {
-            return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
-        }
-        let project_id = scope.project_id.clone();
-        let runtime = Arc::new(
-            open_pr12_feedback_runtime(
-                database,
-                project_root.clone(),
-                scope.clone(),
-                access.clone(),
-            )
-            .await?,
-        );
+        let runtime_root = project_root.clone();
+        #[cfg(test)]
+        let producer_constructions = Arc::clone(&self.producer_constructions);
+        #[cfg(test)]
+        let publication_gate = self.publication_gate.clone();
         self.service
             .project_runtimes
-            .publish(
-                project_root.clone(),
-                RegisteredCallableCodeRuntime {
+            .publish_feedback_atomically(project_root, move |mut publication| async move {
+                let project_id = scope.project_id.clone();
+                #[cfg(test)]
+                producer_constructions.fetch_add(1, Ordering::SeqCst);
+                let runtime = Arc::new(
+                    open_pr12_feedback_runtime(
+                        database,
+                        runtime_root.clone(),
+                        scope.clone(),
+                        access,
+                    )
+                    .await?,
+                );
+                let publications = runtime.publication_store();
+                let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                    project_id.clone(),
+                    runtime.source_observation_port(),
+                ));
+                publication.stage(RegisteredCallableCodeRuntime {
                     authorization: DaemonCallableCodeAuthorizationSource::production(
-                        project_root.clone(),
+                        runtime_root,
                         scope.clone(),
                         configuration,
                     ),
                     scope,
-                },
-            )
-            .await;
-        let publications = runtime.publication_store();
-        let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
-            project_id.clone(),
-            runtime.source_observation_port(),
-        ));
-        self.service
-            .project_runtimes
-            .publish(
-                project_root.clone(),
-                RegisteredFeedbackRuntime {
+                })?;
+                publication.stage(RegisteredFeedbackRuntime {
                     project_id,
                     runtime,
-                },
-            )
-            .await;
-        let _ = self
-            .service
-            .project_runtimes
-            .register(
-                project_root,
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)),
-            )
-            .await;
-        Ok(publications)
+                })?;
+                publication.stage(Arc::new(SwitchableFeedbackCycleRuntimeV1::new(
+                    unavailable_cycle,
+                )))?;
+                #[cfg(test)]
+                if let Some(gate) = publication_gate {
+                    gate.wait().await;
+                }
+                Ok((publication, publications))
+            })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5098,28 +5177,11 @@ impl DaemonFeedbackRuntimeRegistrar {
             production_lsp_input,
             proximity,
         );
-        let cycle_input = self
-            .service
-            .project_runtimes
-            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(&project_root)
-            .await;
-        if let Some(cycle_input) = cycle_input {
-            cycle_input
-                .replace(production_input)
-                .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
-        } else {
-            self.service
-                .project_runtimes
-                .publish(
-                    project_root.clone(),
-                    Arc::new(SwitchableFeedbackCycleRuntimeV1::new(production_input)),
-                )
-                .await;
-        }
         self.service
             .project_runtimes
-            .publish(project_root, runtime.clone())
-            .await;
+            .publish_feedback_cycle_atomically(project_root, runtime.clone(), production_input)
+            .await
+            .map_err(DaemonFeedbackRuntimeRegistrationError::from)?;
         Ok(runtime)
     }
 
@@ -5128,15 +5190,11 @@ impl DaemonFeedbackRuntimeRegistrar {
         project_root: &Path,
         input: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        let router = self
-            .service
+        self.service
             .project_runtimes
-            .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root)
+            .replace_feedback_cycle_input_atomically(project_root, input)
             .await
-            .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
-        router
-            .replace(input)
-            .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)
+            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
     }
 }
 
@@ -5144,6 +5202,8 @@ impl DaemonFeedbackRuntimeRegistrar {
 pub(crate) enum DaemonPrimitiveRuntimeRegistrationError {
     #[error("a PR12 primitive runtime is already mounted for this project")]
     AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
+    RegistryClosed,
 }
 
 /// Central project-open registration for the owned primitive facade.
@@ -5171,7 +5231,14 @@ impl DaemonPrimitiveRuntimeRegistrar {
             .project_runtimes
             .register(project_root, project_runtime)
             .await
-            .map_err(|_| DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered)?;
+            .map_err(|error| match error {
+                ProjectRuntimeRegistryError::AlreadyRegistered => {
+                    DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered
+                }
+                ProjectRuntimeRegistryError::Closed => {
+                    DaemonPrimitiveRuntimeRegistrationError::RegistryClosed
+                }
+            })?;
         Ok(dispatch)
     }
 
@@ -5360,7 +5427,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                     semantic_operation: Arc::new(OnceLock::new()),
                 },
             )
-            .await;
+            .await?;
         Ok(())
     }
 
@@ -5507,8 +5574,8 @@ impl DaemonLspOwnerRegistrar {
         &self,
         project_root: PathBuf,
         owner: DaemonLspInvocationOwner,
-    ) {
-        self.service.install_lsp_owner(project_root, owner).await;
+    ) -> Result<(), ProjectRuntimeRegistryError> {
+        self.service.install_lsp_owner(project_root, owner).await
     }
 
     #[cfg(test)]
@@ -5516,9 +5583,9 @@ impl DaemonLspOwnerRegistrar {
         &self,
         project_root: PathBuf,
         factory: Arc<DaemonLspSessionFactory>,
-    ) {
+    ) -> Result<(), ProjectRuntimeRegistryError> {
         self.register_lsp_owner(project_root, DaemonLspInvocationOwner::new(factory))
-            .await;
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5589,7 +5656,7 @@ impl DaemonLspOwnerRegistrar {
             project_root,
             DaemonLspInvocationOwner::authorized(factory.clone(), scope_grant, scope_set_storage),
         )
-        .await;
+        .await?;
         Ok(factory)
     }
 }
@@ -5598,6 +5665,8 @@ impl DaemonLspOwnerRegistrar {
 pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
     #[error("a PR13 advisory runtime is already mounted for this project")]
     AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
+    RegistryClosed,
     #[error("the shared PR12 feedback readers must be registered before PR13")]
     MissingFeedbackRuntime,
     #[error("the PR13 Hook orchestration registry is unavailable")]
@@ -5606,6 +5675,15 @@ pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
     Production(#[from] Pr13AdvisoryProductionOpenErrorV1),
     #[error(transparent)]
     Startup(#[from] Pr13AdvisoryDaemonStartupErrorV1),
+}
+
+impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
+            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -5673,13 +5751,14 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .project_runtimes
             .register(project_root, published)
             .await
-            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)?;
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
         self.service
             .install_lsp_owner(
                 registered_root,
                 DaemonLspInvocationOwner::new(lsp_session_factory),
             )
-            .await;
+            .await
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
         Ok(registration)
     }
 
@@ -5726,7 +5805,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .project_runtimes
             .register(project_root.clone(), Arc::clone(&runtime))
             .await
-            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)?;
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
         let runtime_weak: Weak<dyn Pr13HookOrchestrationPortV1> = Arc::downgrade(&runtime);
         let registered = match pr13_hook_orchestration_registry().lock() {
             Ok(mut registry) => {
@@ -5773,7 +5852,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .project_runtimes
             .register(project_root, invoker)
             .await
-            .map_err(|_| DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
     }
 }
 
@@ -5786,6 +5865,23 @@ impl DaemonAdvisoryRuntimeRegistrar {
 pub(crate) enum DaemonSemanticRuntimeRegistrationError {
     #[error("a semantic runtime scheduler is already mounted for this project")]
     AlreadyRegistered,
+    #[error("the daemon project runtime registry is closed")]
+    RegistryClosed,
+}
+
+impl From<ProjectRuntimeAlreadyRegistered> for DaemonSemanticRuntimeRegistrationError {
+    fn from(_: ProjectRuntimeAlreadyRegistered) -> Self {
+        Self::AlreadyRegistered
+    }
+}
+
+impl From<ProjectRuntimeRegistryError> for DaemonSemanticRuntimeRegistrationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        match error {
+            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
+            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
+        }
+    }
 }
 
 pub(crate) struct DaemonSemanticRuntimeRegistrar {
@@ -7399,10 +7495,6 @@ impl DaemonInvocationService {
         self.project_runtimes.get(project_root?).await
     }
 
-    async fn work_runtime(&self, project_root: Option<&Path>) -> Option<RegisteredWorkRuntime> {
-        self.project_runtimes.get(project_root?).await
-    }
-
     pub(crate) async fn semantic_configuration_operation(
         &self,
         project_root: &Path,
@@ -7443,9 +7535,13 @@ impl DaemonInvocationService {
             .await
     }
 
-    async fn install_lsp_owner(&self, project_root: PathBuf, owner: DaemonLspInvocationOwner) {
+    async fn install_lsp_owner(
+        &self,
+        project_root: PathBuf,
+        owner: DaemonLspInvocationOwner,
+    ) -> Result<(), ProjectRuntimeRegistryError> {
         // Reinstalled on every project open by the same admission authority.
-        self.project_runtimes.publish(project_root, owner).await;
+        self.project_runtimes.publish(project_root, owner).await
     }
 
     pub(crate) async fn lsp_owner(
@@ -7889,6 +7985,7 @@ impl DaemonInvocationService {
         let feedback_service = runtimes.feedback_owner;
         let advisory_cycle_invoker = runtimes.advisory_cycle_invoker;
         let configuration_runtime = runtimes.configuration;
+        let work_runtime = runtimes.work;
         let lsp_owner = runtimes.lsp_owner;
 
         let response = match request.payload {
@@ -8285,7 +8382,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let Some(registered) = self.work_runtime(project_root).await else {
+                let Some(registered) = work_runtime else {
                     return DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,
@@ -8306,7 +8403,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                let Some(registered) = self.work_runtime(project_root).await else {
+                let Some(registered) = work_runtime else {
                     return DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,
@@ -10433,7 +10530,8 @@ mod tests {
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
             .register_factory(project_root.clone(), unavailable_lsp_session_factory())
-            .await;
+            .await
+            .unwrap();
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
         let response = service
             .invoke(
@@ -10640,7 +10738,8 @@ mod tests {
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
             .register_factory(project_root.clone(), unavailable_lsp_session_factory())
-            .await;
+            .await
+            .unwrap();
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
 
         let response = service
@@ -10669,7 +10768,8 @@ mod tests {
         let project_root = PathBuf::from("/authoritative");
         DaemonLspOwnerRegistrar::new(&service)
             .register_factory(project_root.clone(), unavailable_lsp_session_factory())
-            .await;
+            .await
+            .unwrap();
         let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
         let open = |request_id: &'static str| {
             service.invoke(
@@ -10830,6 +10930,315 @@ mod tests {
             );
         };
         assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn feedback_admission_conflicts_construct_zero_losing_producers() {
+        #[derive(Clone, Copy, Debug)]
+        enum ConflictSlot {
+            CallableCode,
+            Feedback,
+            FeedbackCycleInput,
+        }
+
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project root");
+        let project_id = ProjectId::new("project.feedback.atomic-publication").expect("project id");
+        let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
+        let graph = host
+            .initialize_project_graph_for_test(
+                project.path(),
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
+            .await
+            .expect("initialized project graph");
+        let database = graph.dashboard_database_guard().as_ref().clone();
+        let scope = ResolvedScope::new(
+            project_id.clone(),
+            tracedecay_domain::RepositoryId::new("repository.feedback.atomic-publication")
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new("worktree.feedback.atomic-publication")
+                .expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let access = ProjectSourceAccessSnapshot {
+            scope: scope.clone(),
+            requester: ActorId::new("actor.feedback.atomic-publication").expect("actor"),
+            binding: tracedecay_domain::configuration::ScopeSourceBinding::new(
+                tracedecay_domain::SourceBindingId::new("binding.feedback.atomic-publication")
+                    .expect("binding"),
+                tracedecay_domain::configuration::SourceKindV1::Cursor,
+                tracedecay_domain::LocatorDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("locator"),
+                tracedecay_domain::configuration::AuthorityRef::Project(project_id.clone()),
+            )
+            .expect("source binding"),
+            configuration_revision: ConfigurationRevisionId::new(
+                "revision.feedback.atomic-publication",
+            )
+            .expect("configuration revision"),
+            configuration_digest: canonical_sha256(&"feedback-atomic-configuration")
+                .expect("configuration digest"),
+            configuration_provenance_digest: canonical_sha256(
+                &"feedback-atomic-configuration-provenance",
+            )
+            .expect("configuration provenance"),
+            effective_capabilities: Default::default(),
+            grant_expires_at: UtcMicros(i64::MAX),
+        };
+        let incumbent_runtime = Arc::new(
+            open_pr12_feedback_runtime(
+                database.clone(),
+                project.path(),
+                scope.clone(),
+                access.clone(),
+            )
+            .await
+            .expect("incumbent feedback runtime"),
+        );
+        let publications = incumbent_runtime.publication_store();
+        let incumbent_boot = publications
+            .observation_read_model()
+            .await
+            .expect("incumbent observation model")
+            .watermark
+            .producer_boot_id
+            .expect("incumbent producer boot");
+        for conflict in [
+            ConflictSlot::CallableCode,
+            ConflictSlot::Feedback,
+            ConflictSlot::FeedbackCycleInput,
+        ] {
+            let service = DaemonInvocationService::default();
+            match conflict {
+                ConflictSlot::CallableCode => {
+                    service
+                        .project_runtimes
+                        .publish(
+                            project.path().to_path_buf(),
+                            RegisteredCallableCodeRuntime {
+                                authorization: DaemonCallableCodeAuthorizationSource::production(
+                                    project.path().to_path_buf(),
+                                    scope.clone(),
+                                    Arc::clone(graph.configuration_runtime()),
+                                ),
+                                scope: scope.clone(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                ConflictSlot::Feedback => {
+                    service
+                        .project_runtimes
+                        .publish(
+                            project.path().to_path_buf(),
+                            RegisteredFeedbackRuntime {
+                                project_id: project_id.clone(),
+                                runtime: Arc::clone(&incumbent_runtime),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                ConflictSlot::FeedbackCycleInput => {
+                    let unavailable = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                        project_id.clone(),
+                        incumbent_runtime.source_observation_port(),
+                    ));
+                    service
+                        .project_runtimes
+                        .publish(
+                            project.path().to_path_buf(),
+                            Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable)),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let registrar = DaemonFeedbackRuntimeRegistrar::new(&service);
+            let result = registrar
+                .open_and_register(
+                    database.clone(),
+                    project.path().to_path_buf(),
+                    scope.clone(),
+                    access.clone(),
+                    Arc::clone(graph.configuration_runtime()),
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered)
+                ),
+                "{conflict:?} must reject the whole feedback publication"
+            );
+            assert_eq!(
+                registrar.producer_constructions.load(Ordering::SeqCst),
+                0,
+                "{conflict:?} must reject before constructing any producer"
+            );
+            let watermark = publications
+                .observation_read_model()
+                .await
+                .expect("observation model after rejected publication")
+                .watermark;
+            assert_eq!(
+                watermark.producer_boot_id,
+                Some(incumbent_boot.clone()),
+                "{conflict:?} must preserve the incumbent durable producer boot"
+            );
+            assert_eq!(
+                service
+                    .project_runtimes
+                    .holds::<RegisteredCallableCodeRuntime>(project.path())
+                    .await,
+                matches!(conflict, ConflictSlot::CallableCode)
+            );
+            assert_eq!(
+                service
+                    .project_runtimes
+                    .holds::<RegisteredFeedbackRuntime>(project.path())
+                    .await,
+                matches!(conflict, ConflictSlot::Feedback)
+            );
+            assert_eq!(
+                service
+                    .project_runtimes
+                    .holds::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project.path())
+                    .await,
+                matches!(conflict, ConflictSlot::FeedbackCycleInput)
+            );
+        }
+
+        drop(publications);
+        drop(incumbent_runtime);
+        let service = DaemonInvocationService::default();
+        service
+            .project_runtimes
+            .publish(
+                project.path().to_path_buf(),
+                Arc::new(()) as Arc<dyn Any + Send + Sync>,
+            )
+            .await
+            .unwrap();
+        let (publication_ready, publication_is_ready) = tokio::sync::oneshot::channel();
+        let (continue_publication, publication_may_continue) = tokio::sync::oneshot::channel();
+        let (commit_starting, commit_is_starting) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(DaemonFeedbackPublicationTestGate {
+            publication_ready: StdMutex::new(Some(publication_ready)),
+            continue_publication: Mutex::new(Some(publication_may_continue)),
+        });
+        service
+            .project_runtimes
+            .arm_commit_starting(commit_starting);
+        let registrar = DaemonFeedbackRuntimeRegistrar::new(&service).with_publication_gate(gate);
+        let publisher_registrar = registrar.clone();
+        let publisher_database = database.clone();
+        let publisher_root = project.path().to_path_buf();
+        let publisher_scope = scope.clone();
+        let publisher_access = access.clone();
+        let publisher_configuration = Arc::clone(graph.configuration_runtime());
+        let publisher = tokio::spawn(async move {
+            publisher_registrar
+                .open_and_register(
+                    publisher_database,
+                    publisher_root,
+                    publisher_scope,
+                    publisher_access,
+                    publisher_configuration,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), publication_is_ready)
+            .await
+            .expect("feedback publication must reach its commit gate")
+            .expect("publication-ready sender");
+
+        let observer_registry = service.project_runtimes.clone();
+        let observer_root = project.path().to_path_buf();
+        let (observer_holding, observer_is_holding) = std::sync::mpsc::channel();
+        let (release_observer, observer_may_release) = std::sync::mpsc::channel();
+        let observer = tokio::spawn(async move {
+            let mut samples = vec![
+                observer_registry
+                    .feedback_publication_state(&observer_root)
+                    .await,
+            ];
+            observer_registry
+                .read::<Arc<dyn Any + Send + Sync>, _, _>(&observer_root, move |_| {
+                    observer_holding
+                        .send(())
+                        .expect("observer-holding receiver");
+                    observer_may_release
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .expect("release-observer sender");
+                })
+                .await
+                .expect("observer marker");
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let sample = observer_registry
+                        .feedback_publication_state(&observer_root)
+                        .await;
+                    samples.push(sample);
+                    if sample == (true, true, true) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("observer must reach the complete feedback publication");
+            samples
+        });
+        tokio::task::spawn_blocking(move || {
+            observer_is_holding
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("observer must hold the registry lock");
+        })
+        .await
+        .expect("observer-holding task");
+        continue_publication
+            .send(())
+            .expect("continue-publication receiver");
+        tokio::time::timeout(std::time::Duration::from_secs(2), commit_is_starting)
+            .await
+            .expect("feedback publication must start committing")
+            .expect("commit-starting sender");
+        release_observer
+            .send(())
+            .expect("release-observer receiver");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), publisher)
+            .await
+            .expect("feedback publisher must not deadlock at commit")
+            .expect("feedback publisher task")
+            .expect("feedback publication");
+        assert_eq!(
+            registrar.producer_constructions.load(Ordering::SeqCst),
+            1,
+            "the successful registrar path must construct exactly one producer"
+        );
+        let samples = tokio::time::timeout(std::time::Duration::from_secs(2), observer)
+            .await
+            .expect("feedback observer must finish after publication")
+            .expect("feedback observer task");
+        assert_eq!(samples.last(), Some(&(true, true, true)));
+        assert!(
+            samples
+                .iter()
+                .all(|sample| matches!(sample, (false, false, false) | (true, true, true))),
+            "the real registrar exposed a partial feedback runtime: {samples:?}"
+        );
     }
 
     #[test]
@@ -11010,6 +11419,31 @@ mod tests {
             .await
             .expect("registered Work runtime");
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+        let other_project = tempfile::tempdir().expect("other project root");
+        let unavailable = service
+            .invoke(
+                &registry,
+                Some(other_project.path()),
+                None,
+                None,
+                DaemonInvocationRequest::work_application(
+                    "request.work.other-project",
+                    WorkApplicationInvocationV1::Snapshot(WorkProjectionSnapshotRequestV1 {
+                        page_size: 100,
+                    }),
+                    UtcMicros(100),
+                    Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                    CancellationContext::active("cancel.request.work.other-project")
+                        .expect("cancellation"),
+                ),
+            )
+            .await;
+        assert!(matches!(
+            unavailable.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            }
+        ));
         let task_id = tracedecay_domain::TaskId::new("task.work.core-invocation").expect("task id");
         let proposal_digest =
             ManifestDigest::new(format!("sha256:{}", "1".repeat(64))).expect("proposal digest");
@@ -11580,7 +12014,8 @@ mod tests {
             .await
             .expect("registered Work runtime");
         let registered = service
-            .work_runtime(Some(project.path()))
+            .project_runtimes
+            .get::<RegisteredWorkRuntime>(project.path())
             .await
             .expect("registered Work runtime handle");
 
@@ -11701,7 +12136,8 @@ mod tests {
                     scope_set_storage: None,
                 },
             )
-            .await;
+            .await
+            .unwrap();
 
         assert!(service.lsp_owner_matches_scope(&root, &expected).await);
         assert!(!service.lsp_owner_matches_scope(&root, &sibling).await);

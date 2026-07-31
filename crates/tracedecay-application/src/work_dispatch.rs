@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
@@ -129,6 +130,7 @@ where
 {
     provider: P,
     bounds: WorkDispatchBoundsV1,
+    closed: AtomicBool,
     in_flight: Mutex<BTreeMap<WorkAttemptIdentityV1, InFlightV1<P::Run>>>,
 }
 
@@ -140,6 +142,7 @@ where
         Self {
             provider,
             bounds,
+            closed: AtomicBool::new(false),
             in_flight: Mutex::new(BTreeMap::new()),
         }
     }
@@ -178,11 +181,14 @@ where
         if attempt.state() != WorkAttemptStateV1::Running {
             return Err(WorkDispatchError::NotAdmitted);
         }
+        let mut in_flight = self.registry();
+        if self.closed.load(Ordering::Acquire) {
+            return Err(WorkDispatchError::NotAdmitted);
+        }
         let route = self.provider.route()?;
         if attempt.actual_route() != Some(&route) {
             return Err(WorkDispatchError::RouteNotMounted);
         }
-        let mut in_flight = self.registry();
         if let Some(existing) = in_flight.get_mut(attempt.identity()) {
             if existing.lease.lease_id() != attempt.lease().lease_id()
                 || attempt.lease().epoch() < existing.lease.epoch()
@@ -261,6 +267,10 @@ where
     /// be able to hold the drain open forever.
     pub fn reap(&self) -> usize {
         let mut reaped = 0;
+        {
+            let _in_flight = self.registry();
+            self.closed.store(true, Ordering::Release);
+        }
         for _ in 0..REAP_DRAIN_PASSES {
             let identities = self.registry().keys().cloned().collect::<Vec<_>>();
             if identities.is_empty() {
@@ -640,6 +650,11 @@ mod tests {
 
         assert_eq!(queue.reap(), 3);
         assert_eq!(queue.in_flight(), 0);
+        assert_eq!(
+            queue.admit(&running("attempt.work.after-reap", 1)),
+            Err(WorkDispatchError::NotAdmitted),
+            "a snapshotted queue must not admit provider work after shutdown"
+        );
     }
 
     #[test]
