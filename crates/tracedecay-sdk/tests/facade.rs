@@ -3,7 +3,6 @@ use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
     application, domain, operation, operations, remote, work,
 };
-use tracedecay_sdk::operations::TypedOperation;
 
 #[test]
 fn canonical_contracts_are_available_without_sdk_copies() {
@@ -45,9 +44,9 @@ fn cancellation_types_are_the_canonical_application_types() {
 
 #[test]
 fn remote_outcomes_are_the_canonical_application_types() {
-    let outcome = remote::replay::RemoteReplayOutcomeV1::Rejected;
-    let canonical: application::remote::replay::RemoteReplayOutcomeV1 = outcome;
-    let _: remote::replay::RemoteReplayOutcomeV1 = canonical;
+    let outcome: Option<remote::replay::RemoteReplayOutcomeV1> = None;
+    let canonical: Option<application::remote::replay::RemoteReplayOutcomeV1> = outcome;
+    let _: Option<remote::replay::RemoteReplayOutcomeV1> = canonical;
 }
 
 #[test]
@@ -128,19 +127,21 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
 }
 
 #[test]
-fn generated_multi_root_clients_use_canonical_routes() {
-    assert_eq!(
-        operations::MultiRootScopeSetRead::ROUTE,
-        "/application/multi-root/scope-set/read"
-    );
-    assert_eq!(
-        operations::MultiRootScopeSetCompareAndSwap::ROUTE,
-        "/application/multi-root/scope-set/compare-and-swap"
-    );
-    assert_eq!(
-        operations::MultiRootExecute::ROUTE,
-        "/application/multi-root/execute"
-    );
+fn generated_production_inventory_excludes_quarantined_multi_root_operations() {
+    let production_inventory: Vec<_> = operations::base_operation_capabilities()
+        .map(|capability| capability.operation.as_str())
+        .collect();
+
+    for operation in [
+        "multi_root_scope_set_read",
+        "multi_root_scope_set_compare_and_swap",
+        "multi_root_execute",
+    ] {
+        assert!(
+            !production_inventory.contains(&operation),
+            "{operation} must remain absent from the generated production inventory"
+        );
+    }
 }
 
 #[test]
