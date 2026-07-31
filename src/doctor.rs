@@ -223,8 +223,20 @@ fn check_host_component_receipts(
                 "{label} native registration is repairable; {}",
                 component.repair_action
             )),
+            // Content drift on a path this component still owns is repairable
+            // by the ordinary reinstall, so it warns. A contested path is not:
+            // resolving it needs an operator decision, so it keeps failing.
+            State::Drifted => dc.warn(&format!(
+                "{label} has drifted from its receipt ({}); {}",
+                drifted_paths(component),
+                component.repair_action
+            )),
             State::OwnershipConflict => dc.fail(&format!(
                 "{label} has an ownership conflict; {}",
+                component.repair_action
+            )),
+            State::OrphanedRegistration => dc.warn(&format!(
+                "{label} is still registered with no owning receipt; {}",
                 component.repair_action
             )),
             State::Missing => dc.fail(&format!(
@@ -246,6 +258,26 @@ fn check_host_component_receipts(
     }
     report_native_edit_stop_conformance(dc, &report, agent_filter);
     report
+}
+
+/// Name the exact receipt-owned paths whose bytes moved, so the warning points
+/// at files rather than at a component label.
+fn drifted_paths(
+    component: &agents::host_bundle_v2::HostBundleComponentDoctorResultV1,
+) -> String {
+    use agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let paths = component
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.state == State::Drifted)
+        .map(|artifact| artifact.relative_path.as_str())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        "no receipt-owned path reported drift".to_string()
+    } else {
+        paths.join(", ")
+    }
 }
 
 /// Surface the checked-in native edit/stop fixture behind each packaged host so
