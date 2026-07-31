@@ -11,9 +11,10 @@ use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::{
     FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
-    FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackListRequestV1,
-    FeedbackListResultV1, FeedbackReadPort, FeedbackReadPortContext, FeedbackReadPortFuture,
-    FeedbackReadService, FeedbackRouteAuthorizationPort, feedback_read_operations,
+    FeedbackExpandResultV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackHandleRequestV1,
+    FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadPort, FeedbackReadPortContext,
+    FeedbackReadPortFuture, FeedbackReadService, FeedbackRouteAuthorizationPort,
+    feedback_read_operations,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, ApplicationResult,
@@ -24,8 +25,6 @@ use tracedecay_domain::{
     FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, RetrievalAnchorId, SymbolOccurrenceId,
     UtcMicros,
 };
-
-const MAX_FEEDBACK_REQUEST_HANDLE_BYTES: usize = 256;
 
 /// Closed operation set used by central daemon invocation integration.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -372,7 +371,7 @@ where
         observed_at: UtcMicros,
         controls: Option<(Deadline, CancellationContext)>,
     ) -> Result<FeedbackReadInvocationResultV1, FeedbackReadOwnerErrorV1> {
-        if !valid_request_handle(request_handle) {
+        if FeedbackHandleRequestV1::new(request_handle).is_err() {
             return Err(FeedbackReadOwnerErrorV1::NotFoundOrNotAuthorized);
         }
         let authorized = self
@@ -446,13 +445,6 @@ where
         );
         Ok(Self::new(requests, service))
     }
-}
-
-fn valid_request_handle(handle: &str) -> bool {
-    !handle.is_empty()
-        && handle.trim() == handle
-        && handle.len() <= MAX_FEEDBACK_REQUEST_HANDLE_BYTES
-        && !handle.chars().any(char::is_control)
 }
 
 fn project_feedback_evidence<T>(
