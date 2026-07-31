@@ -249,13 +249,9 @@ fn insert_anchor(
     Ok(())
 }
 
-fn insert_assertion(
-    savepoint: &Savepoint<'_>,
-    owner: &OwnerColumns,
-    assertion: &FactAssertionV1,
-) -> rusqlite::Result<()> {
+fn assertion_header_json(assertion: &FactAssertionV1) -> rusqlite::Result<String> {
     let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
-    let header = encode(&StoredAssertionHeaderV1 {
+    encode(&StoredAssertionHeaderV1 {
         assertion_id: assertion.assertion_id(),
         fact_id: assertion.fact_id(),
         owner: assertion.owner(),
@@ -264,7 +260,23 @@ fn insert_assertion(
         evidence: assertion.evidence(),
         asserted_at: assertion.asserted_at(),
         actor_id: assertion.actor_id(),
-    })?;
+    })
+}
+
+fn insert_assertion(
+    savepoint: &Savepoint<'_>,
+    owner: &OwnerColumns,
+    assertion: &FactAssertionV1,
+) -> rusqlite::Result<()> {
+    if assertion_exists(savepoint, assertion.assertion_id())? {
+        return if assertion_matches(savepoint, owner, assertion)? {
+            Ok(())
+        } else {
+            Err(invalid("assertion identity collision"))
+        };
+    }
+    let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
+    let header = assertion_header_json(assertion)?;
     savepoint.execute(
         "INSERT INTO memory_v2_assertions (
             assertion_id, fact_id, owner_kind, project_id, owner_json,
@@ -315,7 +327,8 @@ fn insert_assertion(
         ],
     )?;
     for (ordinal, evidence) in assertion.evidence().iter().enumerate() {
-        savepoint.execute(
+        let evidence_json = encode(evidence)?;
+        let changed = savepoint.execute(
             "INSERT OR IGNORE INTO memory_v2_evidence (
                 evidence_id, fact_id, owner_kind, project_id,
                 owner_json, anchor_id, evidence_json
@@ -327,9 +340,41 @@ fn insert_assertion(
                 owner.project_id,
                 owner.json,
                 evidence.anchor_id().as_str(),
-                encode(evidence)?,
+                evidence_json.as_str(),
             ],
         )?;
+        if changed == 0 {
+            let stored = savepoint
+                .query_row(
+                    "SELECT evidence_json, owner_json, anchor_id
+                     FROM memory_v2_evidence
+                     WHERE evidence_id = ?1 AND fact_id = ?2
+                       AND owner_kind = ?3 AND project_id = ?4",
+                    params![
+                        evidence.evidence_id().as_str(),
+                        assertion.fact_id().as_str(),
+                        owner.kind,
+                        owner.project_id,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((stored_json, stored_owner, stored_anchor)) = stored else {
+                return Err(invalid("evidence insert disappeared"));
+            };
+            if stored_json != evidence_json
+                || stored_owner != owner.json
+                || stored_anchor != evidence.anchor_id().as_str()
+            {
+                return Err(invalid("evidence identity collision"));
+            }
+        }
         savepoint.execute(
             "INSERT INTO memory_v2_assertion_evidence (
                 assertion_id, evidence_id, fact_id, owner_kind, project_id, ordinal
@@ -353,6 +398,217 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
         FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
         FactAssertionKindV1::Initial | FactAssertionKindV1::LegacyImport => Vec::new(),
     }
+}
+
+fn assertion_exists(
+    connection: &rusqlite::Connection,
+    assertion_id: &FactAssertionId,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM memory_v2_assertions WHERE assertion_id = ?1
+         )",
+        [assertion_id.as_str()],
+        |row| row.get::<_, bool>(0),
+    )
+}
+
+/// Compare a stored assertion against the one being written across every
+/// column the write path persists: the assertion header row, its supersession
+/// list, its payload, and its ordered evidence.
+///
+/// This mirrors the root commit engine so an exact replay is idempotent and a
+/// reused assertion id with different content is a collision, rather than a raw
+/// primary-key violation from the driver.
+fn assertion_matches(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    assertion: &FactAssertionV1,
+) -> rusqlite::Result<bool> {
+    let stored = connection
+        .query_row(
+            "SELECT fact_id, owner_kind, project_id, owner_json,
+                    assertion_header_json, kind_json, payload_reference_json,
+                    receipt_json, asserted_at, actor_id
+             FROM memory_v2_assertions WHERE assertion_id = ?1",
+            [assertion.assertion_id().as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        stored_fact_id,
+        stored_owner_kind,
+        stored_project_id,
+        stored_owner_json,
+        stored_header,
+        stored_kind,
+        stored_payload_reference,
+        stored_receipt,
+        stored_asserted_at,
+        stored_actor,
+    )) = stored
+    else {
+        return Ok(false);
+    };
+    let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
+    if stored_fact_id != assertion.fact_id().as_str()
+        || stored_owner_kind != owner.kind
+        || stored_project_id != owner.project_id
+        || stored_owner_json != owner.json
+        || stored_header != assertion_header_json(assertion)?
+        || stored_kind != encode(assertion.kind())?
+        || stored_payload_reference != encode(&payload_reference)?
+        || stored_receipt != encode(assertion.payload().receipt())?
+        || stored_asserted_at != assertion.asserted_at().0
+        || stored_actor.as_deref() != assertion.actor_id().map(|actor| actor.as_str())
+    {
+        return Ok(false);
+    }
+
+    let mut supersession = connection.prepare(
+        "SELECT superseded_assertion_id FROM memory_v2_assertion_supersession
+         WHERE assertion_id = ?1 AND fact_id = ?2
+           AND owner_kind = ?3 AND project_id = ?4 ORDER BY ordinal",
+    )?;
+    let rows = supersession.query_map(
+        params![
+            assertion.assertion_id().as_str(),
+            assertion.fact_id().as_str(),
+            owner.kind,
+            owner.project_id,
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let mut stored_supersession = Vec::new();
+    for row in rows {
+        stored_supersession.push(row?);
+    }
+    let expected_supersession = superseded_assertions(assertion.kind())
+        .into_iter()
+        .map(|id| id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if stored_supersession != expected_supersession {
+        return Ok(false);
+    }
+
+    let stored_payload = connection
+        .query_row(
+            "SELECT payload_json, content FROM memory_v2_assertion_payloads
+             WHERE assertion_id = ?1 AND fact_id = ?2
+               AND owner_kind = ?3 AND project_id = ?4",
+            params![
+                assertion.assertion_id().as_str(),
+                assertion.fact_id().as_str(),
+                owner.kind,
+                owner.project_id,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let payload_matches = match stored_payload {
+        Some((payload_json, content)) => {
+            payload_json == encode(assertion.payload())?
+                && content == assertion.payload().content()
+        }
+        None => payload_is_purged_projection(connection, owner, assertion.fact_id())?,
+    };
+    if !payload_matches {
+        return Ok(false);
+    }
+
+    let mut evidence = connection.prepare(
+        "SELECT assertion_evidence.evidence_id, evidence.evidence_json,
+                evidence.owner_json, evidence.anchor_id
+         FROM memory_v2_assertion_evidence AS assertion_evidence
+         JOIN memory_v2_evidence AS evidence
+           ON evidence.evidence_id = assertion_evidence.evidence_id
+          AND evidence.fact_id = assertion_evidence.fact_id
+          AND evidence.owner_kind = assertion_evidence.owner_kind
+          AND evidence.project_id = assertion_evidence.project_id
+         WHERE assertion_evidence.assertion_id = ?1
+           AND assertion_evidence.fact_id = ?2
+           AND assertion_evidence.owner_kind = ?3
+           AND assertion_evidence.project_id = ?4
+         ORDER BY assertion_evidence.ordinal",
+    )?;
+    let rows = evidence.query_map(
+        params![
+            assertion.assertion_id().as_str(),
+            assertion.fact_id().as_str(),
+            owner.kind,
+            owner.project_id,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    let mut stored_evidence = Vec::new();
+    for row in rows {
+        stored_evidence.push(row?);
+    }
+    let expected_evidence = assertion
+        .evidence()
+        .iter()
+        .map(|evidence| {
+            Ok((
+                evidence.evidence_id().as_str().to_owned(),
+                encode(evidence)?,
+                owner.json.clone(),
+                evidence.anchor_id().as_str().to_owned(),
+            ))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(stored_evidence == expected_evidence)
+}
+
+/// A missing payload row is only consistent with a purged projection, matching
+/// the root engine's allowance for `Quarantined` and `Deleted` access states.
+fn payload_is_purged_projection(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    fact_id: &FactId,
+) -> rusqlite::Result<bool> {
+    let access = connection
+        .query_row(
+            "SELECT current.payload_access
+             FROM memory_v2_current_facts AS current
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current.fact_id
+              AND facts.owner_kind = current.owner_kind
+              AND facts.project_id = current.project_id
+             WHERE current.fact_id = ?1
+               AND current.owner_kind = ?2
+               AND current.project_id = ?3
+               AND facts.owner_json = ?4",
+            params![fact_id.as_str(), owner.kind, owner.project_id, owner.json],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(access) = access else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        decode::<PayloadAccessState>(format!("\"{access}\""))?,
+        PayloadAccessState::Quarantined | PayloadAccessState::Deleted
+    ))
 }
 
 fn publish_projection(
@@ -579,8 +835,266 @@ fn read_lineage(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ProvenanceId,
+        ComponentVersion, EvidenceClass, FactCategoryV1, FactEvidenceRefV1, FactEvidenceRelationV1,
+        FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, PayloadReferenceV1,
+        ProvenanceId, RetentionClass, RetrievalAnchorId, SanitizationReceiptId,
+        SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     };
+
+    /// Every table `insert_assertion` writes or compares against, so the write
+    /// path is exercised with the real column set rather than a stub.
+    fn assertion_schema(connection: &rusqlite::Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE memory_v2_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    owner_json TEXT NOT NULL,
+                    PRIMARY KEY (fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_current_facts (
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload_access TEXT NOT NULL,
+                    PRIMARY KEY (fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_assertions (
+                    assertion_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    owner_json TEXT NOT NULL,
+                    assertion_header_json TEXT NOT NULL,
+                    kind_json TEXT NOT NULL,
+                    payload_reference_json TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    asserted_at INTEGER NOT NULL,
+                    actor_id TEXT,
+                    PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_assertion_supersession (
+                    assertion_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    superseded_assertion_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id, ordinal)
+                 );
+                 CREATE TABLE memory_v2_assertion_payloads (
+                    assertion_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_evidence (
+                    evidence_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    owner_json TEXT NOT NULL,
+                    anchor_id TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    PRIMARY KEY (evidence_id, fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_assertion_evidence (
+                    assertion_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id, ordinal)
+                 );",
+            )
+            .unwrap();
+    }
+
+    fn payload(content: &str) -> FactPayloadV1 {
+        let material = serde_json::json!({
+            "content": content,
+            "category": "project",
+            "tags": ["fact-executor"],
+            "entities": ["TraceDecay"],
+            "metadata": {},
+        });
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.fact-executor").unwrap(),
+                ComponentVersion::new("sanitizer.fact-executor.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&material).unwrap()),
+        )
+        .unwrap();
+        FactPayloadV1::new(
+            content.to_owned(),
+            FactCategoryV1::Project,
+            vec!["fact-executor".to_owned()],
+            vec!["TraceDecay".to_owned()],
+            serde_json::json!({}),
+            receipt,
+            RetentionClass::new("durable.fact-executor").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn evidence_ref(fact_id: &FactId, anchor: &str) -> FactEvidenceRefV1 {
+        FactEvidenceRefV1::new(
+            fact_id.clone(),
+            RetrievalAnchorId::new(anchor).unwrap(),
+            FactEvidenceRelationV1::Supports,
+            EvidenceClass::Observed,
+            Confidence::new(1.0).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn assertion(
+        fact_id: &FactId,
+        content: &str,
+        evidence: Vec<FactEvidenceRefV1>,
+    ) -> FactAssertionV1 {
+        FactAssertionV1::new(
+            fact_id.clone(),
+            FactOwnerV1::Profile,
+            FactAssertionKindV1::Initial,
+            payload(content),
+            evidence,
+            UtcMicros(5),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn assertion_replay_is_idempotent_and_reuse_is_a_collision() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        assertion_schema(&connection);
+        let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
+        let fact_id = profile_fact_id("operation.assertion-replay");
+        let anchor = "retrieval.fact-executor.alpha";
+        let assertion = assertion(
+            &fact_id,
+            "assertion replay",
+            vec![evidence_ref(&fact_id, anchor)],
+        );
+        let savepoint = connection.savepoint().unwrap();
+
+        insert_assertion(&savepoint, &owner, &assertion).unwrap();
+        // Exact replay of a stored assertion is a no-op, not a primary-key
+        // violation surfaced from the driver.
+        insert_assertion(&savepoint, &owner, &assertion).unwrap();
+        let assertions = savepoint
+            .query_row(
+                "SELECT COUNT(*) FROM memory_v2_assertions WHERE assertion_id = ?1",
+                [assertion.assertion_id().as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(assertions, 1, "replay must not append a second assertion");
+
+        // The same assertion id bound to different stored content is a
+        // collision, classified exactly as the root commit engine classifies it.
+        savepoint
+            .execute(
+                "UPDATE memory_v2_assertions SET asserted_at = asserted_at + 1
+                 WHERE assertion_id = ?1",
+                [assertion.assertion_id().as_str()],
+            )
+            .unwrap();
+        let error = insert_assertion(&savepoint, &owner, &assertion).unwrap_err();
+        assert!(
+            error.to_string().contains("assertion identity collision"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn evidence_rebound_to_another_anchor_is_a_collision() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        assertion_schema(&connection);
+        let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
+        let fact_id = profile_fact_id("operation.evidence-rebound");
+        let evidence = evidence_ref(&fact_id, "retrieval.fact-executor.alpha");
+        let assertion = assertion(&fact_id, "evidence rebound", vec![evidence.clone()]);
+        let savepoint = connection.savepoint().unwrap();
+        // A stored evidence row that reuses the evidence id against a different
+        // anchor must not be silently adopted by `INSERT OR IGNORE`.
+        savepoint
+            .execute(
+                "INSERT INTO memory_v2_evidence (
+                    evidence_id, fact_id, owner_kind, project_id,
+                    owner_json, anchor_id, evidence_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    evidence.evidence_id().as_str(),
+                    fact_id.as_str(),
+                    owner.kind,
+                    owner.project_id,
+                    owner.json,
+                    "retrieval.fact-executor.beta",
+                    encode(&evidence).unwrap(),
+                ],
+            )
+            .unwrap();
+
+        let error = insert_assertion(&savepoint, &owner, &assertion).unwrap_err();
+        assert!(
+            error.to_string().contains("evidence identity collision"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn evidence_exact_replay_is_accepted() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        assertion_schema(&connection);
+        let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
+        let fact_id = profile_fact_id("operation.evidence-replay");
+        let anchor = "retrieval.fact-executor.alpha";
+        let evidence = evidence_ref(&fact_id, anchor);
+        let assertion = assertion(&fact_id, "evidence replay", vec![evidence.clone()]);
+        let savepoint = connection.savepoint().unwrap();
+        savepoint
+            .execute(
+                "INSERT INTO memory_v2_evidence (
+                    evidence_id, fact_id, owner_kind, project_id,
+                    owner_json, anchor_id, evidence_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    evidence.evidence_id().as_str(),
+                    fact_id.as_str(),
+                    owner.kind,
+                    owner.project_id,
+                    owner.json,
+                    anchor,
+                    encode(&evidence).unwrap(),
+                ],
+            )
+            .unwrap();
+
+        insert_assertion(&savepoint, &owner, &assertion).unwrap();
+        let linked = savepoint
+            .query_row(
+                "SELECT COUNT(*) FROM memory_v2_assertion_evidence
+                 WHERE assertion_id = ?1 AND evidence_id = ?2",
+                params![
+                    assertion.assertion_id().as_str(),
+                    evidence.evidence_id().as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 1, "identical evidence must still link the assertion");
+    }
 
     fn profile_fact_id(operation: &str) -> FactId {
         FactId::derive(
