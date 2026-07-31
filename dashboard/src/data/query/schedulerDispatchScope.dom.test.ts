@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { automationSchedulerKey, schedulerStatusUrl, useSchedulerControl } from './automation.ts';
 import { legacyQueryKey, useLegacy } from './useLegacy.ts';
-import { useScope, type DashboardScope } from '../scope/store.ts';
+import { UNSCOPED_CACHE_KEY, useScope, type DashboardScope } from '../scope/store.ts';
 import { AutomationSchedulerStatusV1Schema } from '../../contracts/generated.ts';
 
 function activeProject(projectId: string, label: string): DashboardScope {
@@ -175,11 +175,9 @@ describe('a scheduler control answered after the reader changed project', () => 
 /**
  * The default scope, which is where the two key constructions differed.
  *
- * Under `all` nothing rewrites `/api/automation/scheduler/status`, so the read
- * is keyed by the unscoped token while the writer keyed by `all` — and the
- * daemon's post-change reading was written into an entry with no reader. The
- * badge and the tiles kept showing the pre-click state after a pause the
- * scheduler had accepted.
+ * Under `all`, the scheduler route still carries the all-projects scope even
+ * though its URL is not rewritten. The read and writer must therefore share
+ * the `all` entry and must not leave behind the obsolete unscoped entry.
  *
  * Asserted through the read hook rather than against a key literal: what has to
  * hold is that the writer and the page's own read address the same entry, and a
@@ -214,8 +212,7 @@ describe('a scheduler control under the all-projects default', () => {
       expect(read?.outcome).toBe('ok');
       expect(read?.outcome === 'ok' ? read.data.paused : null).toBe(true);
     });
-    // And no orphan: the writer did not also populate a second entry keyed by
-    // the scope token, which is what the defect produced.
-    expect(client.getQueryData([...automationSchedulerKey, 'all'])).toBeUndefined();
+    // And no orphan: the writer did not also populate the old unscoped entry.
+    expect(client.getQueryData([...automationSchedulerKey, UNSCOPED_CACHE_KEY])).toBeUndefined();
   });
 });
