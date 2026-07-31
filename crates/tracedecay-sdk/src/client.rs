@@ -122,7 +122,6 @@ impl ClientBuilder {
             application_root,
             authorization,
             origin: origin_value,
-            mode: self.mode,
         })
     }
 }
@@ -134,7 +133,6 @@ pub struct Client {
     application_root: String,
     authorization: HeaderValue,
     origin: HeaderValue,
-    mode: ConnectionMode,
 }
 
 impl Client {
@@ -146,15 +144,10 @@ impl Client {
         }
     }
 
-    pub fn connection_mode(&self) -> &ConnectionMode {
-        &self.mode
-    }
-
     /// Invoke one operation admitted by canonical request and result schemas.
     pub fn execute<Operation>(
         &self,
         request: &Operation::Request,
-        options: RequestOptions,
     ) -> Result<TypedResponse<Operation::Result>, ClientError>
     where
         Operation: TypedOperation,
@@ -165,7 +158,7 @@ impl Client {
             status: None,
             message: format!("typed request could not be encoded: {error}"),
         })?;
-        let response = self.request_route(Operation::ROUTE, &request, options)?;
+        let response = self.request_route(Operation::ROUTE, &request)?;
         let binding = response
             .envelope()
             .get("binding_id")
@@ -219,7 +212,6 @@ impl Client {
         &self,
         route: &str,
         request: &Value,
-        options: RequestOptions,
     ) -> Result<ApplicationResponse, ClientError> {
         let route = route.strip_prefix("/application").ok_or_else(|| {
             ClientError::InvalidConfiguration(
@@ -228,7 +220,6 @@ impl Client {
         })?;
         let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-        let _ = options;
         let response = self
             .http
             .post(url)
@@ -243,7 +234,6 @@ impl Client {
     pub fn cancel_operation(
         &self,
         operation_id: &str,
-        _options: Option<RequestOptions>,
     ) -> Result<OperationCancellation, ClientError> {
         validate_opaque(operation_id, MAX_REQUEST_ID_BYTES, "operation ID")?;
         let response = self
@@ -261,17 +251,11 @@ impl Client {
             message: format!("daemon returned malformed cancellation JSON: {error}"),
         })?;
         if body.get("kind").and_then(Value::as_str) == Some("problem") {
-            let envelope = body
-                .get("value")
-                .cloned()
-                .ok_or_else(|| ClientError::Protocol {
-                    status: Some(status.as_u16()),
-                    message: "cancellation problem envelope has no value".into(),
-                })?;
-            return Err(ClientError::Problem(Box::new(ProblemError::new(
+            return Err(problem_error(
+                &body,
                 status.as_u16(),
-                envelope,
-            )?)));
+                "cancellation problem envelope has no value",
+            ));
         }
         let value: OperationCancellation =
             serde_json::from_value(body).map_err(|error| ClientError::Protocol {
@@ -348,13 +332,7 @@ impl Client {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
-        let media_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim);
-        if media_type != Some("application/json") {
+        if media_type(response.headers()) != Some("application/json") {
             return Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
                 message: "daemon response is not application/json".into(),
@@ -375,19 +353,11 @@ impl Client {
                     })?;
                 ApplicationResponse::new(value, status.as_u16())
             }
-            Some("problem") if !status.is_success() => {
-                let value = body
-                    .get("value")
-                    .cloned()
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(status.as_u16()),
-                        message: "problem envelope has no value".into(),
-                    })?;
-                Err(ClientError::Problem(Box::new(ProblemError::new(
-                    status.as_u16(),
-                    value,
-                )?)))
-            }
+            Some("problem") if !status.is_success() => Err(problem_error(
+                &body,
+                status.as_u16(),
+                "problem envelope has no value",
+            )),
             _ => Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
                 message: "daemon returned an inconsistent HTTP envelope".into(),
@@ -402,10 +372,6 @@ pub struct TypedResponse<Result> {
     pub request_id: String,
     pub result: Result,
 }
-
-/// Per-request lifecycle controls.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RequestOptions;
 
 /// A decoded successful application envelope.
 #[derive(Clone, Debug, PartialEq)]
@@ -431,6 +397,40 @@ impl ApplicationResponse {
     pub fn payload(&self) -> Option<&Value> {
         self.envelope.get("outcome")?.get("value")?.get("payload")
     }
+}
+
+/// The response media type, without its parameters.
+fn media_type(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+}
+
+/// Convert an already-identified `problem` envelope into its client error.
+///
+/// The caller supplies the message for a body that claims to be a problem but
+/// carries no value, because only the caller knows which surface it read.
+fn problem_error(body: &Value, status: u16, missing_value: &'static str) -> ClientError {
+    let Some(envelope) = body.get("value").cloned() else {
+        return ClientError::Protocol {
+            status: Some(status),
+            message: missing_value.into(),
+        };
+    };
+    match ProblemError::new(status, envelope) {
+        Ok(problem) => ClientError::Problem(Box::new(problem)),
+        Err(error) => error,
+    }
+}
+
+/// Whether an event name ends the operation's stream.
+fn is_terminal_event(event: &str) -> bool {
+    matches!(
+        event,
+        "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown"
+    )
 }
 
 fn protocol(status: u16, message: impl Into<String>) -> ClientError {
@@ -667,10 +667,7 @@ pub struct StreamEvent {
 
 impl StreamEvent {
     pub fn terminal(&self) -> bool {
-        matches!(
-            self.event.as_str(),
-            "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown"
-        )
+        is_terminal_event(&self.event)
     }
 }
 
@@ -712,29 +709,18 @@ impl OperationStream {
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(ClientError::Authentication(status.as_u16()));
         }
-        let media_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim);
+        let media_type = media_type(response.headers());
         if !status.is_success() && media_type == Some("application/json") {
             let body: Value = response.json().map_err(|error| ClientError::Protocol {
                 status: Some(status.as_u16()),
                 message: format!("daemon returned malformed stream problem JSON: {error}"),
             })?;
             if body.get("kind").and_then(Value::as_str) == Some("problem") {
-                let envelope = body
-                    .get("value")
-                    .cloned()
-                    .ok_or_else(|| ClientError::Protocol {
-                        status: Some(status.as_u16()),
-                        message: "stream problem envelope has no value".into(),
-                    })?;
-                return Err(ClientError::Problem(Box::new(ProblemError::new(
+                return Err(problem_error(
+                    &body,
                     status.as_u16(),
-                    envelope,
-                )?)));
+                    "stream problem envelope has no value",
+                ));
             }
             return Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
@@ -855,18 +841,9 @@ impl OperationStream {
                         }
                     };
                 } else {
-                    if !matches!(
-                        event_name.as_str(),
-                        "item"
-                            | "progress"
-                            | "resume_gap"
-                            | "completed"
-                            | "cancelled"
-                            | "timed_out"
-                            | "failed"
-                            | "partial"
-                            | "effect_unknown"
-                    ) {
+                    if !matches!(event_name.as_str(), "item" | "progress" | "resume_gap")
+                        && !is_terminal_event(&event_name)
+                    {
                         return Err(ClientError::Protocol {
                             status: None,
                             message: "SSE event name is not canonical".into(),
@@ -925,17 +902,7 @@ impl OperationStream {
                             });
                         }
                         "resume_gap" => validate_resume_gap(event_data)?,
-                        event
-                            if matches!(
-                                event,
-                                "completed"
-                                    | "cancelled"
-                                    | "timed_out"
-                                    | "failed"
-                                    | "partial"
-                                    | "effect_unknown"
-                            ) =>
-                        {
+                        event if is_terminal_event(event) => {
                             validate_terminal(event_data, event)?;
                         }
                         _ => {}

@@ -24,6 +24,31 @@ use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
 
+/// Define the handlers that name one fixed operation.
+///
+/// A route whose path carries no operation segment has nothing left to decide,
+/// so its handler is pure forwarding. Stating the extractor list once per
+/// router keeps that forwarding from being retyped for every operation.
+macro_rules! constant_operation_handlers {
+    (
+        owner: $generic:ident = $owner:path,
+        dispatch = $dispatch:path,
+        extractors = { $($extractor:ident: $extractor_type:ty),+ $(,)? },
+        $($handler:ident => $operation:expr;)+
+    ) => {
+        $(
+            async fn $handler<$generic>($($extractor: $extractor_type),+) -> Response
+            where
+                $generic: $owner,
+            {
+                $dispatch($operation, $($extractor),+).await
+            }
+        )+
+    };
+}
+
+pub(crate) use constant_operation_handlers;
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpPageQuery {
@@ -328,6 +353,32 @@ impl HttpApplicationOperation {
         }
     }
 
+    /// Whether the operation is addressed under `/code/{operation}`.
+    ///
+    /// This is not an owner-kind question: the callable-code router also
+    /// carries the five search operations a Primitive owner answers, so the
+    /// route membership has to be stated once and consulted in both
+    /// polarities.
+    pub const fn is_callable_code_route(self) -> bool {
+        matches!(
+            self,
+            Self::CodeExactOccurrence
+                | Self::CodePhraseSearch
+                | Self::CodeSymbolSearch
+                | Self::CodeSignatureSearch
+                | Self::CodeImplementations
+                | Self::CodeTypeHierarchy
+                | Self::CodeCallers
+                | Self::CodeCallees
+                | Self::CodeFacets
+                | Self::CodeTimeline
+                | Self::CodeDeclaration
+                | Self::CodeDefinition
+                | Self::CodeTypeDefinition
+                | Self::CodeReferences
+        )
+    }
+
     pub fn route_path(self) -> String {
         match self {
             operation if operation.owner_kind() == HttpApplicationOwnerKind::Git => {
@@ -350,25 +401,7 @@ impl HttpApplicationOperation {
                         .expect("feedback HTTP operation names use the feedback_ prefix")
                 )
             }
-            operation
-                if matches!(
-                    operation,
-                    Self::CodeExactOccurrence
-                        | Self::CodePhraseSearch
-                        | Self::CodeSymbolSearch
-                        | Self::CodeSignatureSearch
-                        | Self::CodeImplementations
-                        | Self::CodeTypeHierarchy
-                        | Self::CodeCallers
-                        | Self::CodeCallees
-                        | Self::CodeFacets
-                        | Self::CodeTimeline
-                        | Self::CodeDeclaration
-                        | Self::CodeDefinition
-                        | Self::CodeTypeDefinition
-                        | Self::CodeReferences
-                ) =>
-            {
+            operation if operation.is_callable_code_route() => {
                 format!("/code/{}", operation.as_str())
             }
             operation if operation.owner_kind() == HttpApplicationOwnerKind::Primitive => {
@@ -615,7 +648,7 @@ pub(crate) fn invalid_request_response(
 /// The executable nests this router at its root-owned prefix behind
 /// authentication and origin middleware. Authorization remains part of
 /// canonical application dispatch, including concealed
-/// not-found-or-not-authorized results. These PR12 route names are adapter
+/// not-found-or-not-authorized results. These route names are adapter
 /// bindings, not a frozen SDK namespace.
 pub fn application_router<O>(owners: O) -> Router
 where
@@ -639,7 +672,7 @@ where
         .with_state(owners)
 }
 
-/// Build the PR14 dashboard bindings for canonical feedback reads.
+/// Build the dashboard bindings for canonical feedback reads.
 ///
 /// This is a route subset only. It uses the same handlers, request envelopes,
 /// dispatcher, and application owner as the complete HTTP application router;
@@ -689,161 +722,31 @@ fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOpera
     crate::feedback::feedback_read_operation(operation)
 }
 
-async fn feedback_read<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_feedback_read_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
+constant_operation_handlers! {
+    owner: O = HttpApplicationOwners,
+    dispatch = invoke_route,
+    extractors = {
+        state: State<O>,
+        request_id: Extension<RequestId>,
+        cancellation: Extension<HttpApplicationControls>,
+        page: Result<Query<HttpPageQuery>, QueryRejection>,
+        body: Result<Json<Value>, JsonRejection>,
+    },
+    affected_tests => HttpApplicationOperation::AffectedTests;
+    test_results => HttpApplicationOperation::TestResults;
 }
 
-async fn git_read<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_git_read_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
-}
-
-async fn affected_tests<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::AffectedTests,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn test_results<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::TestResults,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn primitive_read<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) =
-        HttpApplicationOperation::from_catalog_name(&operation).filter(|operation| {
-            operation.owner_kind() == HttpApplicationOwnerKind::Primitive
-                && *operation != HttpApplicationOperation::TestResults
-                && !matches!(
-                    operation,
-                    HttpApplicationOperation::CodeSymbolSearch
-                        | HttpApplicationOperation::CodeSignatureSearch
-                        | HttpApplicationOperation::CodeImplementations
-                        | HttpApplicationOperation::CodeTypeHierarchy
-                        | HttpApplicationOperation::CodeCallers
-                )
-        })
-    else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
-}
-
-fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
+fn parse_primitive_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
     HttpApplicationOperation::from_catalog_name(operation).filter(|operation| {
-        matches!(
-            operation,
-            HttpApplicationOperation::CodeExactOccurrence
-                | HttpApplicationOperation::CodePhraseSearch
-                | HttpApplicationOperation::CodeSymbolSearch
-                | HttpApplicationOperation::CodeSignatureSearch
-                | HttpApplicationOperation::CodeImplementations
-                | HttpApplicationOperation::CodeTypeHierarchy
-                | HttpApplicationOperation::CodeCallers
-                | HttpApplicationOperation::CodeCallees
-                | HttpApplicationOperation::CodeFacets
-                | HttpApplicationOperation::CodeTimeline
-                | HttpApplicationOperation::CodeDeclaration
-                | HttpApplicationOperation::CodeDefinition
-                | HttpApplicationOperation::CodeTypeDefinition
-                | HttpApplicationOperation::CodeReferences
-        )
+        operation.owner_kind() == HttpApplicationOwnerKind::Primitive
+            && *operation != HttpApplicationOperation::TestResults
+            && !operation.is_callable_code_route()
     })
 }
 
-async fn callable_code_read<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_callable_code_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
+fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    HttpApplicationOperation::from_catalog_name(operation)
+        .filter(|operation| operation.is_callable_code_route())
 }
 
 fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOperation> {
@@ -851,49 +754,50 @@ fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOpera
         .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
 }
 
-async fn configuration_operation<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_configuration_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
-    };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
-}
-
 fn parse_context_scout_operation(operation: &str) -> Option<HttpApplicationOperation> {
     HttpApplicationOperation::from_catalog_name(operation)
         .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::ContextScout)
 }
 
-async fn context_scout_operation<O>(
-    Path(operation): Path<String>,
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    let Some(operation) = parse_context_scout_operation(&operation) else {
-        return application_problem_response(adapter_problem(
-            request_id.0,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+/// Define the `/{operation}` handlers, which differ only in how the path
+/// segment resolves to an operation.
+///
+/// An unresolvable segment is refused exactly like an unauthorized one, so
+/// route membership never becomes an existence oracle. That concealment is the
+/// reason these handlers must stay byte-identical to each other.
+macro_rules! parsed_operation_handlers {
+    ($($handler:ident => $parse:path;)+) => {
+        $(
+            async fn $handler<O>(
+                Path(operation): Path<String>,
+                state: State<O>,
+                request_id: Extension<RequestId>,
+                cancellation: Extension<HttpApplicationControls>,
+                page: Result<Query<HttpPageQuery>, QueryRejection>,
+                body: Result<Json<Value>, JsonRejection>,
+            ) -> Response
+            where
+                O: HttpApplicationOwners,
+            {
+                let Some(operation) = $parse(&operation) else {
+                    return application_problem_response(adapter_problem(
+                        request_id.0,
+                        ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+                    ));
+                };
+                invoke_route(operation, state, request_id, cancellation, page, body).await
+            }
+        )+
     };
-    invoke_route(operation, state, request_id, cancellation, page, body).await
+}
+
+parsed_operation_handlers! {
+    feedback_read => parse_feedback_read_operation;
+    git_read => parse_git_read_operation;
+    primitive_read => parse_primitive_read_operation;
+    callable_code_read => parse_callable_code_operation;
+    configuration_operation => parse_configuration_operation;
+    context_scout_operation => parse_context_scout_operation;
 }
 
 async fn invoke_route<O>(
