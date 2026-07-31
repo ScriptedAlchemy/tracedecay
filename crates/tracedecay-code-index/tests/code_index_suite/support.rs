@@ -5,7 +5,7 @@ use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, San
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, LanguageDescriptorV1, LanguageId, ManifestDigest,
-    RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    ProjectId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
 };
 
@@ -63,6 +63,7 @@ pub fn validated_rust_file(source: &[u8]) -> ReceiptBoundCodeFileV1 {
     intake
         .bind_file(
             &capability,
+            &id::<ProjectId>("project.fixture"),
             ValidatedCodeFileV1 {
                 generation_id: id::<CodeGenerationId>("generation.fixture"),
                 file,

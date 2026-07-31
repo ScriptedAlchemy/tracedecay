@@ -17,7 +17,10 @@ use tracedecay_domain::{
     ManifestDigest, ParseOutcomeV1, SourceSpan, ValidatedCodeFileV1, canonical_sha256,
 };
 
-use super::{intake::ReceiptBoundCodeFileV1, languages::canonical_language_id};
+use super::{
+    intake::{ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1},
+    languages::canonical_language_id,
+};
 use tracedecay_domain::{Edge, ExtractionResult, Node, UnresolvedRef, Visibility};
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
@@ -44,6 +47,7 @@ impl ExtractionCancellation for NeverCancelled {
 /// chunking can reuse them without widening the durable domain contract.
 #[derive(Debug)]
 pub struct ExtractedCodeFileV1 {
+    authority: ReceiptBoundCodeFileAuthorityV1,
     batch: ExtractionBatchV1,
     parse_artifacts: ExtractionResult,
 }
@@ -53,13 +57,60 @@ impl ExtractedCodeFileV1 {
         &self.batch
     }
 
+    /// Repository-relative logical path that authorized these parser rows.
+    pub fn logical_path(&self) -> &str {
+        &self.authority.logical_path
+    }
+
+    pub fn authority(&self) -> &ReceiptBoundCodeFileAuthorityV1 {
+        &self.authority
+    }
+
     pub(crate) fn parse_artifacts(&self) -> &ExtractionResult {
         &self.parse_artifacts
     }
 
-    pub(crate) fn into_parts(self) -> (ExtractionBatchV1, ExtractionResult) {
-        (self.batch, self.parse_artifacts)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ReceiptBoundCodeFileAuthorityV1,
+        ExtractionBatchV1,
+        ExtractionResult,
+    ) {
+        (self.authority, self.batch, self.parse_artifacts)
     }
+
+    /// Rebind carried extraction evidence onto a new generation-scoped file
+    /// occurrence without re-parsing.
+    ///
+    /// The target file must share the original logical path and content digest
+    /// that minted `rows_digest`. Identical bytes at a different path cannot
+    /// reuse another file's parser rows.
+    pub fn rebind_file_occurrence(
+        &mut self,
+        file: &ReceiptBoundCodeFileV1,
+    ) -> Result<(), ExtractionFailureV1> {
+        self.batch = rebind_extraction_batch(&self.authority, &self.batch, file)?;
+        Ok(())
+    }
+}
+
+pub(crate) fn rebind_extraction_batch(
+    authority: &ReceiptBoundCodeFileAuthorityV1,
+    batch: &ExtractionBatchV1,
+    file: &ReceiptBoundCodeFileV1,
+) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
+    if authority != file.authority() || batch.content_digest != authority.content_digest {
+        return Err(ExtractionFailureV1::IncompatibleDescriptor {
+            detail: "extraction authority does not match target project, repository, scope, path, or content"
+                .to_owned(),
+        });
+    }
+    let target = file.validated_file();
+    let mut rebound = batch.clone();
+    rebound.generation_id = target.generation_id.clone();
+    rebound.file_occurrence_id = target.file.file_occurrence_id.clone();
+    Ok(rebound)
 }
 
 /// The language extractor contract (Plan 25). Language-specific logic stays
@@ -318,6 +369,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         if cancellation.is_cancelled() {
             return Err(ExtractionFailureV1::Cancelled);
         }
+        let authority = file.authority().clone();
         let file = file.validated_file();
         if let Some(declared) = &file.file.language
             && declared != &descriptor.language
@@ -417,6 +469,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         let rows_digest = rows_digest(file, descriptor, &result)?;
 
         Ok(ExtractedCodeFileV1 {
+            authority,
             batch: ExtractionBatchV1 {
                 generation_id: file.generation_id.clone(),
                 file_occurrence_id: file.file.file_occurrence_id.clone(),
@@ -441,7 +494,7 @@ impl LanguageExtractor for TreeSitterExtractor {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        CodeGenerationId, FileOccurrenceId, RepositoryId, SanitizationReceiptId,
+        CodeGenerationId, FileOccurrenceId, ProjectId, RepositoryId, SanitizationReceiptId,
         SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
         UtcMicros, ValidatedCodeFileV1,
     };
@@ -488,6 +541,7 @@ mod tests {
         intake
             .bind_file(
                 &capability,
+                &ProjectId::new("project.fixture").expect("valid project"),
                 ValidatedCodeFileV1 {
                     generation_id: CodeGenerationId::new("generation.fixture").expect("valid id"),
                     file,
@@ -573,6 +627,93 @@ mod tests {
             extractor.extract(&file, &rust_descriptor(), &AlwaysCancelled),
             Err(ExtractionFailureV1::Cancelled)
         ));
+    }
+
+    #[test]
+    fn rebind_rejects_identical_bytes_at_a_different_logical_path() {
+        let extractor = TreeSitterExtractor::new();
+        let path_a = validated_file("src/a.rs", RUST_SOURCE.as_bytes());
+        let mut extraction = extractor
+            .extract(&path_a, &rust_descriptor(), &NeverCancelled)
+            .expect("extraction for path A");
+        let original_digest = extraction.batch().rows_digest.clone();
+        let original_occurrence = extraction.batch().file_occurrence_id.clone();
+        let path_b = validated_file("src/b.rs", RUST_SOURCE.as_bytes());
+
+        assert!(matches!(
+            extraction.rebind_file_occurrence(&path_b),
+            Err(ExtractionFailureV1::IncompatibleDescriptor { .. })
+        ));
+        assert_eq!(extraction.batch().rows_digest, original_digest);
+        assert_eq!(extraction.batch().file_occurrence_id, original_occurrence);
+        assert_eq!(extraction.logical_path(), "src/a.rs");
+    }
+
+    #[test]
+    fn rebind_allows_same_path_under_a_new_generation_occurrence() {
+        let extractor = TreeSitterExtractor::new();
+        let original = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
+        let mut extraction = extractor
+            .extract(&original, &rust_descriptor(), &NeverCancelled)
+            .expect("extraction");
+        let original_digest = extraction.batch().rows_digest.clone();
+
+        let rebound = {
+            let intake = SanitizedCodeIntake::new(
+                StaticLanguageRegistry::new(),
+                SanitizerRevision::new("sanitizer.v1").expect("valid id"),
+                UtcMicros(1_000_000),
+            );
+            let file = SanitizedCodeFileV1 {
+                file_occurrence_id: FileOccurrenceId::new("file.carried").expect("valid id"),
+                logical_path: "src/lib.rs".to_owned(),
+                language: Some(tracedecay_domain::LanguageId::new("rust").expect("valid id")),
+                content_digest: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
+                disposition: SnapshotFileDispositionV1::Present,
+            };
+            let capability = intake
+                .admit(SanitizedCodeSnapshotV1 {
+                    repository: RepositoryId::new("repo.fixture").expect("valid id"),
+                    worktree: None,
+                    reference: None,
+                    source_revision: None,
+                    sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
+                    sanitization_receipts: vec![
+                        SanitizationReceiptId::new("receipt.fixture").expect("valid id"),
+                    ],
+                    content_identity: crate::chunks::content_digest(RUST_SOURCE.as_bytes()),
+                    captured_at: UtcMicros(1_000_000),
+                    files: vec![file.clone()],
+                })
+                .expect("snapshot capability");
+            intake
+                .bind_file(
+                    &capability,
+                    &ProjectId::new("project.fixture").expect("valid project"),
+                    ValidatedCodeFileV1 {
+                        generation_id: CodeGenerationId::new("generation.carried")
+                            .expect("valid id"),
+                        file,
+                        snapshot_digest: capability.snapshot().intake_digest.clone(),
+                        sanitized_bytes: RUST_SOURCE.as_bytes().to_vec(),
+                    },
+                )
+                .expect("receipt-bound carried file")
+        };
+
+        extraction
+            .rebind_file_occurrence(&rebound)
+            .expect("same-path generation rebind");
+        assert_eq!(extraction.batch().rows_digest, original_digest);
+        assert_eq!(
+            extraction.batch().generation_id.as_str(),
+            "generation.carried"
+        );
+        assert_eq!(
+            extraction.batch().file_occurrence_id.as_str(),
+            "file.carried"
+        );
+        assert_eq!(extraction.logical_path(), "src/lib.rs");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
+use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::{
@@ -342,6 +342,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub(in crate::daemon) fn open_worktree(
         &self,
+        project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
     ) -> Result<CodeIndexWorktreeSchedulerV1, CodeIndexSchedulerErrorV1> {
@@ -350,7 +351,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is zero".to_owned(),
             ));
         }
-        CodeIndexWorktreeSchedulerV1::open(project_root, store_root, Arc::clone(&self.byte_pool))
+        CodeIndexWorktreeSchedulerV1::open(
+            project_id,
+            project_root,
+            store_root,
+            Arc::clone(&self.byte_pool),
+        )
     }
 
     pub(in crate::daemon) fn byte_pool_stats(&self) -> CodeIndexBytePoolStatsV1 {
@@ -380,6 +386,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub(in crate::daemon) async fn mount_worktree(
         &self,
+        project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
         semantic_schedule: Option<
@@ -399,6 +406,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 let mut scheduler = scheduler
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if scheduler.project_id() != &project_id {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(
+                        "mounted worktree belongs to a different project identity".to_owned(),
+                    ));
+                }
                 let latest = scheduler.latest_complete().map(|latest| latest.generation);
                 scheduler.replace_semantic_schedule_hook(semantic_schedule.clone());
                 latest
@@ -415,6 +427,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         drop(mounted);
         let mut opened = self.open_worktree(
+            project_id,
             &project_root,
             super::scoped_code_index_store_root(&store_root, &project_root),
         )?;

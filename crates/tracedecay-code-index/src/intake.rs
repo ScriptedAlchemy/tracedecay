@@ -8,10 +8,11 @@
 
 use std::{collections::BTreeMap, ops::Deref};
 
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ContentDigest, DomainError, FileOccurrenceId, IntakeRejectionV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
-    ValidatedCodeSnapshotV1, canonical_sha256,
+    ContentDigest, DomainError, FileOccurrenceId, IntakeRejectionV1, ProjectId, RefId,
+    RepositoryId, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeFileV1, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::languages::LanguageRegistry;
@@ -37,6 +38,7 @@ pub trait CodeIndexIntake {
     fn bind_file(
         &self,
         capability: &SanitizedSnapshotCapabilityV1,
+        project_id: &ProjectId,
         file: ValidatedCodeFileV1,
     ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1>;
 }
@@ -82,15 +84,31 @@ impl SanitizedSnapshotCapabilityV1 {
 
 /// Opaque extraction input whose bytes, file digest, snapshot digest, and
 /// sanitization receipts were bound by [`CodeIndexIntake::bind_file`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptBoundCodeFileAuthorityV1 {
+    pub project_id: ProjectId,
+    pub repository_id: RepositoryId,
+    pub worktree_id: Option<WorktreeId>,
+    pub reference: Option<RefId>,
+    pub logical_path: String,
+    pub content_digest: ContentDigest,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptBoundCodeFileV1 {
     file: ValidatedCodeFileV1,
+    authority: ReceiptBoundCodeFileAuthorityV1,
 }
 
 impl ReceiptBoundCodeFileV1 {
     /// The byte-exact sanitized source authorized for extraction and chunking.
     pub fn sanitized_bytes(&self) -> &[u8] {
         &self.file.sanitized_bytes
+    }
+
+    pub fn authority(&self) -> &ReceiptBoundCodeFileAuthorityV1 {
+        &self.authority
     }
 
     pub(crate) fn validated_file(&self) -> &ValidatedCodeFileV1 {
@@ -249,8 +267,12 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
     fn bind_file(
         &self,
         capability: &SanitizedSnapshotCapabilityV1,
+        project_id: &ProjectId,
         file: ValidatedCodeFileV1,
     ) -> Result<ReceiptBoundCodeFileV1, IntakeRejectionV1> {
+        if project_id.validate().is_err() {
+            return Err(IntakeRejectionV1::UnsanitizedInput);
+        }
         if file.snapshot_digest != capability.snapshot.intake_digest
             || file.file.disposition != SnapshotFileDispositionV1::Present
             || content_digest(&file.sanitized_bytes) != file.file.content_digest
@@ -265,7 +287,16 @@ impl<R: LanguageRegistry> CodeIndexIntake for SanitizedCodeIntake<R> {
         if admitted_file != Some(&file.file) {
             return Err(IntakeRejectionV1::UnsanitizedInput);
         }
-        Ok(ReceiptBoundCodeFileV1 { file })
+        let snapshot = &capability.snapshot.snapshot;
+        let authority = ReceiptBoundCodeFileAuthorityV1 {
+            project_id: project_id.clone(),
+            repository_id: snapshot.repository.clone(),
+            worktree_id: snapshot.worktree.clone(),
+            reference: snapshot.reference.clone(),
+            logical_path: file.file.logical_path.clone(),
+            content_digest: file.file.content_digest.clone(),
+        };
+        Ok(ReceiptBoundCodeFileV1 { file, authority })
     }
 }
 
@@ -505,6 +536,7 @@ mod tests {
         late_binder
             .bind_file(
                 &capability,
+                &ProjectId::new("project.fixture").expect("valid project"),
                 ValidatedCodeFileV1 {
                     generation_id: CodeGenerationId::new("generation.fixture")
                         .expect("valid generation"),

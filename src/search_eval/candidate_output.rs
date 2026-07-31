@@ -2634,6 +2634,7 @@ fn publish_corpus_with_scale(
         target_projection_key: target_projection_key.clone(),
     };
     let config = CodeIndexProductionConfigV1 {
+        project_id: id::<ProjectId>("project.candidate.fixture")?,
         repository: id::<RepositoryId>("repository.candidate.fixture")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,
@@ -3103,6 +3104,7 @@ fn prove_cancellation(
     };
     let generation_scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
     let config = CodeIndexProductionConfigV1 {
+        project_id: id::<ProjectId>("project.candidate.cancel")?,
         repository: id::<RepositoryId>("repository.candidate.cancel")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,

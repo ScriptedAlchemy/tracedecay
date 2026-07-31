@@ -2,8 +2,9 @@ use tracedecay_code_index::chunks::content_digest as source_digest;
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, IntakeRejectionV1, LanguageId,
-    RefId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1, WorktreeId,
+    ProjectId, RefId, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeFileV1, WorktreeId,
 };
 
 use crate::support::{id, registry};
@@ -98,15 +99,16 @@ fn intake_capability_binds_sanitized_bytes_digest_and_receipts() {
         snapshot_digest: capability.snapshot().intake_digest.clone(),
         sanitized_bytes: bytes.to_vec(),
     };
+    let project_id = id::<ProjectId>("project.fixture");
     let bound = admission
-        .bind_file(&capability, candidate.clone())
+        .bind_file(&capability, &project_id, candidate.clone())
         .expect("matching file becomes receipt-bound");
     assert_eq!(bound.sanitized_bytes(), bytes);
 
     let mut forged_bytes = candidate.clone();
     forged_bytes.sanitized_bytes = b"pub fn forged() {}\n".to_vec();
     assert!(matches!(
-        admission.bind_file(&capability, forged_bytes),
+        admission.bind_file(&capability, &project_id, forged_bytes),
         Err(IntakeRejectionV1::UnsanitizedInput)
     ));
 
@@ -114,14 +116,14 @@ fn intake_capability_binds_sanitized_bytes_digest_and_receipts() {
     forged_utf8.sanitized_bytes = vec![b'f', b'n', b' ', 0xff];
     forged_utf8.file.content_digest = source_digest(&forged_utf8.sanitized_bytes);
     assert!(matches!(
-        admission.bind_file(&capability, forged_utf8),
+        admission.bind_file(&capability, &project_id, forged_utf8),
         Err(IntakeRejectionV1::UnsanitizedInput)
     ));
 
     let mut forged_snapshot = candidate.clone();
     forged_snapshot.snapshot_digest = id(&format!("sha256:{}", "f".repeat(64)));
     assert!(matches!(
-        admission.bind_file(&capability, forged_snapshot),
+        admission.bind_file(&capability, &project_id, forged_snapshot),
         Err(IntakeRejectionV1::UnsanitizedInput)
     ));
 
@@ -134,7 +136,7 @@ fn intake_capability_binds_sanitized_bytes_digest_and_receipts() {
     let mut forged_receipt = candidate;
     forged_receipt.snapshot_digest = alternate_capability.snapshot().intake_digest.clone();
     assert!(matches!(
-        admission.bind_file(&capability, forged_receipt),
+        admission.bind_file(&capability, &project_id, forged_receipt),
         Err(IntakeRejectionV1::UnsanitizedInput)
     ));
 }

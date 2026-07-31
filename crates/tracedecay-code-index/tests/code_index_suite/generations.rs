@@ -60,6 +60,7 @@ fn validated(snapshot: SanitizedCodeSnapshotV1) -> ValidatedCodeSnapshotV1 {
 
 fn planner() -> GenerationPlanner<StaticLanguageRegistry> {
     GenerationPlanner::new(
+        id::<tracedecay_domain::ProjectId>("project.incremental"),
         id::<RepositoryId>("repository.incremental"),
         StaticLanguageRegistry::new(),
         id::<ChunkerRevision>("chunker.v1"),

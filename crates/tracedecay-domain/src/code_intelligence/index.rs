@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::id::{
-    CommitId, ManifestDigest, PrivacyDomainId, RefId, RepositoryId, RetrievalAnchorId,
+    CommitId, ManifestDigest, PrivacyDomainId, ProjectId, RefId, RepositoryId, RetrievalAnchorId,
     SanitizationReceiptId, WorktreeId,
 };
 use crate::research::time::UtcMicros;
@@ -198,6 +198,7 @@ pub enum IntakeRejectionV1 {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeGenerationManifestV1 {
+    pub project_id: ProjectId,
     pub generation_id: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,
     /// Canonical digest of every input that controls incremental invalidation
@@ -220,6 +221,7 @@ const LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN: &str =
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeGenerationManifestWireV1 {
+    project_id: ProjectId,
     generation_id: CodeGenerationId,
     snapshot_digest: ManifestDigest,
     #[serde(default)]
@@ -243,6 +245,7 @@ impl<'de> Deserialize<'de> for CodeGenerationManifestV1 {
         let wire = CodeGenerationManifestWireV1::deserialize(deserializer)?;
         let needs_legacy_migration = wire.invalidation_digest.is_none();
         let mut manifest = Self {
+            project_id: wire.project_id,
             generation_id: wire.generation_id,
             snapshot_digest: wire.snapshot_digest,
             invalidation_digest: wire
@@ -513,6 +516,7 @@ impl CodeGenerationManifestV1 {
     pub fn expected_legacy_invalidation_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&(
             LEGACY_GENERATION_INVALIDATION_DIGEST_DOMAIN,
+            &self.project_id,
             &self.generation_id,
             &self.snapshot_digest,
             &self.registry_revision,
@@ -530,6 +534,7 @@ impl CodeGenerationManifestV1 {
     /// at most one parent (Plan 25: mixed-generation manifests are rejected
     /// before publication).
     pub fn validate(&self) -> Result<(), DomainError> {
+        self.project_id.validate()?;
         self.generation_id.validate()?;
         self.snapshot_digest.validate()?;
         self.invalidation_digest.validate()?;
@@ -701,6 +706,7 @@ mod tests {
 
     fn generation_manifest() -> CodeGenerationManifestV1 {
         let mut manifest = CodeGenerationManifestV1 {
+            project_id: id("project.fixture"),
             generation_id: id("generation.v1.aaaaaaaa.00000002"),
             snapshot_digest: id(&digest('a')),
             invalidation_digest: id(&digest('b')),

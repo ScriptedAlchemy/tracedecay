@@ -1918,6 +1918,7 @@ impl DaemonInvocationState {
 
     async fn mount_code_index(
         &self,
+        project_id: tracedecay_domain::ProjectId,
         project_root: &Path,
         store_root: PathBuf,
         semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
@@ -1968,7 +1969,7 @@ impl DaemonInvocationState {
                 },
             );
         self.code_index_schedulers
-            .mount_worktree(project_root, store_root, semantic_schedule)
+            .mount_worktree(project_id, project_root, store_root, semantic_schedule)
             .await
             .map(|_| ())
             .map_err(|error| TraceDecayError::Config {
@@ -6433,6 +6434,7 @@ async fn production_project_server(
                     Some(state)
                 };
                 let code_index_invocation = invocation.clone();
+                let code_index_project_id = project_id.clone();
                 let code_index_project = canonical_project_path.to_path_buf();
                 let code_index_semantic_runtime = semantic_runtime.clone();
                 let code_index_semantic_lifecycle = semantic_lifecycle.clone();
@@ -6448,6 +6450,7 @@ async fn production_project_server(
                     let started = Instant::now();
                     let outcome = code_index_invocation
                         .mount_code_index(
+                            code_index_project_id,
                             &code_index_project,
                             code_index_store_root,
                             Some(&code_index_semantic_runtime),

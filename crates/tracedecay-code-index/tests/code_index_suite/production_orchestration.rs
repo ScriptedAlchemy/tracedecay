@@ -162,6 +162,7 @@ impl CodeIndexExecutionControlV1 for ExpiredControl {
 
 fn config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        project_id: id::<ProjectId>("project.production"),
         repository: id::<RepositoryId>("repository.production"),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         policy_revision: id::<PolicyRevisionId>("policy.v1"),
