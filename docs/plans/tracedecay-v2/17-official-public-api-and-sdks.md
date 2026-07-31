@@ -17,12 +17,14 @@ lifecycle, platform, and regression behavior below.
 
 PR18's first Rust, TypeScript, and Python package shapes are not yet published;
 branch acceptance and generated schemas do not create an older supported SDK
-contract. Pure request/response APIs change to their final shape in place until
-publication. Persisted cursors, idempotency keys, journals, checkpoints, and
-receipts may already exist through dogfood and retain backward-read/recovery
-until a separately authorized registered-store/profile census proves absence.
-Protocol negotiation remains required for independently deployed clients, and
-public API compatibility starts at the first evidenced publication.
+contract. Pure request/response APIs change in place only when they have not
+potentially reached an independently deployed dogfood client or host
+installation. Potentially deployed shapes retain negotiation/conformance until
+an authorized installed-client/host census proves absence. Persisted cursors,
+idempotency keys, journals, checkpoints, and receipts may already exist through
+dogfood and retain backward-read/recovery until a separately authorized
+registered-store/profile census proves absence. Public package compatibility
+starts at the first evidenced publication.
 
 ## User outcome
 
