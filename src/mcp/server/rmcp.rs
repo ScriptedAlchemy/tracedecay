@@ -28,6 +28,32 @@ use super::{ConnectionRouteState, McpServer};
 pub(crate) type RmcpInitializeResponseDecorator =
     Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
 
+async fn await_dispatch_with_cancellation<F, C, N>(
+    handling: F,
+    cancellation: N,
+    mut cancel_registered_request: C,
+) -> F::Output
+where
+    F: std::future::Future,
+    C: FnMut() -> bool,
+    N: std::future::Future<Output = ()>,
+{
+    tokio::pin!(handling);
+    tokio::pin!(cancellation);
+    tokio::select! {
+        response = &mut handling => response,
+        () = &mut cancellation => {
+            while !cancel_registered_request() {
+                tokio::select! {
+                    response = &mut handling => return response,
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+            handling.await
+        }
+    }
+}
+
 /// Per-connection `rmcp` server facade over the existing TraceDecay request
 /// authority.
 pub(crate) struct RmcpConnectionAdapter {
@@ -94,33 +120,30 @@ impl RmcpConnectionAdapter {
         };
         let mut connection = self.connection.lock().await;
         let pre_cancelled = request_cancellation.is_cancelled();
-        let handling = self.server.handle_request_for_connection(
-            &request,
-            self.timings_enabled,
-            &mut connection,
-            pre_cancelled,
-        );
-        tokio::pin!(handling);
         let response = if pre_cancelled {
-            handling.await
+            self.server
+                .handle_request_for_connection(
+                    &request,
+                    self.timings_enabled,
+                    &mut connection,
+                    true,
+                )
+                .await
         } else {
-            'request: loop {
-                tokio::select! {
-                    response = &mut handling => break 'request response,
-                    () = request_cancellation.cancelled() => {
-                        while !self
-                            .server
-                            .cancel_application_surface_request(&id, &self.memory_request_scope)
-                        {
-                            tokio::select! {
-                                response = &mut handling => break 'request response,
-                                () = tokio::task::yield_now() => {}
-                            }
-                        }
-                        break 'request handling.await;
-                    }
-                }
-            }
+            await_dispatch_with_cancellation(
+                self.server.handle_request_for_connection(
+                    &request,
+                    self.timings_enabled,
+                    &mut connection,
+                    false,
+                ),
+                request_cancellation.cancelled(),
+                || {
+                    self.server
+                        .cancel_application_surface_request(&id, &self.memory_request_scope)
+                },
+            )
+            .await
         }
         .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
         if project_tool_call
@@ -277,8 +300,11 @@ fn project_server_retired_error() -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::mcp::server::application_surface_request_id;
@@ -359,5 +385,34 @@ mod tests {
             "rmcp cancellation must not wait for the route lock held by the in-flight request"
         );
         assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancellation_retries_until_the_request_is_registered() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(Notify::new());
+        let handling_completed = Arc::clone(&completed);
+        let cancel_attempts = Arc::clone(&attempts);
+        let cancel_completed = Arc::clone(&completed);
+
+        let result = await_dispatch_with_cancellation(
+            async move {
+                handling_completed.notified().await;
+                "cancelled"
+            },
+            std::future::ready(()),
+            move || {
+                if cancel_attempts.fetch_add(1, Ordering::SeqCst) == 1 {
+                    cancel_completed.notify_one();
+                    true
+                } else {
+                    false
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, "cancelled");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
