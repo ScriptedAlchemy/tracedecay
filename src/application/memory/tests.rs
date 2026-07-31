@@ -10,7 +10,9 @@ use tracedecay_domain::{
     UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    FactCommitReceipt, FactLineageCursor, FactProposalPromotionStateV1, FactStoreResult,
+    FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
+    FactLineageCursor, FactLineageResponseV1, FactProposalPromotionStateV1, FactQueryCoverageV1,
+    FactStoreResult,
 };
 
 use super::*;
@@ -71,6 +73,16 @@ impl EvidenceAnchorResolver for StaticEvidenceResolver {
     }
 }
 
+/// The fake holds bare facts and no visibility ledger, so it can only report
+/// what it returned as unmeasured. Stating that here keeps the fabrication
+/// visible in the double instead of hidden in a `FactStore` trait default.
+fn unmeasured_response_metadata(returned: bool) -> (FactQueryCoverageV1, FactContradictionStateV1) {
+    (
+        FactQueryCoverageV1::new(0, 0, u64::from(returned), 0),
+        FactContradictionStateV1::Unknown,
+    )
+}
+
 impl FactStore for FakeAuthority {
     async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
         let outcome = self
@@ -99,6 +111,15 @@ impl FactStore for FakeAuthority {
         Ok(self.as_of_result.lock().unwrap().clone())
     }
 
+    async fn query_fact_as_of_response(
+        &self,
+        query: FactAsOfQuery,
+    ) -> FactStoreResult<FactAsOfResponseV1> {
+        let fact = self.query_fact_as_of(query).await?;
+        let (coverage, contradiction) = unmeasured_response_metadata(fact.is_some());
+        Ok(FactAsOfResponseV1::new(fact, coverage, contradiction))
+    }
+
     async fn query_fact_current(
         &self,
         query: FactCurrentQuery,
@@ -107,12 +128,30 @@ impl FactStore for FakeAuthority {
         Ok(self.current_fact_result.lock().unwrap().clone())
     }
 
+    async fn query_fact_current_response(
+        &self,
+        query: FactCurrentQuery,
+    ) -> FactStoreResult<FactCurrentResponseV1> {
+        let fact = self.query_fact_current(query).await?;
+        let (coverage, contradiction) = unmeasured_response_metadata(fact.is_some());
+        Ok(FactCurrentResponseV1::new(fact, coverage, contradiction))
+    }
+
     async fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
         self.lineage_queries.lock().unwrap().push(query);
         Ok(self.lineage_results.lock().unwrap().clone())
+    }
+
+    async fn query_fact_lineage_response(
+        &self,
+        query: FactLineageQuery,
+    ) -> FactStoreResult<FactLineageResponseV1> {
+        let events = self.query_fact_lineage(query).await?;
+        let (coverage, contradiction) = unmeasured_response_metadata(!events.is_empty());
+        Ok(FactLineageResponseV1::new(events, coverage, contradiction))
     }
 
     async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {

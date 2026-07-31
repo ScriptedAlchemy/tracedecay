@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt;
 
 use serde_json::{Value, json};
+use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
 use crate::application::host_admission::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use crate::errors::{Result, TraceDecayError};
@@ -588,24 +589,9 @@ fn collect_item_text(value: Option<&Value>) -> Option<String> {
 }
 
 fn find_model_id(value: &Value) -> Option<String> {
-    const MODEL_KEYS: [&str; 13] = [
-        "model",
-        "model_id",
-        "modelId",
-        "model_name",
-        "modelName",
-        "model_slug",
-        "modelSlug",
-        "model_display_name",
-        "modelDisplayName",
-        "display_model",
-        "displayModel",
-        "display_model_name",
-        "displayModelName",
-    ];
     match value {
         Value::Object(map) => {
-            for key in MODEL_KEYS {
+            for key in CURSOR_MODEL_KEYS.iter().copied() {
                 if let Some(model) = map
                     .get(key)
                     .and_then(Value::as_str)
