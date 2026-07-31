@@ -51,6 +51,18 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
 
 impl HostComponentSetRegistrationV1 for CurrentRegistration {}
 
+struct MissingRegistration;
+
+impl HostBundleRegistrationInspectorV1 for MissingRegistration {
+    fn inspect_registration(
+        &self,
+        _host: HostKindV1,
+        _component: HostBundleComponentV1,
+    ) -> HostBundleRegistrationStateV1 {
+        HostBundleRegistrationStateV1::Missing
+    }
+}
+
 #[test]
 fn public_host_contracts_are_compiler_referenced() {
     assert_agent_integration::<KimiIntegration>();
@@ -209,6 +221,8 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         Some(HostBundleRegistrationStateV1::Current)
     );
 
+    // The receipt still owns the path, so moved bytes are content drift the
+    // ordinary reinstall converges — not a contested claim.
     let modified = artifact_root
         .path()
         .join(&receipt.artifacts[0].relative_path);
@@ -221,7 +235,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
     .unwrap();
     assert_eq!(
         repair.components[0].state,
-        HostBundleComponentDoctorStateV1::OwnershipConflict
+        HostBundleComponentDoctorStateV1::Drifted
     );
     assert!(!repair.components[0].repair_action.is_empty());
 }
@@ -885,14 +899,201 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
             inspect_installed_host_bundle_components_at(
                 artifacts.path(),
                 lifecycle.path(),
-                &CurrentRegistration,
+                &MissingRegistration,
             )
             .unwrap()
             .components
             .is_empty()
         );
+        // A host that still advertises an uninstalled component is a
+        // registered orphan no receipt owns, and must stay visible.
+        assert!(
+            inspect_installed_host_bundle_components_at(
+                artifacts.path(),
+                lifecycle.path(),
+                &CurrentRegistration,
+            )
+            .unwrap()
+            .components
+            .iter()
+            .all(|component| component.state
+                == HostBundleComponentDoctorStateV1::OrphanedRegistration)
+        );
     }
     assert!(covered_hosts > 0);
+}
+
+/// Cursor Core is the host that provoked this: its receipt-owned plugin bundle
+/// is regenerated on every version bump (`.cursor-plugin/plugin.json` stamps
+/// the package version, `hooks/hooks.json` bakes the resolved binary path), so
+/// a second writer outside the transaction guarantees byte drift.
+///
+/// Drift on a path the receipt still owns must be a warning Doctor reports, not
+/// a blocking ownership conflict, and `Repair` must converge it while backing
+/// the previous bytes up. Nothing under `.cursor` that TraceDecay does not own
+/// may change — including when a run is interrupted before it mutates anything.
+#[test]
+fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
+    let artifacts = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let component_set = verified_embedded_host_component_set(
+        HostKindV1::CursorDesktop,
+        &[HostBundleComponentV1::Core],
+        0,
+    )
+    .unwrap();
+    let request = |operation, operation_id| HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation,
+            expected_host: HostKindV1::CursorDesktop,
+            expected_components: vec![HostBundleComponentV1::Core],
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+        },
+        operation_id: [operation_id; 16],
+    };
+
+    // Unrelated, user-owned Cursor config that TraceDecay never claims.
+    let unrelated = artifacts.path().join(".cursor/mcp.json");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    let unrelated_bytes = br#"{"mcpServers":{"someone-else":{"command":"other"}}}"#;
+    fs::write(&unrelated, unrelated_bytes).unwrap();
+
+    let mut writer =
+        HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path()).unwrap();
+    let mut registration = CurrentRegistration;
+    let install_request = request(HostBundleLifecycleOpV1::Install, 71);
+    let install_preview = HostComponentSetTransactionV1::new(&mut writer)
+        .preview(
+            &component_set.component_set,
+            &install_request,
+            &component_set,
+            &mut registration,
+        )
+        .unwrap();
+    HostComponentSetTransactionV1::new(&mut writer)
+        .execute_confirmed(
+            &component_set.component_set,
+            &install_request,
+            &install_preview,
+            &component_set,
+            &mut registration,
+        )
+        .unwrap();
+
+    // Rewrite a receipt-owned file the way the generated-plugin refresh did:
+    // same path, same owner, different rendered bytes.
+    let manifest_path = ".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json";
+    assert!(
+        component_set.component_set.components[0]
+            .manifest
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.relative_path == manifest_path),
+        "the Cursor plugin manifest must be receipt-owned"
+    );
+    const REFRESHED: &[u8] = br#"{"name":"tracedecay","version":"9.9.9"}"#;
+    let deployed = artifacts.path().join(manifest_path);
+    let owned_bytes = fs::read(&deployed).unwrap();
+    fs::write(&deployed, REFRESHED).unwrap();
+
+    let drifted = inspect_installed_host_bundle_components_at(
+        artifacts.path(),
+        lifecycle.path(),
+        &CurrentRegistration,
+    )
+    .unwrap();
+    assert_eq!(
+        drifted.components[0].state,
+        HostBundleComponentDoctorStateV1::Drifted,
+        "a receipt-owned path whose owner is unchanged is drift, not a conflict"
+    );
+    assert!(
+        drifted.components[0]
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.relative_path == manifest_path
+                && artifact.state == HostBundleComponentDoctorStateV1::Drifted)
+    );
+
+    // An interrupted run — refused before it mutates anything — leaves both the
+    // drifted artifact and the unrelated Cursor config exactly as they were.
+    let repair_request = request(HostBundleLifecycleOpV1::Repair, 72);
+    let repair_preview = HostComponentSetTransactionV1::new(&mut writer)
+        .preview(
+            &component_set.component_set,
+            &repair_request,
+            &component_set,
+            &mut registration,
+        )
+        .unwrap();
+    let mut stale = repair_preview.clone();
+    stale.plan_digest[0] ^= 1;
+    assert_eq!(
+        HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+            &component_set.component_set,
+            &repair_request,
+            &stale,
+            &component_set,
+            &mut registration,
+        ),
+        Err(HostBundleError::StalePreview)
+    );
+    assert_eq!(fs::read(&unrelated).unwrap(), unrelated_bytes);
+    assert_eq!(fs::read(&deployed).unwrap(), REFRESHED);
+
+    HostComponentSetTransactionV1::new(&mut writer)
+        .execute_confirmed(
+            &component_set.component_set,
+            &repair_request,
+            &repair_preview,
+            &component_set,
+            &mut registration,
+        )
+        .unwrap();
+
+    assert_eq!(fs::read(&deployed).unwrap(), owned_bytes);
+    assert_eq!(
+        inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &CurrentRegistration,
+        )
+        .unwrap()
+        .components[0]
+            .state,
+        HostBundleComponentDoctorStateV1::Current
+    );
+    assert_eq!(fs::read(&unrelated).unwrap(), unrelated_bytes);
+
+    // The replaced bytes were backed up before the repair overwrote them.
+    let backups = lifecycle
+        .path()
+        .join(".tracedecay-host-bundle-v1")
+        .join("backups");
+    let backed_up = walk_files(&backups)
+        .into_iter()
+        .any(|path| fs::read(&path).is_ok_and(|bytes| bytes == REFRESHED));
+    assert!(
+        backed_up,
+        "repair must back the replaced bytes up before it re-owns the path"
+    );
+}
+
+fn walk_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk_files(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
 }
 
 #[test]

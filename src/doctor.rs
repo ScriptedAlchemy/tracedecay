@@ -177,8 +177,6 @@ fn check_host_component_receipts(
     context: &HealthcheckContext,
     agent_filter: Option<&str>,
 ) -> agents::host_bundle_v2::HostBundleDoctorReportV1 {
-    use agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
-
     eprintln!("\n\x1b[1mReceipt-backed host components\x1b[0m");
     let lifecycle_root = match agents::host_bundle_v2::resolved_host_bundle_lifecycle_root() {
         Ok(root) => root,
@@ -213,51 +211,65 @@ fn check_host_component_receipts(
         }) {
             continue;
         }
-        let label = match (component.host, component.component) {
-            (Some(host), Some(component)) => format!("{host:?}/{component:?}"),
-            _ => component.receipt_path.display().to_string(),
-        };
-        match component.state {
-            State::Current => dc.pass(&format!("{label} is current")),
-            State::Repairable => dc.warn(&format!(
-                "{label} native registration is repairable; {}",
-                component.repair_action
-            )),
-            // Content drift on a path this component still owns is repairable
-            // by the ordinary reinstall, so it warns. A contested path is not:
-            // resolving it needs an operator decision, so it keeps failing.
-            State::Drifted => dc.warn(&format!(
-                "{label} has drifted from its receipt ({}); {}",
-                drifted_paths(component),
-                component.repair_action
-            )),
-            State::OwnershipConflict => dc.fail(&format!(
-                "{label} has an ownership conflict; {}",
-                component.repair_action
-            )),
-            State::OrphanedRegistration => dc.warn(&format!(
-                "{label} is still registered with no owning receipt; {}",
-                component.repair_action
-            )),
-            State::Missing => dc.fail(&format!(
-                "{label} is missing receipt-owned artifacts; {}",
-                component.repair_action
-            )),
-            State::Corrupt => dc.fail(&format!(
-                "{label} receipt or deployed state is corrupt; {}",
-                component.repair_action
-            )),
-        }
-        for artifact in component
-            .artifacts
-            .iter()
-            .filter(|artifact| artifact.state != State::Current)
-        {
-            dc.info(&format!("{}: {:?}", artifact.relative_path, artifact.state));
-        }
+        report_host_component_state(dc, component);
     }
     report_native_edit_stop_conformance(dc, &report, agent_filter);
     report
+}
+
+/// Report one installed component. Doctor is read-only: it never repairs, so
+/// each state only decides whether the operator is told this is blocking.
+///
+/// Content drift on a path the component still owns, and a leftover
+/// registration with no owning receipt, both converge under the ordinary
+/// reinstall, so they warn and leave the exit code clean. A contested path,
+/// missing artifacts, and corrupt state each need an operator decision, so
+/// they keep failing.
+fn report_host_component_state(
+    dc: &mut DoctorCounters,
+    component: &agents::host_bundle_v2::HostBundleComponentDoctorResultV1,
+) {
+    use agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let label = match (component.host, component.component) {
+        (Some(host), Some(inner)) => format!("{host:?}/{inner:?}"),
+        _ => component.receipt_path.display().to_string(),
+    };
+    match component.state {
+        State::Current => dc.pass(&format!("{label} is current")),
+        State::Repairable => dc.warn(&format!(
+            "{label} native registration is repairable; {}",
+            component.repair_action
+        )),
+        State::Drifted => dc.warn(&format!(
+            "{label} has drifted from its receipt ({}); {}",
+            drifted_paths(component),
+            component.repair_action
+        )),
+        State::OwnershipConflict => dc.fail(&format!(
+            "{label} has an ownership conflict; {}",
+            component.repair_action
+        )),
+        State::OrphanedRegistration => dc.warn(&format!(
+            "{label} is still registered with no owning receipt; {}",
+            component.repair_action
+        )),
+        State::Missing => dc.fail(&format!(
+            "{label} is missing receipt-owned artifacts; {}",
+            component.repair_action
+        )),
+        State::Corrupt => dc.fail(&format!(
+            "{label} receipt or deployed state is corrupt; {}",
+            component.repair_action
+        )),
+    }
+    for artifact in component
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.state != State::Current)
+    {
+        dc.info(&format!("{}: {:?}", artifact.relative_path, artifact.state));
+    }
 }
 
 /// Name the exact receipt-owned paths whose bytes moved, so the warning points
