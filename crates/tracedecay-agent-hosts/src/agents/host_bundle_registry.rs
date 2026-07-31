@@ -631,11 +631,11 @@ fn component_assets(
             vec![
                 (
                     "plugins/tracedecay-mcp.ts",
-                    include_str!("../../plugin/opencode/tracedecay-mcp.ts"),
+                    include_str!("../../../../plugin/opencode/tracedecay-mcp.ts"),
                 ),
                 (
                     "tracedecay/opencode.registration.json",
-                    include_str!("../../plugin/opencode/opencode.registration.json"),
+                    include_str!("../../../../plugin/opencode/opencode.registration.json"),
                 ),
             ],
         ),

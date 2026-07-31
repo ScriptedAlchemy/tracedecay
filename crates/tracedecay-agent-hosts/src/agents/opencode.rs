@@ -23,7 +23,7 @@ use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 /// `OpenCode` agent.
 pub struct OpenCodeIntegration;
 
-const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../plugin/opencode/tracedecay.ts");
+const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../../../plugin/opencode/tracedecay.ts");
 const OPENCODE_PLUGIN_MARKER: &str = "TraceDecayPlugin";
 /// Deployed path of the managed plugin relative to the `OpenCode` config dir.
 pub(crate) const OPENCODE_PLUGIN_RELATIVE: &str = "plugins/tracedecay.ts";

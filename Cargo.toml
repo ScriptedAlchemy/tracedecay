@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/tracedecay-agent-hosts",
     "crates/tracedecay-api",
     "crates/tracedecay-application",
     "crates/tracedecay-automation",
@@ -129,7 +130,7 @@ production = [
 # Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
 # vocab decoding is lazy (first count pays it, idle servers never do).
 # Disable for a leaner binary — cost estimation falls back to chars/4.
-token-counting = ["dep:tiktoken-rs"]
+token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
@@ -176,7 +177,10 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
-test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+test-transport = [
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-agent-hosts/test-transport",
+]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
 # it and are link-checked separately.
@@ -227,6 +231,7 @@ required-features = ["test-transport"]
 axum = "0.8"
 tower = "0.5"
 tree-sitter = "0.26"
+tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.0" }

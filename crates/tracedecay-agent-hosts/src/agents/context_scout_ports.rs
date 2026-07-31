@@ -1057,7 +1057,7 @@ mod tests {
         let envelope = decode_bound_native_hook_event(
             HookHostV1::ClaudeCode,
             include_bytes!(
-                "../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+                "../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),
             &binding,
             NativeEnvelopeMaterialV1 {
