@@ -69,3 +69,6 @@ c6d4304ea01e1297c4c756b9a822e3292bf69199 # Revert "docs: drop the thermo review 
 e6e973f9446166ac01fef7eae6e08d1f69a13556 # refactor(sessions): delete ingest entrypoints that laundered read failures; 74 chars, merged under two merge commits before the lint ran
 3679336f6770236dacb51b384feb1cadefa25fcc # Revert "merge: add GitHub stack provenance anchors"
 d27f30c86d176f08888710f9cc5f78e4de4281a2 # Revert "merge: add retained policy evaluators and replay"
+ff6f75e7e305adc221094e78956bf207549493b9 # audit prepared query authority; predates lint, history rewrite forbidden on shared branch
+1208467c91bceaa7bed79799f954905866a644d7 # fix(dashboard) 320px remedy; 89-char subject predates lint
+1f0410ae2877037372d8bca71dec53f6032f45bb # git-generated Revert subject predates lint
