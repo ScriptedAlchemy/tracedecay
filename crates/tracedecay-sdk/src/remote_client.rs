@@ -12,7 +12,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
 use tracedecay_application::remote::protocol::{RemoteProtocolBodyV1, RemoteProtocolRequestV1};
-use tracedecay_application::{RequestId, remote::status::RemoteOperationalStatusV1};
+use tracedecay_application::RequestId;
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 
 const MAX_CREDENTIAL_BYTES: usize = 4_096;
@@ -63,8 +63,6 @@ pub struct RemoteProtocolWireResponseV1 {
     pub authority: CurrentRemoteAuthorityStateV1,
     pub result: serde_json::Value,
 }
-
-pub type RemoteStatusProjectionV1 = RemoteOperationalStatusV1;
 
 impl EnrolledRemoteClient {
     pub fn new(

@@ -615,7 +615,7 @@ pub(crate) fn invalid_request_response(
 /// The executable nests this router at its root-owned prefix behind
 /// authentication and origin middleware. Authorization remains part of
 /// canonical application dispatch, including concealed
-/// not-found-or-not-authorized results. These PR12 route names are adapter
+/// not-found-or-not-authorized results. These route names are adapter
 /// bindings, not a frozen SDK namespace.
 pub fn application_router<O>(owners: O) -> Router
 where
@@ -639,7 +639,7 @@ where
         .with_state(owners)
 }
 
-/// Build the PR14 dashboard bindings for canonical feedback reads.
+/// Build the dashboard bindings for canonical feedback reads.
 ///
 /// This is a route subset only. It uses the same handlers, request envelopes,
 /// dispatcher, and application owner as the complete HTTP application router;
