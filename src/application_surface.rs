@@ -1533,7 +1533,7 @@ async fn invoke_workflow_operation(
             };
             let invocation = crate::daemon::DaemonInvocationRequest::workflow_application(
                 request_id.as_str(),
-                WorkflowApplicationInvocationV1::ExecuteFanOut(decoded),
+                WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(decoded)),
                 crate::daemon_client::invocation_now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
@@ -1620,7 +1620,7 @@ async fn invoke_work_operation(
             };
             let invocation = crate::daemon::DaemonInvocationRequest::work_attempt(
                 request_id.as_str(),
-                WorkAttemptInvocationV1::$variant(decoded),
+                WorkAttemptInvocationV1::$variant(decoded.into()),
                 crate::daemon_client::invocation_now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
@@ -1633,7 +1633,7 @@ async fn invoke_work_operation(
                 invocation,
                 |outcome| match outcome {
                     crate::daemon::DaemonInvocationOutcome::WorkAttempt { scope, outcome } => {
-                        Some((scope, outcome))
+                        Some((scope, *outcome))
                     }
                     _ => None,
                 },

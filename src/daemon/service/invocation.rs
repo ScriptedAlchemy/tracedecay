@@ -8,6 +8,8 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -358,7 +360,7 @@ impl WorkApplicationInvocationV1 {
 pub(crate) enum WorkflowApplicationInvocationV1 {
     RegisterDefinition(WorkflowDefinitionRegisterRequestV1),
     ActivateDefinition(WorkflowDefinitionActivateRequestV1),
-    ExecuteFanOut(WorkflowFanOutRequestV1),
+    ExecuteFanOut(Box<WorkflowFanOutRequestV1>),
     HandoffIssue(TaskHandoffIssueRequestV1),
     HandoffRedeem(TaskHandoffRedeemRequestV1),
 }
@@ -4178,7 +4180,7 @@ pub(crate) enum DaemonInvocationOutcome {
     },
     WorkAttempt {
         scope: ResolvedScope,
-        outcome: ApplicationOutcome<WorkAttemptResponseV1>,
+        outcome: Box<ApplicationOutcome<WorkAttemptResponseV1>>,
     },
     SemanticEvaluatedProfilePublished {
         scope: ResolvedScope,
@@ -7142,6 +7144,7 @@ async fn execute_workflow_application(
             WorkflowApplicationOutcomeV1::ActivateDefinition,
         ),
         WorkflowApplicationInvocationV1::ExecuteFanOut(request) => {
+            let request = *request;
             if request.provider.deadline > deadline.expires_at {
                 return DaemonInvocationResponse::problem(
                     request_id,
@@ -7549,7 +7552,7 @@ async fn execute_work_attempt(
             request_id,
             DaemonInvocationOutcome::WorkAttempt {
                 scope: context.scope().clone(),
-                outcome,
+                outcome: Box::new(outcome),
             },
         ),
         Err(_) => {
@@ -11996,7 +11999,7 @@ for line in sys.stdin:
                     tracedecay_application::WORKFLOW_CANONICAL_WORK_OPERATION_V1,
                 )
                 .expect("operation"),
-                predecessors: Default::default(),
+                predecessors: BTreeSet::default(),
                 inputs: Vec::new(),
                 outputs: vec![
                     tracedecay_domain::WorkflowOutputName::new("created-work")
@@ -12097,7 +12100,7 @@ for line in sys.stdin:
         };
         let first = invoke!(
             "request.workflow.execute",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(fan_out.clone())
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(fan_out.clone()))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(first)),
@@ -12163,7 +12166,7 @@ for line in sys.stdin:
         .expect("retry lease fence");
         let replay = invoke!(
             "request.workflow.execute-replay",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(retried_fan_out)
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(retried_fan_out))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(replay)),
@@ -12192,7 +12195,7 @@ for line in sys.stdin:
         crate::daemon::workflow_runtime::crash_after_next_workflow_settlement_for_test();
         let crashed_after_settlement = invoke!(
             "request.workflow.execute-crash-after-settlement",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(settled_fan_out.clone())
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(settled_fan_out.clone()))
         );
         assert!(matches!(
             crashed_after_settlement,
@@ -12219,7 +12222,7 @@ for line in sys.stdin:
         .expect("settled retry lease fence");
         let reconciled = invoke!(
             "request.workflow.execute-reconcile-settlement",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(settled_fan_out)
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(settled_fan_out))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:
@@ -12258,7 +12261,7 @@ for line in sys.stdin:
         std::fs::remove_file(&fixture).expect("remove provider before durable intent retry");
         let interrupted = invoke!(
             "request.workflow.execute-interrupted",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(interrupted_fan_out.clone())
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(interrupted_fan_out.clone()))
         );
         assert!(matches!(
             interrupted,
@@ -12293,7 +12296,7 @@ for line in sys.stdin:
         let mut cancelled_fan_out = interrupted_fan_out.clone();
         let resumed = invoke!(
             "request.workflow.execute-interrupted-retry",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(interrupted_fan_out)
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(interrupted_fan_out))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:
@@ -12334,7 +12337,7 @@ for line in sys.stdin:
             .expect("cancelled plan");
         let cancelled = invoke!(
             "request.workflow.execute-cancelled",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(cancelled_fan_out.clone())
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(cancelled_fan_out.clone()))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:
@@ -12369,7 +12372,7 @@ for line in sys.stdin:
         .expect("cancelled retry lease fence");
         let cancelled_replay = invoke!(
             "request.workflow.execute-cancelled-replay",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(cancelled_fan_out)
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(cancelled_fan_out))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:
@@ -12430,7 +12433,7 @@ for line in sys.stdin:
         .expect("provider failure fixture");
         let failed = invoke!(
             "request.workflow.execute-provider-failure",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(failed_fan_out.clone())
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(failed_fan_out.clone()))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(failed)),
@@ -12474,7 +12477,7 @@ for line in sys.stdin:
         .expect("failed retry lease fence");
         let failed_replay = invoke!(
             "request.workflow.execute-provider-failure-replay",
-            WorkflowApplicationInvocationV1::ExecuteFanOut(failed_fan_out)
+            WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(failed_fan_out))
         );
         let DaemonInvocationOutcome::WorkflowApplication {
             outcome:

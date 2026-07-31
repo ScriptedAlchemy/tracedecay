@@ -1,3 +1,4 @@
+use super::super::maintenance::retention_window_secs;
 use super::*;
 
 use notify::event::EventAttributes;
@@ -36,7 +37,7 @@ fn soft_budget_alone_never_enables_destructive_maintenance() {
 
 #[test]
 fn retention_window_conversion_never_wraps_negative() {
-    assert_eq!(store_maintenance::retention_window_secs(u64::MAX), i64::MAX);
+    assert_eq!(retention_window_secs(u64::MAX), i64::MAX);
 }
 
 /// The ordinary retention cadence must sweep the same scoped code-index root the

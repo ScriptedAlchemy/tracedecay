@@ -145,10 +145,6 @@ impl MaintenanceCoordinator {
         self.wake.notify_one();
     }
 
-    pub(super) async fn metrics(&self) -> MaintenanceMetricsV1 {
-        self.metrics.lock().await.clone()
-    }
-
     pub(super) async fn shutdown(&self) {
         self.cancellation.cancel();
         self.wake.notify_waiters();
@@ -257,7 +253,7 @@ impl MaintenanceCoordinator {
                         metrics.reclaimed_bytes =
                             metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
                         metrics.last_outcome = Some(page.outcome);
-                        succeeded &= page.outcome == MaintenanceStoreOutcomeV1::Processed;
+                        succeeded &= page.outcome.was_processed();
                     }
                     Err(_) => succeeded = false,
                 }
@@ -388,14 +384,23 @@ async fn run_cold_store_page(
             metrics.outcome = MaintenanceStoreOutcomeV1::Unreadable;
         }
     }
-    persist_cursor(
-        &checkpoint_path,
-        &ColdStoreCursorV1 {
-            after_project_id: page.next_cursor,
-        },
+    let project_ids = page
+        .entries
+        .iter()
+        .map(|entry| entry.project_id.clone())
+        .collect::<Vec<_>>();
+    let next_cursor = next_cold_store_cursor(
+        cursor.after_project_id.as_deref(),
+        &project_ids,
+        page.next_cursor.is_some(),
     )
-    .map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("persist maintenance cold-store cursor: {error}"),
+    .unwrap_or(ColdStoreCursorV1 {
+        after_project_id: None,
+    });
+    persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
+        crate::errors::TraceDecayError::Config {
+            message: format!("persist maintenance cold-store cursor: {error}"),
+        }
     })?;
     Ok(metrics)
 }
@@ -448,7 +453,7 @@ pub(super) fn retention_maintenance_enabled(retention: &crate::config::Retention
         || retention.compaction.is_some()
 }
 
-fn retention_window_secs(days: u64) -> i64 {
+pub(super) fn retention_window_secs(days: u64) -> i64 {
     i64::try_from(days)
         .ok()
         .and_then(|days| days.checked_mul(24 * 60 * 60))

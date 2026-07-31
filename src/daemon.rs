@@ -1540,7 +1540,6 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let git_watcher = git_watch::GitWatcher::new_with_administration(
         sync_config,
         engine.store_administration.clone(),
-        profile_root.clone(),
         maintenance.clone(),
     );
     if git_watcher.is_enabled() {

@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
     RequestContext, ReviewProposalCommand, WORKFLOW_CANONICAL_WORK_OPERATION_V1,
-    WorkAttemptPersistencePort, WorkExecutionError, WorkStoragePort, WorkflowChildRecordV1,
-    WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
-    WorkflowExecutionTruthV1, WorkflowFailurePolicyV1, WorkflowFanOutPlanV1,
-    WorkflowFanOutRequestV1, WorkflowFanOutRuntimeError, WorkflowPlannedChildV1,
-    prepare_workflow_fan_out, validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
+    WorkExecutionError, WorkflowChildRecordV1, WorkflowExecutionAdmissionV1,
+    WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort, WorkflowExecutionTruthV1,
+    WorkflowFailurePolicyV1, WorkflowFanOutPlanV1, WorkflowFanOutRequestV1,
+    WorkflowFanOutRuntimeError, WorkflowPlannedChildV1, prepare_workflow_fan_out,
+    validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
 };
 use tracedecay_domain::{
     ManifestDigest, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
@@ -46,7 +46,7 @@ enum PreparedChild {
     Running(RunningChild),
     Terminal {
         child: WorkflowPlannedChildV1,
-        attempt: WorkAttemptV1,
+        attempt: Box<WorkAttemptV1>,
     },
 }
 
@@ -117,7 +117,7 @@ pub(crate) async fn execute_canonical_workflow(
                     return Err(WorkflowFanOutRuntimeError::StaleFence);
                 }
                 if attempt.lease().epoch() < lease.epoch() {
-                    attempt = runtime
+                    runtime
                         .renew_lease(&child.attempt_identity, attempt.lease(), lease.clone())
                         .map_err(work_error)?;
                 }
@@ -195,7 +195,7 @@ pub(crate) async fn execute_canonical_workflow(
                     attach_terminal_evidence(database, context, &request, &child, &attempt)?;
                     let record = child_record(&child);
                     records.insert(record.task_id.clone(), record);
-                    terminal_attempts.push(attempt);
+                    terminal_attempts.push(*attempt);
                     fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
                         && !matches!(
                             terminal_attempts
@@ -305,7 +305,10 @@ async fn admit_child(
     if let Some(mut attempt) = runtime.attempt(&identity).map_err(work_error)? {
         validate_existing_attempt(context, project_root, request, operation, &child, &attempt)?;
         if attempt.is_terminal() {
-            return Ok(PreparedChild::Terminal { child, attempt });
+            return Ok(PreparedChild::Terminal {
+                child,
+                attempt: Box::new(attempt),
+            });
         }
         if !allow_create_or_resume {
             return Err(child_unavailable(
@@ -346,7 +349,7 @@ async fn admit_child(
                     .map_err(work_error)?;
                 return Ok(PreparedChild::Terminal {
                     child,
-                    attempt: terminal,
+                    attempt: Box::new(terminal),
                 });
             }
             WorkAttemptStateV1::RecoveryRequired => {
@@ -358,7 +361,10 @@ async fn admit_child(
             | WorkAttemptStateV1::Failed
             | WorkAttemptStateV1::TimedOut
             | WorkAttemptStateV1::Cancelled => {
-                return Ok(PreparedChild::Terminal { child, attempt });
+                return Ok(PreparedChild::Terminal {
+                    child,
+                    attempt: Box::new(attempt),
+                });
             }
         }
     }

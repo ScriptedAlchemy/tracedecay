@@ -13,13 +13,14 @@ use tracedecay_application::{
     WorkExecutionQueueV1, WorkExecutionService, WorkProviderExecutionError,
     WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
 };
+#[cfg(test)]
+use tracedecay_domain::WorkProviderRouteV1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
     WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationRequestV1,
     WorkCancellationStateV1, WorkExecutionEnvelopeV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1,
-    canonical_sha256,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, canonical_sha256,
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
@@ -45,7 +46,7 @@ const DEFAULT_WORK_EXECUTION_CAPACITY: usize = 4;
     rename_all = "snake_case"
 )]
 pub(crate) enum WorkAttemptInvocationV1 {
-    AcquireLease(WorkAttemptAcquireLeaseRequestV1),
+    AcquireLease(Box<WorkAttemptAcquireLeaseRequestV1>),
     RenewLease(WorkAttemptRenewLeaseRequestV1),
     Start(WorkAttemptStartRequestV1),
     PublishProgress(WorkAttemptPublishProgressRequestV1),
@@ -140,6 +141,7 @@ where
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn provider_route(&self) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
         self.queue.route()
     }
@@ -169,6 +171,7 @@ where
     ) -> Result<WorkAttemptResponseV1, WorkExecutionError> {
         let attempt = match request {
             WorkAttemptInvocationV1::AcquireLease(request) => {
+                let request = *request;
                 if !self.queue.supports_route(&request.requested_route)? {
                     return Err(WorkProviderExecutionError::Rejected(
                         "requested Work provider route is not mounted".to_owned(),
