@@ -600,12 +600,18 @@ pub(crate) fn is_isolated_test_path(path: &Path) -> bool {
 }
 
 /// Matches `src/daemon/authority.rs` `LOCK_FILE`. Kept local so the access
-/// layer can fail closed without depending on the daemon module.
+/// layer can fail closed without depending on the daemon module. Its only
+/// consumer is the ambient-Test authority probe below, so it shares that
+/// probe's cfg surface — without the gate the default-feature build sees it
+/// as dead.
+#[cfg(any(test, feature = "test-transport"))]
 const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 
 /// Returns true when another process currently holds the profile's exclusive
 /// daemon-authority lock. Used to keep ambient Test opens from mutating a
-/// store while a live daemon owner is elected.
+/// store while a live daemon owner is elected — its sole caller is the
+/// cfg-gated ambient-Test branch, so the probe carries the same gate.
+#[cfg(any(test, feature = "test-transport"))]
 fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
     let lock_path = profile_root.join(DAEMON_AUTHORITY_LOCK_FILE);
     // Probe with a read-only open so a rejected contender mutates zero bytes
