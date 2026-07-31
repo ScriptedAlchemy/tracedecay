@@ -57,10 +57,12 @@ impl RmcpConnectionAdapter {
 
     async fn dispatch(
         &self,
-        request_id: rmcp::model::RequestId,
+        context: RequestContext<RoleServer>,
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
+        let request_id = context.id;
+        let request_cancellation = context.ct;
         let project_tool_call = method == "tools/call" && self.server.project_server_live.is_some();
         let _response_guard = if project_tool_call {
             Some(
@@ -86,18 +88,41 @@ impl RmcpConnectionAdapter {
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
-            id: Some(id),
+            id: Some(id.clone()),
             method: method.to_owned(),
             params,
         };
         let mut connection = self.connection.lock().await;
-        let response = self
-            .server
-            .handle_request_for_connection(&request, self.timings_enabled, &mut connection, false)
-            .await
-            .ok_or_else(|| {
-                ErrorData::internal_error("MCP request did not produce a response", None)
-            })?;
+        let pre_cancelled = request_cancellation.is_cancelled();
+        let handling = self.server.handle_request_for_connection(
+            &request,
+            self.timings_enabled,
+            &mut connection,
+            pre_cancelled,
+        );
+        tokio::pin!(handling);
+        let response = if pre_cancelled {
+            handling.await
+        } else {
+            'request: loop {
+                tokio::select! {
+                    response = &mut handling => break 'request response,
+                    () = request_cancellation.cancelled() => {
+                        while !self
+                            .server
+                            .cancel_application_surface_request(&id, &self.memory_request_scope)
+                        {
+                            tokio::select! {
+                                response = &mut handling => break 'request response,
+                                () = tokio::task::yield_now() => {}
+                            }
+                        }
+                        break 'request handling.await;
+                    }
+                }
+            }
+        }
+        .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
         if project_tool_call
             && self
                 .server
@@ -167,9 +192,7 @@ impl ServerHandler for RmcpConnectionAdapter {
     ) -> Result<InitializeResult, ErrorData> {
         let params = serde_json::to_value(request)
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
-        let mut response = self
-            .dispatch(context.id, "initialize", Some(params))
-            .await?;
+        let mut response = self.dispatch(context, "initialize", Some(params)).await?;
         if let Some(decorate) = &self.initialize_response_decorator {
             decorate(&mut response);
         }
@@ -181,7 +204,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Self::response_result(self.dispatch(context.id, "tools/list", None).await?)
+        Self::response_result(self.dispatch(context, "tools/list", None).await?)
     }
 
     async fn call_tool(
@@ -192,8 +215,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         let params = serde_json::to_value(request)
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         Self::response_result::<CallToolResult>(
-            self.dispatch(context.id, "tools/call", Some(params))
-                .await?,
+            self.dispatch(context, "tools/call", Some(params)).await?,
         )
         .map(Into::into)
     }
@@ -203,7 +225,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Self::response_result(self.dispatch(context.id, "resources/list", None).await?)
+        Self::response_result(self.dispatch(context, "resources/list", None).await?)
     }
 
     async fn read_resource(
@@ -214,7 +236,7 @@ impl ServerHandler for RmcpConnectionAdapter {
         let params = serde_json::to_value(request)
             .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
         Self::response_result::<ReadResourceResult>(
-            self.dispatch(context.id, "resources/read", Some(params))
+            self.dispatch(context, "resources/read", Some(params))
                 .await?,
         )
         .map(Into::into)

@@ -8950,33 +8950,35 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
     }
 
     async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>> {
-        let line = match self.read_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => return None,
-            Err(error)
-                if crate::application::host_admission::is_wire_oversized_io_error(&error) =>
-            {
-                let _ = crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "daemon broker MCP transport read failed");
-                return None;
-            }
-        };
-        match serde_json::from_str(&line) {
-            Ok(message) => Some(message),
-            Err(error) => {
-                let response = JsonRpcResponse::error(
-                    serde_json::Value::Null,
-                    ErrorCode::ParseError,
-                    format!("failed to parse JSON-RPC request: {error}"),
-                );
-                if let Ok(line) = serde_json::to_string(&response) {
-                    let _ = self.write_line(&format!("{line}\n")).await;
-                    let _ = self.flush().await;
+        loop {
+            let line = match self.read_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => return None,
+                Err(error)
+                    if crate::application::host_admission::is_wire_oversized_io_error(&error) =>
+                {
+                    let _ =
+                        crate::mcp::transport::write_wire_oversized_rejection(self, &error).await;
+                    return None;
                 }
-                None
+                Err(error) => {
+                    tracing::warn!(%error, "daemon broker MCP transport read failed");
+                    return None;
+                }
+            };
+            match serde_json::from_str(&line) {
+                Ok(message) => return Some(message),
+                Err(error) => {
+                    let response = JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        ErrorCode::ParseError,
+                        format!("failed to parse JSON-RPC request: {error}"),
+                    );
+                    if let Ok(line) = serde_json::to_string(&response) {
+                        let _ = self.write_line(&format!("{line}\n")).await;
+                        let _ = self.flush().await;
+                    }
+                }
             }
         }
     }
@@ -9072,6 +9074,36 @@ mod wire_bound_tests {
                 .is_none(),
             "rmcp must receive the same bounded rejection as the daemon transport"
         );
+    }
+
+    #[tokio::test]
+    async fn rmcp_broker_transport_recovers_after_malformed_json() {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let mut transport = BrokerStreamTransport::new(server);
+
+        client.write_all(b"{not-json}\n").await.expect("malformed");
+        client
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .await
+            .expect("valid frame");
+        client.flush().await.expect("flush");
+
+        let recovered = Transport::<rmcp::RoleServer>::receive(&mut transport)
+            .await
+            .expect("valid frame after parse error");
+        let recovered = serde_json::to_value(recovered).expect("serialize received message");
+        assert_eq!(recovered["method"], serde_json::json!("ping"));
+
+        let mut client = tokio::io::BufReader::new(client);
+        let mut line = String::new();
+        client.read_line(&mut line).await.expect("parse response");
+        let response: serde_json::Value =
+            serde_json::from_str(&line).expect("parse error JSON response");
+        assert_eq!(response["error"]["code"], serde_json::json!(-32700));
     }
 
     #[tokio::test]
