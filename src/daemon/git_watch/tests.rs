@@ -69,6 +69,94 @@ fn code_generation_retention_sweeps_the_scheduler_store_root() {
     );
 }
 
+/// Scope reconciliation reaches the *siblings* generation retention cannot see,
+/// so it must operate exactly one directory above the sweep root.
+#[test]
+fn scope_reconciliation_operates_on_the_shared_code_index_parent() {
+    let data_root = PathBuf::from("/profile/projects/alpha");
+    let project_root = PathBuf::from("/work/alpha");
+
+    let parent = store_maintenance::code_index_scope_store_root(&data_root);
+    let scoped = store_maintenance::code_index_store_root(&data_root, &project_root);
+
+    assert_eq!(parent, data_root.join("code-index-v1"));
+    assert_eq!(
+        scoped.parent(),
+        Some(parent.as_path()),
+        "the scoped sweep root must be a direct child of the reconciled parent"
+    );
+}
+
+fn scope_fixture_git(root: &Path, args: &[&str]) {
+    let status = Command::new(crate::git::git_program())
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("run git fixture command");
+    assert!(status.success(), "git fixture command failed: {args:?}");
+}
+
+/// A linked worktree is a live canonical root with its own code-index scope.
+/// Missing one would classify a scope in daily use as stranded.
+#[test]
+fn live_code_index_roots_cover_every_linked_worktree() {
+    use crate::retention::code_index_generations::code_index_scope_hash;
+
+    let tmp = tempfile::TempDir::new().expect("repository root");
+    let primary = tmp.path().join("primary");
+    let linked = tmp.path().join("linked");
+    std::fs::create_dir_all(&primary).expect("create primary checkout");
+    scope_fixture_git(&primary, &["init", "-q", "-b", "main"]);
+    scope_fixture_git(&primary, &["config", "user.name", "TraceDecay Test"]);
+    scope_fixture_git(
+        &primary,
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::write(primary.join("README.md"), b"fixture").expect("seed repository file");
+    scope_fixture_git(&primary, &["add", "."]);
+    scope_fixture_git(&primary, &["commit", "-qm", "fixture"]);
+    scope_fixture_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("worktree path"),
+        ],
+    );
+
+    let roots = store_maintenance::resolve_live_code_index_roots(&primary)
+        .expect("git's own worktree registry is readable");
+
+    let hashes = roots
+        .iter()
+        .map(|root| code_index_scope_hash(root))
+        .collect::<std::collections::BTreeSet<_>>();
+    for root in [&primary, &linked] {
+        let canonical = std::fs::canonicalize(root).expect("canonical worktree root");
+        assert!(
+            hashes.contains(&code_index_scope_hash(&canonical)),
+            "every live worktree root must be represented in the live scope set: {}",
+            canonical.display()
+        );
+    }
+}
+
+/// Fail closed: a repository whose worktree registry cannot be resolved yields
+/// no live set at all, so the caller collects nothing instead of treating an
+/// empty set as "everything is stranded".
+#[test]
+fn live_code_index_roots_fail_closed_outside_a_repository() {
+    let tmp = tempfile::TempDir::new().expect("non-repository root");
+
+    assert!(
+        store_maintenance::resolve_live_code_index_roots(tmp.path()).is_err(),
+        "an unresolvable repository must never produce a smaller live set"
+    );
+}
+
 #[test]
 fn failed_branch_compaction_keeps_maintenance_retry_eligible() {
     let report = crate::retention::branch_compaction::BranchCompactionReport {

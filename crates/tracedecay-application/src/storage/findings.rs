@@ -512,8 +512,16 @@ pub fn retention_backlog_finding(
     DoctorStorageFindingV1::new(kind, finding)
 }
 
-/// Report immutable code-generation retention with both the total superseded
-/// footprint and the exact liveness-based collectable subset.
+/// Report immutable code-generation retention with the total superseded
+/// footprint, the exact liveness-based collectable subset, and the disjoint
+/// stranded-scope class one level up.
+///
+/// Both classes share one finding because they describe the same store from the
+/// owner's point of view — "how many code-index bytes are being held that
+/// nothing reads". They are reported as separate numbers because a scope-local
+/// generation census structurally cannot see a stranded sibling scope, and
+/// folding the two totals together would let a clean generation census hide
+/// gigabytes of unreachable directories.
 pub fn code_generation_retention_finding(
     record: &CodeGenerationRetentionRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -521,29 +529,41 @@ pub fn code_generation_retention_finding(
     record.validate()?;
     let kind = DoctorStorageFindingKindV1::RetentionBacklog;
     let detail = format!(
-        "superseded-{}.bytes-{}b.collectable-{}.collectable-bytes-{}b",
+        "superseded-{}.bytes-{}b.collectable-{}.collectable-bytes-{}b.stranded-scopes-{}.stranded-scope-bytes-{}b",
         record.superseded_generation_count,
         record.superseded_generation_bytes.get(),
         record.collectable_generation_count,
         record.collectable_generation_bytes.get(),
+        record.stranded_scope_count,
+        record.stranded_scope_bytes.get(),
     );
-    let finding = if record.has_collectable_generations() {
-        problem_finding(
+    let finding = match (
+        record.has_collectable_generations(),
+        record.has_stranded_scopes(),
+    ) {
+        (_, true) => problem_finding(
+            kind,
+            &record.store,
+            DoctorEvidenceStateV1::Stale,
+            completeness,
+            &detail,
+            "code-index scope roots whose project root no longer exists hold bytes no scope-local retention pass can reach",
+        )?,
+        (true, false) => problem_finding(
             kind,
             &record.store,
             DoctorEvidenceStateV1::Stale,
             completeness,
             &detail,
             "superseded code generations outside active, vector-readable, and rollback-floor liveness await collection",
-        )?
-    } else {
-        clean_finding(
+        )?,
+        (false, false) => clean_finding(
             kind,
             &record.store,
             completeness,
             &detail,
-            "superseded code generations are bounded by exact liveness and rollback floor",
-        )?
+            "superseded code generations are bounded by exact liveness and rollback floor; every scope root resolves to a live project root",
+        )?,
     };
     DoctorStorageFindingV1::new(kind, finding)
 }
@@ -869,6 +889,8 @@ mod tests {
             superseded_generation_bytes: StorageByteSizeV1(22_980_254_208),
             collectable_generation_count: 24,
             collectable_generation_bytes: StorageByteSizeV1(20_600_000_000),
+            stranded_scope_count: 0,
+            stranded_scope_bytes: StorageByteSizeV1(0),
         };
 
         let finding =
@@ -880,6 +902,51 @@ mod tests {
         assert!(only_evidence(&finding).contains("superseded-27"));
         assert!(only_evidence(&finding).contains("bytes-22980254208b"));
         assert!(only_evidence(&finding).contains("collectable-24"));
+    }
+
+    /// A scope root whose project root is gone is unreachable by the per-scope
+    /// generation census, so a clean generation plan must never present it as
+    /// healthy.
+    #[test]
+    fn stranded_code_index_scopes_are_reported_even_when_generations_are_clean() {
+        let record = super::super::inventory::CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 4,
+            superseded_generation_bytes: StorageByteSizeV1(4_000),
+            collectable_generation_count: 0,
+            collectable_generation_bytes: StorageByteSizeV1(0),
+            stranded_scope_count: 2,
+            stranded_scope_bytes: StorageByteSizeV1(7_730_941_132),
+        };
+
+        let finding =
+            code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Stale);
+        assert!(only_evidence(&finding).contains("stranded-scopes-2"));
+        assert!(only_evidence(&finding).contains("stranded-scope-bytes-7730941132b"));
+        assert!(finding.finding().remediation().is_some());
+    }
+
+    #[test]
+    fn code_index_retention_is_clean_only_without_collectable_or_stranded_bytes() {
+        let record = super::super::inventory::CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 3,
+            superseded_generation_bytes: StorageByteSizeV1(3_000),
+            collectable_generation_count: 0,
+            collectable_generation_bytes: StorageByteSizeV1(0),
+            stranded_scope_count: 0,
+            stranded_scope_bytes: StorageByteSizeV1(0),
+        };
+
+        let finding =
+            code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+
+        assert!(finding.finding().state().is_healthy_complete());
+        assert!(only_evidence(&finding).contains("stranded-scopes-0"));
     }
 
     // --- Cross-cutting -------------------------------------------------------

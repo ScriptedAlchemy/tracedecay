@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use super::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    plan_code_generation_retention, scoped_code_index_store_root,
+    GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
+    scoped_code_index_store_root,
 };
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
@@ -218,12 +219,29 @@ pub struct CodeGenerationRetentionDryRunEntry {
     pub collectable_generation_count: usize,
     pub collectable_generation_bytes: u64,
     pub collectable_generations: Vec<CodeGenerationRetentionGenerationV1>,
+    /// Whether every listed generation was proven to match the content digest in
+    /// its name. False when the digest scan exceeded its budget and the entry
+    /// was produced from metadata alone: the counts and byte totals are exact,
+    /// the integrity claim is not. Absent in payloads predating this field,
+    /// which were only ever emitted after a full verification.
+    #[serde(default = "digest_verified_default")]
+    pub digest_verified: bool,
+}
+
+fn digest_verified_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageReportAvailabilityState {
     Available,
+    /// The scope was censused from metadata only because verifying every
+    /// generation digest exceeded the report's budget. Counts and bytes are
+    /// present and exact; this is deliberately not `Unavailable`, which used to
+    /// discard a perfectly readable census over a cost the census does not
+    /// actually incur.
+    MetadataOnly,
     Unavailable,
 }
 
@@ -540,15 +558,16 @@ fn append_project_report(
             return Ok(());
         }
     };
-    if digest_scan_exceeds_budget {
-        code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-            project_id: project_id.to_owned(),
-            store_root: code_index_store_root.display().to_string(),
-            state: StorageReportAvailabilityState::Unavailable,
-            reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
-        });
-        return Ok(());
-    }
+    // Exceeding the digest budget bounds how hard the census may *verify*, not
+    // whether it may run. A single sealed generation is routinely larger than
+    // any budget cheap enough to be worth having, so treating this as
+    // "unavailable" reported nothing at all on exactly the profiles that had
+    // something to report.
+    let verification = if digest_scan_exceeds_budget {
+        GenerationDigestVerificationV1::MetadataOnly
+    } else {
+        GenerationDigestVerificationV1::Full
+    };
     let readable_sources = match crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
             &data_root,
         ) {
@@ -563,10 +582,11 @@ fn append_project_report(
             return Ok(());
         }
     };
-    let plan = match plan_code_generation_retention(
+    let plan = match plan_code_generation_retention_with_verification(
         &code_index_store_root,
         &readable_sources,
         DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        verification,
     ) {
         Ok(plan) => plan,
         Err(_) => {
@@ -595,12 +615,20 @@ fn append_project_report(
         collectable_generation_count: plan.collectable_generations.len(),
         collectable_generation_bytes: plan.collectable_generation_bytes(),
         collectable_generations: plan.collectable_generations,
+        digest_verified: verification == GenerationDigestVerificationV1::Full,
     });
+    let (state, reason) = match verification {
+        GenerationDigestVerificationV1::Full => (StorageReportAvailabilityState::Available, None),
+        GenerationDigestVerificationV1::MetadataOnly => (
+            StorageReportAvailabilityState::MetadataOnly,
+            Some("generation_digest_scan_budget_exceeded".to_owned()),
+        ),
+    };
     code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
         project_id: project_id.to_owned(),
         store_root: code_index_store_root.display().to_string(),
-        state: StorageReportAvailabilityState::Available,
-        reason: None,
+        state,
+        reason,
     });
     Ok(())
 }
@@ -1298,8 +1326,12 @@ mod tests {
         );
     }
 
+    /// Exceeding the digest budget must not by itself discard the census. The
+    /// fixture's active pointer is deliberately corrupt, so the metadata-only
+    /// fallback still refuses — but it refuses for the *pointer*, proving the
+    /// budget no longer short-circuits ahead of it.
     #[test]
-    fn oversized_generation_digest_scan_is_typed_unavailable() {
+    fn oversized_generation_digest_scan_falls_through_to_the_metadata_census() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
@@ -1320,14 +1352,40 @@ mod tests {
         let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
         let payload = serde_json::to_value(report).unwrap();
 
-        assert_eq!(
-            payload["code_generation_retention_availability"][0]["state"], "unavailable",
-            "an intentionally skipped digest scan must not look like an empty retention plan: \
-             {payload}"
+        assert_ne!(
+            payload["code_generation_retention_availability"][0]["reason"],
+            "generation_digest_scan_budget_exceeded",
+            "the digest budget must bound verification, not availability: {payload}"
         );
         assert_eq!(
-            payload["code_generation_retention_availability"][0]["reason"],
-            "generation_digest_scan_budget_exceeded"
+            payload["code_generation_retention_availability"][0]["state"], "unavailable",
+            "a corrupt active pointer is still unavailable: {payload}"
+        );
+    }
+
+    #[test]
+    fn metadata_only_state_is_not_treated_as_an_unreadable_scope() {
+        let report = StorageReport {
+            stores: vec![store("alpha", 400)],
+            code_generation_retention_availability: vec![
+                CodeGenerationRetentionAvailabilityEntry {
+                    project_id: "alpha".to_owned(),
+                    store_root: "/profile/projects/alpha/code-index-v1/ab".to_owned(),
+                    state: StorageReportAvailabilityState::MetadataOnly,
+                    reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
+                },
+            ],
+            ..StorageReport::default()
+        };
+
+        let total = report.profile_total_size();
+
+        assert!(
+            !total
+                .excluded_families
+                .iter()
+                .any(|family| family.contains("could not be read")),
+            "a metadata-only census read the scope; it just did not re-hash it"
         );
     }
 }

@@ -216,6 +216,12 @@ impl MaintenanceCoordinator {
                     }
                     succeeded &=
                         super::store_maintenance::run_code_generation_retention(graph).await;
+                    // Generation retention only ever sees the one scope root
+                    // derived from this graph's project root. Scope
+                    // reconciliation is the sibling pass that reaches whole
+                    // scope directories whose project root no longer exists.
+                    succeeded &=
+                        super::store_maintenance::run_code_index_scope_reconciliation(graph).await;
                 }
                 if let Some(compaction) = &retention.compaction {
                     succeeded &= super::store_maintenance::run_global_compaction(
