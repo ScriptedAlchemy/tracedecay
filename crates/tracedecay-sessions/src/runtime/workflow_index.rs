@@ -18,7 +18,7 @@
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
 use std::fmt::Write as _;
-pub use tracedecay_sessions::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
+pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 
 use crate::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
@@ -79,7 +79,7 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
 /// through the shared `session_schema_migrations` table exactly like
 /// [`crate::runtime::git_correlation::ensure_git_correlation_schema`], so both
 /// stores register under their own migration name in one table.
-pub(crate) async fn ensure_workflow_index_schema(
+pub async fn ensure_workflow_index_schema(
     conn: &impl Executor,
 ) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
@@ -185,7 +185,7 @@ pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
 /// Reads the ingest watermark (max processed run-file mtime, unix seconds), or
 /// `0` when unset / the schema predates this table. Never errors: a store
 /// without the meta table simply reports no watermark, forcing a full sweep.
-pub(crate) async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
+pub async fn read_ingest_watermark(conn: &impl QueryExecutor, key: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(
             "SELECT value FROM workflow_index_meta WHERE key = ?1",
@@ -213,7 +213,7 @@ fn opt_int(value: Option<i64>) -> Value {
 /// whose transcripts grew (e.g. a `running` run that later `completed`)
 /// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
 /// preserved.
-pub(crate) async fn upsert_run(
+pub async fn upsert_run(
     conn: &impl Executor,
     run: &WorkflowRun,
 ) -> Result<(), WorkflowIndexError> {
@@ -257,7 +257,7 @@ pub(crate) async fn upsert_run(
 
 /// Inserts or updates one agent row (idempotent on `(run_id, agent_label,
 /// agent_id)`).
-pub(crate) async fn upsert_agent(
+pub async fn upsert_agent(
     conn: &impl Executor,
     agent: &WorkflowAgent,
 ) -> Result<(), WorkflowIndexError> {
@@ -346,12 +346,12 @@ fn clamp_limit(limit: usize) -> i64 {
 ///
 /// A run detail and its agents are therefore observed at one database
 /// generation; callers cannot rediscover or reopen the physical store.
-pub(crate) struct RegisteredWorkflowIndexSnapshot {
+pub struct RegisteredWorkflowIndexSnapshot {
     snapshot: RegisteredReadSnapshot,
 }
 
 impl RegisteredWorkflowIndexSnapshot {
-    pub(crate) fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: RegisteredReadSnapshot) -> Self {
         Self { snapshot }
     }
 
@@ -383,11 +383,11 @@ impl RegisteredWorkflowIndexSnapshot {
     /// The query methods below already treat an absent index as empty, which is
     /// safe but indistinguishable from a built index holding nothing. Callers
     /// that report to a user ask this first so they can say which one it is.
-    pub(crate) async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
+    pub async fn workflow_tables_present(&self) -> Result<bool, WorkflowIndexError> {
         self.has_tables(&["workflow_runs", "workflow_agents"]).await
     }
 
-    pub(crate) async fn runs_for_session(
+    pub async fn runs_for_session(
         &self,
         parent_session_id: &str,
         limit: usize,
@@ -416,7 +416,7 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(runs)
     }
 
-    pub(crate) async fn run_for_id(
+    pub async fn run_for_id(
         &self,
         run_id: &str,
     ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
@@ -431,7 +431,7 @@ impl RegisteredWorkflowIndexSnapshot {
         rows.next().await?.map(|row| row_to_run(&row)).transpose()
     }
 
-    pub(crate) async fn agents_for_run(
+    pub async fn agents_for_run(
         &self,
         run_id: &str,
         limit: usize,
@@ -460,7 +460,7 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(agents)
     }
 
-    pub(crate) async fn agent_count_for_run(
+    pub async fn agent_count_for_run(
         &self,
         run_id: &str,
     ) -> Result<i64, WorkflowIndexError> {
@@ -483,7 +483,7 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(row.get(0)?)
     }
 
-    pub(crate) async fn agent_for_run_label(
+    pub async fn agent_for_run_label(
         &self,
         run_id: &str,
         agent_label: &str,
@@ -508,7 +508,7 @@ impl RegisteredWorkflowIndexSnapshot {
         rows.next().await?.map(|row| row_to_agent(&row)).transpose()
     }
 
-    pub(crate) async fn runs_for_git_scope(
+    pub async fn runs_for_git_scope(
         &self,
         filter: &GitScopeFilter,
         limit: usize,
@@ -706,7 +706,7 @@ fn workflow_scope_exists_predicate(
 }
 
 mod port;
-pub(crate) use port::WorkflowIngestWriteTxn;
+pub use port::WorkflowIngestWriteTxn;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

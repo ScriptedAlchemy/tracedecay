@@ -49,7 +49,7 @@ pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 /// `git_correlation_meta` key holding the auto-backfill activity watermark:
 /// the highest session-activity timestamp the incremental backfill has already
 /// attempted. See [`run_incremental_backfill`].
-pub(crate) const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
 
 /// Errors from the git-correlation store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -545,7 +545,7 @@ pub fn span_debounce_key(
 #[cfg(test)]
 /// Creates the correlation tables when missing. Version-gated via
 /// `session_schema_migrations` like the LCM schema; idempotent.
-pub(crate) async fn ensure_git_correlation_schema(
+pub async fn ensure_git_correlation_schema(
     conn: &Connection,
 ) -> Result<(), GitCorrelationError> {
     let transaction = conn
@@ -556,7 +556,7 @@ pub(crate) async fn ensure_git_correlation_schema(
     Ok(())
 }
 
-pub(crate) async fn ensure_git_correlation_schema_in_transaction(
+pub async fn ensure_git_correlation_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
@@ -730,7 +730,7 @@ fn opt_text(value: Option<&str>) -> Value {
 /// Resolves provider-reported commit candidates against the repository and
 /// turns them into durable producer evidence. Ambiguous, missing, or non-commit
 /// object ids are ignored; transcript ingest can safely retry them later.
-pub(crate) fn direct_commit_records(
+pub fn direct_commit_records(
     messages: &[SessionMessageRecord],
     project_root: &std::path::Path,
 ) -> Vec<CommitSessionRecord> {
@@ -865,7 +865,7 @@ impl DirectEvidenceKind {
 /// Derives durable branch/worktree observations from provider message
 /// metadata. These rows survive worktree deletion and make transcript ingest,
 /// rather than a live hook, the source of truth for historical locations.
-pub(crate) fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
+pub fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
     let mut observations = Vec::new();
     for message in messages {
         let Some(ts) = message.timestamp else {
@@ -924,7 +924,7 @@ fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> O
 /// Runs in a `BEGIN IMMEDIATE` transaction so concurrent writers converge on
 /// widened spans instead of interleaved half-updates.
 #[cfg(test)]
-pub(crate) async fn record_span_observation(
+pub async fn record_span_observation(
     conn: &Connection,
     observation: &SpanObservation,
     merge_gap_secs: i64,
@@ -938,7 +938,7 @@ pub(crate) async fn record_span_observation(
     Ok(span_id)
 }
 
-pub(crate) async fn record_span_observation_in_transaction(
+pub async fn record_span_observation_in_transaction(
     conn: &(impl Executor + ?Sized),
     observation: &SpanObservation,
     merge_gap_secs: i64,
@@ -1303,7 +1303,7 @@ fn span_id_list(ids: &[i64]) -> String {
 /// Inserts one commit attribution row. Stronger evidence replaces weaker
 /// evidence; identical or weaker replays are no-ops. Returns `true` when the
 /// row was inserted or strengthened.
-pub(crate) async fn upsert_commit_session(
+pub async fn upsert_commit_session(
     conn: &(impl Executor + ?Sized),
     record: &CommitSessionRecord,
 ) -> Result<bool, GitCorrelationError> {
@@ -1353,21 +1353,21 @@ pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
     match_commit_to_spans,
 };
-pub(crate) use attribution::{read_meta_value, run_commit_attribution_sweep, write_meta_value};
+pub use attribution::{read_meta_value, run_commit_attribution_sweep, write_meta_value};
 
 /// Returns sessions correlated with a branch, worktree, or commit, most
 /// recently active first. Branch/worktree queries aggregate span rows per
 /// session; commit queries return attribution rows (abbreviated shas match
 /// by prefix). `since`/`until` bound span overlap (branch/worktree) or
 /// commit time (commit).
-pub(crate) async fn sessions_for(
+pub async fn sessions_for(
     conn: &(impl QueryExecutor + ?Sized),
     query: &SessionsForQuery,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
     sessions_for_with_relation(conn, query, CommitRelationFilter::Produced).await
 }
 
-pub(crate) async fn sessions_for_with_relation(
+pub async fn sessions_for_with_relation(
     conn: &(impl QueryExecutor + ?Sized),
     query: &SessionsForQuery,
     relation: CommitRelationFilter,
@@ -1405,7 +1405,7 @@ pub(crate) async fn sessions_for_with_relation(
 }
 
 /// Resolves the `(provider, session_id)` pairs matching all present git filters.
-pub(crate) async fn session_ids_for_scope(
+pub async fn session_ids_for_scope(
     conn: &(impl QueryExecutor + ?Sized),
     filter: &GitScopeFilter,
 ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
@@ -1505,7 +1505,7 @@ async fn commit_session_ids(
 /// Span rows may carry `provider = ''` (raw hook routes are provider-agnostic),
 /// so scoping matches on `session_id` alone rather than also constraining the
 /// provider.
-pub(crate) fn git_scope_exists_clauses(
+pub fn git_scope_exists_clauses(
     filter: &GitScopeFilter,
     session_column: &str,
 ) -> Vec<(String, Vec<Value>)> {
@@ -1558,7 +1558,7 @@ pub(crate) fn git_scope_exists_clauses(
 /// One AND-combined EXISTS predicate plus bound values for a git-scope
 /// constraint, correlated to an outer row via `session_column` (e.g.
 /// `m.session_id`). Returns `None` when the filter is empty.
-pub(crate) fn git_scope_exists_predicate(
+pub fn git_scope_exists_predicate(
     filter: &GitScopeFilter,
     session_column: &str,
 ) -> Option<(String, Vec<Value>)> {
@@ -1580,7 +1580,7 @@ pub(crate) fn git_scope_exists_predicate(
 /// the git-correlation schema (returning empty rather than a `no such table`
 /// error).
 #[cfg(test)]
-pub(crate) async fn tables_present(
+pub async fn tables_present(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<bool, GitCorrelationError> {
     correlation_tables_present(conn).await
@@ -1641,7 +1641,7 @@ impl CorrelationIndexHealth {
 /// Reads the correlation index health for a project store. Cheap: two counts
 /// plus a metadata lookup. Never runs DDL, so a store predating the schema
 /// reports `tables_present = false` with zero counts rather than erroring.
-pub(crate) async fn correlation_index_health(
+pub async fn correlation_index_health(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
     if !correlation_tables_present(conn).await? {
@@ -1875,9 +1875,9 @@ pub use backfill::{
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
     WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
 };
-pub(crate) use backfill::{run_backfill, run_incremental_backfill};
+pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;
-pub(crate) use store::{AnalyticsSessionTimestampSource, GitCorrelationWriteTxn};
+pub use store::{AnalyticsSessionTimestampSource, GitCorrelationWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

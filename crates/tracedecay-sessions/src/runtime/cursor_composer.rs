@@ -55,11 +55,11 @@ pub use capture::{
 };
 pub use ingest::{CursorComposerSource, CursorComposerSweepOutcome, DEFAULT_COMPOSER_ENVELOPE_CAP};
 #[cfg(test)]
-pub(crate) use tracedecay_capture::cursor_composer::{
+pub use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,
 };
 
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.
-pub(crate) const PROVIDER: &str = "cursor";
+pub const PROVIDER: &str = "cursor";

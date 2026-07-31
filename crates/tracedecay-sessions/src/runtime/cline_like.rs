@@ -83,7 +83,7 @@ pub struct ClineLikeSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClineLikeSnapshotObservationRecord {
+pub struct ClineLikeSnapshotObservationRecord {
     provider: &'static str,
     session_id: String,
     native_record_id: String,
@@ -379,7 +379,7 @@ impl ClineLikeSource {
 /// This deliberately re-reads complete snapshots and derives a new source generation
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
-pub(crate) async fn capture_cline_like_snapshot_observations(
+pub async fn capture_cline_like_snapshot_observations(
     facade: &HostAdmissionFacade<'_>,
     source: &ClineLikeSource,
     project_root: &Path,
@@ -784,7 +784,7 @@ fn native_record_id(entry: &Value) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-pub(crate) fn normalize_cline_like_snapshot_observations(
+pub fn normalize_cline_like_snapshot_observations(
     provider: &'static str,
     messages: &[SessionMessageRecord],
 ) -> TranscriptIngestResult<Vec<ClineLikeSnapshotObservationRecord>> {

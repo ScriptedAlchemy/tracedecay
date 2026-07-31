@@ -22,12 +22,12 @@ use crate::runtime::source::{
 };
 
 #[derive(Clone, Copy)]
-pub(crate) enum PersistedCursorUpdate {
+pub enum PersistedCursorUpdate {
     Replace,
     Monotonic,
 }
 
-pub(crate) struct JsonlObservationAdmissionRequest<'request, 'authority> {
+pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
     provider: &'static str,
     path: &'request Path,
     admission: &'request HostAdmissionFacade<'authority>,
@@ -40,7 +40,7 @@ pub(crate) struct JsonlObservationAdmissionRequest<'request, 'authority> {
 }
 
 impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority> {
-    pub(crate) fn new(
+    pub fn new(
         provider: &'static str,
         path: &'request Path,
         admission: &'request HostAdmissionFacade<'authority>,
@@ -61,12 +61,12 @@ impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority
         }
     }
 
-    pub(crate) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
+    pub fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
         self.max_new_bytes = max_new_bytes;
         self
     }
 
-    pub(crate) fn with_persisted_cursor_update(
+    pub fn with_persisted_cursor_update(
         mut self,
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> Self {
@@ -74,13 +74,13 @@ impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority
         self
     }
 
-    pub(crate) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
+    pub fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
         self.cancellation = cancellation;
         self
     }
 }
 
-pub(crate) enum JsonlFrameAdmission {
+pub enum JsonlFrameAdmission {
     Durable {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
@@ -89,7 +89,7 @@ pub(crate) enum JsonlFrameAdmission {
 }
 
 impl JsonlFrameAdmission {
-    pub(crate) fn durable(
+    pub fn durable(
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     ) -> Self {
@@ -99,27 +99,27 @@ impl JsonlFrameAdmission {
         }
     }
 
-    pub(crate) fn non_durable(reason: ObservationCoverageReason) -> Self {
+    pub fn non_durable(reason: ObservationCoverageReason) -> Self {
         Self::NonDurable(reason)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct JsonlObservationAdmissionProgress {
-    pub(crate) bytes_consumed: u64,
-    pub(crate) source_deferred: bool,
+pub struct JsonlObservationAdmissionProgress {
+    pub bytes_consumed: u64,
+    pub source_deferred: bool,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct JsonlObservationScan {
-    pub(crate) resumed: bool,
+pub struct JsonlObservationScan {
+    pub resumed: bool,
     /// True when a prior cursor existed but the scan restarted at offset 0
     /// (truncate/rename replacement). Callers use this to keep projected
     /// message ids distinct across file generations.
-    pub(crate) replacement_rescan: bool,
-    pub(crate) start_offset: u64,
-    pub(crate) source_mtime: u64,
-    pub(crate) generation: u64,
+    pub replacement_rescan: bool,
+    pub start_offset: u64,
+    pub source_mtime: u64,
+    pub generation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -321,7 +321,7 @@ impl ActiveAdmission<'_, '_> {
     }
 }
 
-pub(crate) async fn admit_jsonl_observations<State>(
+pub async fn admit_jsonl_observations<State>(
     request: JsonlObservationAdmissionRequest<'_, '_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
     mut normalize: impl FnMut(
@@ -539,7 +539,7 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     }
 }
 
-pub(crate) fn namespace_replacement_message_ids(
+pub fn namespace_replacement_message_ids(
     messages: &mut [SessionMessageRecord],
     generation: u64,
 ) {
@@ -548,7 +548,7 @@ pub(crate) fn namespace_replacement_message_ids(
     }
 }
 
-pub(crate) fn preflight_and_parse_new(
+pub fn preflight_and_parse_new(
     provider: &'static str,
     path: &Path,
     prev: StoredCursor,

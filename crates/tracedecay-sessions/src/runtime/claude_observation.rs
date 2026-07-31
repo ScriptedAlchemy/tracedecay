@@ -39,9 +39,9 @@ use crate::runtime::source::{
     TranscriptSource,
 };
 
-pub(crate) const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
+pub const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.
-pub(crate) const CLAUDE_HOOK_MAX_NEW_BYTES: u64 = STRICT_JSONL_BATCH_BYTES;
+pub const CLAUDE_HOOK_MAX_NEW_BYTES: u64 = STRICT_JSONL_BATCH_BYTES;
 const CLAUDE_RECOVERY_MAX_NEW_BYTES: u64 = STRICT_JSONL_BATCH_BYTES * 8;
 const MAX_CLAUDE_SOURCES_PER_PASS: usize = 64;
 const CLAUDE_SOURCE_FRONTIER_KEY: &str =
@@ -49,7 +49,7 @@ const CLAUDE_SOURCE_FRONTIER_KEY: &str =
 const MAX_PROJECTIONS_PER_PASS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ClaudeObservationIngestStats {
+pub struct ClaudeObservationIngestStats {
     pub transcript: TranscriptIngestStats,
     pub observations_committed: u64,
     pub observation_duplicates: u64,
@@ -104,13 +104,13 @@ impl ClaudeObservationIngestStats {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CapturedClaudeFrame {
+pub struct CapturedClaudeFrame {
     pub committed_cursor: ClaudeSourceCursorV1,
     pub exact_duplicate: bool,
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ClaudeObservationIngestError {
+pub enum ClaudeObservationIngestError {
     #[error("Claude observation domain value is invalid")]
     Domain(#[from] DomainError),
     #[error("Claude observation contract is invalid")]
@@ -194,7 +194,7 @@ impl ScannedSegment {
 }
 
 /// Converts a durable observation cursor into a provider scanner cursor.
-pub(crate) fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
+pub fn scanner_cursor(cursor: Option<&ClaudeSourceCursorV1>) -> StoredCursor {
     cursor.map_or_else(StoredCursor::default, |cursor| StoredCursor {
         position: cursor.byte_offset(),
         mtime: 0,
@@ -701,7 +701,7 @@ where
     }
 }
 
-pub(crate) async fn drain_projection_queue<A: ObservationCaptureAdmissionPort>(
+pub async fn drain_projection_queue<A: ObservationCaptureAdmissionPort>(
     admission: &A,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -793,7 +793,7 @@ async fn advance_source_frontier<A: TranscriptCursorAdmissionPort>(
 }
 
 /// Ingest one Claude source through caller-prepared project admission authority.
-pub(crate) async fn ingest_source_with_observations_with_admission<A>(
+pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
@@ -869,7 +869,7 @@ where
     Ok(stats.merge(projection_stats))
 }
 
-pub(crate) async fn ingest_user_sessions_with_admission<A>(
+pub async fn ingest_user_sessions_with_admission<A>(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,

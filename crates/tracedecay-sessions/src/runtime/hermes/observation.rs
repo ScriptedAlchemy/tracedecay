@@ -24,22 +24,22 @@ use super::ingest::HermesProfileSource;
 use super::rows::{HermesRow, hermes_native_payload_bytes};
 use super::{OBSERVATION_RETENTION, PROVIDER};
 
-pub(crate) struct HermesObservationRecord {
-    pub(crate) native: Value,
-    pub(crate) native_record_id: ObservationId,
-    pub(crate) source: ObservationSourceIdentityV1,
-    pub(crate) range: ObservationSourceRangeV1,
+pub struct HermesObservationRecord {
+    pub native: Value,
+    pub native_record_id: ObservationId,
+    pub source: ObservationSourceIdentityV1,
+    pub range: ObservationSourceRangeV1,
 }
 
 #[derive(Clone)]
-pub(crate) struct HermesProjectionMetadata {
-    pub(crate) project_path: Option<String>,
-    pub(crate) location_path: Option<String>,
-    pub(crate) profile: Option<String>,
-    pub(crate) location_provenance: Option<&'static str>,
+pub struct HermesProjectionMetadata {
+    pub project_path: Option<String>,
+    pub location_path: Option<String>,
+    pub profile: Option<String>,
+    pub location_provenance: Option<&'static str>,
 }
 
-pub(crate) fn project_projection_metadata(
+pub fn project_projection_metadata(
     row: &HermesRow,
     source: &HermesProfileSource,
     authority_project_root: &Path,
@@ -60,19 +60,19 @@ pub(crate) fn project_projection_metadata(
     }
 }
 
-pub(crate) enum HermesAdmissionAction {
+pub enum HermesAdmissionAction {
     Capture(Box<CaptureObservationRequest>),
     Cover(ObservationCoverageReason),
 }
 
-pub(crate) struct HermesAdmission {
-    pub(crate) source: ObservationSourceIdentityV1,
-    pub(crate) range: ObservationSourceRangeV1,
-    pub(crate) expected_cursor: Option<ObservationSourceCursorV1>,
-    pub(crate) action: HermesAdmissionAction,
+pub struct HermesAdmission {
+    pub source: ObservationSourceIdentityV1,
+    pub range: ObservationSourceRangeV1,
+    pub expected_cursor: Option<ObservationSourceCursorV1>,
+    pub action: HermesAdmissionAction,
 }
 
-pub(crate) fn observation_source(row: &HermesRow) -> Result<ObservationSourceIdentityV1, String> {
+pub fn observation_source(row: &HermesRow) -> Result<ObservationSourceIdentityV1, String> {
     let provider = ProviderId::new(PROVIDER).map_err(|_| "invalid Hermes provider".to_string())?;
     let session_id =
         SessionId::new(&row.session_id).map_err(|_| "invalid Hermes session id".to_string())?;
@@ -116,7 +116,7 @@ struct HermesNativeUsage {
     reasoning: Option<i64>,
 }
 
-pub(crate) fn native_observation_record(
+pub fn native_observation_record(
     row: &HermesRow,
     projection: &HermesProjectionMetadata,
     source: ObservationSourceIdentityV1,
@@ -191,12 +191,12 @@ fn immutable_message_evidence(native: &Value) -> Value {
     })
 }
 
-pub(crate) fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
+pub fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
     let digest = PayloadReferenceV1::for_payload(evidence).map_err(|_| ())?;
     ObservationId::new(format!("{prefix}.{}", digest.digest().as_str())).map_err(|_| ())
 }
 
-pub(crate) fn normalize_native_observation(
+pub fn normalize_native_observation(
     native: Value,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -421,7 +421,7 @@ fn nonnegative_token_count(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_observation_row(
+pub fn prepare_observation_row(
     row: &HermesRow,
     projection: Option<&HermesProjectionMetadata>,
     scope: &ObservationScopeV1,
@@ -443,7 +443,7 @@ pub(crate) fn prepare_observation_row(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_observation_row_with_cancellation(
+pub fn prepare_observation_row_with_cancellation(
     row: &HermesRow,
     projection: Option<&HermesProjectionMetadata>,
     scope: &ObservationScopeV1,

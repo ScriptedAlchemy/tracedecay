@@ -29,13 +29,13 @@ use crate::runtime::source::{
     FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
 
-pub(crate) const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
-pub(crate) const MAX_SNAPSHOT_METADATA_BYTES: u64 = 256 * 1024;
+pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_SNAPSHOT_METADATA_BYTES: u64 = 256 * 1024;
 /// Largest atomic snapshot task admitted by the shared scheduler.
 ///
 /// Cline-family tasks may read one API transcript, one UI companion, and all
 /// three metadata candidates before finding the first valid document.
-pub(crate) const MAX_SNAPSHOT_CAPTURE_UNIT_BYTES: u64 =
+pub const MAX_SNAPSHOT_CAPTURE_UNIT_BYTES: u64 =
     (2 * MAX_SNAPSHOT_FILE_BYTES) + (3 * MAX_SNAPSHOT_METADATA_BYTES);
 
 #[derive(Clone, Debug, Default)]
@@ -46,7 +46,7 @@ pub struct SnapshotCaptureOutcome {
 }
 
 /// Provider-specific record material needed by the shared snapshot admission loop.
-pub(crate) trait SnapshotAdmissionRecord {
+pub trait SnapshotAdmissionRecord {
     fn provider(&self) -> &'static str;
     fn session_id(&self) -> &str;
     fn native_record_id(&self) -> &str;
@@ -64,7 +64,7 @@ pub(crate) trait SnapshotAdmissionRecord {
 }
 
 /// Builds the canonical capture request shared by every snapshot provider.
-pub(crate) fn snapshot_capture_request<R>(
+pub fn snapshot_capture_request<R>(
     record: &R,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -117,16 +117,16 @@ where
 
 /// Provider-specific domain separators for [`stable_snapshot_message_id`].
 #[derive(Clone, Copy)]
-pub(crate) struct StableMessageIdDomains {
-    pub(crate) delimited_domain: &'static [u8],
-    pub(crate) delimited_prefix: &'static str,
-    pub(crate) derived_domain: &'static [u8],
-    pub(crate) derived_prefix: &'static str,
+pub struct StableMessageIdDomains {
+    pub delimited_domain: &'static [u8],
+    pub delimited_prefix: &'static str,
+    pub derived_domain: &'static [u8],
+    pub derived_prefix: &'static str,
 }
 
 /// Two-tier snapshot message identity: native fast path with a collision-safe
 /// delimited fallback, otherwise a derived digest over the provider frames.
-pub(crate) fn stable_snapshot_message_id(
+pub fn stable_snapshot_message_id(
     domains: StableMessageIdDomains,
     id: &str,
     native_id: Option<&str>,
@@ -148,7 +148,7 @@ pub(crate) fn stable_snapshot_message_id(
 
 /// Post-record snapshot cursor shared by provider capture-request tests.
 #[cfg(test)]
-pub(crate) fn snapshot_cursor_after(
+pub fn snapshot_cursor_after(
     provider: &'static str,
     session_id: &str,
     order: u64,
@@ -176,7 +176,7 @@ pub(crate) fn snapshot_cursor_after(
 /// generation from their content; it neither consults nor advances legacy parse
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
-pub(crate) async fn capture_snapshot_observations<R, B, L>(
+pub async fn capture_snapshot_observations<R, B, L>(
     facade: &HostAdmissionFacade<'_>,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -204,14 +204,14 @@ where
 }
 
 /// Owns byte accounting and durable admission state for one snapshot-provider sweep.
-pub(crate) struct SnapshotAdmissionRunner {
+pub struct SnapshotAdmissionRunner {
     budget: IngestByteBudget,
     stats: TranscriptIngestStats,
     sessions: BTreeSet<String>,
 }
 
 impl SnapshotAdmissionRunner {
-    pub(crate) fn new(max_new_bytes: Option<u64>) -> Self {
+    pub fn new(max_new_bytes: Option<u64>) -> Self {
         Self {
             budget: match max_new_bytes {
                 Some(limit) => IngestByteBudget::bounded_allowing_empty(limit),
@@ -222,11 +222,11 @@ impl SnapshotAdmissionRunner {
         }
     }
 
-    pub(crate) fn defer(&mut self) {
+    pub fn defer(&mut self) {
         self.budget.defer();
     }
 
-    pub(crate) async fn admit_batch<R, F>(
+    pub async fn admit_batch<R, F>(
         &mut self,
         facade: &HostAdmissionFacade<'_>,
         input_bytes: u64,
@@ -355,7 +355,7 @@ impl SnapshotAdmissionRunner {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self) -> SnapshotCaptureOutcome {
+    pub fn finish(mut self) -> SnapshotCaptureOutcome {
         self.stats.sessions_upserted = self.sessions.len() as u64;
         SnapshotCaptureOutcome {
             stats: self.stats,
@@ -386,7 +386,7 @@ async fn session_cursor(
     Ok(cursor)
 }
 
-pub(crate) fn non_durable_snapshot_record(
+pub fn non_durable_snapshot_record(
     provider: &'static str,
     path: &Path,
     reason: &'static str,
@@ -400,7 +400,7 @@ pub(crate) fn non_durable_snapshot_record(
     }
 }
 
-pub(crate) fn snapshot_source_identity(
+pub fn snapshot_source_identity(
     provider: &'static str,
     session_id: &str,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
@@ -410,7 +410,7 @@ pub(crate) fn snapshot_source_identity(
     )?)
 }
 
-pub(crate) fn bounded_snapshot_input_len(
+pub fn bounded_snapshot_input_len(
     provider: &'static str,
     path: &Path,
     byte_cap: u64,
@@ -429,7 +429,7 @@ pub(crate) fn bounded_snapshot_input_len(
     Ok(metadata.len())
 }
 
-pub(crate) fn read_snapshot_text_bounded(
+pub fn read_snapshot_text_bounded(
     provider: &'static str,
     path: &Path,
     byte_cap: u64,
@@ -463,7 +463,7 @@ pub(crate) fn read_snapshot_text_bounded(
     }
 }
 
-pub(crate) fn host_admission_error(
+pub fn host_admission_error(
     provider: &'static str,
     outcome: HostAdmissionOutcome,
 ) -> TranscriptIngestError {
@@ -486,7 +486,7 @@ pub(crate) fn host_admission_error(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn advance_snapshot_coverage(
+pub async fn advance_snapshot_coverage(
     facade: &HostAdmissionFacade<'_>,
     provider: &'static str,
     source: ObservationSourceIdentityV1,
@@ -516,7 +516,7 @@ pub(crate) async fn advance_snapshot_coverage(
 /// [`advance_snapshot_coverage`] for coverage transitions whose sanitization
 /// receipt is optional (structural covers carry no receipt; sanitizer covers do).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn advance_snapshot_coverage_maybe(
+pub async fn advance_snapshot_coverage_maybe(
     facade: &HostAdmissionFacade<'_>,
     provider: &'static str,
     source: ObservationSourceIdentityV1,
@@ -559,7 +559,7 @@ pub(crate) async fn advance_snapshot_coverage_maybe(
 
 /// Human-readable host-admission failure message shared by the SQLite-backed
 /// snapshot providers, prefixed with the caller's provider label.
-pub(crate) fn host_admission_status_message(
+pub fn host_admission_status_message(
     provider_label: &str,
     status: HostAdmissionStatus,
 ) -> String {
@@ -585,7 +585,7 @@ pub(crate) fn host_admission_status_message(
     }
 }
 
-pub(crate) fn snapshot_message_fields(
+pub fn snapshot_message_fields(
     provider: &str,
     message: &SessionMessageRecord,
 ) -> Map<String, Value> {
@@ -614,7 +614,7 @@ pub(crate) fn snapshot_message_fields(
     fields
 }
 
-pub(crate) async fn snapshot_range_was_committed(
+pub async fn snapshot_range_was_committed(
     facade: &HostAdmissionFacade<'_>,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
@@ -627,7 +627,7 @@ pub(crate) async fn snapshot_range_was_committed(
     snapshot_cursor_covers_range(cursor.as_ref(), generation, range)
 }
 
-pub(crate) fn snapshot_cursor_covers_range(
+pub fn snapshot_cursor_covers_range(
     cursor: Option<&ObservationSourceCursorV1>,
     generation: ObservationSourceGenerationV1,
     range: ObservationSourceRangeV1,
@@ -636,7 +636,7 @@ pub(crate) fn snapshot_cursor_covers_range(
         .is_some_and(|cursor| cursor.generation() == generation && cursor.position() >= range.end())
 }
 
-pub(crate) fn canonical_snapshot_envelope(
+pub fn canonical_snapshot_envelope(
     native: &Value,
     provider: &str,
     session_id: &str,

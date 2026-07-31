@@ -8,35 +8,35 @@ use serde_json::Value;
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
 /// Session metadata read from a rollout's leading `session_meta` line.
-pub(crate) struct CodexMeta {
-    pub(crate) cwd: PathBuf,
-    pub(crate) session_id: String,
-    pub(crate) model: Option<String>,
-    pub(crate) git: Option<Value>,
-    pub(crate) parent_session_id: Option<String>,
-    pub(crate) is_subagent: bool,
-    pub(crate) agent_id: Option<String>,
-    pub(crate) agent_nickname: Option<String>,
-    pub(crate) agent_role: Option<String>,
-    pub(crate) thread_source: Option<String>,
+pub struct CodexMeta {
+    pub cwd: PathBuf,
+    pub session_id: String,
+    pub model: Option<String>,
+    pub git: Option<Value>,
+    pub parent_session_id: Option<String>,
+    pub is_subagent: bool,
+    pub agent_id: Option<String>,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
+    pub thread_source: Option<String>,
 }
 
-pub(crate) struct CodexMetaWithProvenance {
-    pub(crate) meta: CodexMeta,
-    pub(crate) native_thread_id: Option<String>,
+pub struct CodexMetaWithProvenance {
+    pub meta: CodexMeta,
+    pub native_thread_id: Option<String>,
 }
 
-pub(crate) struct CodexTurnContext {
-    pub(crate) model: Option<String>,
-    pub(crate) cwd: Option<PathBuf>,
+pub struct CodexTurnContext {
+    pub model: Option<String>,
+    pub cwd: Option<PathBuf>,
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
-pub(crate) fn session_meta(path: &Path) -> Option<CodexMeta> {
+pub fn session_meta(path: &Path) -> Option<CodexMeta> {
     session_meta_with_provenance(path).map(|parsed| parsed.meta)
 }
 
-pub(crate) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
+pub fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
     let file = std::fs::File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     for _ in 0..4 {
@@ -56,7 +56,7 @@ pub(crate) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithP
     None
 }
 
-pub(crate) fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
+pub fn session_meta_from_record(record: &Value, path: &Path) -> Option<CodexMeta> {
     session_meta_with_provenance_from_record(record, path).map(|parsed| parsed.meta)
 }
 
@@ -126,7 +126,7 @@ fn session_meta_with_provenance_from_record(
     })
 }
 
-pub(crate) fn string_field(payload: &Value, key: &str) -> Option<String> {
+pub fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -134,7 +134,7 @@ pub(crate) fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+pub fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)
@@ -144,7 +144,7 @@ pub(crate) fn nested_string_field(payload: &Value, pointer: &str) -> Option<Stri
 
 /// Context recorded on a `turn_context` line. Real rollouts use this for the
 /// active model and current cwd; both can change mid-session.
-pub(crate) fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
+pub fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
     if record.get("type").and_then(Value::as_str) != Some("turn_context") {
         return None;
     }

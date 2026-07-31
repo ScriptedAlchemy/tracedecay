@@ -44,7 +44,7 @@ use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
-pub(crate) use crate::runtime::shared::{
+pub use crate::runtime::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
     usage_counters_from,
@@ -193,7 +193,7 @@ impl TranscriptCursorKey {
         }
     }
 
-    pub(crate) fn store_path(&self) -> PathBuf {
+    pub fn store_path(&self) -> PathBuf {
         match &self.durable {
             DurableTranscriptCursorKey::Path(path) => path.clone(),
             DurableTranscriptCursorKey::Opaque(key) => PathBuf::from(key),
@@ -210,20 +210,20 @@ impl TranscriptCursorKey {
 /// Keeping the durable key attached to both ends of a scan prevents consumers
 /// from advancing a cursor reconstructed from an ambient or lossy path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TranscriptCursorCheckpoint {
+pub struct TranscriptCursorCheckpoint {
     pub key: TranscriptCursorKey,
     pub state: StoredCursor,
 }
 
 /// Loaded cursor state plus the compare-and-swap expectations needed to
 /// preserve opaque-key migration and the legacy health mirror.
-pub(crate) struct LoadedTranscriptCursor {
+pub struct LoadedTranscriptCursor {
     pub checkpoint: TranscriptCursorCheckpoint,
     durable_offset: ParseOffset,
     legacy_offset: Option<ParseOffset>,
 }
 
-pub(crate) async fn load_transcript_cursor<S: TranscriptIngestStore>(
+pub async fn load_transcript_cursor<S: TranscriptIngestStore>(
     store: &S,
     key: TranscriptCursorKey,
 ) -> TranscriptIngestResult<LoadedTranscriptCursor> {
@@ -346,7 +346,7 @@ pub trait TranscriptSource: Send + Sync {
 /// `max_new_bytes` bounds how much newly-appended content a byte-offset source
 /// will read in one call (used to keep per-prompt hot paths inside budget);
 /// pass `None` for an unbounded catch-up.
-pub(crate) async fn try_ingest_source<S: TranscriptIngestStore>(
+pub async fn try_ingest_source<S: TranscriptIngestStore>(
     store: &S,
     source: &dyn TranscriptSource,
     project_root: &Path,
@@ -355,7 +355,7 @@ pub(crate) async fn try_ingest_source<S: TranscriptIngestStore>(
     try_ingest_source_with_store(store, source, project_root, max_new_bytes).await
 }
 
-pub(crate) async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
+pub async fn try_ingest_source_with_store<S: TranscriptIngestStore>(
     store: &S,
     source: &dyn TranscriptSource,
     project_root: &Path,
@@ -402,7 +402,7 @@ async fn ingest_one<S: TranscriptIngestStore>(
 /// Persist an already parsed transcript through the authoritative V1 batch and
 /// git-evidence transaction. Observation coordinators reuse this after their
 /// one-pass privacy parse and Claude fold.
-pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
+pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store: &S,
     provider: &'static str,
     _path: &Path,
@@ -647,13 +647,13 @@ mod discovery;
 mod jsonl;
 
 pub use discovery::{FileDiscoveryLimit, FileDiscoveryReport, TranscriptDiscoveryBounds};
-pub(crate) use discovery::{
+pub use discovery::{
     bound_path_list, collect_files_with_ext_bounded, os_str_byte_len, path_byte_len,
 };
 
 #[cfg(test)]
-pub(crate) use jsonl::try_stream_new_jsonl_raw_strict;
-pub(crate) use jsonl::{
+pub use jsonl::try_stream_new_jsonl_raw_strict;
+pub use jsonl::{
     JsonlFrameDeferral, JsonlResumeState, MAX_JSONL_RECORD_BYTES, RawJsonlFrame,
     RawJsonlFrameReader, RawJsonlSkippedReason, STRICT_JSONL_BATCH_BYTES,
     try_stream_new_jsonl_raw_strict_with_resume,
@@ -665,7 +665,7 @@ use jsonl::{
     stream_new_jsonl_raw_strict, stream_new_jsonl_strict, stream_new_jsonl_with_policy,
 };
 
-pub(crate) fn preflight_strict_jsonl(
+pub fn preflight_strict_jsonl(
     provider: &'static str,
     path: &Path,
     previous: StoredCursor,
@@ -733,7 +733,7 @@ pub fn read_changed_file(path: &Path, prev: StoredCursor, max_bytes: u64) -> Opt
 /// own content hash moves or a companion sidecar file's hash moves. The stored
 /// cursor's `position` is a combined hash of both files so a sidecar-only
 /// update (e.g. Cline `ui_messages.json` usage counters) triggers a re-ingest.
-pub(crate) fn read_changed_with_companion(
+pub fn read_changed_with_companion(
     primary: &Path,
     companion: &Path,
     prev: StoredCursor,
@@ -813,7 +813,7 @@ fn read_file_to_string_bounded(path: &Path, max_bytes: u64) -> Option<String> {
 /// unreadable. Used by global-store adapters (Claude, Codex) whose transcripts
 /// live in nested date/slug directories.
 #[cfg(test)]
-pub(crate) fn collect_files_with_ext(dir: &Path, ext: &str, max_depth: u8) -> Vec<PathBuf> {
+pub fn collect_files_with_ext(dir: &Path, ext: &str, max_depth: u8) -> Vec<PathBuf> {
     collect_files_with_ext_bounded(
         dir,
         ext,
@@ -909,7 +909,7 @@ fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
 
 /// Stable 64-bit content hash prefix suitable for the existing integer
 /// `parse_offsets.byte_offset` column.
-pub(crate) fn content_hash64(contents: &str) -> u64 {
+pub fn content_hash64(contents: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(contents.as_bytes());
     let digest = hasher.finalize();
@@ -918,7 +918,7 @@ pub(crate) fn content_hash64(contents: &str) -> u64 {
     u64::from_be_bytes(bytes)
 }
 
-pub(crate) fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
+pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     hasher.update((domain.len() as u64).to_be_bytes());
     hasher.update(domain);

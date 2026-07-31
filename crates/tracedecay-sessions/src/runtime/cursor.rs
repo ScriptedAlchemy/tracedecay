@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use serde_json::Value;
 #[cfg(test)]
-pub(crate) use tracedecay_capture::cursor::normalize_cursor_observation;
+pub use tracedecay_capture::cursor::normalize_cursor_observation;
 use tracedecay_capture::cursor::{
     cursor_projected_message_id, normalize_cursor_observation_with_message_id,
     observation_native_record_id, timestamp_tag_from_record,
@@ -593,7 +593,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
     .await
 }
 
-pub(crate) async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
+pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     event_json: &str,
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
@@ -698,7 +698,7 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
 
 /// Project startup-sweep variant whose authority has already been prepared by
 /// the caller from the authoritative project identity and privacy policy.
-pub(crate) fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
+pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
     project_root: &'a Path,
     project_id: ProjectId,
     admission: &'a HostAdmissionFacade<'a>,
@@ -746,7 +746,7 @@ pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
     .await
 }
 
-pub(crate) async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
+pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
     registered_roots: &[PathBuf],
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
@@ -1358,13 +1358,13 @@ fn dispatch_targets_agent(item: &Value, agent_id: &str) -> bool {
 /// (assistant turns happen after the prompt that started them); lines seen
 /// before any tag fall back to the transcript file's mtime, which on the
 /// incremental hook path approximates "now" for freshly appended lines.
-pub(crate) struct TimestampCarry {
+pub struct TimestampCarry {
     carried: Option<i64>,
     fallback: Option<i64>,
 }
 
 impl TimestampCarry {
-    pub(crate) fn new(fallback_mtime: Option<i64>) -> Self {
+    pub fn new(fallback_mtime: Option<i64>) -> Self {
         Self {
             carried: None,
             fallback: fallback_mtime.filter(|mtime| *mtime > 0),
@@ -1373,7 +1373,7 @@ impl TimestampCarry {
 
     /// Folds one transcript line into the carry and returns the timestamp to
     /// use for messages derived from that line.
-    pub(crate) fn observe(&mut self, record: &Value) -> Option<i64> {
+    pub fn observe(&mut self, record: &Value) -> Option<i64> {
         if let Some(tag) = timestamp_tag_from_record(record) {
             self.carried = Some(tag);
         }

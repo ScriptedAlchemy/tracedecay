@@ -5,13 +5,13 @@ use crate::db::engine::{IntoParams, QueryExecutor, Value, params};
 use super::LcmError;
 
 #[cfg(unix)]
-pub(crate) fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
+pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     use std::os::unix::fs::MetadataExt;
     metadata.mtime()
 }
 
 #[cfg(not(unix))]
-pub(crate) fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
+pub fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
         .ok()
@@ -20,21 +20,21 @@ pub(crate) fn file_mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or_default()
 }
 
-pub(crate) fn opt_text(value: Option<&str>) -> Value {
+pub fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |s| Value::Text(s.to_string()))
 }
 
-pub(crate) fn opt_i64(value: Option<i64>) -> Value {
+pub fn opt_i64(value: Option<i64>) -> Value {
     value.map_or(Value::Null, Value::Integer)
 }
 
-pub(crate) fn sha256_hex(content: &[u8]) -> String {
+pub fn sha256_hex(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     hex::encode(hasher.finalize())
 }
 
-pub(crate) async fn fetch_i64(
+pub async fn fetch_i64(
     conn: &(impl QueryExecutor + ?Sized),
     sql: &str,
     params: impl IntoParams,
@@ -48,7 +48,7 @@ pub(crate) async fn fetch_i64(
     Ok(row.get::<i64>(0)?)
 }
 
-pub(crate) async fn count_by_provider_session(
+pub async fn count_by_provider_session(
     conn: &(impl QueryExecutor + ?Sized),
     table: &str,
     provider: &str,

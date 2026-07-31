@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::{Map, Value as JsonValue, json};
 
 pub use crate::application::session::compatibility::derived_text_for_index;
-pub(crate) use crate::application::session::compatibility::derived_text_for_snippet;
+pub use crate::application::session::compatibility::derived_text_for_snippet;
 use crate::application::session::compatibility::projected_content_hash;
 use crate::{
     db::engine::{Executor, QueryExecutor, Row, params},
@@ -15,16 +15,16 @@ use crate::{
 
 use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};
 
-pub(crate) const RAW_MESSAGE_SELECT_COLUMNS: &str =
+pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
                     snippet_text, legacy_source, legacy_truncated, metadata_json";
-pub(crate) const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
+pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
                     '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
 
-pub(crate) fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
+pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let storage_kind_text: String = row.get(9)?;
     let content: Option<String> = row.get(7)?;
     let snippet_text: String = row.get(11)?;
@@ -52,7 +52,7 @@ pub(crate) fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError>
     })
 }
 
-pub(crate) async fn load_raw_message_by_store_id(
+pub async fn load_raw_message_by_store_id(
     conn: &(impl QueryExecutor + ?Sized),
     store_id: i64,
 ) -> Result<LcmRawMessage, LcmError> {
@@ -69,7 +69,7 @@ pub(crate) async fn load_raw_message_by_store_id(
     raw_message_from_row(&row)
 }
 
-pub(crate) struct RawMessageUpsert {
+pub struct RawMessageUpsert {
     pub projection_text: String,
     pub projection_metadata_json: Option<String>,
 }
@@ -218,7 +218,7 @@ fn externalized_payload_metadata(
     metadata.to_string()
 }
 
-pub(crate) async fn upsert_raw_message_with_payload_tracked(
+pub async fn upsert_raw_message_with_payload_tracked(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     message: &SessionMessageRecord,
@@ -321,7 +321,7 @@ pub(crate) async fn upsert_raw_message_with_payload_tracked(
 /// Applies ingest protection to an arbitrary replay field value (for example
 /// active-replay `tool_calls`) using the same redaction and substring media
 /// externalization primitives as raw-message ingest.
-pub(crate) async fn protect_replay_field_value_tracked(
+pub async fn protect_replay_field_value_tracked(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     message: &SessionMessageRecord,

@@ -85,11 +85,11 @@ impl FileDiscoveryReport {
 }
 
 /// Native path byte length without allocating a lossy `String`.
-pub(crate) fn path_byte_len(path: &Path) -> usize {
+pub fn path_byte_len(path: &Path) -> usize {
     os_str_byte_len(path.as_os_str())
 }
 
-pub(crate) fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
+pub fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -113,7 +113,7 @@ pub(crate) fn os_str_byte_len(value: &std::ffi::OsStr) -> usize {
 ///
 /// Prefer [`collect_files_with_ext_bounded`] for filesystem walks so bounds are
 /// enforced before collection. This helper exists for trait defaults and tests.
-pub(crate) fn bound_path_list(
+pub fn bound_path_list(
     paths: impl IntoIterator<Item = PathBuf>,
     bounds: TranscriptDiscoveryBounds,
 ) -> FileDiscoveryReport {
@@ -159,7 +159,7 @@ pub(crate) fn bound_path_list(
 
 /// Recursively collect files with `ext` under `dir`, enforcing discovery bounds
 /// before retaining each path. Directory symlinks are not followed.
-pub(crate) fn collect_files_with_ext_bounded(
+pub fn collect_files_with_ext_bounded(
     dir: &Path,
     ext: &str,
     max_depth: u8,

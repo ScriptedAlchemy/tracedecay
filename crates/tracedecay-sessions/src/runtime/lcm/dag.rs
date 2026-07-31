@@ -12,14 +12,14 @@ use super::{
     LcmSummaryNode, LcmSummaryNodeDraft, raw,
 };
 
-pub(crate) trait LcmSummaryPublicationPort {
+pub trait LcmSummaryPublicationPort {
     fn publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
     ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>>;
 }
 
-pub(crate) async fn insert_summary_node(
+pub async fn insert_summary_node(
     publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
@@ -42,7 +42,7 @@ pub(crate) async fn insert_summary_node(
         .map(|receipt| receipt.summary)
 }
 
-pub(crate) async fn expand_summary_node(
+pub async fn expand_summary_node(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,
@@ -131,16 +131,16 @@ async fn expand_summary_node_with_content(
 /// One uncondensed summary node plus the earliest raw-message store id in its
 /// descendant lineage, used to position the node inside interleaved replay.
 #[derive(Debug, Clone)]
-pub(crate) struct LcmUncondensedSummaryNode {
-    pub(crate) node: LcmSummaryNode,
-    pub(crate) first_source_store_id: Option<i64>,
+pub struct LcmUncondensedSummaryNode {
+    pub node: LcmSummaryNode,
+    pub first_source_store_id: Option<i64>,
 }
 
 /// Loads every summary node for the session that has not been condensed into
 /// a higher-depth node. Mirrors hermes-lcm `SummaryDAG.get_uncondensed_at_depth`
 /// collapsed across all depths in one query; replay assembly consumes the
 /// result ordered by lineage position (then depth, highest first).
-pub(crate) async fn load_uncondensed_summary_nodes(
+pub async fn load_uncondensed_summary_nodes(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: &str,

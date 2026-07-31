@@ -59,7 +59,7 @@ struct DiscoveredRun {
 /// The registered-database entry points live on the store adapter, which
 /// implements [`WorkflowIngestSink`]; taking the concrete adapter here keeps
 /// spawn paths on inherent `Send` futures instead of HRTB trait RPITIT.
-pub(crate) async fn ingest_workflow_runs_with_sink(
+pub async fn ingest_workflow_runs_with_sink(
     sink: &GlobalDbWorkflowStore<'_>,
     project_id: &ProjectId,
     project_root: &Path,

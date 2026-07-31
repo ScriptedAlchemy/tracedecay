@@ -25,7 +25,7 @@ use super::observation::{
 use super::rows::HermesRow;
 use super::{MAX_HERMES_PROJECTIONS_PER_DRAIN, PROVIDER};
 
-pub(crate) fn sqlite_incarnation(
+pub fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
     let file_identity = sqlite_generation_identity(path).map_err(|error| {
@@ -93,7 +93,7 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     crate::runtime::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
 }
 
-pub(crate) async fn drain_hermes_projections_with_admission(
+pub async fn drain_hermes_projections_with_admission(
     facade: &HostAdmissionFacade<'_>,
     scope: &ObservationScopeV1,
 ) -> Result<(), String> {
@@ -105,7 +105,7 @@ pub(crate) async fn drain_hermes_projections_with_admission(
     .await
 }
 
-pub(crate) async fn drain_hermes_projections_with_admission_and_cancellation(
+pub async fn drain_hermes_projections_with_admission_and_cancellation(
     facade: &HostAdmissionFacade<'_>,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -133,7 +133,7 @@ pub(crate) async fn drain_hermes_projections_with_admission_and_cancellation(
     }
 }
 
-pub(crate) async fn admit_rows_with_admission(
+pub async fn admit_rows_with_admission(
     facade: &HostAdmissionFacade<'_>,
     rows: &[HermesRow],
     scope: ObservationScopeV1,
@@ -156,7 +156,7 @@ pub(crate) async fn admit_rows_with_admission(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn admit_rows_with_admission_and_cancellation(
+pub async fn admit_rows_with_admission_and_cancellation(
     facade: &HostAdmissionFacade<'_>,
     rows: &[HermesRow],
     scope: ObservationScopeV1,

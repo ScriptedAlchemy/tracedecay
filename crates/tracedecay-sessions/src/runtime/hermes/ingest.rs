@@ -286,7 +286,7 @@ pub async fn ingest_user_sessions_capped(
     ingest_user_homes_capped(admission, &homes, registered_roots, max_new_bytes).await
 }
 
-pub(crate) async fn ingest_user_sessions_capped_with_admission(
+pub async fn ingest_user_sessions_capped_with_admission(
     admission: &HostAdmissionFacade<'_>,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
@@ -386,7 +386,7 @@ async fn ingest_user_homes_capped_with_admission(
 /// Strict one-time import for a legacy profile whose project pin was already
 /// resolved by the migration layer. Unlike the normal catch-up sweep, any
 /// open/query/write failure is returned so callers retain the pin and source.
-pub(crate) async fn ingest_legacy_pinned_profile(
+pub async fn ingest_legacy_pinned_profile(
     admission: &HostAdmissionFacade<'_>,
     profile_dir: &Path,
     project_root: &Path,
@@ -441,10 +441,10 @@ pub(crate) async fn ingest_legacy_pinned_profile(
 /// profile is only a bounded candidate source and each session must carry a
 /// matching code-project cwd.
 ///
-pub(crate) struct HermesProfileSource {
-    pub(crate) state_db: PathBuf,
-    pub(crate) legacy_project_pin: Option<PathBuf>,
-    pub(crate) profile: Option<String>,
+pub struct HermesProfileSource {
+    pub state_db: PathBuf,
+    pub legacy_project_pin: Option<PathBuf>,
+    pub profile: Option<String>,
 }
 
 fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {

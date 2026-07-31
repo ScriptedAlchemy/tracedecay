@@ -71,9 +71,9 @@ struct LineFacts {
 
 /// Counts of rows that gained each fact.
 #[derive(Default, Clone, Copy)]
-pub(crate) struct BackfillStats {
-    pub(crate) dated: u64,
-    pub(crate) usage_added: u64,
+pub struct BackfillStats {
+    pub dated: u64,
+    pub usage_added: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,14 +93,14 @@ struct TranscriptFactCandidate {
 
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct BackfillError {
+pub struct BackfillError {
     primary: EngineError,
     rollback_cleanup: Option<EngineError>,
 }
 
 #[cfg(test)]
 impl BackfillError {
-    pub(crate) const fn atomicity_preserved(&self) -> bool {
+    pub const fn atomicity_preserved(&self) -> bool {
         self.rollback_cleanup.is_none()
     }
 }
@@ -136,7 +136,7 @@ impl std::error::Error for BackfillError {
     }
 }
 
-pub(crate) async fn transcript_facts_backfill_status(
+pub async fn transcript_facts_backfill_status(
     db: &RegisteredGlobalDb,
 ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
     if !matches!(
@@ -162,7 +162,7 @@ pub(crate) async fn transcript_facts_backfill_status(
     Ok(TranscriptFactsBackfillOutcome::Pending { cursor })
 }
 
-pub(crate) async fn advance_transcript_facts_backfill(
+pub async fn advance_transcript_facts_backfill(
     db: &RegisteredGlobalDb,
 ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
     advance_transcript_facts_backfill_with_limit(db, TRANSCRIPT_FACTS_BATCH).await
@@ -741,9 +741,9 @@ fn structured_backfill_target_version(provider: &str) -> i64 {
 }
 
 #[derive(Default, Clone, Copy)]
-pub(crate) struct StructuredBackfillStats {
-    pub(crate) inserted: u64,
-    pub(crate) files_scanned: u64,
+pub struct StructuredBackfillStats {
+    pub inserted: u64,
+    pub files_scanned: u64,
 }
 
 struct StructuredCandidate {
@@ -782,7 +782,7 @@ pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::F
 
 /// Re-parses the next bounded transcript batch and inserts rows missing from
 /// legacy stores.
-pub(crate) async fn backfill_structured_rows(
+pub async fn backfill_structured_rows(
     db: &RegisteredGlobalDb,
 ) -> Option<StructuredBackfillStats> {
     if !matches!(
@@ -1193,7 +1193,7 @@ async fn write_backfill_cursor(
 /// exactly as the sweep does, so tests can assert the compare-and-set
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
-pub(crate) async fn write_structured_backfill_cursor_for_test(
+pub async fn write_structured_backfill_cursor_for_test(
     db: &RegisteredGlobalDb,
     value: &str,
 ) -> Option<()> {
@@ -1207,7 +1207,7 @@ pub(crate) async fn write_structured_backfill_cursor_for_test(
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
-pub(crate) async fn read_structured_backfill_cursor_for_test(db: &RegisteredGlobalDb) -> String {
+pub async fn read_structured_backfill_cursor_for_test(db: &RegisteredGlobalDb) -> String {
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
     let Ok(snapshot) = db.read_snapshot().await else {
         return String::new();

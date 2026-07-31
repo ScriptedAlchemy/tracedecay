@@ -29,7 +29,7 @@ pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
 
-pub(crate) async fn registered_project_roots_from(
+pub async fn registered_project_roots_from(
     global: &RegisteredGlobalDb,
 ) -> Option<Vec<PathBuf>> {
     let log_unavailable = |surface: &'static str, error: &dyn std::fmt::Display| {
@@ -59,7 +59,7 @@ pub(crate) async fn registered_project_roots_from(
     Some(roots)
 }
 
-pub(crate) async fn try_ingest_user_codex_sessions_with_db_and_admission(
+pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
@@ -220,7 +220,7 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-pub(crate) async fn ingest_user_global_sources_for_provider_with_authorities(
+pub async fn ingest_user_global_sources_for_provider_with_authorities(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &RegisteredGlobalDb,

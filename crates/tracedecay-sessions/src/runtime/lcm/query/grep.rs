@@ -19,7 +19,7 @@ pub(super) fn contains_cjk(value: &str) -> bool {
     })
 }
 
-pub(crate) async fn grep(
+pub async fn grep(
     conn: &(impl QueryExecutor + ?Sized),
     request: LcmGrepRequest,
     retrieval_filters: LcmGrepFilters,

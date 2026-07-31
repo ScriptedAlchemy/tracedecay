@@ -11,26 +11,26 @@ mod filesystem_authority;
 mod rollback;
 
 #[cfg(test)]
-pub(crate) use delete_recovery::delete_external_payload;
-pub(crate) use delete_recovery::{
+pub use delete_recovery::delete_external_payload;
+pub use delete_recovery::{
     CommittedPayloadRemoval, PreparedPayloadDelete, payload_file_fingerprint,
     remove_committed_payload_file,
 };
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
-pub(crate) use delete_recovery::{
+pub use delete_recovery::{
     reconcile_committed_payload_drain, remove_committed_payload_file_with,
 };
 pub use filesystem_authority::VerifiedPayloadAuthority;
 use filesystem_authority::{
     PayloadFileWrite, prepare_payload_dir, read_verified_payload_file, write_private_file,
 };
-pub(crate) use filesystem_authority::{
+pub use filesystem_authority::{
     ensure_contained, existing_payload_dir, existing_payload_dir_opt,
 };
-pub(crate) use rollback::PayloadFileRollback;
+pub use rollback::PayloadFileRollback;
 
-pub(crate) async fn delete_external_payload_in_transaction(
+pub async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
@@ -40,7 +40,7 @@ pub(crate) async fn delete_external_payload_in_transaction(
         .await
 }
 
-pub(crate) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     filesystem_authority::canonical_storage_root(storage_root)
 }
 
@@ -48,7 +48,7 @@ pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
 }
 
-pub(crate) fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
+pub fn extract_payload_refs_from_text(text: &str) -> Vec<String> {
     let mut refs = Vec::new();
     let mut offset = 0usize;
     while let Some(relative) = text[offset..].find('[') {
@@ -92,7 +92,7 @@ fn is_external_payload_placeholder(value: &str) -> bool {
     .any(|prefix| lower.starts_with(prefix))
 }
 
-pub(crate) struct ExternalPayloadWrite<'a> {
+pub struct ExternalPayloadWrite<'a> {
     pub provider: &'a str,
     pub session_id: &'a str,
     pub message_id: &'a str,
@@ -101,7 +101,7 @@ pub(crate) struct ExternalPayloadWrite<'a> {
     pub metadata_json: Option<String>,
 }
 
-pub(crate) fn write_external_payload_tracked(
+pub fn write_external_payload_tracked(
     storage_root: &Path,
     write: ExternalPayloadWrite<'_>,
     rollback: &mut PayloadFileRollback,
@@ -114,7 +114,7 @@ pub(crate) fn write_external_payload_tracked(
 }
 
 #[cfg(test)]
-pub(crate) fn write_external_payload(
+pub fn write_external_payload(
     storage_root: &Path,
     provider: &str,
     session_id: &str,
@@ -178,7 +178,7 @@ fn write_external_payload_inner(
     ))
 }
 
-pub(crate) async fn upsert_payload_metadata(
+pub async fn upsert_payload_metadata(
     conn: &(impl Executor + ?Sized),
     payload: &LcmPayloadRef,
 ) -> Result<(), LcmError> {
@@ -231,7 +231,7 @@ pub(crate) async fn upsert_payload_metadata(
     Ok(())
 }
 
-pub(crate) async fn expand_payload(
+pub async fn expand_payload(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
     provider: &str,
@@ -280,7 +280,7 @@ pub(crate) async fn expand_payload(
     })
 }
 
-pub(crate) fn read_verified_payload_content(
+pub fn read_verified_payload_content(
     storage_root: &Path,
     payload_ref: &str,
     content_hash: &str,
@@ -397,7 +397,7 @@ async fn ensure_current_raw_payload_ref(
     Err(LcmError::PayloadNotFound)
 }
 
-pub(crate) async fn load_payload_metadata(
+pub async fn load_payload_metadata(
     conn: &(impl QueryExecutor + ?Sized),
     payload_ref: &str,
 ) -> Result<LcmPayloadRef, LcmError> {

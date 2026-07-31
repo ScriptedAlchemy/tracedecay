@@ -40,11 +40,11 @@ use super::store::{
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
-pub(crate) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
+pub fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
     entry.file_type().is_ok_and(|kind| kind.is_dir())
 }
 
-pub(crate) fn path_is_regular_file_no_follow(path: &Path) -> bool {
+pub fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
@@ -78,7 +78,7 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
     .map_err(|error| format!("invalid Cursor composer source: {error}"))
 }
 
-pub(crate) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
+pub fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
     let identity = crate::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
 }

@@ -61,9 +61,9 @@ pub struct VibeSource {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct VibeCaptureOutcome {
-    pub(crate) bytes_consumed: u64,
-    pub(crate) deferred: bool,
+pub struct VibeCaptureOutcome {
+    pub bytes_consumed: u64,
+    pub deferred: bool,
 }
 
 impl VibeSource {
@@ -199,7 +199,7 @@ impl TranscriptSource for VibeSource {
     }
 }
 
-pub(crate) async fn capture_vibe_observations(
+pub async fn capture_vibe_observations(
     facade: &HostAdmissionFacade<'_>,
     source: &VibeSource,
     project_root: &Path,

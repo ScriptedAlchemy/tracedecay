@@ -43,19 +43,19 @@ mod record_metadata;
 mod source_records;
 
 use cursor::{claude_cursor_key, claude_source_component};
-pub(crate) use frames::{
+pub use frames::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSourceFrame,
     ClaudeSourceFrameScan, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
 #[cfg(test)]
-pub(crate) use frames::{scan_claude_source_frames, try_scan_claude_source_frames};
+pub use frames::{scan_claude_source_frames, try_scan_claude_source_frames};
 #[cfg(test)]
 use record_metadata::{SessionAccumulator, session_metadata};
 #[cfg(test)]
 use source_records::reasoning_from_line;
 use source_records::record_cwd;
-pub(crate) use source_records::transcript_cwd;
-pub(crate) use source_records::{
+pub use source_records::transcript_cwd;
+pub use source_records::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
 
@@ -105,7 +105,7 @@ const CLAUDE_MESSAGE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
 const MAX_SCAN_DEPTH: u8 = 9;
 /// `cwd` should appear on an early line; scan a few in case the first is a
 /// `summary`/meta line without one.
-pub(crate) const CWD_PROBE_LINES: usize = 8;
+pub const CWD_PROBE_LINES: usize = 8;
 
 /// Claude Code transcript locator + parser.
 pub struct ClaudeSource {
@@ -152,7 +152,7 @@ impl ClaudeSource {
 
     /// Retain exactly the frames owned by this source scope and record the
     /// excluded verified ranges for cursor-only persistence.
-    pub(crate) fn retain_scoped_frames(
+    pub fn retain_scoped_frames(
         &self,
         scan: &mut ClaudeSourceFrameScan,
         project_root: &Path,

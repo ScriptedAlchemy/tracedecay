@@ -2,8 +2,11 @@ use serde::{Deserialize, Serialize};
 
 pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
+// Everything the root crate could once reach through `crate::sessions::…` is
+// `pub` here: crate-private visibility would now stop at the tracedecay-sessions
+// boundary and silently drop that surface from the root shim.
 pub mod claude;
-pub(crate) mod claude_observation;
+pub mod claude_observation;
 #[cfg(test)]
 mod claude_observation_benchmark;
 pub mod cline_like;
@@ -14,25 +17,24 @@ pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
-mod ingest;
+pub mod ingest;
 mod ingest_byte_budget;
 mod jsonl_observation_admission;
 pub mod kiro;
 pub mod lcm;
 pub mod session_temporal_benchmark;
 pub mod shared;
-pub(crate) mod snapshot_observation;
+pub mod snapshot_observation;
 pub mod source;
-// `pub` (not `pub(crate)`) only so integration tests can reach the three
-// `#[doc(hidden)]` process-safety test helpers; every other item stays
-// `pub(crate)`.
+// Exposes three `#[doc(hidden)]` process-safety test helpers that the root
+// integration tests reach through the `crate::sessions` shim.
 pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;
 pub mod workflow_state;
 
-pub(crate) use ingest::{
+pub use ingest::{
     TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation,
@@ -44,7 +46,7 @@ pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 /// Public because the snapshot capture entry points that return it are public.
 pub use snapshot_observation::SnapshotCaptureOutcome;
-pub use tracedecay_sessions::{ProviderScope, SessionProvider};
+pub use crate::{ProviderScope, SessionProvider};
 
 /// Search hit for session-message full-text lookup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

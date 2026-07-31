@@ -1,6 +1,6 @@
 use serde::Serialize;
 use tracedecay_domain::ObservationSourceRangeV1;
-use tracedecay_sessions::{
+use crate::{
     ProviderRunFailure, ProviderRunFold as GenericProviderRunFold,
     ProviderRunOutcome as GenericProviderRunOutcome,
 };
@@ -9,13 +9,13 @@ use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{claude_observation, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ClaudeObservationFailureClass {
+pub struct ClaudeObservationFailureClass {
     pub reason_code: &'static str,
     pub retryable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct TranscriptCatchUpFailure {
+pub struct TranscriptCatchUpFailure {
     pub provider: &'static str,
     pub source: &'static str,
     pub reason_code: &'static str,
@@ -87,7 +87,7 @@ pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailur
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IngestPassBounds {
+pub struct IngestPassBounds {
     /// Maximum work units discovered before discovery itself is truncated.
     pub discovered_units: usize,
     /// Maximum work units admitted into one pass after fair rotation.
@@ -107,7 +107,7 @@ pub(crate) struct IngestPassBounds {
 /// Typed coverage / overload outcome for one bounded ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum IngestPassCoverage {
+pub enum IngestPassCoverage {
     /// Every discovered unit was admitted and dispositioned in this pass.
     Complete,
     /// Some discovered work remains; a durable scheduling frontier may advance.
@@ -120,14 +120,14 @@ pub(crate) enum IngestPassCoverage {
 }
 
 impl IngestPassCoverage {
-    pub(crate) const fn is_complete(self) -> bool {
+    pub const fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
     }
 }
 
 /// Narrow additive pass result required by PR6 bounded multi-source scheduling.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IngestPassOutcome {
+pub struct IngestPassOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
@@ -162,7 +162,7 @@ impl IngestPassOutcome {
 
 /// Pure round-robin admission over a discovered unit count.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RoundRobinAdmission {
+pub struct RoundRobinAdmission {
     pub admitted_indices: Vec<usize>,
     pub coverage: IngestPassCoverage,
 }
@@ -171,7 +171,7 @@ pub(crate) struct RoundRobinAdmission {
 ///
 /// A fully covered pass (`discovered <= max_units`) reports complete coverage;
 /// callers persist rotation only for bounded partial passes.
-pub(crate) fn plan_round_robin_admission(
+pub fn plan_round_robin_admission(
     discovered: usize,
     frontier_offset: u64,
     max_units: usize,
@@ -208,7 +208,7 @@ pub(crate) fn plan_round_robin_admission(
     }
 }
 
-pub(crate) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
+pub fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
     let mut remaining = bounds.bytes_per_pass;
     let mut budgets = Vec::with_capacity(unit_count.min(bounds.units_per_pass));
     while budgets.len() < unit_count && remaining > 0 && bounds.bytes_per_unit > 0 {
@@ -223,7 +223,7 @@ pub(crate) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBo
 ///
 /// Cancellation and full coverage never write. Partial / backpressured passes
 /// write only when at least one unit was attempted so rotation can continue.
-pub(crate) fn scheduling_write_required(
+pub fn scheduling_write_required(
     coverage: IngestPassCoverage,
     attempted_units: usize,
     cancelled: bool,
@@ -237,7 +237,7 @@ pub(crate) fn scheduling_write_required(
     )
 }
 
-pub(crate) fn classify_transcript_ingest_failure(
+pub fn classify_transcript_ingest_failure(
     provider: &'static str,
     source: &'static str,
     error: &source::TranscriptIngestError,
@@ -352,7 +352,7 @@ pub(super) fn warn_transcript_catch_up_failure(
     failure
 }
 
-pub(crate) fn classify_claude_observation_failure(
+pub fn classify_claude_observation_failure(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> ClaudeObservationFailureClass {
     use claude_observation::ClaudeObservationIngestError as Ingest;

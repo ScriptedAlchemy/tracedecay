@@ -20,7 +20,7 @@ use crate::runtime::SessionMessageRecord;
 /// `cache_read_input_tokens` and `input_tokens` keeps only the uncached
 /// remainder.
 #[derive(Default)]
-pub(crate) struct CodexTurnUsage {
+pub struct CodexTurnUsage {
     input: i64,
     output: i64,
     cache_read: i64,
@@ -35,7 +35,7 @@ impl CodexTurnUsage {
     /// per-call counters to the running turn sums. Returns `true` for every
     /// `token_count` line (even malformed or duplicate ones, which add
     /// nothing) and `false` for any other line kind.
-    pub(crate) fn observe(&mut self, record: &Value) -> bool {
+    pub fn observe(&mut self, record: &Value) -> bool {
         if record.get("type").and_then(Value::as_str) != Some("event_msg") {
             return false;
         }
@@ -107,7 +107,7 @@ impl CodexTurnUsage {
 
     /// The summed counters as a dashboard-shaped usage object, resetting the
     /// turn sums (the cumulative-total dedup guard survives across turns).
-    pub(crate) fn take(&mut self) -> Option<Value> {
+    pub fn take(&mut self) -> Option<Value> {
         if !self.seen {
             return None;
         }
@@ -139,7 +139,7 @@ impl CodexTurnUsage {
 /// Add `add`'s numeric counters field-wise into `existing` (both are usage
 /// objects). Used when several flushes land on the same assistant message
 /// (e.g. an aborted turn with no reply of its own).
-pub(crate) fn merge_usage_counters(existing: &mut Value, add: &Value) {
+pub fn merge_usage_counters(existing: &mut Value, add: &Value) {
     let (Some(map), Some(add_map)) = (existing.as_object_mut(), add.as_object()) else {
         return;
     };
@@ -154,7 +154,7 @@ pub(crate) fn merge_usage_counters(existing: &mut Value, add: &Value) {
 /// Attach the finished turn's summed usage to the most recent assistant
 /// message of the batch (the reply the turn's `token_count` events report
 /// on), merging additively when that message already carries usage.
-pub(crate) fn flush_turn_usage(
+pub fn flush_turn_usage(
     messages: &mut [SessionMessageRecord],
     turn_usage: &mut CodexTurnUsage,
 ) {

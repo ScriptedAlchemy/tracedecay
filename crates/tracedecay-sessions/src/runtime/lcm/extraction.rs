@@ -30,7 +30,7 @@ struct LcmProvidedSummaryRouteEnvelope {
     pre_compaction_extraction: Option<LcmExtractionResult>,
 }
 
-pub(crate) fn build_extraction_request(
+pub fn build_extraction_request(
     session_id: &str,
     source_range: &LcmSummarySourceRange,
     source_messages: &[LcmSummarySourceMessage],
@@ -47,7 +47,7 @@ pub(crate) fn build_extraction_request(
     })
 }
 
-pub(crate) fn split_summary_route(
+pub fn split_summary_route(
     route: Option<&str>,
 ) -> (Option<String>, Option<LcmExtractionResult>) {
     let route = route.and_then(non_empty).map(str::to_string);
@@ -71,7 +71,7 @@ pub(crate) fn split_summary_route(
     (Some(route), None)
 }
 
-pub(crate) fn summary_metadata_extraction(
+pub fn summary_metadata_extraction(
     extraction_result: Option<&LcmExtractionResult>,
     condensation: bool,
 ) -> Value {

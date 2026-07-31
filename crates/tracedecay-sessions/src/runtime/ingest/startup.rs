@@ -11,7 +11,7 @@ use super::user::{
     registered_project_roots_from,
 };
 
-pub(crate) struct TranscriptIngestOutcome {
+pub struct TranscriptIngestOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
@@ -37,7 +37,7 @@ impl TranscriptIngestOutcome {
         }
     }
 
-    pub(crate) fn is_success(&self) -> bool {
+    pub fn is_success(&self) -> bool {
         self.coverage.is_complete() && self.failures.is_empty()
     }
 }
@@ -101,7 +101,7 @@ impl Drop for StartupUserIngestGuard {
 /// Coalesces the profile-wide user transcript sweep shared by every project
 /// server created during daemon startup. Live hooks use the retained
 /// registered profile authority, so the cooldown cannot hide a completed turn.
-pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
+pub async fn ingest_user_global_sources_for_startup_with_db(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &RegisteredGlobalDb,
@@ -119,7 +119,7 @@ pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
 }
 
 #[cfg(test)]
-pub(crate) async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority(
+pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority(
     _db: &RegisteredGlobalDb,
     _registry_db: &RegisteredGlobalDb,
     _profile_root: &Path,
