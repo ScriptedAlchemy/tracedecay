@@ -1,5 +1,4 @@
-#![allow(dead_code)] // white-box test include; not all items exercised
-//! Projection execution and atomic publication handoff (Plan 25).
+//! Projection execution and atomic publication handoff.
 //!
 //! Projectors receive one immutable [`ProjectionBatchRequestV1`] and return
 //! one complete deterministic receipt. The orchestration helper verifies the

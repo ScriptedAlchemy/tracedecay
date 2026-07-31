@@ -1,5 +1,4 @@
 mod architecture_boundaries;
-mod benchmark_contract;
 mod chunk_incremental;
 mod deterministic_extraction;
 mod diagnostic_generation;
@@ -8,7 +7,6 @@ mod git_joins;
 mod impact_joins;
 mod language_registry;
 mod lineage;
-mod production_join_readers;
 mod production_orchestration;
 mod projection_receipts;
 mod sanitized_intake;
