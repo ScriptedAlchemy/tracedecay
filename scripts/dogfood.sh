@@ -535,7 +535,20 @@ if [[ "$marker_boundary" == reached ]]; then
 fi
 attempt_id="$(date +%s)-$$-$RANDOM-$RANDOM"
 
-if [[ -z "$verified_backup" || ! -d "$verified_backup" \
+# Owner-authorized fast path (2026-07-31): a plain `cp -a` profile copy with
+# no manifest or rehearsal. The checksummed backup-profile path re-reads and
+# re-writes the full profile twice; at current profile size that outlasts the
+# maintenance window, so the owner accepted a plain copy as the recovery
+# artifact. The copy must at least LOOK like a profile before we proceed.
+if [[ "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" == 1 ]]; then
+  if [[ -z "$verified_backup" || ! -d "$verified_backup/profile" \
+    || ! -f "$verified_backup/profile/global.db" ]]; then
+    printf '%s\n' \
+      'TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1 requires TRACEDECAY_DOGFOOD_BACKUP to' \
+      'name a directory holding a plain profile copy at <backup>/profile.' >&2
+    exit 1
+  fi
+elif [[ -z "$verified_backup" || ! -d "$verified_backup" \
   || ! -f "$verified_backup/backup-manifest.json" ]]; then
   printf '%s\n' \
     'dogfood requires TRACEDECAY_DOGFOOD_BACKUP to name a complete verified profile backup.' \
@@ -671,13 +684,17 @@ trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
-backup_rehearsal=$(mktemp -d "$stage_dir/dogfood-backup-rehearsal.XXXXXX")
-rmdir -- "$backup_rehearsal"
-"$source_binary" migrate rehearse-profile-backup \
-  --backup "$verified_backup" \
-  --restore "$backup_rehearsal"
-rm -rf -- "$backup_rehearsal"
-backup_rehearsal=
+# A plain owner-authorized copy has no manifest to rehearse against; the
+# checksummed path keeps its full restore-and-verify rehearsal.
+if [[ "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" != 1 ]]; then
+  backup_rehearsal=$(mktemp -d "$stage_dir/dogfood-backup-rehearsal.XXXXXX")
+  rmdir -- "$backup_rehearsal"
+  "$source_binary" migrate rehearse-profile-backup \
+    --backup "$verified_backup" \
+    --restore "$backup_rehearsal"
+  rm -rf -- "$backup_rehearsal"
+  backup_rehearsal=
+fi
 
 report_stage forward-boundary-preflight "$preflight_started"
 install_started=$SECONDS
