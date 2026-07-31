@@ -544,7 +544,6 @@ fn git_changed_files(
             continue;
         }
 
-        // Check if file exists in HEAD tree
         let head_entry = head_tree
             .lookup_entry_by_path(std::path::Path::new(&path_str))
             .ok()
@@ -994,7 +993,6 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
             }
 
             if has_external_callers {
-                // Track impacted modules
                 for (caller, _) in &callers {
                     if !changed_files.contains(&caller.file_path) {
                         let dir = caller
@@ -1259,7 +1257,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     };
     let head_ref = head_cg.as_ref().unwrap_or(cg);
 
-    // Collect nodes from both branches
     let base_files = base_cg.get_all_files().await?;
     let head_files = head_ref.get_all_files().await?;
 
@@ -1294,7 +1291,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             .map(|n| (n.qualified_name.as_str(), n))
             .collect();
 
-        // Added: in head but not in base
         for (qn, node) in &head_map {
             if let Some(filter) = kind_filter
                 && node.kind.as_str() != filter
@@ -1314,7 +1310,6 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             }
         }
 
-        // Removed: in base but not in head
         for (qn, node) in &base_map {
             if let Some(filter) = kind_filter
                 && node.kind.as_str() != filter

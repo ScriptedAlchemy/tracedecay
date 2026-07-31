@@ -683,7 +683,6 @@ pub(super) async fn handle_gini(
     let gini = gini_coefficient(&values);
     let interpretation = gini_label(gini);
 
-    // Sort descending, take top limit as outliers with percentiles
     let total_items = named_values.len();
     let mut sorted = named_values;
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1513,7 +1512,6 @@ pub(super) async fn handle_session_end(
     let tracedecay_dir = &cg.store_layout().data_root;
     let baseline_path = tracedecay_dir.join("session_baseline.json");
 
-    // Check if baseline exists
     if !baseline_path.exists() {
         let output = json!({
             "status": "no_baseline",
@@ -1588,7 +1586,6 @@ pub(super) async fn handle_session_end(
     let delta = i64::from(signal_after) - i64::from(signal_before);
     let pass = signal_after >= signal_before;
 
-    // Compute per-dimension deltas
     let (dimensions, degraded_dimensions) = session_dimension_deltas(dims_before, &snap);
 
     let output = json!({

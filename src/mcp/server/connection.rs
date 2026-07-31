@@ -299,7 +299,6 @@ impl McpServer {
                 continue;
             }
 
-            // Parse the incoming JSON
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
             let revocable_tool_call = parsed.as_ref().ok().and_then(|request| {
                 (request.method == "tools/call").then_some(())?;
@@ -476,7 +475,6 @@ impl McpServer {
                 }
             }
 
-            // Write response (if any) as a single line to stdout
             if let Some(resp) = response {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
@@ -542,7 +540,6 @@ impl McpServer {
             tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
         }
 
-        // Update global DB with final count and checkpoint it
         if let Some(ref gdb) = self.accounting_db {
             gdb.upsert(cg.project_root(), tokens_saved).await;
             gdb.checkpoint().await;
