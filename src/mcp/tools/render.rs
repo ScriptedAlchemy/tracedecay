@@ -4,11 +4,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_application::ApplicationProblem;
 
 use crate::context::CONTEXT_PRIORITY_HEADINGS;
 use crate::daemon_client::RequestedOutputFormat;
-use crate::daemon_client::concealed_not_found_or_not_authorized;
 use crate::display::format_relative_time;
 use crate::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, RESPONSE_RETRIEVE_TOOL, ResponseHandleRecord,
@@ -30,18 +28,6 @@ fn parse_format(args: &Value) -> RequestedOutputFormat {
 /// True when the caller explicitly opted into JSON output via `format: "json"`.
 pub(super) fn wants_json(args: &Value) -> bool {
     parse_format(args) == RequestedOutputFormat::Json
-}
-
-/// Serializes a canonical pre-admission problem for MCP structured content.
-#[allow(dead_code)] // Plan 21 output unification helper — staged
-pub(super) fn application_problem_value(problem: &ApplicationProblem) -> serde_json::Result<Value> {
-    serde_json::to_value(problem)
-}
-
-/// Returns the common non-disclosing unknown-or-unauthorized problem value.
-#[allow(dead_code)] // Plan 21 output unification helper — staged
-pub(super) fn concealed_problem_value() -> serde_json::Result<Value> {
-    application_problem_value(&concealed_not_found_or_not_authorized())
 }
 
 pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Value, md: F) -> String
@@ -72,37 +58,6 @@ where
             }
             truncated_markdown_with_handle(project_root, &text)
         }
-    }
-}
-
-/// Truncates a string to the maximum response character limit, appending
-/// a truncation notice if necessary.
-///
-/// Legacy, irreversible truncation: no retrieval handle is stored. Prefer
-/// [`truncate_text_with_handle`] for plain-text tool output.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn truncate_response(s: &str) -> String {
-    debug_assert!(!s.is_empty(), "truncate_response called with empty string");
-    if s.len() <= MAX_RESPONSE_CHARS {
-        s.to_string()
-    } else {
-        let started = std::time::Instant::now();
-        let now = current_timestamp();
-        // Find a valid UTF-8 character boundary at or before MAX_RESPONSE_CHARS.
-        let mut end = MAX_RESPONSE_CHARS;
-        while !s.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        let truncated = format!("{}\n\n[... truncated at {} chars]", &s[..end], end);
-        observe_response_truncation(
-            s.len(),
-            truncated.len(),
-            false,
-            now,
-            "not_available",
-            started.elapsed(),
-        );
-        truncated
     }
 }
 
@@ -182,15 +137,6 @@ pub(super) fn truncated_json_envelope_with_handle(
         }
         end = end.saturating_sub(1024);
     }
-}
-
-/// Reversible truncation for plain-text tool output. Returns `text` unchanged
-/// when it fits within [`MAX_RESPONSE_CHARS`]; otherwise stores the full text
-/// via the response-handle machinery and returns the readable markdown
-/// truncation envelope (preview plus `rh_` retrieval handle).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn truncate_text_with_handle(project_root: Option<&Path>, text: &str) -> String {
-    truncated_markdown_with_handle(project_root, text)
 }
 
 pub(super) fn markdown_preview_with_handle(

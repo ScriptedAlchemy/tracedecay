@@ -2,27 +2,15 @@
 
 use super::view::{CanonicalHumanView, HumanFieldValue};
 
-/// The reviewed revision of the compact human presentation contract.
-pub const HUMAN_VIEW_REVISION: u32 = 2;
-
-/// Presentation-ready human output with its contract revision.
+/// Presentation-ready human output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkdownView {
-    revision: u32,
     text: String,
 }
 
 impl MarkdownView {
     pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            revision: HUMAN_VIEW_REVISION,
-            text: text.into(),
-        }
-    }
-
-    #[allow(dead_code)] // Plan 21 CLI output helper — staged
-    pub const fn revision(&self) -> u32 {
-        self.revision
+        Self { text: text.into() }
     }
 
     pub fn as_str(&self) -> &str {
@@ -60,15 +48,7 @@ fn escape_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::view::{CanonicalHumanView, HumanField, HumanFieldValue};
-    use super::{HUMAN_VIEW_REVISION, MarkdownView, render};
-
-    #[test]
-    fn carries_the_current_human_view_revision() {
-        let view = MarkdownView::new("result");
-
-        assert_eq!(view.revision(), HUMAN_VIEW_REVISION);
-        assert_eq!(view.as_str(), "result");
-    }
+    use super::render;
 
     #[test]
     fn canonical_markdown_golden_formats_only_the_supplied_view() {
