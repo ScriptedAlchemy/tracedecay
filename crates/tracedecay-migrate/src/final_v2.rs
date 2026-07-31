@@ -216,6 +216,23 @@ impl ReleasedV0067Fixture {
                     .get(key)
                     .is_none_or(String::is_empty)
             })
+            || self
+                .preservation_probes
+                .get("profile_id")
+                .map(String::as_str)
+                != Some(self.source.profile_id.as_str())
+            || self
+                .preservation_probes
+                .get("repository_id")
+                .map(String::as_str)
+                != Some(self.source.repository_id.as_str())
+            || self
+                .preservation_probes
+                .get("project_id")
+                .map(String::as_str)
+                != Some(self.source.project_id.as_str())
+            || self.preservation_probes.get("store_id").map(String::as_str)
+                != Some(self.source.store_id.as_str())
         {
             return Err(MigrationContractError::SourceSchemaMismatch);
         }
@@ -591,6 +608,25 @@ impl LastReleasedToFinalV2MigrationContract {
     }
 }
 
+/// Construction inputs for [`ExactMigrationSourceIdentity`].
+///
+/// This is an intentional break from the previous eight-argument
+/// [`ExactMigrationSourceIdentity::new`] signature. The type is crate-public
+/// and re-exported by the root package, but every production and test caller
+/// lived inside this workspace; callers now pass one typed request. Persisted
+/// serde shapes remain those of [`ExactMigrationSourceIdentity`] itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExactMigrationSourceIdentityRequest {
+    pub profile_id: String,
+    pub repository_id: String,
+    pub project_id: String,
+    pub store_id: String,
+    pub runtime_binding: StoreRuntimeBindingV1,
+    pub verified_locator: VerifiedStoreLocatorV1,
+    pub material_digest: [u8; 32],
+    pub schema_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExactMigrationSourceIdentity {
@@ -606,27 +642,9 @@ pub struct ExactMigrationSourceIdentity {
 
 impl ExactMigrationSourceIdentity {
     pub fn new(
-        profile_id: impl Into<String>,
-        repository_id: impl Into<String>,
-        project_id: impl Into<String>,
-        store_id: impl Into<String>,
-        runtime_binding: StoreRuntimeBindingV1,
-        verified_locator: VerifiedStoreLocatorV1,
-        material_digest: [u8; 32],
-        schema_id: impl Into<String>,
+        request: ExactMigrationSourceIdentityRequest,
     ) -> Result<Self, MigrationContractError> {
-        let identity = Self {
-            profile_id: profile_id.into(),
-            repository_id: repository_id.into(),
-            project_id: project_id.into(),
-            store_id: store_id.into(),
-            runtime_binding,
-            verified_locator,
-            material_digest,
-            schema_id: schema_id.into(),
-        };
-        identity.validate()?;
-        Ok(identity)
+        Self::try_from(request)
     }
 
     pub fn validate(&self) -> Result<(), MigrationContractError> {
@@ -653,6 +671,25 @@ impl ExactMigrationSourceIdentity {
             return Err(MigrationContractError::SourceSchemaMismatch);
         }
         Ok(())
+    }
+}
+
+impl TryFrom<ExactMigrationSourceIdentityRequest> for ExactMigrationSourceIdentity {
+    type Error = MigrationContractError;
+
+    fn try_from(request: ExactMigrationSourceIdentityRequest) -> Result<Self, Self::Error> {
+        let identity = Self {
+            profile_id: request.profile_id,
+            repository_id: request.repository_id,
+            project_id: request.project_id,
+            store_id: request.store_id,
+            runtime_binding: request.runtime_binding,
+            verified_locator: request.verified_locator,
+            material_digest: request.material_digest,
+            schema_id: request.schema_id,
+        };
+        identity.validate()?;
+        Ok(identity)
     }
 }
 
@@ -1123,6 +1160,111 @@ pub enum MigrationContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_store::{
+        BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,
+        StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
+        VerifiedStoreLocatorV1, WorktreeId,
+    };
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn valid_source_request() -> ExactMigrationSourceIdentityRequest {
+        let shard_id = StoreShardIdV1::code(
+            id::<BrainId>("brain.source"),
+            id::<UserProfileId>("profile.source"),
+            id::<ProjectId>("project.source"),
+            id::<RepositoryId>("repository.source"),
+            CodeShardScopeV1::Worktree {
+                worktree_id: id::<WorktreeId>("worktree.source"),
+            },
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let runtime_binding = StoreRuntimeBindingV1::new(
+            shard_id.clone(),
+            incarnation,
+            StoreAuthorityEpochV1::new(1).unwrap(),
+        );
+        let verified_locator = VerifiedStoreLocatorV1::new(
+            shard_id,
+            incarnation,
+            LocatorDigest::new(format!("sha256:{:064x}", 9)).unwrap(),
+        );
+        ExactMigrationSourceIdentityRequest {
+            profile_id: "profile.source".to_owned(),
+            repository_id: "repository.source".to_owned(),
+            project_id: "project.source".to_owned(),
+            store_id: "store.source".to_owned(),
+            runtime_binding,
+            verified_locator,
+            material_digest: [9; 32],
+            schema_id: LAST_RELEASED_SCHEMA_ID.to_owned(),
+        }
+    }
+
+    #[test]
+    fn source_identity_constructs_from_typed_request() {
+        let request = valid_source_request();
+        let identity = ExactMigrationSourceIdentity::new(request.clone()).unwrap();
+        assert_eq!(identity.profile_id, request.profile_id);
+        assert_eq!(identity.repository_id, request.repository_id);
+        assert_eq!(identity.project_id, request.project_id);
+        assert_eq!(identity.store_id, request.store_id);
+        assert_eq!(identity.runtime_binding, request.runtime_binding);
+        assert_eq!(identity.verified_locator, request.verified_locator);
+        assert_eq!(identity.material_digest, request.material_digest);
+        assert_eq!(identity.schema_id, LAST_RELEASED_SCHEMA_ID);
+        identity.validate().unwrap();
+    }
+
+    #[test]
+    fn source_identity_request_rejects_invalid_inputs() {
+        let mut empty_profile = valid_source_request();
+        empty_profile.profile_id.clear();
+        assert_eq!(
+            ExactMigrationSourceIdentity::new(empty_profile),
+            Err(MigrationContractError::SourceSchemaMismatch)
+        );
+
+        let mut zero_digest = valid_source_request();
+        zero_digest.material_digest = [0; 32];
+        assert_eq!(
+            ExactMigrationSourceIdentity::new(zero_digest),
+            Err(MigrationContractError::SourceSchemaMismatch)
+        );
+
+        let mut wrong_schema = valid_source_request();
+        wrong_schema.schema_id = "tracedecay.not-released".to_owned();
+        assert_eq!(
+            ExactMigrationSourceIdentity::new(wrong_schema),
+            Err(MigrationContractError::SourceSchemaMismatch)
+        );
+
+        let mut mismatched_project = valid_source_request();
+        mismatched_project.project_id = "project.other".to_owned();
+        assert_eq!(
+            ExactMigrationSourceIdentity::new(mismatched_project),
+            Err(MigrationContractError::SourceSchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn source_identity_round_trips_persisted_shape() {
+        let identity = ExactMigrationSourceIdentity::new(valid_source_request()).unwrap();
+        let encoded = serde_json::to_string(&identity).unwrap();
+        let decoded: ExactMigrationSourceIdentity = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, identity);
+        decoded.validate().unwrap();
+        assert!(
+            !encoded.contains("ExactMigrationSourceIdentityRequest"),
+            "request type must not appear in persisted JSON"
+        );
+    }
 
     #[test]
     fn every_released_fixture_is_exact_and_recognizable() {

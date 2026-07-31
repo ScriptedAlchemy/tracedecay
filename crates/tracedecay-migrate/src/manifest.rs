@@ -839,16 +839,16 @@ mod tests {
             incarnation,
             LocatorDigest::new(format!("sha256:{material:064x}")).unwrap(),
         );
-        ExactMigrationSourceIdentity::new(
-            "profile.final-v2",
-            "repository.final-v2",
-            "project.final-v2",
-            "store.final-v2",
-            binding,
-            locator,
-            [material; 32],
-            LAST_RELEASED_SCHEMA_ID,
-        )
+        ExactMigrationSourceIdentity::new(ExactMigrationSourceIdentityRequest {
+            profile_id: "profile.final-v2".to_owned(),
+            repository_id: "repository.final-v2".to_owned(),
+            project_id: "project.final-v2".to_owned(),
+            store_id: "store.final-v2".to_owned(),
+            runtime_binding: binding,
+            verified_locator: locator,
+            material_digest: [material; 32],
+            schema_id: LAST_RELEASED_SCHEMA_ID.to_owned(),
+        })
         .expect("source identity")
     }
 

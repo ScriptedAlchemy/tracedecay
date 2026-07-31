@@ -994,16 +994,16 @@ mod tests {
             incarnation,
             LocatorDigest::new(format!("sha256:{material:064x}")).unwrap(),
         );
-        ExactMigrationSourceIdentity::new(
-            "project.release",
-            "project.release",
-            "project.release",
-            "project.release",
-            binding,
-            locator,
-            [material; 32],
-            crate::LAST_RELEASED_SCHEMA_ID,
-        )
+        ExactMigrationSourceIdentity::new(crate::ExactMigrationSourceIdentityRequest {
+            profile_id: "project.release".to_owned(),
+            repository_id: "project.release".to_owned(),
+            project_id: "project.release".to_owned(),
+            store_id: "project.release".to_owned(),
+            runtime_binding: binding,
+            verified_locator: locator,
+            material_digest: [material; 32],
+            schema_id: crate::LAST_RELEASED_SCHEMA_ID.to_owned(),
+        })
         .unwrap()
     }
 
@@ -1203,6 +1203,82 @@ mod tests {
         );
         assert!(runtime.calls.borrow().is_empty());
         assert!(journal.0.borrow().is_none());
+    }
+
+    #[test]
+    fn exact_source_identity_component_drift_never_starts_backup_or_publication() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut ExactMigrationSourceIdentity)>)> = vec![
+            (
+                "profile_id",
+                Box::new(|source| source.profile_id = "profile.other".to_owned()),
+            ),
+            (
+                "repository_id",
+                Box::new(|source| source.repository_id = "repository.other".to_owned()),
+            ),
+            (
+                "project_id",
+                Box::new(|source| source.project_id = "project.other".to_owned()),
+            ),
+            (
+                "store_id",
+                Box::new(|source| source.store_id = "store.other".to_owned()),
+            ),
+            (
+                "schema_id",
+                Box::new(|source| source.schema_id = "tracedecay.release.other".to_owned()),
+            ),
+            (
+                "material_digest",
+                Box::new(|source| source.material_digest = [9; 32]),
+            ),
+            (
+                "runtime_binding",
+                Box::new(|source| {
+                    source.runtime_binding = StoreRuntimeBindingV1::new(
+                        source.runtime_binding.shard_id.clone(),
+                        StoreIncarnationV1::new(2).unwrap(),
+                        StoreAuthorityEpochV1::new(1).unwrap(),
+                    );
+                }),
+            ),
+            (
+                "verified_locator",
+                Box::new(|source| {
+                    source.verified_locator = VerifiedStoreLocatorV1::new(
+                        source.verified_locator.shard_id.clone(),
+                        source.verified_locator.incarnation,
+                        LocatorDigest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+                    );
+                }),
+            ),
+        ];
+
+        for (label, mutate) in cases {
+            let runtime = RecordingRuntime::default();
+            let journal = MemoryJournal::default();
+            let mut drifted = request();
+            mutate(&mut drifted.source);
+            drifted.publication_grant.source = drifted.source.clone();
+            drifted.publication_grant.target_evidence.source = drifted.source.clone();
+
+            let error = execute_final_v2_migration(&runtime, &journal, drifted).unwrap_err();
+            assert!(
+                error.contract_error().is_some(),
+                "{label} must fail closed on complete identity mismatch: {error:?}"
+            );
+            let calls = runtime.calls.borrow().clone();
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| { matches!(*call, "recover_publication" | "inspect" | "verify") }),
+                "{label} must not start backup/publication: {calls:?}"
+            );
+            assert!(
+                journal.0.borrow().is_none(),
+                "{label} must leave no journal"
+            );
+        }
     }
 
     #[test]
