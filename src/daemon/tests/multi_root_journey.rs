@@ -308,6 +308,11 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
         0,
         "quarantined multi-root initialize must not mount an LSP runtime"
     );
+    assert_eq!(
+        engine.invocation.service.active_lsp_runtime_count().await,
+        0,
+        "quarantined multi-root initialize must not create a runtime actor"
+    );
     assert!(
         engine
             .invocation
@@ -325,6 +330,28 @@ async fn authenticated_multi_root_cas_is_quarantined_before_storage() {
             .await
             .is_none(),
         "quarantined initialize must not persist the scope set in the second store"
+    );
+    let sibling_root_lsp = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::lsp_open(
+            "request.sibling-root.lsp",
+            "client.sibling-root",
+            Some(second_uri.clone()),
+            vec![second_uri.clone()],
+        ),
+    )
+    .await;
+    assert!(matches!(
+        sibling_root_lsp.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+        }
+    ));
+    assert_eq!(
+        engine.invocation.service.active_lsp_runtime_count().await,
+        0,
+        "a sibling single-folder hint must not mount a runtime"
     );
     let single_root_lsp = execute_daemon_invocation(
         &engine,

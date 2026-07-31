@@ -8388,6 +8388,11 @@ impl DaemonInvocationService {
         self.operation_events.expire_all().await;
     }
 
+    #[cfg(test)]
+    pub(crate) async fn active_lsp_runtime_count(&self) -> usize {
+        self.lsp_sessions.lock().await.len()
+    }
+
     async fn open_lsp_session(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
