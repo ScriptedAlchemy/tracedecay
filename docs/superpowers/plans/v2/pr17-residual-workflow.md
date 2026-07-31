@@ -8,6 +8,9 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical version/compatibility/migration language cannot resurrect
+> branch-only scaffolding; without released or live predecessor evidence, the
+> current numbered plan changes the contract in place.
 
 **Goal:** Extend PR14's single graph/runtime authorities with advanced workflow
 definition, fan-out/synthesis/recovery, placement, expertise, automation, and
