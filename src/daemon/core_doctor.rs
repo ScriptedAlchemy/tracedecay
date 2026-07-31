@@ -420,9 +420,8 @@ async fn doctor_runtime_value_inner(
     // `authority_audit_error` carries the observed detail when there is one and
     // otherwise mirrors the typed reason so readers that only know the older
     // key still see the same vocabulary.
-    value["database"]["authority_audit_error"] = json!(
-        authority_detail.or_else(|| authority_reason.map(std::string::ToString::to_string))
-    );
+    value["database"]["authority_audit_error"] =
+        json!(authority_detail.or_else(|| authority_reason.map(str::to_string)));
 
     let canonical_session_path = session_path
         .canonicalize()
@@ -882,6 +881,40 @@ mod doctor_runtime_route_tests {
         assert!(!parsed.should_serve_from_core(true));
     }
 
+    /// The comprehensive Doctor request (`authority_audit` +
+    /// `session_ingest_health`, no `doctor_report`) is always served from the
+    /// core, even when a cached core-stage server has already published a ready
+    /// Doctor report. That makes the core route — not the routed project owner
+    /// — the producer Doctor reads its authority verdict from in the common
+    /// case, so the core route must run the real audit rather than infer one.
+    #[test]
+    fn comprehensive_request_is_served_from_core_even_with_a_ready_report() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "format": "json",
+                    "authority_audit": true,
+                    "session_ingest_health": true,
+                },
+            },
+        })
+        .to_string();
+        let parsed = doctor_runtime_request(&request).expect("comprehensive Doctor request");
+
+        assert!(!parsed.doctor_report_requested());
+        for report_ready in [false, true] {
+            assert!(
+                parsed.should_serve_from_core(report_ready),
+                "comprehensive requests never fall through to the routed owner \
+                 (doctor_report_ready={report_ready})"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unix_doctor_probe_drops_activity_before_core_response_write() {
         let root = tempfile::TempDir::new().expect("fixture root");
@@ -1174,8 +1207,20 @@ mod doctor_runtime_route_tests {
             value.pointer("/session_temporal_health/reason"),
             Some(&serde_json::json!("project_store_authority_unavailable"))
         );
+        // The cold route never reaches the audit, so it must say so rather than
+        // publish a verdict: `ok` stays null and the typed reason survives on
+        // both the current and the legacy key.
+        assert_eq!(
+            value.pointer("/database/authority_audit_ok"),
+            Some(&serde_json::Value::Null),
+            "an audit that did not run must not report a verdict"
+        );
         assert_eq!(
             value.pointer("/database/authority_audit_reason"),
+            Some(&serde_json::json!("authority_audit_not_run"))
+        );
+        assert_eq!(
+            value.pointer("/database/authority_audit_error"),
             Some(&serde_json::json!("authority_audit_not_run"))
         );
         for path in [
