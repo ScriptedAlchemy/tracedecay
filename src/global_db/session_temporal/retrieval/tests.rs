@@ -147,10 +147,6 @@ fn record_request() -> PageRequest {
     PageRequest::for_test(32, 64 * 1024, 8 * 1024, 32, 512)
 }
 
-fn record_candidate() -> RankingCandidate {
-    candidate_for_anchor("anchor-1")
-}
-
 fn candidate_for_anchor(anchor_id: &str) -> RankingCandidate {
     RankingCandidate {
         stable_id: "exact:occurrence-1".to_string(),

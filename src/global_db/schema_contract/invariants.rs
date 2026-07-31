@@ -543,6 +543,7 @@ pub(in crate::global_db) async fn validate_session_temporal_repair_authority_aud
     Ok(())
 }
 
+#[cfg(test)]
 pub(in crate::global_db) async fn validate_session_temporal_effect_authority_page(
     conn: &impl QueryExecutor,
     after_rowid: i64,
@@ -599,18 +600,6 @@ pub(in crate::global_db) async fn validate_session_temporal_effect_authority_pag
         count += 1;
     }
     Ok((last_rowid, count < page_rows))
-}
-
-pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_page(
-    conn: &impl QueryExecutor,
-    after_rowid: i64,
-) -> crate::errors::Result<(i64, bool)> {
-    validate_session_temporal_receipt_authority_page_with_limit(
-        conn,
-        after_rowid,
-        SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS,
-    )
-    .await
 }
 
 pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_page_with_limit(

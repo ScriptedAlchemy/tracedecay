@@ -11,7 +11,7 @@ use crate::{
         DatabaseAuthority,
         engine::{
             Connection, Executor, IntoParams, QueryExecutor, ReadConnection, ReadSnapshot, Rows,
-            Statement, Transaction, TransactionBehavior, WalCheckpointExecutor,
+            Transaction, TransactionBehavior, WalCheckpointExecutor,
         },
     },
     errors::TraceDecayError,
@@ -104,17 +104,6 @@ impl RegisteredGlobalDb {
             .execute_batch("PRAGMA shrink_memory")
             .await
             .map_err(|error| registered_error("release registered database memory", error))
-    }
-
-    pub(super) async fn attach(
-        runtime: StoreRuntimeHandle,
-        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
-        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
-        authority: DatabaseAuthority,
-    ) -> crate::errors::Result<Self> {
-        let write_connection =
-            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        Self::finish_attach(runtime, write_connection, authority).await
     }
 
     async fn finish_attach(
@@ -518,21 +507,6 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.connection.execute_batch(sql).await
     }
 
-    pub(crate) async fn prepare(
-        &self,
-        sql: &str,
-    ) -> crate::db::engine::Result<RegisteredGlobalDbStatement<'_>> {
-        self.require_active("prepare registered global database statement")?;
-        Ok(RegisteredGlobalDbStatement {
-            statement: self.connection.prepare(sql).await?,
-            authority: self.authority,
-        })
-    }
-
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
-        self.connection.last_insert_rowid()
-    }
-
     fn require_active(&self, intent: &str) -> crate::db::engine::Result<()> {
         self.authority
             .require_active_write_scope(intent)
@@ -544,27 +518,6 @@ impl WalCheckpointExecutor for RegisteredGlobalDbWriterConnection<'_> {
     async fn checkpoint_wal_truncate(&self) -> crate::db::engine::Result<Rows> {
         self.require_active("checkpoint registered global database WAL")?;
         self.connection.checkpoint_wal_truncate().await
-    }
-}
-
-pub(crate) struct RegisteredGlobalDbStatement<'a> {
-    statement: Statement<'a>,
-    authority: &'a DatabaseAuthority,
-}
-
-impl RegisteredGlobalDbStatement<'_> {
-    pub(crate) async fn execute<P>(&self, params: P) -> crate::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        self.authority
-            .require_active_write_scope("execute registered prepared statement")
-            .map_err(|error| crate::db::engine::Error::invalid_operation(error.to_string()))?;
-        self.statement.execute(params).await
-    }
-
-    pub(crate) fn reset(&self) {
-        self.statement.reset();
     }
 }
 
@@ -626,21 +579,6 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.require_active("execute registered global database transaction batch")?;
         self.transaction.execute_batch(sql).await
-    }
-
-    pub(crate) async fn prepare(
-        &self,
-        sql: &str,
-    ) -> crate::db::engine::Result<RegisteredGlobalDbStatement<'_>> {
-        self.require_active("prepare registered global database transaction statement")?;
-        Ok(RegisteredGlobalDbStatement {
-            statement: self.transaction.prepare(sql).await?,
-            authority: self.authority,
-        })
-    }
-
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
-        self.transaction.last_insert_rowid()
     }
 
     pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {

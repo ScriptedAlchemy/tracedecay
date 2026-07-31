@@ -636,9 +636,7 @@ async fn test_migrate_v21_adds_owner_bound_typed_fact_relations() {
         .await
         .expect("read upserted typed relation row")
         .expect("typed relation row");
-    assert!(
-        (row.get::<f64>(0).expect("decode relation confidence") - 0.9).abs() <= f64::EPSILON
-    );
+    assert!((row.get::<f64>(0).expect("decode relation confidence") - 0.9).abs() <= f64::EPSILON);
     assert_eq!(
         row.get::<String>(1).expect("decode relation provenance"),
         "{\"provenance\":\"updated\"}"

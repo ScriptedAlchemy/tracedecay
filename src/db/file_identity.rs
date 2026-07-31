@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-/// Why a SQLite source could not yield a stable physical identity.
+/// Why a `SQLite` source could not yield a stable physical identity.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) enum SqliteFileIdentityError {

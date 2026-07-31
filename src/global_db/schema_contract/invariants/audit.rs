@@ -1444,9 +1444,7 @@ mod tests {
             MAX_DETAILED_OBSERVATIONS_PER_PAGE,
             DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
         );
-        assert!(
-            std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY
-        );
+        assert!(std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY);
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 

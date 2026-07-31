@@ -237,12 +237,9 @@ async fn v8_to_v9_rejects_exact_precreated_read_cache_index_before_mutation() {
     conn.execute(crate::db::migrations::V9_READ_CACHE_TABLE_SQL, ())
         .await
         .expect("plant exact-looking v9 table");
-    conn.execute(
-        crate::db::migrations::V9_READ_CACHE_SESSION_INDEX_SQL,
-        (),
-    )
-    .await
-    .expect("plant exact-looking read_cache index");
+    conn.execute(crate::db::migrations::V9_READ_CACHE_SESSION_INDEX_SQL, ())
+        .await
+        .expect("plant exact-looking read_cache index");
     conn.execute(
         "INSERT INTO read_cache VALUES (
             'project', 'session', 'src/lib.rs', 1, 'lines',

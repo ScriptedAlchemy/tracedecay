@@ -23,17 +23,6 @@ impl Database {
             })
     }
 
-    /// Samples per-table payload bytes for the graph store, so a store total
-    /// can be attributed to the tables that actually hold it.
-    pub(crate) async fn storage_table_bytes(&self) -> Result<Vec<(String, u64)>> {
-        self.retained_runtime()
-            .storage_table_bytes(std::time::Duration::from_secs(5))
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to sample graph-store table sizes: {error:?}"),
-                operation: "sample graph-store table sizes".to_string(),
-            })
-    }
-
     /// Runs a bounded incremental vacuum through the canonical writer lane.
     pub(crate) async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
         let authority = self.write_authority()?;

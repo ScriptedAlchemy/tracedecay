@@ -433,10 +433,6 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode total cost: {error}"))
     }
 
-    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
-        self.try_total_cost_since(since).await.ok()
-    }
-
     pub(crate) async fn try_total_tokens_since(&self, since: u64) -> Result<u64, String> {
         let snapshot = self
             .read_snapshot()
@@ -459,10 +455,6 @@ impl RegisteredGlobalDb {
             .get::<i64>(0)
             .map_err(|error| format!("failed to decode total tokens: {error}"))?;
         u64::try_from(total).map_err(|_| format!("total tokens cannot be negative: {total}"))
-    }
-
-    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
-        self.try_total_tokens_since(since).await.ok()
     }
 
     /// One-snapshot denominator and aggregate for the canonical turn store.
@@ -519,10 +511,6 @@ impl RegisteredGlobalDb {
                 .map_err(|_| format!("token breakdown cannot contain a negative value: {value}"))
         };
         Ok((read(0)?, read(1)?, read(2)?))
-    }
-
-    pub(crate) async fn token_breakdown_since(&self, since: u64) -> Option<(u64, u64, u64)> {
-        self.try_token_breakdown_since(since).await.ok()
     }
 
     pub(crate) async fn try_cost_by_model_since(
@@ -607,11 +595,6 @@ impl RegisteredGlobalDb {
         Ok(out)
     }
 
-    pub(crate) async fn cost_by_category_since(&self, since: u64) -> Vec<(String, f64, u64)> {
-        self.try_cost_by_category_since(since)
-            .await
-            .unwrap_or_default()
-    }
 }
 
 fn turn_params(turn: &crate::types::CostTurn) -> crate::db::engine::Params {

@@ -628,39 +628,6 @@ async fn list_project_paths_compat_from(db: ProjectRegistryDatabase<'_>) -> Vec<
     paths
 }
 
-pub(super) async fn list_registered_project_alias_paths_compat(
-    db: &RegisteredGlobalDb,
-) -> Vec<String> {
-    list_project_alias_paths_compat_from(ProjectRegistryDatabase(db)).await
-}
-
-async fn list_project_alias_paths_compat_from(db: ProjectRegistryDatabase<'_>) -> Vec<String> {
-    let Ok(read) = db
-        .read_snapshot("list compatibility project alias paths")
-        .await
-    else {
-        return Vec::new();
-    };
-    let Ok(mut rows) = read
-        .query(
-            "SELECT alias_path FROM project_aliases ORDER BY alias_path",
-            (),
-        )
-        .await
-    else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
-        if let Ok(path) = row.get::<String>(0)
-            && Path::new(&path).is_absolute()
-        {
-            paths.push(path);
-        }
-    }
-    paths
-}
-
 impl RegisteredGlobalDb {
     pub fn is_explicit_project_path_selector(selector: &str) -> bool {
         let selector = selector.trim();
@@ -1501,10 +1468,6 @@ impl RegisteredGlobalDb {
 
     pub(crate) async fn list_project_paths_compat(&self) -> Vec<String> {
         list_registered_project_paths_compat(self).await
-    }
-
-    pub(crate) async fn list_project_alias_paths_compat(&self) -> Vec<String> {
-        list_registered_project_alias_paths_compat(self).await
     }
 
     /// Classifies registry rows whose referenced path no longer exists.
