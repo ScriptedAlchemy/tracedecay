@@ -5567,6 +5567,7 @@ dependencies = [
  "walkdir",
  "webpki-roots",
  "windows-sys 0.61.2",
+ "xattr",
  "yaml-edit",
  "zeroize",
  "zip",
