@@ -26,13 +26,13 @@ const CANONICAL_CHUNK_SET_DOMAIN_V1: &str =
 /// Read-only identity inventory. Deliberately contains no legacy vector bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyVectorInventoryV1 {
+pub struct LegacyVectorInventoryV1 {
     pub expected_active_generation: Option<VectorGenerationIdV1>,
     pub entries: Vec<LegacyVectorInventoryEntryV1>,
 }
 
 impl LegacyVectorInventoryV1 {
-    pub(crate) fn canonical_digest(&self) -> Result<ManifestDigest, LegacyVectorMigrationErrorV1> {
+    pub fn canonical_digest(&self) -> Result<ManifestDigest, LegacyVectorMigrationErrorV1> {
         let mut canonical = self.clone();
         canonical
             .entries
@@ -50,7 +50,7 @@ impl LegacyVectorInventoryV1 {
     ///
     /// This is the shared liveness authority for legacy migration reads,
     /// code-generation retention, and Doctor's exact collectable-byte reading.
-    pub(crate) fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
+    pub fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
         self.entries
             .iter()
             .filter_map(|entry| match entry {
@@ -65,7 +65,7 @@ impl LegacyVectorInventoryV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "readability", rename_all = "snake_case")]
-pub(crate) enum LegacyVectorInventoryEntryV1 {
+pub enum LegacyVectorInventoryEntryV1 {
     Readable {
         legacy_generation: VectorGenerationIdV1,
         source_generation: CodeGenerationId,
@@ -89,7 +89,7 @@ impl LegacyVectorInventoryEntryV1 {
     }
 }
 
-pub(crate) trait LegacyVectorInventoryPortV1 {
+pub trait LegacyVectorInventoryPortV1 {
     fn read_only_inventory(&self) -> Result<LegacyVectorInventoryV1, LegacyVectorMigrationErrorV1>;
 }
 
@@ -98,14 +98,14 @@ pub(crate) trait LegacyVectorInventoryPortV1 {
 /// Construction rejects foreign, invalid, or duplicate chunks. No legacy
 /// embedding values are representable.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CanonicalEligibleChunkSetV1 {
+pub struct CanonicalEligibleChunkSetV1 {
     source_generation: CodeGenerationId,
     chunks: Vec<CodeSearchChunkV1>,
     digest: ManifestDigest,
 }
 
 impl CanonicalEligibleChunkSetV1 {
-    pub(crate) fn try_from_chunks(
+    pub fn try_from_chunks(
         source_generation: CodeGenerationId,
         mut chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, LegacyVectorMigrationErrorV1> {
@@ -138,20 +138,20 @@ impl CanonicalEligibleChunkSetV1 {
         })
     }
 
-    pub(crate) fn source_generation(&self) -> &CodeGenerationId {
+    pub fn source_generation(&self) -> &CodeGenerationId {
         &self.source_generation
     }
 
-    pub(crate) fn chunks(&self) -> &[CodeSearchChunkV1] {
+    pub fn chunks(&self) -> &[CodeSearchChunkV1] {
         &self.chunks
     }
 
-    pub(crate) fn digest(&self) -> &ManifestDigest {
+    pub fn digest(&self) -> &ManifestDigest {
         &self.digest
     }
 }
 
-pub(crate) fn canonical_chunk_set_digest(
+pub fn canonical_chunk_set_digest(
     source_generation: &CodeGenerationId,
     chunks: &[(CodeSearchChunkId, ContentDigest)],
 ) -> Result<ManifestDigest, LegacyVectorMigrationErrorV1> {
@@ -189,13 +189,13 @@ pub(crate) fn canonical_chunk_set_digest(
 /// eligible chunks. It is staged, never active.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct StagedCanonicalVectorRebuildV1 {
+pub struct StagedCanonicalVectorRebuildV1 {
     pub source_generation: CodeGenerationId,
     pub rebuilt_generation: VectorGenerationIdV1,
     pub canonical_chunk_set_digest: ManifestDigest,
 }
 
-pub(crate) trait LegacyVectorCanonicalRebuildPortV1 {
+pub trait LegacyVectorCanonicalRebuildPortV1 {
     /// Returns `None` when no retained eligible canonical code remains.
     fn retained_eligible_chunks(
         &mut self,
@@ -214,7 +214,7 @@ pub(crate) trait LegacyVectorCanonicalRebuildPortV1 {
 ///
 /// The callback may stage only into caller-owned scratch storage. This adapter
 /// never accepts legacy vector bytes and has no live publication authority.
-pub(crate) struct ProductionLegacyVectorCanonicalRebuilderV1<Stage> {
+pub struct ProductionLegacyVectorCanonicalRebuilderV1<Stage> {
     retained: BTreeMap<CodeGenerationId, CanonicalEligibleChunkSetV1>,
     stage: Stage,
     staged_rebuilds: Vec<StagedCanonicalVectorRebuildV1>,
@@ -226,7 +226,7 @@ where
         &CanonicalEligibleChunkSetV1,
     ) -> Result<StagedCanonicalVectorRebuildV1, LegacyVectorMigrationErrorV1>,
 {
-    pub(crate) fn try_new(
+    pub fn try_new(
         retained: impl IntoIterator<Item = CanonicalEligibleChunkSetV1>,
         stage: Stage,
     ) -> Result<Self, LegacyVectorMigrationErrorV1> {
@@ -248,7 +248,7 @@ where
         })
     }
 
-    pub(crate) fn staged_rebuilds(&self) -> &[StagedCanonicalVectorRebuildV1] {
+    pub fn staged_rebuilds(&self) -> &[StagedCanonicalVectorRebuildV1] {
         &self.staged_rebuilds
     }
 }
@@ -291,12 +291,12 @@ where
     }
 }
 
-pub(crate) trait LegacyVectorMigrationCancellationV1 {
+pub trait LegacyVectorMigrationCancellationV1 {
     fn is_cancelled(&self) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct NeverCancelLegacyVectorMigrationV1;
+pub struct NeverCancelLegacyVectorMigrationV1;
 
 impl LegacyVectorMigrationCancellationV1 for NeverCancelLegacyVectorMigrationV1 {
     fn is_cancelled(&self) -> bool {
@@ -306,7 +306,7 @@ impl LegacyVectorMigrationCancellationV1 for NeverCancelLegacyVectorMigrationV1 
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LegacyVectorMigrationOutcomeKindV1 {
+pub enum LegacyVectorMigrationOutcomeKindV1 {
     RebuildFromRetainedEligibleCode,
     DropWithReceipt,
     QuarantineUnreadable,
@@ -314,7 +314,7 @@ pub(crate) enum LegacyVectorMigrationOutcomeKindV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyVectorMigrationItemReceiptV1 {
+pub struct LegacyVectorMigrationItemReceiptV1 {
     pub legacy_generation: VectorGenerationIdV1,
     pub outcome: LegacyVectorMigrationOutcomeKindV1,
     pub source_generation: Option<CodeGenerationId>,
@@ -325,7 +325,7 @@ pub(crate) struct LegacyVectorMigrationItemReceiptV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyVectorMigrationCountsV1 {
+pub struct LegacyVectorMigrationCountsV1 {
     pub inventoried: u64,
     pub rebuilt: u64,
     pub dropped: u64,
@@ -334,7 +334,7 @@ pub(crate) struct LegacyVectorMigrationCountsV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyVectorMigrationReceiptV1 {
+pub struct LegacyVectorMigrationReceiptV1 {
     pub inventory_digest: ManifestDigest,
     pub expected_prior_active_generation: Option<VectorGenerationIdV1>,
     pub next_active_generation: Option<VectorGenerationIdV1>,
@@ -344,7 +344,7 @@ pub(crate) struct LegacyVectorMigrationReceiptV1 {
 }
 
 impl LegacyVectorMigrationReceiptV1 {
-    pub(crate) fn validate(&self) -> Result<(), LegacyVectorMigrationErrorV1> {
+    pub fn validate(&self) -> Result<(), LegacyVectorMigrationErrorV1> {
         let valid_items = self.items.iter().all(|item| match item.outcome {
             LegacyVectorMigrationOutcomeKindV1::RebuildFromRetainedEligibleCode => {
                 item.source_generation.is_some()
@@ -458,14 +458,14 @@ impl LegacyVectorMigrationReceiptV1 {
 /// expected prior pointer remains authoritative.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LegacyVectorMigrationOwnerTransactionV1 {
+pub struct LegacyVectorMigrationOwnerTransactionV1 {
     pub expected_prior_active_generation: Option<VectorGenerationIdV1>,
     pub next_active_generation: Option<VectorGenerationIdV1>,
     pub receipt: LegacyVectorMigrationReceiptV1,
 }
 
 impl LegacyVectorMigrationOwnerTransactionV1 {
-    pub(crate) fn validate(&self) -> Result<(), LegacyVectorMigrationErrorV1> {
+    pub fn validate(&self) -> Result<(), LegacyVectorMigrationErrorV1> {
         self.receipt.validate()?;
         if self.expected_prior_active_generation != self.receipt.expected_prior_active_generation
             || self.next_active_generation != self.receipt.next_active_generation
@@ -493,7 +493,7 @@ impl LegacyVectorMigrationOwnerTransactionV1 {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub(crate) enum LegacyVectorMigrationErrorV1 {
+pub enum LegacyVectorMigrationErrorV1 {
     #[error("legacy vector inventory failed: {0}")]
     Inventory(String),
     #[error("legacy vector inventory contains duplicate generation identity")]
@@ -518,7 +518,7 @@ pub(crate) enum LegacyVectorMigrationErrorV1 {
     InvalidReceipt,
 }
 
-pub(crate) fn prepare_legacy_vector_migration<Inventory, Rebuilder, Cancellation>(
+pub fn prepare_legacy_vector_migration<Inventory, Rebuilder, Cancellation>(
     inventory: &Inventory,
     rebuilder: &mut Rebuilder,
     cancellation: &Cancellation,

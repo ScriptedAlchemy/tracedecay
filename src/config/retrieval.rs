@@ -215,14 +215,9 @@ impl SemanticCompatibilityPinsV1 {
     }
 }
 
-/// Exact artifact and runtime pins for the optional bounded reranker.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RerankCompatibilityPinsV1 {
-    pub implementation_revision: ComponentRevision,
-    pub artifact_manifest_digest: ManifestDigest,
-    pub runtime_compatibility_digest: ManifestDigest,
-}
+/// Exact artifact and runtime pins for the optional bounded reranker. The
+/// shape is owned by the semantic runtime crate, which mounts against it.
+pub use tracedecay_semantic::RerankCompatibilityPinsV1;
 
 /// All optional-stage compatibility selected by one evaluated profile.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

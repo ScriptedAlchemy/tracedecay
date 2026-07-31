@@ -93,7 +93,7 @@ impl MonotonicClock for ManualClock {
 /// be created from the domain's admitted embedding projection key, so a
 /// projection, privacy-domain, or key-epoch change produces zero cache hits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct SessionIdentityV1 {
+pub struct SessionIdentityV1 {
     admitted_projection: AdmittedEmbeddingProjectionKeyV1,
 }
 
@@ -316,7 +316,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> PoolInner<R, C> {
 /// Bounded pool of warmed embedding sessions over one [`EmbeddingRuntime`]
 /// (Plan 31: cold and warm sessions, OOM, cancellation, and offline startup
 /// are exercised against this pool with the deterministic fake runtime).
-pub(super) struct SessionPool<R: EmbeddingRuntime, C: MonotonicClock> {
+pub struct SessionPool<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
 }
 
@@ -350,7 +350,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// matching identity or opens a new one within the bounds; otherwise
     /// fails with a typed error. Never blocks and never substitutes a
     /// session from another identity.
-    pub(super) fn acquire(
+    pub fn acquire(
         &self,
         authority: &AdmittedProjectionArtifactV1,
     ) -> Result<PooledSession<R, C>, SessionAcquireError> {
@@ -510,7 +510,7 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> SessionPool<R, C> {
     /// Bounded blocking acquisition with FIFO-fair waiter accounting.
     /// Waits on resource, cancellation, and deadline wakeups until the caller
     /// reaches the head of the FIFO queue and a resource is available.
-    pub(super) fn acquire_blocking(
+    pub fn acquire_blocking(
         &self,
         authority: &AdmittedProjectionArtifactV1,
         budget: Duration,
@@ -695,7 +695,7 @@ fn reap_expired_locked<S>(
 /// RAII checkout guard. Dereferences to the warmed session; dropping the
 /// guard returns the session to the idle pool (or closes it when the pool
 /// is closed).
-pub(super) struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
+pub struct PooledSession<R: EmbeddingRuntime, C: MonotonicClock> {
     inner: Arc<PoolInner<R, C>>,
     identity: SessionIdentityV1,
     session: Option<R::Session>,
@@ -781,21 +781,17 @@ impl<R: EmbeddingRuntime, C: MonotonicClock> Drop for WaiterPermit<R, C> {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::mpsc;
-    use std::thread;
-
+/// Canonical pooled-session fixtures shared by this crate's tests and, through
+/// the `test-helpers` feature, by dependent crates' test builds. Nothing here
+/// opens a real embedding runtime or touches the filesystem.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_support {
     use super::*;
     // Two `super` steps resolve to the directory module in every layout
-    // (scratch `#[path]` crate root and the integrated
-    // `src/semantic_code/` module alike).
+    // (scratch `#[path]` crate root and the integrated crate-root module
+    // alike).
     use super::super::artifact_store::AdmittedArtifactV1;
-    use super::super::fastembed_adapter::{
-        AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, FakeEmbeddingRuntime,
-        ManualCancellation, ProjectionArtifactPinV1, RuntimeFailureKindV1,
-    };
+    use super::super::fastembed_adapter::AdmittedProjectionArtifactV1;
     use super::super::manifest::{
         ArtifactMemberPinV1, ArtifactMemberRoleV1, ArtifactPackageMemberV1, ArtifactProfileKindV1,
         DeviceClassV1, EmbeddingNormalizationV1 as ManifestNormalizationV1,
@@ -810,7 +806,7 @@ pub(crate) mod tests {
         EmbeddingTruncationSideV1, ManifestDigest, PrivacyDomainId,
     };
 
-    fn domain_id<T>(value: &str) -> T
+    pub fn domain_id<T>(value: &str) -> T
     where
         T: TryFrom<String>,
         T::Error: std::fmt::Debug,
@@ -818,15 +814,15 @@ pub(crate) mod tests {
         T::try_from(value.to_owned()).expect("canonical domain fixture identity")
     }
 
-    fn domain_digest(label: u8) -> ManifestDigest {
+    pub fn domain_digest(label: u8) -> ManifestDigest {
         domain_id(&format!("sha256:{}", format!("{label:02x}").repeat(32)))
     }
 
-    fn manifest_digest(digest: &Sha256DigestHex) -> ManifestDigest {
+    pub fn manifest_digest(digest: &Sha256DigestHex) -> ManifestDigest {
         domain_id(&format!("sha256:{}", digest.as_str()))
     }
 
-    fn admitted_artifact() -> AdmittedArtifactV1 {
+    pub fn admitted_artifact() -> AdmittedArtifactV1 {
         let model_digest = Sha256DigestHex::of_bytes(b"model");
         let tokenizer_digest = Sha256DigestHex::of_bytes(b"tokenizer");
         let config_digest = Sha256DigestHex::of_bytes(b"config");
@@ -929,7 +925,7 @@ pub(crate) mod tests {
         AdmittedArtifactV1::test_fixture(manifest)
     }
 
-    fn projection_for(artifact: &AdmittedArtifactV1) -> EmbeddingProjectionKeyV1 {
+    pub fn projection_for(artifact: &AdmittedArtifactV1) -> EmbeddingProjectionKeyV1 {
         let payload = &artifact.manifest().payload;
         EmbeddingProjectionKeyV1 {
             model_artifact_digest: manifest_digest(artifact.artifact_digest()),
@@ -960,11 +956,11 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn authority() -> AdmittedProjectionArtifactV1 {
+    pub fn authority() -> AdmittedProjectionArtifactV1 {
         authority_with_privacy("domain-a", 7)
     }
 
-    fn authority_with_privacy(domain: &str, key_epoch: u64) -> AdmittedProjectionArtifactV1 {
+    pub fn authority_with_privacy(domain: &str, key_epoch: u64) -> AdmittedProjectionArtifactV1 {
         let artifact = admitted_artifact();
         let mut projection = projection_for(&artifact);
         projection.privacy_domain = domain_id::<PrivacyDomainId>(&format!("privacy.{domain}"));
@@ -974,11 +970,11 @@ pub(crate) mod tests {
             .expect("matching projection and artifact")
     }
 
-    fn identity_with_epoch(domain: &str, key_epoch: u64) -> SessionIdentityV1 {
+    pub fn identity_with_epoch(domain: &str, key_epoch: u64) -> SessionIdentityV1 {
         SessionIdentityV1::from_authority(&authority_with_privacy(domain, key_epoch))
     }
 
-    pub(crate) fn config(
+    pub fn config(
         max_sessions: usize,
         idle_timeout: Duration,
         ceiling: u64,
@@ -990,6 +986,26 @@ pub(crate) mod tests {
             memory_ceiling_bytes: ceiling,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::mpsc;
+    use std::thread;
+
+    use super::super::artifact_store::AdmittedArtifactV1;
+    use super::super::fastembed_adapter::{
+        BoundedSanitizedTextBatchV1, FakeEmbeddingRuntime, ManualCancellation,
+        ProjectionArtifactPinV1, RuntimeFailureKindV1,
+    };
+    use super::super::manifest::{ArtifactProfileKindV1, Sha256DigestHex};
+    use super::test_support::*;
+    use super::*;
+    use tracedecay_domain::{
+        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
+    };
 
     fn fake_pool(
         max_sessions: usize,

@@ -14,6 +14,7 @@ members = [
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
     "crates/tracedecay-sdk",
+    "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
     "crates/tracedecay-temporal-query",
     "crates/tracedecay-rusqlite-parity",
@@ -185,13 +186,9 @@ rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the
-# immutable catalog pins, never query-time ambient cache discovery.
-semantic-fastembed = [
-    "dep:fastembed",
-    "dep:hf-hub",
-    "fastembed/ort-download-binaries-rustls-tls",
-    "fastembed/hf-hub-rustls-tls",
-]
+# immutable catalog pins, never query-time ambient cache discovery. The
+# adapter itself lives in `tracedecay-semantic`, which owns the pins.
+semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
 
 [lib]
 name = "tracedecay"
@@ -240,6 +237,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
+tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
@@ -284,13 +282,6 @@ regex = "1.12.3"
 shell-words = "1.1"
 open = "5.3"
 tiktoken-rs = { version = "0.12", optional = true }
-# Library-first FastEmbed: disable hub/image defaults so the adapter can only
-# construct from local verified artifact bytes (no model-hub / cache discovery).
-# The `semantic-fastembed` feature adds the bundled ORT runtime and hf-hub
-# acquisition separately. Keep this exact runtime pin synchronized with
-# `FASTEMBED_RUNTIME_BUILD_REVISION_V1`; FastEmbed 5.17.3 itself pins ORT rc.12.
-fastembed = { version = "=5.17.3", optional = true, default-features = false }
-hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq", "rustls-tls"] }
 # Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
 # We deliberately use the raw watcher (not notify-debouncer-full) and debounce
 # ourselves so a monorepo's git-ref churn coalesces into a single sync.
@@ -352,6 +343,7 @@ static_assertions = "1.1.0"
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
