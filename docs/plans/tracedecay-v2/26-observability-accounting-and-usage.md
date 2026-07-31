@@ -40,6 +40,12 @@ Published event/metric names and persisted observability records remain
 compatibility contracts; all other retention is judged by the direct
 measurement, privacy, lifecycle, platform, and regression behavior below.
 
+The Plan 26 Work/topology event family is unreleased and absent from
+`origin/master` and established live persistence. Its `V1` suffixes identify
+the initial final wire format; they do not imply a V2 sibling, compatibility
+reader, or migration. Until publication or live persistence supplies contrary
+evidence, those records change in place with their consuming PR14/PR17 path.
+
 ## Outcome
 
 Every operational and product metric states what was measured, over which population and horizon, at which watermark, with what coverage. Unknown, partial, stale, sampled, or capped data stays visible and can never render as a trustworthy zero.

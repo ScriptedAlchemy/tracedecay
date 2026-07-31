@@ -14,6 +14,13 @@ persisted task/work records retain compatibility and migration obligations;
 all other retention is judged by the direct Work journey, lifecycle,
 platform, and regression behavior below.
 
+No Plan 24 Work wire contract or persisted task/runtime format is established
+on `origin/master`, in a published package/release, or in live product data.
+PR14/PR17 therefore implement the final Work shape directly in place; branch
+checkpoints, tests, and PR sequencing require no compatibility aliases,
+dual readers, or migration. Immutable work-item and graph versions below are
+product history/CAS identities, not contract-version release evidence.
+
 ## Decision
 
 TraceDecay owns one host-neutral, typed task/work graph for user and agent work.
