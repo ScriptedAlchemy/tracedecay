@@ -16,6 +16,12 @@ compatibility and migration obligations; all other retention is evaluated
 through the direct scope, inventory, Git, platform, and regression behavior
 below.
 
+No Plan 16 multi-root selector, collection, or stack wire/persistence shape is
+established on `origin/master`, in a published package/release, or in live
+product data. PR15 therefore finalizes those shapes in place; single-root
+behavior proven on released surfaces remains supported, but branch-only
+aliases, readers, and migration fixtures create no compatibility obligation.
+
 **Local identity correction (2026-07-26).** Repository-level project/store
 identity now collapses a linked worktree onto its primary checkout through
 `repository_identity_root` at the single `default_profile_project_id` minting
