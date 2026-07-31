@@ -18,12 +18,12 @@ use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
     ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
-    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
-    RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
-    WorktreeId, canonical_sha256,
+    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1,
+    ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::{
@@ -33,7 +33,9 @@ use super::{
         DeterministicCodeChunker, ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1,
         content_digest,
     },
-    extract::{ExtractionCancellation, LanguageExtractor, TreeSitterExtractor},
+    extract::{
+        ExtractionCancellation, LanguageExtractor, TreeSitterExtractor, rebind_extraction_batch,
+    },
     generations::{
         FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
     },
@@ -41,7 +43,10 @@ use super::{
         ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
         plan_chunk_increment,
     },
-    intake::{CodeIndexIntake, SanitizedCodeIntake, SanitizedSnapshotCapabilityV1},
+    intake::{
+        CodeIndexIntake, ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1,
+        SanitizedCodeIntake, SanitizedSnapshotCapabilityV1,
+    },
     languages::{LanguageRegistry, StaticLanguageRegistry},
     lineage::{GenerationSymbolIndexV1, LineageResolutionErrorV1, SymbolLineageResolver},
     projection::{
@@ -64,6 +69,7 @@ use helpers::*;
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
 pub struct CodeIndexProductionConfigV1 {
+    pub project_id: ProjectId,
     pub repository: RepositoryId,
     pub sanitizer_revision: SanitizerRevision,
     pub policy_revision: PolicyRevisionId,
@@ -76,7 +82,8 @@ pub struct CodeIndexProductionConfigV1 {
 
 impl CodeIndexProductionConfigV1 {
     fn validate(&self) -> Result<(), CodeIndexProductionOpenErrorV1> {
-        if self.repository.validate().is_err()
+        if self.project_id.validate().is_err()
+            || self.repository.validate().is_err()
             || self.sanitizer_revision.validate().is_err()
             || self.policy_revision.validate().is_err()
             || self.chunker_revision.validate().is_err()
@@ -204,6 +211,7 @@ pub trait CodeIndexAtomicPublicationPort {
 
 #[derive(Clone, Debug)]
 struct FileGenerationArtifactsV1 {
+    authority: ReceiptBoundCodeFileAuthorityV1,
     extraction: ExtractionBatchV1,
     artifacts: CodeFileIndexArtifactsV1,
     exact_authority: ExactExtractionAuthorityV1,
@@ -291,17 +299,14 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     fn reuse(
         &self,
         key: &ManifestDigest,
-        generation_id: CodeGenerationId,
-        file_occurrence_id: FileOccurrenceId,
+        file: &ReceiptBoundCodeFileV1,
     ) -> Option<FileGenerationArtifactsV1> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let artifact = state.artifacts.get(key)?.clone();
-        let rebound = artifact
-            .rematerialize_for_generation(generation_id, file_occurrence_id)
-            .ok()?;
+        let rebound = artifact.rematerialize_for_file(file).ok()?;
         state.reused = state.reused.saturating_add(1);
         Some(rebound)
     }
@@ -342,12 +347,14 @@ const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedFileGenerationArtifactsV1 {
+    authority: ReceiptBoundCodeFileAuthorityV1,
     extraction: ExtractionBatchV1,
     artifacts: CodeFileIndexArtifactsV1,
 }
 
 #[derive(Serialize)]
 struct PersistedFileGenerationArtifactsRefV1<'a> {
+    authority: &'a ReceiptBoundCodeFileAuthorityV1,
     extraction: &'a ExtractionBatchV1,
     artifacts: &'a CodeFileIndexArtifactsV1,
 }
@@ -403,21 +410,22 @@ struct SealedPublishedGenerationEnvelopeRefV1<'a> {
 }
 
 impl FileGenerationArtifactsV1 {
-    fn rematerialize_for_generation(
+    fn rematerialize_for_file(
         &self,
-        generation_id: CodeGenerationId,
-        file_occurrence_id: FileOccurrenceId,
+        file: &ReceiptBoundCodeFileV1,
     ) -> Result<Self, ChunkingFailureV1> {
-        let artifacts = self
-            .artifacts
-            .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
+        let target = file.validated_file();
+        let artifacts = self.artifacts.rematerialize_for_generation(
+            target.generation_id.clone(),
+            target.file.file_occurrence_id.clone(),
+        )?;
         let exact_authority = self
             .exact_authority
             .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
-        let mut extraction = self.extraction.clone();
-        extraction.generation_id = generation_id;
-        extraction.file_occurrence_id = file_occurrence_id;
+        let extraction = rebind_extraction_batch(&self.authority, &self.extraction, file)
+            .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
         Ok(Self {
+            authority: self.authority.clone(),
             extraction,
             artifacts,
             exact_authority,
@@ -740,6 +748,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .files
                 .iter()
                 .map(|file| PersistedFileGenerationArtifactsRefV1 {
+                    authority: &file.authority,
                     extraction: &file.extraction,
                     artifacts: &file.artifacts,
                 })
@@ -790,6 +799,7 @@ impl CodeIndexPublishedGenerationV1 {
             let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
             files.push(FileGenerationArtifactsV1 {
+                authority: file.authority,
                 extraction: file.extraction,
                 artifacts: file.artifacts,
                 exact_authority,
@@ -904,7 +914,8 @@ impl CodeIndexPublishedGenerationV1 {
                     != file.artifacts.chunks.document.file_occurrence_id
             {
                 return Err(CodeIndexProductionErrorV1::Contract(
-                    "extraction evidence does not match its published file".to_owned(),
+                    "extraction authority does not match its published project, repository, scope, path, or content"
+                        .to_owned(),
                 ));
             }
             file.exact_authority
@@ -1069,7 +1080,8 @@ where
         let active = self.publication.load_active(scope)?;
         if let Some(active) = &active {
             active.validate()?;
-            if CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot) != *scope
+            if active.manifest.project_id != self.config.project_id
+                || CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot) != *scope
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
@@ -1111,6 +1123,7 @@ where
         Self::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
+            self.config.project_id.clone(),
             self.config.repository.clone(),
             registry_for_snapshot(&validated.snapshot)?,
             self.config.chunker_revision.clone(),
@@ -1309,6 +1322,7 @@ where
         let receipt_bound = intake
             .bind_file(
                 capability,
+                &config.project_id,
                 ValidatedCodeFileV1 {
                     generation_id: manifest.generation_id.clone(),
                     file: file.clone(),
@@ -1329,11 +1343,7 @@ where
         })?;
         let physical_reuse_key =
             Self::physical_reuse_key(config, file, descriptor, captured.sensitivity_level)?;
-        if let Some(reused) = physical_artifacts.reuse(
-            &physical_reuse_key,
-            manifest.generation_id.clone(),
-            file.file_occurrence_id.clone(),
-        ) {
+        if let Some(reused) = physical_artifacts.reuse(&physical_reuse_key, &receipt_bound) {
             Self::checkpoint(control)?;
             return Ok(reused);
         }
@@ -1360,8 +1370,9 @@ where
                 error => CodeIndexProductionErrorV1::Chunk(error),
             })?;
         Self::checkpoint(control)?;
-        let (extraction, _) = extraction.into_parts();
+        let (authority, extraction, _) = extraction.into_parts();
         let artifact = FileGenerationArtifactsV1 {
+            authority,
             extraction,
             artifacts,
             exact_authority,
@@ -1380,6 +1391,7 @@ where
     ) -> Result<ManifestDigest, CodeIndexProductionErrorV1> {
         canonical_sha256(&(
             PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
+            &config.project_id,
             &config.repository,
             &file.logical_path,
             &file.content_digest,
@@ -1522,24 +1534,35 @@ where
                                     "increment plan refers to a missing prior file".to_owned(),
                                 )
                             })?;
-                        if let Ok(artifact) = prior.rematerialize_for_generation(
-                            manifest.generation_id.clone(),
-                            file_occurrence_id.clone(),
-                        ) {
+                        let current_file = current_by_occurrence
+                            .get(file_occurrence_id)
+                            .ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "increment plan refers to a missing current file".to_owned(),
+                                )
+                            })?;
+                        let captured = captured_files
+                            .get(file_occurrence_id)
+                            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
+                        let receipt_bound = intake
+                            .bind_file(
+                                capability,
+                                &config.project_id,
+                                ValidatedCodeFileV1 {
+                                    generation_id: manifest.generation_id.clone(),
+                                    file: (**current_file).clone(),
+                                    snapshot_digest: capability.snapshot().intake_digest.clone(),
+                                    sanitized_bytes: captured.sanitized_bytes.clone(),
+                                },
+                            )
+                            .map_err(CodeIndexProductionErrorV1::Intake)?;
+                        if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
                             Ok(IncrementFileMaterializationV1::CarryForward(artifact))
                         } else {
                             // Opaque exact evidence may refuse generation-local
                             // occurrence rebinding. Re-extract through the parser
                             // authority instead of rewriting that evidence.
-                            let file =
-                                current_by_occurrence
-                                    .get(file_occurrence_id)
-                                    .ok_or_else(|| {
-                                        CodeIndexProductionErrorV1::Contract(
-                                            "increment plan refers to a missing current file"
-                                                .to_owned(),
-                                        )
-                                    })?;
+                            let file = current_file;
                             let artifact = Self::extract_file(
                                 config,
                                 physical_artifacts,

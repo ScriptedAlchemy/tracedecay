@@ -749,6 +749,7 @@ impl Drop for AtomicFlagReset {
 }
 
 pub(super) struct CodeIndexWorktreeSchedulerV1 {
+    project_id: ProjectId,
     project_root: PathBuf,
     /// The exact indexing identity this worktree is bound to. Re-resolved
     /// before each reconciliation so a HEAD move never mis-attributes a served
@@ -800,11 +801,13 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
 
 impl CodeIndexWorktreeSchedulerV1 {
     pub fn open(
+        project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         Self::open_with_policy(
+            project_id,
             project_root,
             store_root,
             byte_pool,
@@ -813,6 +816,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn open_with_policy(
+        project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
@@ -831,6 +835,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             DaemonCodeIndexPublicationStoreV1::new(&store_root, sanitizer_revision.clone())?;
         let owner = open_production_code_index_owner_v1(
             CodeIndexProductionConfigV1 {
+                project_id: project_id.clone(),
                 repository: repository_id.clone(),
                 sanitizer_revision,
                 policy_revision: id::<PolicyRevisionId>("policy.daemon.v1")?,
@@ -852,11 +857,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         // or branch label is never sufficient; cross-worktree reuse is refused.
         if let Some(generation) = &restored {
             let snapshot = generation.snapshot();
+            let same_project = generation.manifest().project_id == project_id;
             let same_worktree = snapshot.worktree.as_ref() == Some(&worktree_id);
             let same_repository = snapshot.repository == repository_id;
-            if !same_worktree || !same_repository {
+            if !same_project || !same_worktree || !same_repository {
                 return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "active code generation belongs to a different worktree identity".to_owned(),
+                    "active code generation belongs to a different project/worktree identity"
+                        .to_owned(),
                 ));
             }
         }
@@ -871,6 +878,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // freshness claim. Cadence must verify against gix before tier-1/tier-2
         // clocks may suppress reconciliation.
         let scheduler = Self {
+            project_id,
             project_root,
             identity,
             repository_id,

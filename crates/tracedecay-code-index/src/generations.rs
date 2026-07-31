@@ -28,9 +28,9 @@ use tracedecay_domain::{
     ChunkGenerationBindingV1, ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1,
     CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1, ComponentVersion, ContentDigest,
     ExtractorRevision, FileOccurrenceId, GenerationSealV1, GrammarRevision, LanguageId,
-    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, RepositoryId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeSnapshotV1,
-    canonical_sha256,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectId, RepositoryId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
+    ValidatedCodeSnapshotV1, canonical_sha256,
 };
 
 use super::capabilities::expected_seal_digest;
@@ -147,6 +147,7 @@ impl GenerationIncrementPlanV1 {
 #[derive(Serialize)]
 struct GenerationInvalidationDigestInput<'a> {
     domain: &'static str,
+    project_id: &'a ProjectId,
     repository: &'a RepositoryId,
     parent_generation: Option<&'a CodeGenerationId>,
     parent_publication_fence: Option<&'a ManifestDigest>,
@@ -166,6 +167,7 @@ struct GenerationInvalidationDigestInput<'a> {
 /// repository, one language registry, and one pinned chunker/privacy
 /// configuration; generation identity is monotonic within that binding.
 pub struct GenerationPlanner<R: LanguageRegistry> {
+    project_id: ProjectId,
     repository: RepositoryId,
     registry: R,
     chunker_revision: ChunkerRevision,
@@ -178,6 +180,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     /// Create a planner for one repository with pinned chunker and privacy
     /// inputs.
     pub fn new(
+        project_id: ProjectId,
         repository: RepositoryId,
         registry: R,
         chunker_revision: ChunkerRevision,
@@ -185,6 +188,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         privacy_key_epoch: u64,
     ) -> Self {
         Self {
+            project_id,
             repository,
             registry,
             chunker_revision,
@@ -303,6 +307,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
             self.next_generation_id(parent_generation.as_ref(), &invalidation_digest)?;
 
         let mut manifest = CodeGenerationManifestV1 {
+            project_id: self.project_id.clone(),
             generation_id,
             snapshot_digest: snapshot.intake_digest.clone(),
             invalidation_digest,
@@ -469,6 +474,9 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         parent
             .validate()
             .map_err(|error| GenerationPlanningErrorV1::Contract(error.to_string()))?;
+        if parent.project_id != self.project_id {
+            return Err(GenerationPlanningErrorV1::ForeignParentIdentity);
+        }
         let discriminator = self.discriminator()?;
         if parse_minted_generation_id(&parent.generation_id)
             .is_none_or(|(minted, _)| minted != discriminator)
@@ -531,6 +539,7 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
     ) -> Result<ManifestDigest, GenerationPlanningErrorV1> {
         canonical_sha256(&GenerationInvalidationDigestInput {
             domain: GENERATION_INVALIDATION_SEPARATOR,
+            project_id: &self.project_id,
             repository: &self.repository,
             parent_generation: parent.map(|parent| &parent.generation_id),
             parent_publication_fence: parent.map(|parent| &parent.seal.expected_digest),
@@ -741,6 +750,10 @@ mod tests {
         id("repository.fixture")
     }
 
+    fn project() -> ProjectId {
+        id("project.fixture")
+    }
+
     fn rust_descriptor() -> LanguageDescriptorV1 {
         LanguageDescriptorV1 {
             language: id("rust"),
@@ -796,6 +809,7 @@ mod tests {
 
     fn planner() -> GenerationPlanner<StaticLanguageRegistry> {
         GenerationPlanner::new(
+            project(),
             repository(),
             registry(),
             id("chunker.v1"),
@@ -845,6 +859,7 @@ mod tests {
         // A different repository has its own discriminator and its own
         // monotonic sequence starting at one.
         let other_planner = GenerationPlanner::new(
+            project(),
             id("repository.other"),
             registry(),
             id("chunker.v1"),
@@ -969,6 +984,7 @@ mod tests {
 
         // Another repository's minted identity is also foreign here.
         let other_planner = GenerationPlanner::new(
+            project(),
             id("repository.other"),
             registry(),
             id("chunker.v1"),
@@ -1106,6 +1122,7 @@ mod tests {
 
         // Chunker revision bump: a declared full rebuild, nothing carried.
         let rechunked = GenerationPlanner::new(
+            project(),
             repository(),
             registry(),
             id("chunker.v2"),
@@ -1127,6 +1144,7 @@ mod tests {
         let mut bumped = rust_descriptor();
         bumped.grammar_revision = id("grammar.tree-sitter.rust.v2");
         let regrammared = GenerationPlanner::new(
+            project(),
             repository(),
             StaticLanguageRegistry::from_descriptors(vec![bumped]),
             id("chunker.v1"),
@@ -1143,6 +1161,7 @@ mod tests {
 
         // Privacy epoch bump.
         let reprivated = GenerationPlanner::new(
+            project(),
             repository(),
             registry(),
             id("chunker.v1"),

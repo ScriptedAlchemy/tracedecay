@@ -53,6 +53,7 @@ fn generation() -> (ValidatedCodeSnapshotV1, CodeGenerationManifestV1) {
         .validate(snapshot)
         .expect("validated fixture snapshot");
     let manifest = GenerationPlanner::new(
+        id("project.fixture"),
         id("repository.fixture"),
         registry(),
         id("chunker.v1"),

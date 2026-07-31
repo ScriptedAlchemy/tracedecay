@@ -12,7 +12,7 @@ use tracedecay_domain::{
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
     EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactAdmissionValidator,
     ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
-    FreshnessCompatibilityV1, LanguageDescriptorRevision, PolicyRevisionId, PrincipalId,
+    FreshnessCompatibilityV1, LanguageDescriptorRevision, PolicyRevisionId, PrincipalId, ProjectId,
     QueryNormalizationRevision, RepositoryId, RetrievalBudget, RetrievalRequest, RetrievalScope,
     RetrievalSnapshot, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
     SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SensitivityDecision,
@@ -262,6 +262,7 @@ fn admitted_rust_chunk(
     let file = intake
         .bind_file(
             &snapshot,
+            &id::<ProjectId>("project.fixture"),
             ValidatedCodeFileV1 {
                 generation_id: generation.clone(),
                 file,

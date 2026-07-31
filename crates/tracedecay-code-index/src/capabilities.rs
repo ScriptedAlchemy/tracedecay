@@ -426,6 +426,7 @@ mod tests {
             })
             .collect();
         let mut manifest = CodeGenerationManifestV1 {
+            project_id: tracedecay_domain::ProjectId::new("project.fixture").expect("valid id"),
             generation_id: CodeGenerationId::new("generation.v1.aaaaaaaa.00000001")
                 .expect("valid id"),
             snapshot_digest: digest('a'),

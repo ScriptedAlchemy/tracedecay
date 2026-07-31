@@ -21,12 +21,12 @@ use tracedecay_code_index::projection::{
     expected_request_digest, project_for_publication,
 };
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, FileOccurrenceId,
+    ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId, ExtractionBatchV1, FileOccurrenceId,
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
     ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
+    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
 };
 
 const WORKLOAD_PATH: &str = concat!(
@@ -769,8 +769,9 @@ fn build_artifact(
         .extract(&file, descriptor, &NeverCancelled)
         .map_err(|error| format!("extract {}: {error:?}", source.logical_path))?;
     let chunks = chunker
-        .chunk_file(&file, &extraction, descriptor, &NeverCancelled)
+        .chunk_file(&file, extraction.batch(), descriptor, &NeverCancelled)
         .map_err(|error| format!("chunk {}: {error}", source.logical_path))?;
+    let extraction = extraction.batch().clone();
     Ok(FileArtifact {
         source: source.clone(),
         extraction,

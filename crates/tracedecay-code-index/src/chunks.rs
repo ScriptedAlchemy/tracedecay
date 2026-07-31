@@ -1964,9 +1964,9 @@ mod tests {
         CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchEligibilityV1, ContentDigest,
         ExtractionCoverageV1, FileIdentityDigest, FileOccurrenceId, GrammarRevision,
         LanguageDescriptorRevision, LanguageId, ManifestDigest, ParseOutcomeV1, PolicyRevisionId,
-        SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-        SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan,
-        SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
+        ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+        SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
     use crate::extract::{
@@ -2138,6 +2138,7 @@ mod tests {
         intake
             .bind_file(
                 &capability,
+                &id::<ProjectId>("project.fixture"),
                 ValidatedCodeFileV1 {
                     generation_id: id("generation.fixture"),
                     file,
