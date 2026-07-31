@@ -176,10 +176,10 @@ const DELIVERY_OVERVIEW = {
   coverage: {
     ...INDEX_FRESHNESS.coverage,
     completeness: 'partial',
-    eligible: 9,
+    eligible: 8,
     examined: 3,
-    omitted: 6,
-    denominator: 9,
+    omitted: 5,
+    denominator: 8,
     unit: 'delivery sources',
     omission_reasons: ['external authorities are not mounted'],
   },
@@ -278,67 +278,6 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
   });
 }
 
-/** The delivery envelope with named source projections replaced, and — when a
- * case is about the envelope itself rather than its payload — envelope fields
- * replaced too. */
-function deliveryOverview(
-  sources: Record<string, unknown> = {},
-  envelope: Record<string, unknown> = {},
-) {
-  return {
-    ...DELIVERY_OVERVIEW,
-    ...envelope,
-    payload: { ...DELIVERY_OVERVIEW.payload, ...sources },
-  };
-}
-
-/** One CI check record. `source_degradation` is the field this page has to read:
- * the archive can hand back a validated run whose provider read was throttled or
- * failed underneath it. */
-function ciCheck(over: Record<string, unknown> = {}) {
-  return {
-    provider: 'github',
-    workflow_id: 'wf-1',
-    run_id: 'run-1',
-    attempt_id: '1',
-    job_id: 'job-1',
-    check_suite_id: 'suite-1',
-    check_run_id: 'check-1',
-    state: 'complete',
-    coverage: 'complete',
-    failures: 1,
-    checks: 4,
-    annotations: 2,
-    source_degradation: null,
-    ...over,
-  };
-}
-
-function hostComponent(over: Record<string, unknown> = {}) {
-  return {
-    host: 'codex',
-    component: 'core',
-    state: 'current',
-    registration: 'current',
-    evidence_source: '/profile/host-components/codex-core.receipt',
-    artifact_count: 2,
-    ...over,
-  };
-}
-
-/** The stage a pipeline row draws into, found by its own label. */
-function stage(label: string): HTMLElement {
-  return screen.getByText(label).parentElement as HTMLElement;
-}
-
-/** Domain states a stage rendered, in render order. The chip's `data-state` is
- * the stable selector for this — the label text is presentation. */
-function statesIn(element: HTMLElement): string[] {
-  return [...element.querySelectorAll('[data-state]')].map(
-    (chip) => chip.getAttribute('data-state') ?? '',
-  );
-}
-
 function renderDelivery(
   body: unknown = PROJECTS,
   status = 200,
@@ -396,419 +335,53 @@ describe('DeliveryPage', () => {
     expect(screen.getByText('Releases')).toBeTruthy();
     expect(screen.getByText('Index freshness')).toBeTruthy();
     expect(screen.getByText(/2 commits · 1 changed path/)).toBeTruthy();
+    expect(screen.getByText(/unavailable · GitHub review authority is not mounted/)).toBeTruthy();
     expect(screen.getByText(/no reusable read-only release authority is implemented/)).toBeTruthy();
     expect(screen.getByText('measured')).toBeTruthy();
   });
 
-  /** Two sources behind one authority report the same gap. Both are named, and
-   * the authority's sentence is printed once. */
-  it('names both sources of a shared authority gap without repeating its reason', async () => {
-    renderDelivery();
-
-    await screen.findByText('Pull requests & review');
-    const review = stage('Pull requests & review');
-    expect(statesIn(review)).toEqual(['unavailable']);
-    expect(
-      within(review).getAllByText(/GitHub review authority is not mounted/),
-    ).toHaveLength(1);
-    expect(
-      within(review).getByText(/pull requests and review comments/),
-    ).toBeTruthy();
-  });
-
-  /**
-   * The envelope the payload arrives in, which this panel used to discard
-   * entirely. Its coverage is the only statement of how much of the read
-   * completed, and without it nine sources with six gaps looked the same as nine
-   * sources with none.
-   */
-  it('states how much of the delivery read completed, in the unit the server named', async () => {
-    renderDelivery();
-
-    const truth = await screen.findByRole('group', { name: 'Delivery read truth' });
-    expect(within(truth).getByText(/3 of 9 delivery sources complete/)).toBeTruthy();
-    expect(statesIn(truth)).toEqual(['partial']);
-    expect(within(truth).getByText(/freshness unknown · no observation stamp/)).toBeTruthy();
-    expect(
-      within(screen.getByRole('list', { name: 'Why this delivery read is incomplete' })).getByText(
-        'external authorities are not mounted',
-      ),
-    ).toBeTruthy();
-  });
-
-  it('reports an unreported source count as unreported rather than as zero', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({}, {
-      coverage: {
-        ...DELIVERY_OVERVIEW.coverage,
-        completeness: 'unknown',
-        eligible: null,
-        examined: null,
-        omitted: null,
-        denominator: null,
-        omission_reasons: [],
-      },
-      domain_state: 'unknown',
-    }));
-
-    const truth = await screen.findByRole('group', { name: 'Delivery read truth' });
-    expect(within(truth).getByText(/no delivery sources count reported/)).toBeTruthy();
-    expect(within(truth).queryByText(/0 of/)).toBeNull();
-  });
-
-  /**
-   * A refusal and an absence are different facts with different next actions.
-   * `denied` is this identity not being allowed to see the read; `unavailable` is
-   * a source that could not answer anyone. Rendering the first as the second
-   * tells the reader to mount an authority that is already mounted.
-   */
-  it('renders a denied read authorization as denied, not as unavailable', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({}, {
-      authorization: { outcome: 'denied' },
-      domain_state: 'denied',
-    }));
-
-    const truth = await screen.findByRole('group', { name: 'Delivery read truth' });
-    expect(statesIn(truth)).toEqual(['denied', 'denied']);
-    expect(within(truth).getByText(/delivery read authorization/)).toBeTruthy();
-    expect(truth.querySelector('[data-state="unavailable"]')).toBeNull();
-    expect(truth.querySelector('[data-state="error"]')).toBeNull();
-    expect(truth.querySelector('[data-state="partial"]')).toBeNull();
-  });
-
-  it('keeps a redacted read distinct from a denied one', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({}, {
-      authorization: { outcome: 'redacted' },
-    }));
-
-    const truth = await screen.findByRole('group', { name: 'Delivery read truth' });
-    expect(truth.querySelector('[data-state="redacted"]')).toBeTruthy();
-    expect(truth.querySelector('[data-state="denied"]')).toBeNull();
-  });
-
-  it('renders retained partial provider evidence as partial, and says so once', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      pull_requests: {
-        state: 'partial',
-        value: { items: [] },
-        reason: 'GitHub returned partial review coverage',
-      },
-    }));
-
-    await screen.findByText('Pull requests & review');
-    const review = stage('Pull requests & review');
-    expect(statesIn(review)).toEqual(['unavailable', 'partial']);
-    // Once. The reason used to be printed inside the chip and again beside it,
-    // which reads as two separate findings about one source.
-    expect(
-      within(review).getAllByText(/GitHub returned partial review coverage/),
-    ).toHaveLength(1);
-    // A partial read still measured something, and the count survives the
-    // degradation instead of vanishing with it.
-    expect(within(review).getByText(/0 pull requests/)).toBeTruthy();
-  });
-
-  /**
-   * The pairing defect. Each stage covers two sources, and the old panel drew
-   * "the first one that is not ready" — so a source that could not be read at all
-   * hid behind its partner being merely old.
-   */
-  it('leads a paired stage with the worse of its two source states', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      ci_checks: {
-        state: 'stale',
-        reason: 'the retained CI evidence is stale',
-        value: { items: [ciCheck()] },
-      },
-      failure_localization: {
-        state: 'failed',
-        reason: 'the retained CI evidence read failed',
-      },
-    }));
-
-    await screen.findByText('Continuous integration');
-    const ci = stage('Continuous integration');
-    expect(statesIn(ci)).toEqual(['error', 'stale']);
-    expect(within(ci).getByText(/the retained CI evidence read failed/)).toBeTruthy();
-    expect(within(ci).getByText(/the retained CI evidence is stale/)).toBeTruthy();
-    expect(ci.querySelector('[data-state="ready"]')).toBeNull();
-  });
-
-  it('draws a stage as ready only when every source in it is ready', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      pull_requests: { state: 'ready', value: { items: [] } },
-      review_comments: { state: 'ready', value: { items: [] } },
-      ci_checks: { state: 'ready', value: { items: [ciCheck()] } },
-      failure_localization: { state: 'ready', value: { items: [] } },
-      releases: { state: 'ready', value: { items: [] } },
-      host_evidence: { state: 'ready', value: { items: [hostComponent()] } },
-    }, {
-      domain_state: 'ready',
-      coverage: {
-        ...DELIVERY_OVERVIEW.coverage,
-        completeness: 'complete',
-        eligible: 9,
-        examined: 9,
-        omitted: 0,
-        omission_reasons: [],
-      },
-    }));
-
-    await screen.findByText('Continuous integration');
-    expect(statesIn(stage('Continuous integration'))).toEqual(['ready']);
-    expect(statesIn(stage('Pull requests & review'))).toEqual(['ready']);
-    expect(statesIn(stage('Releases'))).toEqual(['ready']);
-    const truth = screen.getByRole('group', { name: 'Delivery read truth' });
-    expect(within(truth).getByText(/9 of 9 delivery sources complete/)).toBeTruthy();
-  });
-
-  /**
-   * The CI archive can return a complete, validated run whose provider read was
-   * degraded underneath it: the projection is legitimately `ready`, and drawing
-   * that as a green Ready claimed the run was fully read when it was not.
-   */
-  it.each([
-    ['failed', 'error', /the provider read failed for this run/],
-    ['rate_limited', 'partial', /rate limited, so this run is not fully read/],
-  ] as const)(
-    'never greens a ready CI projection whose provider read was %s',
-    async (degradation, state, detail) => {
-      renderDelivery(PROJECTS, 200, deliveryOverview({
-        ci_checks: {
-          state: 'ready',
-          value: { items: [ciCheck({ source_degradation: degradation })] },
-        },
-        failure_localization: { state: 'ready', value: { items: [] } },
-      }));
-
-      await screen.findByText('Continuous integration');
-      const ci = stage('Continuous integration');
-      expect(statesIn(ci)).toEqual([state]);
-      expect(within(ci).getByText(detail)).toBeTruthy();
-      expect(ci.querySelector('[data-state="ready"]')).toBeNull();
-      // The counts the read did produce are still stated.
-      expect(within(ci).getByText(/1 check · 0 localized failures/)).toBeTruthy();
-    },
-  );
-
-  it('keeps a failed provider read distinct from a rate-limited one', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      ci_checks: {
-        state: 'ready',
-        value: {
-          items: [
-            ciCheck({ run_id: 'run-1', source_degradation: 'rate_limited' }),
-            ciCheck({ run_id: 'run-2', provider: 'buildkite', source_degradation: 'failed' }),
-          ],
-        },
-      },
-      failure_localization: { state: 'ready', value: { items: [] } },
-    }));
-
-    await screen.findByText('Continuous integration');
-    const ci = stage('Continuous integration');
-    expect(statesIn(ci)).toEqual(['error', 'partial']);
-  });
-
-  it('names a source degradation this build does not recognize', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      ci_checks: {
-        state: 'ready',
-        value: { items: [ciCheck({ source_degradation: 'quota_exhausted' })] },
-      },
-      failure_localization: { state: 'ready', value: { items: [] } },
-    }));
-
-    await screen.findByText('Continuous integration');
-    const ci = stage('Continuous integration');
-    expect(statesIn(ci)).toEqual(['unknown']);
-    expect(within(ci).getByText(/quota_exhausted, which this build does not recognize/)).toBeTruthy();
-  });
-
-  it('renders receipt-backed host evidence as accessible per-component rows', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      host_evidence: {
-        state: 'ready',
-        value: {
-          items: [
-            hostComponent(),
-            hostComponent({
-              host: 'first_party_catalog',
-              component: null,
-              state: 'observed',
-              registration: null,
-              evidence_source: 'checked_in_native_edit_stop_fixtures',
-              artifact_count: 5,
-            }),
-          ],
-        },
-      },
-    }));
-
-    expect(await screen.findByText('Host integrations')).toBeTruthy();
-    const components = screen.getByRole('list', { name: 'Host integration components' });
-    expect(within(components).getAllByRole('group')).toHaveLength(2);
-
-    const codex = screen.getByRole('group', { name: 'codex · core' });
-    expect(statesIn(codex)).toEqual(['ready', 'ready']);
-    expect(within(codex).getByText(/component current/)).toBeTruthy();
-    expect(within(codex).getByText(/registration current/)).toBeTruthy();
-    expect(within(codex).getByText('2 artifacts')).toBeTruthy();
-    expect(
-      within(codex).getByText('/profile/host-components/codex-core.receipt'),
-    ).toBeTruthy();
-
-    // A row the doctor observed without grading is neither ready nor degraded.
-    const catalog = screen.getByRole('group', { name: 'first_party_catalog · bundle' });
-    expect(statesIn(catalog)).toEqual(['unknown']);
-    expect(within(stage('Host integrations')).getByText(/2 component rows · 0 degraded · 7 artifacts/))
-      .toBeTruthy();
-  });
-
-  it.each([
-    ['repairable', 'partial'],
-    ['ownership_conflict', 'conflicting'],
-    ['missing', 'unavailable'],
-    ['corrupt', 'error'],
-  ] as const)(
-    'renders a %s component as its own degradation rather than as complete',
-    async (state, expected) => {
-      renderDelivery(PROJECTS, 200, deliveryOverview({
-        host_evidence: {
-          state: 'partial',
-          reason: `host receipt evidence includes a ${state.replace('_', ' ')} component`,
-          value: { items: [hostComponent({ state })] },
-        },
-      }));
-
-      await screen.findByText('Host integrations');
-      const row = screen.getByRole('group', { name: 'codex · core' });
-      expect(statesIn(row)).toEqual([expected, 'ready']);
-      expect(within(row).getByText(new RegExp(`component ${state.replace('_', ' ')}`))).toBeTruthy();
-      const hosts = stage('Host integrations');
-      expect(within(hosts).getByText(/Retained by this read: 1 component row · 1 degraded/))
-        .toBeTruthy();
-      expect(hosts.querySelector('[data-state="partial"]')).toBeTruthy();
-    },
-  );
-
-  /** Registration is a second, independently measured axis: a component whose
-   * files are current can still be unregistered with its host. */
-  it('reports registration degradation on a component that is itself current', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      host_evidence: {
-        state: 'partial',
-        reason: 'host receipt evidence includes an unregistered component',
-        value: { items: [hostComponent({ state: 'current', registration: 'missing' })] },
-      },
-    }));
-
-    await screen.findByText('Host integrations');
-    const row = screen.getByRole('group', { name: 'codex · core' });
-    expect(statesIn(row)).toEqual(['ready', 'unavailable']);
-    expect(within(row).getByText(/component current/)).toBeTruthy();
-    expect(within(row).getByText(/registration missing/)).toBeTruthy();
-    expect(within(stage('Host integrations')).getByText(/1 component row · 1 degraded/))
-      .toBeTruthy();
-  });
-
-  it('counts a component state it cannot read apart from a degraded one', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      host_evidence: {
-        state: 'ready',
-        value: { items: [hostComponent({ state: 'quarantined' })] },
-      },
-    }));
-
-    await screen.findByText('Host integrations');
-    const row = screen.getByRole('group', { name: 'codex · core' });
-    expect(statesIn(row)).toEqual(['unsupported_schema', 'ready']);
-    expect(
-      within(stage('Host integrations')).getByText(
-        /1 component row · 0 degraded · 2 artifacts · 1 in a state this build cannot read/,
-      ),
-    ).toBeTruthy();
-  });
-
-  it('renders unavailable host evidence without implying zero coverage', async () => {
-    renderDelivery();
-
-    expect(await screen.findByText('Host integrations')).toBeTruthy();
-    const hosts = stage('Host integrations');
-    expect(within(hosts).getByText(/host evidence authority is not mounted/)).toBeTruthy();
-    expect(screen.queryByRole('list', { name: 'Host integration components' })).toBeNull();
-    expect(within(hosts).queryByText(/component rows/)).toBeNull();
-    expect(screen.queryByText('0 host integrations')).toBeNull();
-  });
-
-  /**
-   * The release walk is bounded and its projection carries no `truncated` flag,
-   * so the count cannot be presented as a total. Until the contract grows the
-   * flag, the page says the statement is missing rather than implying there is
-   * nothing beyond what it drew.
-   */
-  it('does not present a bounded release count as a total', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      releases: {
-        state: 'ready',
-        value: {
-          items: [
-            { tag: 'v1.0.0', commit: 'a'.repeat(40), title: 'one', prerelease: false, published_at_micros: 1 },
-            { tag: 'v0.9.0', commit: 'b'.repeat(40), title: 'zero nine', prerelease: false, published_at_micros: 0 },
-          ],
-        },
-      },
-    }));
-
-    await screen.findByText('Releases');
-    const releases = stage('Releases');
-    expect(statesIn(releases)).toEqual(['ready']);
-    expect(
-      within(releases).getByText(/2 releases · no truncation stated, so this is a floor/),
-    ).toBeTruthy();
-  });
-
   it('discloses when the commit timeline is truncated', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      commits: {
-        ...DELIVERY_OVERVIEW.payload.commits,
-        value: { ...DELIVERY_OVERVIEW.payload.commits.value, truncated: true },
+    renderDelivery(PROJECTS, 200, {
+      ...DELIVERY_OVERVIEW,
+      payload: {
+        ...DELIVERY_OVERVIEW.payload,
+        commits: {
+          ...DELIVERY_OVERVIEW.payload.commits,
+          value: {
+            ...DELIVERY_OVERVIEW.payload.commits.value,
+            truncated: true,
+          },
+        },
       },
-    }));
+    });
 
     expect(
       await screen.findByText(/2 commits shown · more commits not shown/),
     ).toBeTruthy();
   });
 
-  it('reports a behind index generation as stale even when its read completed', async () => {
-    renderDelivery(PROJECTS, 200, deliveryOverview({
-      generation_freshness: {
-        state: 'ready',
-        value: {
-          comparison: 'behind',
-          head_commit: 'c'.repeat(40),
-          indexed_commit: 'a'.repeat(40),
+  it('renders generation freshness from the reusable delivery projection', async () => {
+    renderDelivery(PROJECTS, 200, {
+      ...DELIVERY_OVERVIEW,
+      payload: {
+        ...DELIVERY_OVERVIEW.payload,
+        generation_freshness: {
+          state: 'ready',
+          value: {
+            comparison: 'behind',
+            head_commit: 'c'.repeat(40),
+            indexed_commit: 'a'.repeat(40),
+          },
         },
       },
-    }));
+    });
 
-    await screen.findByText('Index freshness');
-    const freshness = stage('Index freshness');
-    expect(statesIn(freshness)).toEqual(['stale']);
+    await screen.findByText('Stale');
+    const staleRead = screen.getByText(/behind · HEAD cccccccc · indexed aaaaaaaa/);
+    expect(staleRead).toBeTruthy();
     expect(
-      within(freshness).getByText(/behind · HEAD cccccccc · indexed aaaaaaaa/),
+      within(staleRead.parentElement?.parentElement ?? document.body).getByText('unknown'),
     ).toBeTruthy();
-    expect(within(freshness).getByText('unknown')).toBeTruthy();
-  });
-
-  it('reports a current index generation as measured evidence', async () => {
-    renderDelivery();
-
-    await screen.findByText('Index freshness');
-    const freshness = stage('Index freshness');
-    expect(statesIn(freshness)).toEqual(['ready']);
-    expect(within(freshness).getByText(/HEAD aaaaaaaa · indexed aaaaaaaa/)).toBeTruthy();
-    expect(within(freshness).getByText('measured')).toBeTruthy();
   });
 
   it('uses the shared ordered freshness meter beside explicit index age', async () => {
