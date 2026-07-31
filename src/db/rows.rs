@@ -6,6 +6,30 @@ use crate::types::*;
 // Helper: map an engine row to domain types (by column index).
 // ---------------------------------------------------------------------------
 
+/// The `nodes` projection [`row_to_node`] expects, in index order.
+///
+/// `row_to_node` maps **by column index**, so every `SELECT` feeding it must
+/// request exactly these columns in exactly this order. Use this macro (via
+/// `concat!` for static SQL, or the [`NODE_SELECT_COLUMNS`] const inside
+/// `format!`) rather than re-spelling the list — a hand-written copy that
+/// drifts by one column silently mis-maps every field after the drift.
+///
+/// Callers needing extra columns append them *after* this list, so their
+/// indices start at 23 and the mapped prefix stays valid.
+macro_rules! node_select_columns {
+    () => {
+        "id, kind, name, qualified_name, file_path, \
+         start_line, end_line, start_column, end_column, \
+         docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, \
+         unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id"
+    };
+}
+
+pub(super) use node_select_columns;
+
+/// [`node_select_columns!`] as a value, for `format!`-built SQL.
+pub(super) const NODE_SELECT_COLUMNS: &str = node_select_columns!();
+
 /// Maps a row from the `nodes` table to a `Node`.
 ///
 /// Expected column order: id(0), kind(1), name(2), `qualified_name(3)`,

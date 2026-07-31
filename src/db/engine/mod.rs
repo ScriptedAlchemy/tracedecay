@@ -24,7 +24,7 @@ pub(crate) use statement::Statement;
 #[cfg(test)]
 pub(crate) use test_support::TestConnection;
 pub(crate) use transaction::{Transaction, TransactionBehavior};
-pub(crate) use value::Value;
+pub(crate) use value::{FromValue, Value};
 
 #[cfg(test)]
 mod tests;

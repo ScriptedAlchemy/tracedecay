@@ -2,7 +2,7 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseEngineReadSnapshot};
-use super::rows::row_to_node;
+use super::rows::{NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{build_qmark_placeholders, collect_rows};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
@@ -75,12 +75,13 @@ impl Database {
         let like_pattern = format!("%{query}%");
         let mut rows = conn
             .query(
-                "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes
-                 WHERE name LIKE ?1 OR qualified_name LIKE ?1 OR docstring LIKE ?1 OR signature LIKE ?1
-                 LIMIT ?2",
+                concat!(
+                    "SELECT ",
+                    node_select_columns!(),
+                    " FROM nodes
+                     WHERE name LIKE ?1 OR qualified_name LIKE ?1 OR docstring LIKE ?1 OR signature LIKE ?1
+                     LIMIT ?2"
+                ),
                 params![like_pattern.as_str(), limit as i64],
             )
             .await
@@ -194,11 +195,7 @@ impl Database {
         }
         let placeholders = build_qmark_placeholders(names.len());
         let sql = format!(
-            "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async,
-                    branches, loops, returns, max_nesting,
-                    unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+            "SELECT {NODE_SELECT_COLUMNS}
              FROM nodes
              WHERE LOWER(name) IN ({placeholders})
              LIMIT ?",
