@@ -1227,4 +1227,5 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     close_db(db3).await;
 }
 
+#[path = "corruption_test/fallback.rs"]
 mod fallback;

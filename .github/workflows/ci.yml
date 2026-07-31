@@ -641,19 +641,7 @@ jobs:
           if (Test-Path Env:TRACEDECAY_SQLITE_UNSAFE_FAST) {
             throw "TRACEDECAY_SQLITE_UNSAFE_FAST must be absent for durable SQLite coverage"
           }
-          # The LCM schema tests are NOT in session_suite. `session_suite/main.rs`
-          # dropped `mod lcm_schema;` when the module moved under src/, and they
-          # are now compiled into the LIBRARY unit-test binary by the #[path]
-          # injection at src/global_db/session_temporal/schema.rs, so they carry
-          # the `global_db::session_temporal::schema::stage_e_schema_tests::`
-          # prefix under binary(=tracedecay). The old
-          # `binary(=session_suite) & test(/^lcm_schema::/)` clause matched
-          # nothing, and because the other clauses matched, this DELETE+FULL job
-          # went green for months without ever running them against Windows
-          # production pragmas. tests/dashboard_workflow_contract_test.sh now
-          # checks each clause against the module that backs it.
-          $filter = '(binary(=session_suite) & (test(/^temporal_projection::/) | test(/^lcm_summary_lineage_review::/) | test(/^lcm_payload::/) | test(/^lcm_query::/))) | (binary(=storage_suite) & (test(/^corruption_test::/) | test(/^db_query_test::/) | test(/^migration_manifest_test::/) | test(/^fact_merge_hydration_test::/))) | binary(=session_contract) | (binary(=tracedecay) & (test(/^query::temporal::/) | test(/^global_db::session_temporal::schema::stage_e_schema_tests::/)))'
-          cargo-nextest nextest run --profile ci --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst" --extract-to "$env:GITHUB_WORKSPACE" --workspace-remap "$env:GITHUB_WORKSPACE" -E $filter --no-tests=fail --test-threads 1 --status-level slow
+          cargo-nextest nextest run --profile ci --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst" --extract-to "$env:GITHUB_WORKSPACE" --workspace-remap "$env:GITHUB_WORKSPACE" -E 'binary(=windows_durable_behavior)' --no-tests=fail --test-threads 1 --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()
