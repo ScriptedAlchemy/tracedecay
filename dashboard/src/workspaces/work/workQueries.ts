@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
-  WorkProjection,
   WorkProjectionCoverageV1,
   WorkProjectionDeltaV1,
   WorkProjectionResumeCursorV1,
@@ -141,18 +140,4 @@ export function useWorkCommand<Request, Response>(
       }
     },
   });
-}
-
-/**
- * The tasks a snapshot reports, ordered for reading.
- *
- * Sorted by title so the board is stable across refetches; the daemon returns
- * projection order, which is insertion order and shuffles as tasks change.
- */
-export function orderedProjections(
-  snapshot: WorkProjectionSnapshotV1,
-): readonly WorkProjection[] {
-  return [...snapshot.projections].sort((left, right) =>
-    left.title.localeCompare(right.title),
-  );
 }

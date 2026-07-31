@@ -185,9 +185,6 @@ export function fetchLegacyWrite<T>(
 
 /** Loose object schema for legacy payloads we render generically. */
 export const AnyObject = z.record(z.string(), z.unknown());
-export type AnyObj = z.infer<typeof AnyObject>;
-
-/* ---- typed slices of the legacy surfaces the workspaces consume ---- */
 
 // `ProjectSchema`/`ProjectsSchema` — every field optional, the collection
 // optional — had no callers; `/api/projects` is the generated
@@ -197,11 +194,8 @@ export type AnyObj = z.infer<typeof AnyObject>;
 // optional accepts a body that says nothing, and the one field it would have
 // been reached for — `active_project_id`, the authority behind `scopeWritable`
 // — it could not express at all.
-
-export const LcmOverviewSchema = AnyObject;
-export const LcmSessionsSchema = AnyObject;
-export const MemoryOverviewSchema = AnyObject;
-export const GraphOverviewSchema = AnyObject;
-export const SavingsOverviewSchema = AnyObject;
-export const AutomationStatusSchema = AnyObject;
-export const SettingsSchema = AnyObject;
+//
+// The seven per-surface aliases that followed (`LcmOverviewSchema`,
+// `GraphOverviewSchema`, and the rest) went for the adjacent reason: each was
+// `AnyObject` under another name, so they promised a per-route contract none of
+// them held, and every caller had already moved to a generated schema.
