@@ -50,7 +50,7 @@ impl McpServer {
         }
         tokio::select! {
             biased;
-            () = self.project_server_response_revoked.cancelled() => Ok(false),
+            () = self.project_server_lifecycle.response_revoked().cancelled() => Ok(false),
             result = write => result.map(|()| true),
         }
     }
@@ -359,12 +359,15 @@ impl McpServer {
                 .is_ok_and(|request| request.method == "tools/call")
                 && self.project_server_live.is_some();
             let project_request_guard = if project_tool_call {
-                Some(self.project_server_response_gate.read().await)
+                Some(self.project_server_lifecycle.response_gate().read().await)
             } else {
                 None
             };
             let project_request_admitted = project_request_guard.is_none()
-                || !self.project_server_response_revoked.is_cancelled();
+                || !self
+                    .project_server_lifecycle
+                    .response_revoked()
+                    .is_cancelled();
             let request_activity =
                 request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
@@ -443,7 +446,7 @@ impl McpServer {
                             let shutdown_requested = async {
                                 tokio::select! {
                                     () = &mut external_shutdown_requested => {}
-                                    () = self.project_server_request_abort.cancelled() => {}
+                                    () = self.project_server_lifecycle.request_abort().cancelled() => {}
                                 }
                             };
                             tokio::pin!(shutdown_requested);
