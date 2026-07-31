@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_application::DirectorySyncPolicy;
 
 use crate::config::{self, TRACEDECAY_DIR};
 use crate::errors::{Result, TraceDecayError};
@@ -1574,18 +1575,11 @@ impl PrivateStoreIo {
     }
 }
 
-#[cfg(unix)]
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid_input("private store durable file has no parent directory"))?;
-    fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
+    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
 pub(crate) fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {

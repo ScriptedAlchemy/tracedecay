@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::DirectorySyncPolicy;
 
 use super::files::{remove_runtime_files, sqlite_sidecar};
 use super::*;
@@ -236,15 +237,6 @@ fn create_private_directory(path: &Path) -> Result<()> {
     builder.create(path).map_err(io_error)
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(io_error)
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(io_error)
 }

@@ -15,6 +15,7 @@ use std::process::{Command, Output, Stdio};
 
 use serde::Serialize;
 use thiserror::Error;
+use tracedecay_application::DirectorySyncPolicy;
 use tracedecay_domain::{
     DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
@@ -1180,8 +1181,7 @@ fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexError> {
     let parent = path
         .parent()
         .ok_or_else(|| NativeGitIndexError::Io("Git index has no parent directory".to_owned()))?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
+    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
         .map_err(|error| NativeGitIndexError::Io(error.to_string()))
 }
 

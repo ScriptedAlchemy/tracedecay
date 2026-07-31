@@ -17,7 +17,7 @@ use std::{
 };
 
 use thiserror::Error;
-use tracedecay_application::now_micros;
+use tracedecay_application::{DirectorySyncPolicy, now_micros};
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
@@ -180,8 +180,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        std::fs::File::open(path)
-            .and_then(|directory| directory.sync_all())
+        tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict)
             .map_err(Self::unavailable)
     }
 

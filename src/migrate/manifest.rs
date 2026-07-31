@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tracedecay_application::DirectorySyncPolicy;
 
 use crate::migrate::inventory::{MigrationInventory, StoreStatus};
 use crate::migrate::registry::{
@@ -976,18 +977,11 @@ fn sync_file(path: &Path) -> io::Result<()> {
         .sync_all()
 }
 
-#[cfg(unix)]
 fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid_manifest("migration target has no parent directory"))?;
-    fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
+    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
 fn copy_file_atomically(source: &Path, target: &Path, label: &str) -> io::Result<()> {

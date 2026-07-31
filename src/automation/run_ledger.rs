@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_application::DirectorySyncPolicy;
 
 use super::backend::{
     AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
@@ -503,24 +504,13 @@ fn publish_run_artifact_chain_blocking_with_fault(
     Ok(())
 }
 
-#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::fs::File::open(path)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                config_error(format!(
-                    "failed to sync artifact directory '{}': {error}",
-                    path.display()
-                ))
-            })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
+        config_error(format!(
+            "failed to sync artifact directory '{}': {error}",
+            path.display()
+        ))
+    })
 }
 
 pub async fn read_run_artifact_payload(
