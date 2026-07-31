@@ -538,9 +538,7 @@ mod tests {
         registry.publish(project.clone(), component(7)).await;
 
         assert_eq!(
-            registry
-                .read::<Component, _, _>(&project, |held| mark(held))
-                .await,
+            registry.read::<Component, _, _>(&project, mark).await,
             Some(Some(7))
         );
         assert!(

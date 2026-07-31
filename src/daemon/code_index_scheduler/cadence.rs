@@ -475,7 +475,9 @@ mod tests {
 
     #[test]
     fn ring_capacity_can_hold_a_p99_eligible_population() {
-        assert!(CodeIndexCadenceTelemetryV1::CAPACITY >= P99_MINIMUM_SAMPLES);
+        const {
+            assert!(CodeIndexCadenceTelemetryV1::CAPACITY >= P99_MINIMUM_SAMPLES);
+        }
         let mut telemetry = CodeIndexCadenceTelemetryV1::default();
         for index in 0..(CodeIndexCadenceTelemetryV1::CAPACITY + 3) {
             let wake = i64::try_from(index).expect("fixture index fits i64");

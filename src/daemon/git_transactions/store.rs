@@ -80,7 +80,7 @@ pub(crate) struct DaemonGitIndexTransactionStore {
 enum ActorDatabase {
     Registered(Arc<RegisteredGlobalDb>),
     #[cfg(test)]
-    Engine(TestConnection),
+    Engine(Box<TestConnection>),
 }
 
 impl ActorDatabase {
@@ -134,7 +134,7 @@ impl DaemonGitIndexTransactionStore {
     pub(crate) fn open_engine_test(
         database: TestConnection,
     ) -> GitIndexTransactionStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Engine(database))
+        Self::open_actor(ActorDatabase::Engine(Box::new(database)))
     }
 
     fn open_actor(database: ActorDatabase) -> GitIndexTransactionStoreResult<Self> {
