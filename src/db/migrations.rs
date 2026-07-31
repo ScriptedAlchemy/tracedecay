@@ -1407,7 +1407,7 @@ async fn migrate_v8(conn: &Transaction) -> Result<()> {
 /// `user_version` at V8 on every rejection.
 async fn migrate_v9(conn: &Transaction) -> Result<()> {
     reject_precreated_v9_objects(conn).await?;
-    ensure_exact_v9_read_cache(conn).await?;
+    create_and_verify_v9_read_cache(conn).await?;
 
     // V9 and its user_version publication execute in one immediate
     // transaction. A valid V8 source therefore always lacks this column;
@@ -1418,6 +1418,7 @@ async fn migrate_v9(conn: &Transaction) -> Result<()> {
             message: format!("v9: failed to add parent_id column: {e}"),
             operation: "migrate_v9".to_string(),
         })?;
+    verify_created_v9_parent_id_column(conn).await?;
 
     // V1 creates edges, so its absence at V8 is corruption and must fail
     // closed. When a node has multiple incoming Contains rows (legacy data
@@ -1443,7 +1444,7 @@ async fn migrate_v9(conn: &Transaction) -> Result<()> {
             operation: "migrate_v9".to_string(),
         })?;
 
-    ensure_exact_schema_object(
+    create_and_verify_schema_object(
         conn,
         "index",
         "idx_nodes_parent_id",
@@ -1573,26 +1574,21 @@ async fn reject_precreated_v9_objects(conn: &Transaction) -> Result<()> {
     })
 }
 
-async fn ensure_exact_v9_read_cache(conn: &Transaction) -> Result<()> {
-    match schema_object_sql(conn, "table", "read_cache").await? {
-        Some(sql) => validate_exact_v9_read_cache(conn, &sql).await?,
-        None => {
-            conn.execute(V9_READ_CACHE_TABLE_SQL, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("v9: failed to create read_cache table: {e}"),
-                    operation: "migrate_v9".to_string(),
-                })?;
-            let sql = schema_object_sql(conn, "table", "read_cache")
-                .await?
-                .ok_or_else(|| TraceDecayError::Database {
-                    message: "v9: read_cache table missing after create".to_string(),
-                    operation: "migrate_v9".to_string(),
-                })?;
-            validate_exact_v9_read_cache(conn, &sql).await?;
-        }
-    }
-    ensure_exact_schema_object(
+async fn create_and_verify_v9_read_cache(conn: &Transaction) -> Result<()> {
+    conn.execute(V9_READ_CACHE_TABLE_SQL, ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to create read_cache table: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let sql = schema_object_sql(conn, "table", "read_cache")
+        .await?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "v9: read_cache table missing after create".to_string(),
+            operation: "migrate_v9".to_string(),
+        })?;
+    validate_exact_v9_read_cache(conn, &sql).await?;
+    create_and_verify_schema_object(
         conn,
         "index",
         "idx_read_cache_session",
@@ -1604,7 +1600,7 @@ async fn ensure_exact_v9_read_cache(conn: &Transaction) -> Result<()> {
 async fn validate_exact_v9_read_cache(conn: &Transaction, sql: &str) -> Result<()> {
     if normalize_schema_sql(sql) != normalize_schema_sql(V9_READ_CACHE_TABLE_SQL) {
         return Err(TraceDecayError::Database {
-            message: "v9: precreated read_cache table SQL does not match the exact contract"
+            message: "v9: created read_cache table SQL does not match the exact contract"
                 .to_string(),
             operation: "migrate_v9".to_string(),
         });
@@ -1648,7 +1644,7 @@ async fn validate_exact_v9_read_cache(conn: &Transaction, sql: &str) -> Result<(
         .collect::<Vec<_>>();
     if columns != expected {
         return Err(TraceDecayError::Database {
-            message: "v9: precreated read_cache columns do not match the exact contract"
+            message: "v9: created read_cache columns do not match the exact contract"
                 .to_string(),
             operation: "migrate_v9".to_string(),
         });
@@ -1732,48 +1728,93 @@ async fn validate_exact_v9_read_cache(conn: &Transaction, sql: &str) -> Result<(
     Ok(())
 }
 
-async fn ensure_exact_schema_object(
+async fn verify_created_v9_parent_id_column(conn: &Transaction) -> Result<()> {
+    let mut rows = conn
+        .query("PRAGMA table_info(nodes)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to verify created nodes.parent_id column: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v9: failed to iterate created nodes columns: {e}"),
+        operation: "migrate_v9".to_string(),
+    })? {
+        let name = row
+            .get::<String>(1)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read created nodes column name: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        if name != "parent_id" {
+            continue;
+        }
+        let col_type = row
+            .get::<String>(2)
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("v9: failed to read created nodes.parent_id type: {e}"),
+                operation: "migrate_v9".to_string(),
+            })?;
+        let notnull = row.get::<i64>(3).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read created nodes.parent_id nullability: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        let default_value =
+            row.get::<Option<String>>(4)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("v9: failed to read created nodes.parent_id default: {e}"),
+                    operation: "migrate_v9".to_string(),
+                })?;
+        let primary_key = row.get::<i64>(5).map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to read created nodes.parent_id primary key: {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+        if col_type.eq_ignore_ascii_case("TEXT")
+            && notnull == 0
+            && default_value.is_none()
+            && primary_key == 0
+        {
+            return Ok(());
+        }
+        return Err(TraceDecayError::Database {
+            message: "v9: created nodes.parent_id column does not match the exact contract"
+                .to_string(),
+            operation: "migrate_v9".to_string(),
+        });
+    }
+    Err(TraceDecayError::Database {
+        message: "v9: nodes.parent_id column missing after create".to_string(),
+        operation: "migrate_v9".to_string(),
+    })
+}
+
+async fn create_and_verify_schema_object(
     conn: &Transaction,
     object_type: &str,
     name: &str,
     expected_sql: &str,
 ) -> Result<()> {
-    match schema_object_sql(conn, object_type, name).await? {
-        Some(sql) => {
-            if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
-                return Err(TraceDecayError::Database {
-                    message: format!(
-                        "v9: precreated {object_type} '{name}' SQL does not match the exact contract"
-                    ),
-                    operation: "migrate_v9".to_string(),
-                });
-            }
-            Ok(())
-        }
-        None => {
-            conn.execute(expected_sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("v9: failed to create {object_type} '{name}': {e}"),
-                    operation: "migrate_v9".to_string(),
-                })?;
-            let sql = schema_object_sql(conn, object_type, name)
-                .await?
-                .ok_or_else(|| TraceDecayError::Database {
-                    message: format!("v9: {object_type} '{name}' missing after create"),
-                    operation: "migrate_v9".to_string(),
-                })?;
-            if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
-                return Err(TraceDecayError::Database {
-                    message: format!(
-                        "v9: created {object_type} '{name}' SQL does not match the exact contract"
-                    ),
-                    operation: "migrate_v9".to_string(),
-                });
-            }
-            Ok(())
-        }
+    conn.execute(expected_sql, ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v9: failed to create {object_type} '{name}': {e}"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    let sql = schema_object_sql(conn, object_type, name)
+        .await?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: format!("v9: {object_type} '{name}' missing after create"),
+            operation: "migrate_v9".to_string(),
+        })?;
+    if normalize_schema_sql(&sql) != normalize_schema_sql(expected_sql) {
+        return Err(TraceDecayError::Database {
+            message: format!(
+                "v9: created {object_type} '{name}' SQL does not match the exact contract"
+            ),
+            operation: "migrate_v9".to_string(),
+        });
     }
+    Ok(())
 }
 
 async fn schema_object_sql(
