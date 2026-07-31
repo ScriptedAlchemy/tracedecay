@@ -82,6 +82,11 @@ compiles.
 - Complete cutovers in one delivery slice: migrate every caller and datum,
   then delete compatibility façades, duplicate routes, old flags, dead aliases,
   and superseded scaffolding.
+- Add a V2/V3 contract, compatibility alias, deprecation path, or data
+  migration only after proving the prior shape shipped on `origin/master`, in
+  a published package, or in a live persisted format. Branch-local and
+  unreleased contracts change in place; a `V1` suffix alone is not release
+  evidence and does not justify compatibility scaffolding.
 - Keep hand-written modules focused: no new hand-written source file over
   1,000 lines and do not grow an existing oversized file. When safely possible,
   touching one should extract a cohesive responsibility. Generated code and
