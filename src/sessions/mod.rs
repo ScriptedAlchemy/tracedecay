@@ -42,6 +42,8 @@ pub(crate) use ingest::{
 };
 pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+/// Public because the snapshot capture entry points that return it are public.
+pub use snapshot_observation::SnapshotCaptureOutcome;
 pub use tracedecay_sessions::{ProviderScope, SessionProvider};
 
 /// Search hit for session-message full-text lookup.

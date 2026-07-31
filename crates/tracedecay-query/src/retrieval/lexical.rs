@@ -20,6 +20,7 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, LexicalPostingReadPort, RetrievalPortError,
+    contract_error,
 };
 
 mod projection;
@@ -194,19 +195,19 @@ impl LexicalLaneRequest<'_> {
         self.base
             .budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.budget
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.generation
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.lexical_profile_revision
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         self.score_domain
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         if self.fuzzy_budget > MAX_FUZZY_TERM_EXPANSIONS_V1 {
             return Err(RetrievalPortError::Contract(format!(
                 "lexical fuzzy budget exceeds the v1 bound of {MAX_FUZZY_TERM_EXPANSIONS_V1}"
@@ -249,6 +250,18 @@ impl LexicalLaneRequest<'_> {
 impl LexicalLaneEvidence {
     pub fn validate(&self, request: &LexicalLaneRequest<'_>) -> Result<(), RetrievalPortError> {
         request.validate()?;
+        self.validate_against_validated_request(request)
+    }
+
+    /// Same rejection set as [`Self::validate`], minus the request
+    /// revalidation the caller has already performed.
+    ///
+    /// The lane validates the request once per retrieval; re-running it for
+    /// every candidate in the batch is pure hot-path cost.
+    fn validate_against_validated_request(
+        &self,
+        request: &LexicalLaneRequest<'_>,
+    ) -> Result<(), RetrievalPortError> {
         if self.binding.occurrence.generation != request.generation {
             return Err(RetrievalPortError::GenerationMismatch);
         }
@@ -343,7 +356,7 @@ where
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         batch
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         let mut admitted: Vec<(CompactCandidate, LexicalLaneEvidence, FixedPointScore)> =
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
@@ -361,7 +374,7 @@ where
                         "lexical lane evidence is missing for a returned occurrence".to_owned(),
                     )
                 })?;
-            evidence.validate(request)?;
+            evidence.validate_against_validated_request(request)?;
             if evidence.binding.candidate_anchor != candidate.anchor_id
                 || evidence.binding.source_occurrence != candidate.source_occurrence_id
             {
@@ -383,7 +396,7 @@ where
             for (_, field_score) in &filtered.field_scores_micros {
                 raw_score = raw_score
                     .checked_add(FixedPointScore(*field_score))
-                    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                    .map_err(contract_error)?;
             }
             admitted.push((candidate.clone(), filtered, raw_score));
         }
@@ -440,7 +453,7 @@ where
         };
         rebuilt
             .validate()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            .map_err(contract_error)?;
         Ok(rebuilt)
     }
 }
@@ -527,9 +540,9 @@ fn lexical_checkpoint_digest(
         generation.as_str(),
         prefix,
     ))
-    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    .map_err(contract_error)?;
     CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(|error| RetrievalPortError::Contract(error.to_string()))
+        .map_err(contract_error)
 }
 
 #[cfg(test)]

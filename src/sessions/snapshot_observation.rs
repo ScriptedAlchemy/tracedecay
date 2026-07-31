@@ -26,7 +26,7 @@ use crate::sessions::SessionMessageRecord;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{
-    TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
+    FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
 };
 
 pub(crate) const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -39,10 +39,10 @@ pub(crate) const MAX_SNAPSHOT_CAPTURE_UNIT_BYTES: u64 =
     (2 * MAX_SNAPSHOT_FILE_BYTES) + (3 * MAX_SNAPSHOT_METADATA_BYTES);
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SnapshotCaptureOutcome {
-    pub(crate) stats: TranscriptIngestStats,
-    pub(crate) bytes_consumed: u64,
-    pub(crate) deferred_by_byte_cap: bool,
+pub struct SnapshotCaptureOutcome {
+    pub stats: TranscriptIngestStats,
+    pub bytes_consumed: u64,
+    pub deferred_by_byte_cap: bool,
 }
 
 /// Provider-specific record material needed by the shared snapshot admission loop.
@@ -162,6 +162,45 @@ pub(crate) fn snapshot_cursor_after(
         ObservationOrderingDomainV1::SnapshotOrder,
         order + 1,
     )?)
+}
+
+/// Runs one bounded snapshot sweep for a provider that re-reads complete files.
+///
+/// Every snapshot provider drives the same loop: bound discovery, defer when
+/// discovery truncated, then charge each discovered path against the sweep
+/// budget before loading and admitting its records. Providers supply only what
+/// actually differs — the discovery report, how a path's input bytes are
+/// charged, and how a path becomes `(generation, records)`.
+///
+/// This deliberately re-reads complete snapshots and derives a new source
+/// generation from their content; it neither consults nor advances legacy parse
+/// offsets. `max_new_bytes` is one logical source-byte budget for the complete
+/// sweep.
+pub(crate) async fn capture_snapshot_observations<R, B, L>(
+    facade: &HostAdmissionFacade<'_>,
+    scope: ObservationScopeV1,
+    cancellation: &ObservationCancellation,
+    max_new_bytes: Option<u64>,
+    discovery: FileDiscoveryReport,
+    input_bytes_fn: B,
+    load_fn: L,
+) -> TranscriptIngestResult<SnapshotCaptureOutcome>
+where
+    R: SnapshotAdmissionRecord,
+    B: Fn(&Path) -> TranscriptIngestResult<u64>,
+    L: Fn(&Path) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
+{
+    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
+    if discovery.is_truncated() {
+        runner.defer();
+    }
+    for path in discovery.paths {
+        let input_bytes = input_bytes_fn(&path)?;
+        runner
+            .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
+            .await?;
+    }
+    Ok(runner.finish())
 }
 
 /// Owns byte accounting and durable admission state for one snapshot-provider sweep.

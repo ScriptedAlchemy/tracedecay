@@ -8,7 +8,7 @@ use tracedecay_domain::{LogicalCopyRecordV1, SessionSummaryRecordV1};
 
 use super::{
     BoundedPage, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
-    PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
+    ExecutionLimits, PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
     TemporalExecutionSnapshot, TemporalPortError, TemporalRecordPageSink, TemporalRecordReadState,
     TemporalRetrievalScope, await_controlled,
 };
@@ -116,18 +116,18 @@ pub async fn pull_candidate_page(
     plan: &CandidatePlan,
     state: &mut CandidateReadState,
 ) -> Result<BoundedPage<RankingCandidate>, TemporalPortError> {
-    snapshot.request().execution_control().checkpoint()?;
-    let limits = snapshot.request().limits().validate()?;
-    state.require_within_limits(
-        limits.candidate_limit,
-        limits.candidate_total_bytes,
-        limits.candidate_item_bytes,
+    let limits = begin_pull(
+        snapshot,
+        state,
+        |limits| {
+            (
+                limits.candidate_limit,
+                limits.candidate_total_bytes,
+                limits.candidate_item_bytes,
+            )
+        },
         CANDIDATE_READ_BUDGET,
     )?;
-    if state.is_exhausted() {
-        // Caps exhausted with unread producer work must not synthesize Complete.
-        return Err(state.incomplete_coverage_error(CANDIDATE_READ_BUDGET));
-    }
     let control = snapshot.request().execution_control();
     let field_caps = CandidateFieldCaps::new(
         limits.candidate_stable_id_bytes,
@@ -162,18 +162,18 @@ pub async fn pull_temporal_record_page(
     candidates: &[RankingCandidate],
     state: &mut TemporalRecordReadState,
 ) -> Result<BoundedPage<TemporalRecord>, TemporalPortError> {
-    snapshot.request().execution_control().checkpoint()?;
-    let limits = snapshot.request().limits().validate()?;
-    state.require_within_limits(
-        limits.record_limit,
-        limits.record_total_bytes,
-        limits.record_item_bytes,
+    let limits = begin_pull(
+        snapshot,
+        state,
+        |limits| {
+            (
+                limits.record_limit,
+                limits.record_total_bytes,
+                limits.record_item_bytes,
+            )
+        },
         RECORD_READ_BUDGET,
     )?;
-    if state.is_exhausted() {
-        // Caps exhausted with unread producer work must not synthesize Complete.
-        return Err(state.incomplete_coverage_error(RECORD_READ_BUDGET));
-    }
     let control = snapshot.request().execution_control();
     let request = state.request(limits.record_key_bytes, None);
     let mut sink = state.begin_page(control, limits.record_key_bytes, None, RECORD_READ_BUDGET);
@@ -190,6 +190,27 @@ pub async fn pull_temporal_record_page(
     .await?;
     let page = sink.finish(status)?;
     commit_pulled_page(state, page, RECORD_READ_BUDGET)
+}
+
+/// Shared preamble every bounded pull runs before touching the port:
+/// cancellation checkpoint, limit validation, per-state cap admission, and the
+/// exhausted-state guard. `select_caps` picks the (item count, total bytes,
+/// item bytes) triple this read family is admitted against.
+fn begin_pull<T>(
+    snapshot: &TemporalExecutionSnapshot,
+    state: &ReadState<T>,
+    select_caps: impl FnOnce(&ExecutionLimits) -> (usize, usize, usize),
+    resources: ReadBudgetResources,
+) -> Result<ExecutionLimits, TemporalPortError> {
+    snapshot.request().execution_control().checkpoint()?;
+    let limits = snapshot.request().limits().validate()?;
+    let (max_items, max_total_bytes, max_item_bytes) = select_caps(&limits);
+    state.require_within_limits(max_items, max_total_bytes, max_item_bytes, resources)?;
+    if state.is_exhausted() {
+        // Caps exhausted with unread producer work must not synthesize Complete.
+        return Err(state.incomplete_coverage_error(resources));
+    }
+    Ok(limits)
 }
 
 fn commit_pulled_page<T>(
