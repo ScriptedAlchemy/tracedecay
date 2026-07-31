@@ -239,10 +239,8 @@ impl McpTransport for ReadErrorTransport {
     }
 }
 
-/// Serializes the two tests that still mutate process-wide global-accounting
-/// env vars. `#[tokio::test]` defaults to a current-thread runtime, so holding
-/// the guard across `.await` is fine.
-pub(crate) static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes tests that mutate process-wide global-accounting environment.
+pub(crate) static SAVINGS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Awaits the server's ledger-write settlement signal (the rows are written
 /// by spawned fire-and-forget tasks), then reads the ledger once and asserts

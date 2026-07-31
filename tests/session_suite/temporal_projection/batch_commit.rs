@@ -650,8 +650,6 @@ async fn mid_batch_abort_preserves_prior_receipt_frontier_for_resume() {
 
     conn.execute("DROP TRIGGER abort_copy_insert", []).unwrap();
     drop(conn);
-    drop(store);
-    drop(observation_store);
     drop(runtime);
 
     let runtime = profile_runtime(&tmp).await;

@@ -26,6 +26,12 @@ mod migration_manifest;
 #[path = "../crates/tracedecay-domain/tests/session_contract.rs"]
 mod domain_session_contract;
 
+#[tokio::test]
+async fn storage_fixture_authorities_are_available() {
+    let _guard = support::HOME_ENV_LOCK.lock().await;
+    assert!(support::ephemeral_safe_fixture_base().is_absolute());
+}
+
 mod temporal_kernel_behavior {
     use tracedecay_temporal_query::candidates::{CandidateChannel, plan_candidates};
 

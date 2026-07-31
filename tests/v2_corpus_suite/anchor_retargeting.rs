@@ -521,7 +521,6 @@ async fn moved_branch_ref_keeps_resolution_on_the_captured_commit() {
     assert_eq!(checkout.git(&["rev-parse", "refs/heads/main"]), commit_b);
 
     // Restart the store so resolution runs against reopened retained state.
-    drop(store);
     drop(runtime);
     let runtime = reopen_project_runtime(&tmp, checkout.path(), &project_id).await;
     let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;
@@ -552,7 +551,6 @@ async fn force_rewritten_branch_keeps_resolution_on_the_captured_commit() {
     let rewritten = checkout.git(&["rev-parse", "refs/heads/main"]);
     assert_ne!(commit_a, rewritten);
 
-    drop(store);
     drop(runtime);
     let runtime = reopen_project_runtime(&tmp, checkout.path(), &project_id).await;
     let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;
@@ -587,7 +585,6 @@ async fn deleted_ref_and_removed_checkout_never_resolve_against_ambient_head() {
     let ambient_head = ambient.commit("ambient replacement");
     assert_ne!(commit_a, ambient_head);
 
-    drop(store);
     drop(runtime);
     let runtime = reopen_project_runtime(&tmp, ambient.path(), &project_id).await;
     let record = resolve_capture_anchor(&runtime, &project_id, &persisted.anchor_id).await;

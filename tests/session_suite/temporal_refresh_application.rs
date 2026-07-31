@@ -140,10 +140,6 @@ impl TestRequestContext {
         self.binding.configuration_digest()
     }
 
-    fn cancellation(&self) -> &CancellationToken {
-        self.binding.cancellation()
-    }
-
     fn budgets(&self) -> RequestBudgets {
         self.binding.budgets()
     }

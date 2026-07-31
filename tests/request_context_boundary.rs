@@ -33,10 +33,8 @@ fn imports_root_request_context(source: &str) -> bool {
             .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
             .filter(|token| !token.is_empty())
             .collect::<Vec<_>>();
-        let names_context = tokens.iter().any(|token| *token == "context");
-        if names_context
-            && (tokens.iter().any(|token| *token == "RequestContext") || statement.contains('*'))
-        {
+        let names_context = tokens.contains(&"context");
+        if names_context && (tokens.contains(&"RequestContext") || statement.contains('*')) {
             return true;
         }
         if names_context

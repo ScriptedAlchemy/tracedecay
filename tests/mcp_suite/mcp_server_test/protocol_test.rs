@@ -5,7 +5,6 @@ use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::McpServer;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,

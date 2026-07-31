@@ -3392,7 +3392,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -3414,7 +3414,7 @@ mod tests {
 "#;
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
-    static HOST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static HOST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn feedback_registration_snapshot_rejects_pre_activation_edit() {
@@ -4301,7 +4301,7 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_tracked_reinstall_returns_non_blocking_typed_deferral() {
-        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let _env_lock = HOST_ENV_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
         let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
@@ -4334,9 +4334,9 @@ mod tests {
         assert!(staged.join(".kimi-plugin/plugin.json").is_file());
     }
 
-    #[test]
-    fn kimi_canonical_component_set_fails_before_direct_host_mutation() {
-        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+    #[tokio::test]
+    async fn kimi_canonical_component_set_fails_before_direct_host_mutation() {
+        let _env_lock = HOST_ENV_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
@@ -4396,11 +4396,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn kimi_registration_preflight_creates_no_backup_for_unavailable_api() {
+    #[tokio::test]
+    async fn kimi_registration_preflight_creates_no_backup_for_unavailable_api() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
-        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let _env_lock = HOST_ENV_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();

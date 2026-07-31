@@ -28,9 +28,9 @@ fn step(
     WorkflowStepV1 {
         step_id: id(step_id),
         operation: id(&format!("operation.{step_id}.v1")),
-        predecessors: predecessors.iter().map(|value| id(*value)).collect(),
+        predecessors: predecessors.iter().map(|value| id(value)).collect(),
         inputs,
-        outputs: outputs.iter().map(|value| id(*value)).collect(),
+        outputs: outputs.iter().map(|value| id(value)).collect(),
         fan_out: None,
     }
 }

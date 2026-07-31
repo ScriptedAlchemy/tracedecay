@@ -88,23 +88,23 @@ async fn project_runtime_at(
     project_root: &std::path::Path,
     project_id: &ProjectId,
 ) -> HostAdmissionTestRuntimeV1 {
-    std::fs::create_dir_all(&project_root).unwrap();
+    std::fs::create_dir_all(project_root).unwrap();
     if !project_root.join(".git").exists() {
         assert!(
             Command::new("git")
                 .args(["init", "-q"])
-                .current_dir(&project_root)
+                .current_dir(project_root)
                 .status()
                 .unwrap()
                 .success()
         );
     }
     assert!(
-        tracedecay::storage::write_repository_identity_marker(&project_root, project_id.as_str())
+        tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())
             .unwrap()
     );
     tracedecay::storage::write_enrollment_marker(
-        &project_root,
+        project_root,
         &tracedecay::storage::EnrollmentMarker {
             project_id: project_id.as_str().to_owned(),
             storage_mode: tracedecay::storage::StorageMode::ProfileSharded,

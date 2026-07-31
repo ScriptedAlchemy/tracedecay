@@ -627,7 +627,7 @@ fn uninstall_preserves_user_tracedecay_heading_after_block() {
     contents.push_str(user_section);
     std::fs::write(&claude_md, &contents).unwrap();
 
-    uninstall_claude_md_rules(&claude_md);
+    uninstall_claude_md_rules(&claude_md).unwrap();
 
     let after = std::fs::read_to_string(&claude_md).unwrap();
     assert!(

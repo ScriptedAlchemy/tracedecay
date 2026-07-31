@@ -335,9 +335,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 /// through the ungated CLI paths).
 #[tokio::test]
 async fn ledger_records_by_default_without_env_opt_in() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
     // Simulate a real (non-cargo) launch: neither the opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
     let _enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
@@ -374,11 +372,9 @@ async fn ledger_records_by_default_without_env_opt_in() {
 /// The explicit opt-outs must still work: a falsy
 /// `TRACEDECAY_ENABLE_GLOBAL_DB` or a truthy `TRACEDECAY_DISABLE_GLOBAL_DB`
 /// disables global accounting.
-#[test]
-fn global_accounting_env_overrides() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+#[tokio::test]
+async fn global_accounting_env_overrides() {
+    let _env_guard = SAVINGS_ENV_LOCK.lock().await;
     use tracedecay::global_db::{AccountingMode, global_accounting_mode};
 
     let _clear_enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");

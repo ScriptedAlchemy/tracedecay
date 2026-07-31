@@ -111,7 +111,7 @@ async fn activation_accepts_complete_canonical_graph_and_receipt_coverage() {
 
     assert_eq!(
         rows(
-            &path,
+            path,
             "SELECT generation || ':' || state
              FROM session_temporal_generations
              WHERE session_id = 'session.temporal.complete'
@@ -226,7 +226,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
     expected_supersession.sort_unstable();
     assert_eq!(
         rows(
-            &path,
+            path,
             "SELECT superseded_assertion_id || ':' || superseding_assertion_id
              FROM session_assertion_supersession
              ORDER BY superseded_assertion_id, superseding_assertion_id"
@@ -245,7 +245,7 @@ async fn supersession_derivatives_resolve_transitive_current_state() {
     expected_current.sort_unstable();
     assert_eq!(
         rows(
-            &path,
+            path,
             "SELECT entity_id || ':' || current_assertion_id
              FROM session_current_entities
              WHERE entity_kind = 'assertion_anchor'
@@ -282,7 +282,7 @@ async fn failed_activation_leaves_the_prior_generation_active() {
     );
     assert_eq!(
         rows(
-            &path,
+            path,
             "SELECT generation || ':' || state
              FROM session_temporal_generations
              WHERE state = 'active'"

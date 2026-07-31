@@ -591,9 +591,20 @@ async fn open_preserves_a_dirty_marker_owned_by_a_live_foreign_writer()
 
     let mut owner = spawn_live_foreign_owner();
     let foreign = structured_dirty_marker(owner.id(), "foreign-writer-epoch");
-    std::fs::write(&layout.dirty_path, &foreign)?;
+    if let Err(error) = std::fs::write(&layout.dirty_path, &foreign) {
+        let _ = owner.kill();
+        let _ = owner.wait();
+        return Err(error.into());
+    }
 
-    let opened = TraceDecay::open_with_options(&project_root, open_options).await?;
+    let opened = match TraceDecay::open_with_options(&project_root, open_options).await {
+        Ok(opened) => opened,
+        Err(error) => {
+            let _ = owner.kill();
+            let _ = owner.wait();
+            return Err(error.into());
+        }
+    };
     let observed = std::fs::read_to_string(&layout.dirty_path);
     opened.close();
     let _ = owner.kill();

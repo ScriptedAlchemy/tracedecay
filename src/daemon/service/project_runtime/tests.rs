@@ -737,7 +737,6 @@ async fn request_resolution_answers_nothing_for_an_absent_or_unnamed_project() {
         let resolved = registry.request_runtimes(project_root, None).await;
         assert!(resolved.feedback.is_none());
         assert!(resolved.feedback_owner.is_none());
-        assert!(resolved.advisory_cycle_invoker.is_none());
         assert!(resolved.configuration.is_none());
         assert!(resolved.work.is_none());
         assert!(resolved.lsp_owner.is_none());

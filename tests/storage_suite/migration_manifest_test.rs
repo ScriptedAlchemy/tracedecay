@@ -14,10 +14,10 @@ use tracedecay::migrate::inventory::{
     StoreStatus,
 };
 use tracedecay::migrate::manifest::{
-    ArtifactState, MIGRATION_MANIFEST_SCHEMA_VERSION, MigrationArtifact, MigrationManifest,
-    MigrationPlanOptions, MigrationProtocol, MigrationRollbackState, apply_migration_manifest,
-    assess_migration_rollback_state, build_plan_manifest, cleanup_migration_sources,
-    export_profile_store, export_profile_store_with_lease, finalize_migration_apply, load_manifest,
+    ArtifactState, MigrationArtifact, MigrationManifest, MigrationPlanOptions, MigrationProtocol,
+    MigrationRollbackState, apply_migration_manifest, assess_migration_rollback_state,
+    build_plan_manifest, cleanup_migration_sources, export_profile_store,
+    export_profile_store_with_lease, finalize_migration_apply, load_manifest,
     rollback_migration_manifest, save_manifest, verify_migration_manifest,
 };
 use tracedecay::storage::{

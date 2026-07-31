@@ -383,6 +383,8 @@ fn provider_scoped_user_catch_up_excludes_unrelated_providers() {
     assert!(provider_selected(None, SessionProvider::Codex));
     assert!(provider_selected(None, SessionProvider::Hermes));
 }
+
+#[test]
 fn transcript_failure_classification_is_bounded_and_drives_outcome_success() {
     let error =
         source::TranscriptIngestError::Store(tracedecay_store::TranscriptStoreError::Storage {

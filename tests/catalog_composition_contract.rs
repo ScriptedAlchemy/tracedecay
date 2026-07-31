@@ -11,7 +11,7 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef,
-    ScopeDimension, SortContractId, UseCaseId,
+    ScopeDimension, UseCaseId,
 };
 
 #[test]

@@ -1522,7 +1522,6 @@ async fn fact_retriever_search_includes_old_entity_only_matches() {
         .unwrap()
         .fact
         .unwrap();
-    drop(store);
     drop(writer);
 
     seed_newer_unrelated_memory_facts(
@@ -1645,7 +1644,6 @@ async fn fact_retriever_reason_applies_entity_predicates_before_limit() {
         .unwrap()
         .fact
         .unwrap();
-    drop(store);
     drop(writer);
 
     seed_newer_unrelated_memory_facts(
