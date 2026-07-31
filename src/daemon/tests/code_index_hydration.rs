@@ -314,6 +314,8 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
 
     let store = TempDir::new().expect("store");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        tracedecay_domain::ProjectId::new("project.code-index-hydration")
+            .expect("valid project"),
         project.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),

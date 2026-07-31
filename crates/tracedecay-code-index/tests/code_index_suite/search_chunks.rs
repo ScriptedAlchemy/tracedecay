@@ -313,6 +313,7 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         .collect();
     let privacy_domain = id::<PrivacyDomainId>("privacy.fixture");
     let mut generation = CodeGenerationManifestV1 {
+        project_id: id("project.fixture"),
         generation_id: id("generation.v1.aaaaaaaa.00000001"),
         snapshot_digest: digest('a'),
         invalidation_digest: digest('d'),
