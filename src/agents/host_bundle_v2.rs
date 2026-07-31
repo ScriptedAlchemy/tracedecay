@@ -1908,6 +1908,16 @@ pub fn latest_host_component_set_receipt_at(
     Ok(latest.map(|(_, receipt)| receipt))
 }
 
+/// Where rollback backups are written, one subdirectory per applied operation
+/// id. Exposed so a dry run can tell the operator where the bytes it is about
+/// to replace will be preserved, without the CLI reconstructing a
+/// control-directory layout it does not own. The operation id is minted when
+/// the mutation actually runs, so only the root is knowable during a preview.
+#[must_use]
+pub fn host_bundle_backup_root(lifecycle_root: &Path) -> PathBuf {
+    lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR).join("backups")
+}
+
 pub fn latest_host_component_receipt_at(
     lifecycle_root: &Path,
     host: HostKindV1,

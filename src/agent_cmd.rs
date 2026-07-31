@@ -106,6 +106,14 @@ pub(crate) async fn handle_host_bundle_component_command(
                 &lifecycle_root,
             )?;
         } else {
+            require_adoption_confirmation(
+                agent_id,
+                operation,
+                &component_set,
+                &options,
+                &home,
+                &lifecycle_root,
+            )?;
             apply_canonical_component_set(
                 agent_id,
                 operation,
@@ -129,6 +137,54 @@ pub(crate) async fn handle_host_bundle_component_command(
             })?;
     }
     Ok(())
+}
+
+/// Refuse an explicit component mutation that would claim a file no receipt
+/// records unless the operator confirmed adoption specifically.
+///
+/// `--yes` confirms the plan the preview showed; taking ownership of somebody
+/// else's bytes is a separate decision, so it needs its own `--adopt`. This is
+/// a confirmation gate only: the planner's adoption boundary is unchanged, a
+/// file another owner claims is still refused with a typed ownership conflict,
+/// and the automatic install/update/repair paths that migrate pre-receipt
+/// deployments do not route through this command.
+fn require_adoption_confirmation(
+    agent_id: &str,
+    operation: HostBundleCliOperation,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    options: &crate::cli::HostBundleCliOptions,
+    home: &Path,
+    lifecycle_root: &Path,
+) -> tracedecay::errors::Result<()> {
+    if options.adopt {
+        return Ok(());
+    }
+    let preview = preview_canonical_component_set(
+        agent_id,
+        operation,
+        component_set,
+        options,
+        home,
+        lifecycle_root,
+    )?;
+    let adopted = adopted_relative_paths(
+        &preview,
+        lifecycle_root,
+        component_set.component_set.host,
+    );
+    if adopted.is_empty() {
+        return Ok(());
+    }
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "agent {agent_id:?} would take ownership of {} file(s) that no TraceDecay receipt \
+             records ({}); the previous bytes are backed up under {}/<operation-id>, but claiming \
+             them is a separate decision — review `--dry-run` and re-run with `--yes --adopt`",
+            adopted.len(),
+            adopted.join(", "),
+            tracedecay::agents::host_bundle_v2::host_bundle_backup_root(lifecycle_root).display()
+        ),
+    })
 }
 
 /// Truthful reason a host component set is unavailable, so a skipped or
@@ -433,18 +489,99 @@ fn dry_run_canonical_component_set(
             hex::encode(claim.evidence_digest)
         );
     }
-    for plan in preview.component_plans {
+    let backup_root =
+        tracedecay::agents::host_bundle_v2::host_bundle_backup_root(lifecycle_root);
+    for plan in &preview.component_plans {
         eprintln!(
             "  {:?}: {} mutation(s), rollback={}",
             plan.component,
             plan.mutations.len(),
             plan.rollback_required
         );
-        for mutation in plan.mutations {
-            eprintln!("  {:?} {}", mutation.action, mutation.relative_path);
+        let owned = receipt_owned_paths(lifecycle_root, component_set.component_set.host, plan.component);
+        for mutation in &plan.mutations {
+            eprintln!(
+                "  {:?} {} [{}]",
+                mutation.action,
+                mutation.relative_path,
+                artifact_disposition(&mutation.action, &owned, &mutation.relative_path)
+            );
+        }
+        if plan.rollback_required {
+            eprintln!("    backups: {}/<operation-id>", backup_root.display());
         }
     }
     Ok(())
+}
+
+/// Deploy paths the durable receipt for this component already claims. A path
+/// missing from this set is one no receipt records, so replacing an existing
+/// file there is an adoption rather than an ordinary refresh.
+fn receipt_owned_paths(
+    lifecycle_root: &Path,
+    host: tracedecay::agents::host_bundle_v2::HostKindV1,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
+) -> std::collections::BTreeSet<String> {
+    tracedecay::agents::host_bundle_v2::latest_host_component_receipt_at(
+        lifecycle_root,
+        host,
+        component,
+    )
+    .ok()
+    .flatten()
+    .map(|receipt| {
+        receipt
+            .artifacts
+            .into_iter()
+            .map(|artifact| artifact.relative_path)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Per-path disposition for the dry run. A foreign claim never reaches here —
+/// the planner refuses the whole preview with a typed ownership conflict — so
+/// the reportable dispositions are the three the plan can actually contain.
+fn artifact_disposition(
+    action: &tracedecay::agents::host_bundle_v2::HostArtifactActionV1,
+    receipt_owned: &std::collections::BTreeSet<String>,
+    relative_path: &str,
+) -> &'static str {
+    use tracedecay::agents::host_bundle_v2::HostArtifactActionV1 as Action;
+
+    match action {
+        Action::Noop => "unchanged",
+        Action::WriteNew => "write-new",
+        Action::BackupThenRemove => "backup-then-remove",
+        Action::BackupThenReplace if receipt_owned.contains(relative_path) => {
+            "backup-then-replace"
+        }
+        Action::BackupThenReplace => "adopt",
+    }
+}
+
+/// Mutations that would claim an existing file no receipt records.
+fn adopted_relative_paths(
+    preview: &tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
+    lifecycle_root: &Path,
+    host: tracedecay::agents::host_bundle_v2::HostKindV1,
+) -> Vec<String> {
+    use tracedecay::agents::host_bundle_v2::HostArtifactActionV1 as Action;
+
+    let mut adopted = Vec::new();
+    for plan in &preview.component_plans {
+        let owned = receipt_owned_paths(lifecycle_root, host, plan.component);
+        for mutation in &plan.mutations {
+            if mutation.action == Action::BackupThenReplace
+                && !owned.contains(&mutation.relative_path)
+            {
+                adopted.push(mutation.relative_path.clone());
+            }
+        }
+    }
+    adopted.sort();
+    adopted.dedup();
+    adopted
 }
 
 fn preview_canonical_component_set(
@@ -597,6 +734,7 @@ fn apply_default_canonical_component_set(
             component: None,
             dry_run: false,
             yes: true,
+            adopt: false,
         },
         home,
         &lifecycle_root,
@@ -3184,6 +3322,7 @@ fn preflight_agent_integration(
             component: None,
             dry_run: true,
             yes: true,
+            adopt: false,
         },
         home,
         &lifecycle_root,
@@ -3415,6 +3554,106 @@ mod tests {
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
     static HOST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// `--yes` confirms the plan the preview showed; taking ownership of bytes
+    /// no receipt records is a separate decision, so the dry run must name it
+    /// as `adopt` rather than folding it into an ordinary refresh.
+    #[test]
+    fn dry_run_separates_adoption_from_an_ordinary_refresh() {
+        use tracedecay::agents::host_bundle_v2::HostArtifactActionV1 as Action;
+
+        let owned = ["plugins/tracedecay.json".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            super::artifact_disposition(&Action::BackupThenReplace, &owned, "plugins/tracedecay.json"),
+            "backup-then-replace"
+        );
+        assert_eq!(
+            super::artifact_disposition(&Action::BackupThenReplace, &owned, "plugins/unowned.json"),
+            "adopt"
+        );
+        assert_eq!(
+            super::artifact_disposition(&Action::WriteNew, &owned, "plugins/unowned.json"),
+            "write-new"
+        );
+        assert_eq!(
+            super::artifact_disposition(&Action::BackupThenRemove, &owned, "plugins/tracedecay.json"),
+            "backup-then-remove"
+        );
+        assert_eq!(
+            super::artifact_disposition(&Action::Noop, &owned, "plugins/tracedecay.json"),
+            "unchanged"
+        );
+    }
+
+    /// An explicit component mutation that would claim an unrecorded file is
+    /// refused without `--adopt`, and the refusal names every such path plus
+    /// where the replaced bytes are preserved.
+    #[tokio::test]
+    async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
+        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set(
+            "cursor",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        // A pre-receipt deployment: the cataloged path exists on disk with
+        // foreign bytes and no receipt records it.
+        let adopted = &component_set.component_set.components[0]
+            .manifest
+            .artifacts[0]
+            .relative_path;
+        let deployed = home.path().join(adopted);
+        std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+        std::fs::write(&deployed, b"pre-receipt").unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+
+        let error = super::require_adoption_confirmation(
+            "cursor",
+            HostBundleCliOperation::Repair,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains(adopted.as_str()), "{error}");
+        assert!(error.contains("--yes --adopt"), "{error}");
+        assert!(error.contains("backups"), "{error}");
+        assert_eq!(std::fs::read(&deployed).unwrap(), b"pre-receipt");
+
+        let confirmed = crate::cli::HostBundleCliOptions {
+            adopt: true,
+            ..options
+        };
+        super::require_adoption_confirmation(
+            "cursor",
+            HostBundleCliOperation::Repair,
+            &component_set,
+            &confirmed,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&deployed).unwrap(),
+            b"pre-receipt",
+            "the confirmation gate is read-only"
+        );
+    }
 
     #[test]
     fn feedback_registration_snapshot_rejects_pre_activation_edit() {
@@ -3799,6 +4038,7 @@ mod tests {
             component: Some(crate::cli::HostBundleComponentArg::Agent),
             dry_run: false,
             yes: true,
+            adopt: false,
         };
         apply_canonical_component_set(
             "opencode",
@@ -3857,6 +4097,7 @@ mod tests {
             component: Some(crate::cli::HostBundleComponentArg::ContextMcp),
             dry_run: false,
             yes: true,
+            adopt: false,
         };
 
         apply_canonical_component_set(
@@ -4209,6 +4450,7 @@ mod tests {
             component: Some(crate::cli::HostBundleComponentArg::Core),
             dry_run: false,
             yes: true,
+            adopt: false,
         };
 
         for operation in [
@@ -4277,6 +4519,7 @@ mod tests {
             component: Some(crate::cli::HostBundleComponentArg::Core),
             dry_run: false,
             yes: true,
+            adopt: false,
         };
 
         let error = apply_canonical_component_set(
@@ -4358,6 +4601,7 @@ mod tests {
             component: None,
             dry_run: false,
             yes: true,
+            adopt: false,
         };
 
         for operation in [
