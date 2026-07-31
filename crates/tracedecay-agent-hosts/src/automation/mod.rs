@@ -38,7 +38,7 @@ pub mod text;
 /// Canonical home for the `config_error` helper duplicated across the
 /// automation module tree; other automation submodules should call this
 /// instead of re-declaring their own copy.
-pub(crate) fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
+pub fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
     crate::errors::TraceDecayError::Config {
         message: message.into(),
     }

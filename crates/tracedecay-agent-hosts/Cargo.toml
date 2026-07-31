@@ -23,8 +23,14 @@ cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 dirs = "6"
 fs2 = "0.4"
+getrandom = "0.2"
 hex = "0.4"
 regex = "1.12.3"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -36,16 +42,22 @@ toml = "1"
 toml_edit = "0.25.13"
 tracing = "0.1"
 url = "2"
+webpki-roots = "1"
 yaml-edit = { version = "0.2.3", default-features = false }
 
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+
+# Linux-only extended-attribute probe in `agents::mod` (host install provenance).
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = "1"
 
 [dev-dependencies]
 tempfile = "3"

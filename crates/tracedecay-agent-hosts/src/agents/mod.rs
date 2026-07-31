@@ -1426,7 +1426,7 @@ pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
 /// `using-the-cli` skill: when the MCP transport fails, agents should fall
 /// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
 /// poking at `.tracedecay` databases directly.
-pub(crate) const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
+pub const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
     "If a tracedecay MCP call errors, times out, \
 or the server is disconnected, every tool is also available as a shell command: ",
     cli_fallback_args_invocation_lit!(),
