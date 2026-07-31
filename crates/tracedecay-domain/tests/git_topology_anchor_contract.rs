@@ -401,12 +401,12 @@ fn github_stack_layer(
     provider_position: u32,
     repository: &str,
     pull_request: &str,
-    base_ref: &str,
-    head_ref: &str,
-    base_commit: &str,
-    head_commit: &str,
+    refs: (&str, &str),
+    commits: (&str, &str),
     source_anchor: &str,
 ) -> GitHubStackLayerSnapshotV1 {
+    let (base_ref, head_ref) = refs;
+    let (base_commit, head_commit) = commits;
     let result = GitHubReviewIngressResultV1 {
         provider: id("provider.github"),
         scope: FeedbackScopeV1 {
@@ -446,20 +446,16 @@ fn linear_github_stack_layers() -> Vec<GitHubStackLayerSnapshotV1> {
             0,
             "repository.fixture",
             "pr.41",
-            "refs/heads/main",
-            "refs/heads/lower",
-            "commit.main",
-            "commit.lower",
+            ("refs/heads/main", "refs/heads/lower"),
+            ("commit.main", "commit.lower"),
             "anchor.pr.41",
         ),
         github_stack_layer(
             1,
             "repository.fixture",
             "pr.42",
-            "refs/heads/lower",
-            "refs/heads/upper",
-            "commit.lower",
-            "commit.upper",
+            ("refs/heads/lower", "refs/heads/upper"),
+            ("commit.lower", "commit.upper"),
             "anchor.pr.42",
         ),
     ]
@@ -617,10 +613,8 @@ fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
         1,
         "repository.fixture",
         "pr.42",
-        "refs/heads/other",
-        "refs/heads/upper",
-        "commit.other",
-        "commit.upper",
+        ("refs/heads/other", "refs/heads/upper"),
+        ("commit.other", "commit.upper"),
         "anchor.pr.42",
     );
     assert!(
@@ -641,10 +635,8 @@ fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
         1,
         "repository.other",
         "pr.42",
-        "refs/heads/lower",
-        "refs/heads/upper",
-        "commit.lower",
-        "commit.upper",
+        ("refs/heads/lower", "refs/heads/upper"),
+        ("commit.lower", "commit.upper"),
         "anchor.pr.42",
     );
     assert!(

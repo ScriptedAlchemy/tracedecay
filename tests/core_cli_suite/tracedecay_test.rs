@@ -1014,7 +1014,7 @@ async fn edit_verify_flag_surfaces_planted_compiler_error() {
     fs::write(project.join("src/lib.rs"), "pub fn answer() -> u32 { 1 }\n").unwrap();
 
     let profile_root = tmp.path().join("profile");
-    let cg = crate::fixture::init_project_from_template_with_options(
+    let cg = TraceDecay::init_with_options(
         &project,
         TraceDecayOpenOptions {
             global_db_path: Some(profile_root.join("global.db")),

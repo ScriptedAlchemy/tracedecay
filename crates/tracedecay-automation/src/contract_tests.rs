@@ -111,8 +111,10 @@ fn apply_policy_preserves_complete_and_partial_outcomes() {
 
 #[test]
 fn apply_policy_preserves_the_legacy_proposal_only_escape_hatch() {
-    let mut config = AutomationConfig::default();
-    config.auto_apply_memory_ops = false;
+    let config = AutomationConfig {
+        auto_apply_memory_ops: false,
+        ..AutomationConfig::default()
+    };
 
     let policy = MemoryApplyPolicy::curation_ops(&config, 1);
 

@@ -420,7 +420,6 @@ async fn codex_goal_token_ticks_retain_raw_observations_and_dedupe_projected_goa
     assert_eq!(goal_rows_rebuilt[2].1.as_deref(), Some("paused"));
 
     // Restart reopen: latest goal remains paused with objective text.
-    drop(store);
     drop(runtime);
     let reopened = open_project_session_db(&project).await.unwrap();
     let goals_again = reopened

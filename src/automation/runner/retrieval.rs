@@ -597,6 +597,7 @@ fn project_automation_identity(
     ))
 }
 
+#[cfg(test)]
 fn profile_automation_identity(
     shard: &StoreShardIdV1,
     profile_identity: &LocalProfileIdentityAuthorityV1,
@@ -612,6 +613,7 @@ fn profile_automation_identity(
     ))
 }
 
+#[cfg(test)]
 pub(crate) async fn registered_profile_automation_retrieval(
     database: Arc<RegisteredGlobalDb>,
     profile_identity: &LocalProfileIdentityAuthorityV1,

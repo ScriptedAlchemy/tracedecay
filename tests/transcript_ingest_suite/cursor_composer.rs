@@ -18,9 +18,9 @@ use tracedecay_store::ObservationReplayRequest;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, durable_table_count, fixture_project_id,
-    ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
-    open_project_session_db, set_projection_failure, try_ingest_source,
+    ProjectSessionTestRuntime, durable_table_count, ingest_global_sources_for_provider,
+    mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
+    try_ingest_source,
 };
 use crate::support::{init_git_repo, init_project};
 

@@ -16,7 +16,6 @@ use tracedecay::automation::backend::{
     run_agent_task_with_retry,
 };
 use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
-use tracedecay::errors::TraceDecayError;
 use tracedecay::sessions::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
