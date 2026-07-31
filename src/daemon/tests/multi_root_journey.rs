@@ -165,7 +165,7 @@ fn assert_git_preflight<'a>(
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_registered_roots_survive_cas_partial_query_and_restart() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
