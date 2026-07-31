@@ -34,6 +34,19 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
     .await
     .expect("summary should insert");
 
+    let memory_db_path = db
+        .database_path(HostAdmissionScope::Profile)
+        .expect("registered profile database path");
+    let memory_conn =
+        rusqlite::Connection::open(memory_db_path).expect("open profile memory store");
+    memory_conn
+        .execute(
+            "INSERT INTO memory_facts (content) VALUES (?1)",
+            ["billing migration memory-only canary"],
+        )
+        .expect("seed competing memory fact");
+    drop(memory_conn);
+
     let hits = db
         .lcm_grep_for_test(LcmGrepRequest {
             provider: "cursor".into(),
@@ -59,6 +72,11 @@ async fn grep_searches_raw_snippets_and_summary_nodes() {
         hits.iter()
             .all(|hit| matches!(hit.kind.as_str(), "raw_message" | "summary_node")),
         "LCM query results must stay within the raw-message and summary stores"
+    );
+    assert!(
+        hits.iter()
+            .all(|hit| !hit.snippet.contains("memory-only canary")),
+        "LCM query must not retrieve matching durable memory facts"
     );
     assert!(
         hits.iter()
