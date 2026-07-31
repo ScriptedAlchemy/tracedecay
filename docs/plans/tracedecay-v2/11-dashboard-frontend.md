@@ -29,12 +29,13 @@ other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
 That compatibility applies to URLs/deep links evidenced on `origin/master`, in
-a published release, or in live persisted navigation. Pure transient DTOs and
-source-only design tokens change to their final shape in place. A branch-era
-route may already be retained by dogfood navigation, saved views, bookmarks,
-or installed host surfaces, so its alias/migration remains until a separately
-authorized live/profile navigation census proves absence; references and tests
-alone are not persistence evidence.
+a published release, or in live persisted navigation. Pure source-only/internal
+view helpers and design tokens change to their final shape in place.
+Wire-visible DTO revisions and branch-era routes may already be retained by
+dogfood clients, navigation, saved views, bookmarks, or installed host
+surfaces, so negotiation/aliases/migration remain until a separately authorized
+installed-client/live-profile navigation census proves absence; references and
+tests alone are not persistence evidence.
 
 Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
 holographic, lcm, graph, code-diagnostics, savings, settings as separate

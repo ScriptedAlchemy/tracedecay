@@ -36,13 +36,15 @@ verify the journeys and safety properties, not recreate a former refactor
 schema registry or file inventory.
 
 The published `tracedecay_rename_preview` surface above is release evidence and
-keeps its compatibility obligation. Pure branch-local Plan 34 plan/apply
-request DTOs change in place. Any migration-plan file, staged mutation,
-journal, checkpoint, rollback artifact, or receipt potentially written by
-dogfood remains backward-readable/recoverable until a separately authorized
-registered-store/profile census proves absence. An API alias, deprecation, or
-wrapper is retained for a predecessor proven on `origin/master`, in a published
-package/release, an independently deployed client, or a live host installation.
+keeps its compatibility obligation. Pure source-only/internal Plan 34
+plan/apply request helpers change in place. Wire-visible request revisions
+retain negotiation until an authorized installed-client/host census proves
+absence. Any migration-plan file, staged mutation, journal, checkpoint,
+rollback artifact, or receipt potentially written by dogfood remains
+backward-readable/recoverable until the registered-store/profile census proves
+absence. An API alias, deprecation, or wrapper is retained for a predecessor
+proven on `origin/master`, in a published package/release, an independently
+deployed client, or a live host installation.
 A branch-era callable name remains until an authorized installed-client/host
 census proves absence; source moves, PR sequencing, tests, and branch history
 alone are not release evidence.

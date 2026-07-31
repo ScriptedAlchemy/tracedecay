@@ -19,12 +19,13 @@ reader/writer, contract/schema V2 or V3, or migration is required when the
 predecessor exists on `origin/master`, in a published package/release, an
 independently deployed client, a live host installation, or a live persisted
 format. Branch-local shapes, PR order, historical type names, tests, and future
-consumers are not publication evidence. Pure transient wire/request DTOs and
-source-only contracts change to their final shape in place. Anything
+consumers are not publication evidence. Pure source-only/internal contracts
+change to their final shape in place. Wire-visible revisions remain negotiated
+until an authorized installed-client/host census proves absence. Anything
 potentially installed or written to a store, spool, file, or persisted
 projection fail-closes as live and preserves compatibility, backward-read, and
-migration/recovery until a separately authorized census proves absence. A `V1`
-suffix may name an initial final wire format without requiring a sibling
+migration/recovery until the applicable authorized census proves absence. A
+`V1` suffix may name an initial final wire format without requiring a sibling
 version by itself.
 
 ## Current product foundation

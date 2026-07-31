@@ -34,10 +34,11 @@ not acceptance requirements.
 
 Installed host/provider formats and names retain compatibility when a released
 bundle/package or live host installation proves them. Pure transient PR13
-request DTOs may change in place, but Kimi Code, OpenCode, and other dogfood
-install manifests, generated host files, local queues, checkpoints, and
-receipts are potentially live formats. Their readers and migration/rollback
-remain until a separately authorized installed-profile census proves absence;
+source-only/internal helpers may change in place. Wire-visible request
+revisions, Kimi Code, OpenCode, and other dogfood install manifests, generated
+host files, local queues, checkpoints, and receipts are potentially deployed or
+live formats. Their negotiation, readers, and migration/rollback remain until a
+separately authorized installed-client/host/profile census proves absence;
 fixture versions and PR sequencing alone remain insufficient evidence.
 Bundle/protocol negotiation remains required for actual installed-version
 skew.

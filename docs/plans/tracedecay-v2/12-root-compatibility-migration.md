@@ -150,9 +150,10 @@ family corruption remains preserve-and-escalate.
 - Migrate all detected supported families whose predecessor is proven released
   or live. Unknown or corrupt required data blocks the upgrade with Doctor
   guidance; PR19 has no skipped-family or deferred-family success state.
-  Pure branch-local API/DTO families are finalized in place. Branch-written
-  persisted families remain in this inventory until a separately authorized
-  registered-store/profile census proves absence.
+  Pure source-only/internal API/DTO families are finalized in place.
+  Wire-visible branch-era families remain until the authorized
+  installed-client/host census proves absence; branch-written persisted
+  families remain until the registered-store/profile census proves absence.
 - Classify corruption by family. Deterministically rebuildable indexes and
   projections may be repaired under exclusive maintenance authority;
   authoritative facts, observations, sessions, and receipts are preserved and

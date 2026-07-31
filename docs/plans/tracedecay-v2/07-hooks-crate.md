@@ -17,12 +17,13 @@ audits assess the host behavior, wire compatibility, migration, safety, and
 regressions specified here.
 
 The V1 envelope is the initial final wire format, not evidence for a V2
-sibling. Pure pre-admission host DTOs may change in place. Once an envelope,
-provider record, replay item, checkpoint, or receipt can enter a spool/file, it
-is potentially live through dogfood; prior-revision decoding and
-migration/replay recovery remain until a separately authorized installed-host
-and spool census proves absence. Fixture revisions alone remain insufficient
-evidence.
+sibling. Pure source-only/internal pre-admission helpers may change in place.
+Any wire-visible host DTO potentially deployed through dogfood retains
+negotiation/decoding until an authorized installed-client/host census proves
+absence. Once an envelope, provider record, replay item, checkpoint, or receipt
+can enter a spool/file, it is potentially live; migration/replay recovery
+remains until the installed-host and spool census proves absence. Fixture
+revisions alone remain insufficient evidence.
 
 ## PR13 user outcome
 

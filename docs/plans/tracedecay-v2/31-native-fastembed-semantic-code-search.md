@@ -9,11 +9,13 @@ exact-tier behavior before PR10 can activate semantics. Those versioned PR9
 results become immutable runtime prerequisites for semantic composition.
 
 PR9 baseline/profile and generation versions are reproducibility identities,
-not evidence that a predecessor wire contract shipped. Pure PR9/PR10 request
-DTOs are unreleased and change in place. Index/profile manifests, generations,
-model bindings, and activation receipts are persisted and may exist in dogfood
-stores; compatibility readers and migration/rebuild recovery remain required
-until a separately authorized registered-store census proves absence.
+not evidence that a predecessor wire contract shipped. Pure source-only/internal
+PR9/PR10 request helpers change in place. Wire-visible request revisions retain
+negotiation until an authorized installed-client/host census proves absence.
+Index/profile manifests, generations, model bindings, and activation receipts
+are persisted and may exist in dogfood stores; compatibility readers and
+migration/rebuild recovery remain required until the registered-store census
+proves absence.
 
 **Operational qualification (2026-07-27).** The callable semantic machinery
 does not mean the live profile is currently serving semantic results. Semantic

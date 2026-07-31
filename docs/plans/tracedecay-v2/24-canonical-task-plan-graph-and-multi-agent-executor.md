@@ -15,13 +15,14 @@ all other retention is judged by the direct Work journey, lifecycle,
 platform, and regression behavior below.
 
 No Plan 24 Work contract is established on `origin/master` or in a published
-package/release. Pure transient request DTOs therefore take their final shape
-in place. Work-item, graph, read, lease, evidence, journal, checkpoint, and
-receipt records are persisted and may exist in dogfood stores; backward
-readers and migration/recovery remain required until a separately authorized
-registered-store census proves absence. Immutable work-item and graph versions
-below remain product history/CAS identities, not by themselves
-contract-version release evidence.
+package/release. Pure source-only/internal request helpers take their final
+shape in place. Wire-visible Work request revisions retain negotiation until an
+authorized installed-client/host census proves absence. Work-item, graph, read,
+lease, evidence, journal, checkpoint, and receipt records are persisted and
+may exist in dogfood stores; backward readers and migration/recovery remain
+required until the registered-store census proves absence. Immutable work-item
+and graph versions below remain product history/CAS identities, not by
+themselves contract-version release evidence.
 
 ## Decision
 

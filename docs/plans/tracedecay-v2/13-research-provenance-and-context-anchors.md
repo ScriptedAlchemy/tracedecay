@@ -22,8 +22,10 @@ package/release. That does not prove live/profile stores contain no rows:
 registered-store admission and dogfood may have persisted them. Preserve V2/V3
 decoding, backward reads, migration, and recovery until a separately authorized
 census of every registered live/profile store proves the predecessor absent.
-This plan authorizes no live-store inspection. Pure transient request DTOs may
-still converge in place, and `V1` may identify an initial final wire record.
+This plan authorizes no live-store inspection. Pure source-only/internal
+request helpers may converge in place; wire-visible request revisions retain
+negotiation until an authorized installed-client/host census proves absence.
+`V1` may identify an initial final wire record.
 
 **Status (2026-07-23):** Landed on this branch. PR7/Plan 13's core — `RetrievalAnchorId`
 identity and resolution, the branch's V2/V3-named anchor targets, native Git/worktree/integration-receipt
@@ -799,10 +801,11 @@ through without defining another reference type (Required behavior 10).
   through span -> contribution -> nested summary -> FTS/context.
 - Migration tests prove reader compatibility, integrity and immutability constraints,
   shape/version refusal, exact-only backfill, dispositions-first
-  restore/consolidation, repeatable migration receipts, rollback, and no
-  payload resurrection until the authorized live/profile census permits
-  removal. Historical migration and schema-object names are not acceptance
-  artifacts.
+  restore/consolidation, repeatable migration receipts, rollback, and
+  unconditional no-payload-resurrection safety. The authorized live/profile
+  census may permit reader/migration retirement; it never relaxes
+  no-resurrection safety. Historical migration and schema-object names are not
+  acceptance artifacts.
 - Moving refs, rewriting a branch, or removing a checkout does not retarget retained
   commit/tree/blob or captured-state anchors; unavailable objects return a safe typed
   state rather than resolving against ambient `HEAD`.

@@ -8,12 +8,13 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
-> Historical version/compatibility/migration language applies only to APIs or
-> data proven on `origin/master`, in a published release, or in live
-> persistence. Pure branch-local adapter/source shapes change in place; any
-> branch-written store, spool, file, journal, checkpoint, receipt, or
-> projection remains recoverable until a separately authorized
-> registered-store/profile census proves absence.
+> Historical version/compatibility/migration language applies to APIs or data
+> proven on `origin/master`, in a published release, or in live persistence.
+> Pure source-only/internal adapter shapes change in place.
+> Potentially deployed branch-era callable APIs remain compatible until an
+> authorized installed-client/host census proves absence; any branch-written
+> store, spool, file, journal, checkpoint, receipt, or projection remains
+> recoverable until the registered-store/profile census proves absence.
 
 **Goal:** After dependency inversion, extract rusqlite, MCP/LSP, daemon, and
 remaining root adapters without changing product authority.

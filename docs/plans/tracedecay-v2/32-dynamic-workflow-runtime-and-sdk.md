@@ -20,13 +20,15 @@ migration obligations; all other retention is judged by the direct runtime,
 provider, recovery, platform, and regression behavior below.
 
 No Plan 32 workflow/lease/attempt contract is established on `origin/master` or
-in a published package/release. Pure transient request DTOs therefore take
-their final shape in place. Definition, run, lease, attempt, effect, journal,
-and receipt records are persisted product data and may exist in dogfood stores;
-their backward-read/migration/recovery obligations remain fail-closed until a
-separately authorized registered-store census proves absence. Definition and
-authority versions below remain product-data history and fencing identities,
-not by themselves evidence that a second wire-contract version shipped.
+in a published package/release. Pure source-only/internal request helpers take
+their final shape in place. Wire-visible request revisions retain negotiation
+until an authorized installed-client/host census proves absence. Definition,
+run, lease, attempt, effect, journal, and receipt records are persisted product
+data and may exist in dogfood stores; their
+backward-read/migration/recovery obligations remain fail-closed until the
+registered-store census proves absence. Definition and authority versions
+below remain product-data history and fencing identities, not by themselves
+evidence that a second wire-contract version shipped.
 
 ## Decision
 
