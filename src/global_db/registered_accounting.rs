@@ -594,7 +594,6 @@ impl RegisteredGlobalDb {
         }
         Ok(out)
     }
-
 }
 
 fn turn_params(turn: &crate::types::CostTurn) -> crate::db::engine::Params {

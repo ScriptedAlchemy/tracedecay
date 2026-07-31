@@ -134,13 +134,6 @@ pub struct AnalyticsHintCounts {
     pub suppressed: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionToolUsageRow {
-    pub tool_names: String,
-    pub text: String,
-    pub metadata_json: String,
-}
-
 /// One ingested session message, projected to the fields the hint-outcome
 /// correlator needs: the timestamp/ordinal that order activity after a hint and
 /// the tool-activity carriers (`kind='tool_event'` + `tool_names` for Codex,

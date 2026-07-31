@@ -50,6 +50,7 @@ impl TemporalHealthDiagnosis {
     }
 }
 
+#[cfg(test)]
 pub(super) fn diagnose(payload: Option<&Value>) -> TemporalHealthDiagnosis {
     diagnose_with_recovery(payload, false)
 }

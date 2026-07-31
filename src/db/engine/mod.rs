@@ -4,6 +4,7 @@ mod executor;
 mod params;
 mod row;
 mod snapshot;
+#[cfg(test)]
 mod statement;
 #[cfg(test)]
 mod test_support;
@@ -18,6 +19,7 @@ pub(crate) use executor::{
 pub(crate) use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub(crate) use row::{Row, Rows};
 pub(crate) use snapshot::ReadSnapshot;
+#[cfg(test)]
 pub(crate) use statement::Statement;
 #[cfg(test)]
 pub(crate) use test_support::TestConnection;

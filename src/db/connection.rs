@@ -224,7 +224,6 @@ pub(crate) struct DatabaseEngineReadSnapshot {
 }
 
 enum DatabaseEngineStatementTarget<'a> {
-    Connection(Connection),
     Transaction(&'a Transaction),
 }
 
@@ -261,6 +260,7 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute_batch(sql).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
@@ -268,21 +268,11 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
-    pub(crate) async fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> crate::db::engine::Result<crate::db::engine::Rows>
-    where
-        P: crate::db::engine::IntoParams,
-    {
-        self.conn.query(sql, params).await
-    }
-
     pub(crate) fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
         crate::memory::store::MemoryStore::new_runtime(&self.conn)
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute_engine<P>(
         &self,
         sql: &str,
@@ -294,6 +284,7 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn query_engine<P>(
         &self,
         sql: &str,
@@ -303,17 +294,6 @@ impl DatabaseWriterConnection<'_> {
         P: crate::db::engine::IntoParams,
     {
         self.conn.query(sql, params).await
-    }
-
-    pub(crate) async fn prepare_engine(
-        &self,
-        sql: &str,
-    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
-        self.conn.prepare(sql).await?;
-        Ok(DatabaseEngineStatement {
-            target: DatabaseEngineStatementTarget::Connection(self.conn.clone()),
-            sql: sql.to_owned(),
-        })
     }
 }
 
@@ -349,9 +329,6 @@ impl DatabaseEngineStatement<'_> {
         P: crate::db::engine::IntoParams,
     {
         match &self.target {
-            DatabaseEngineStatementTarget::Connection(connection) => {
-                connection.execute(&self.sql, params).await
-            }
             DatabaseEngineStatementTarget::Transaction(transaction) => {
                 transaction.execute(&self.sql, params).await
             }
@@ -470,16 +447,6 @@ impl<'a> DatabaseMemoryTransaction<'a> {
             Self::Write(transaction) => transaction.rollback().await,
         }
     }
-
-    pub(super) fn legacy_write_transaction(&self, operation: &str) -> Result<&Transaction> {
-        match self {
-            Self::Write(transaction) => Ok(&transaction.transaction),
-            Self::Read(_) => Err(TraceDecayError::Database {
-                message: "memory write authority requires a writable transaction".to_owned(),
-                operation: operation.to_owned(),
-            }),
-        }
-    }
 }
 
 impl crate::db::engine::QueryExecutor for DatabaseMemoryTransaction<'_> {
@@ -564,17 +531,6 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute_batch(sql).await
     }
 
-    pub(crate) async fn prepare(
-        &self,
-        sql: &str,
-    ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
-        self.prepare_engine(sql).await
-    }
-
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
-        self.transaction.last_insert_rowid()
-    }
-
     pub(crate) async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
@@ -605,7 +561,7 @@ impl DatabaseWriteTransaction<'_> {
         &self,
         sql: &str,
     ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
-        self.transaction.prepare(sql).await?;
+        self.transaction.validate(sql).await?;
         Ok(DatabaseEngineStatement {
             target: DatabaseEngineStatementTarget::Transaction(&self.transaction),
             sql: sql.to_owned(),
@@ -692,10 +648,6 @@ impl Database {
     /// Physical `SQLite` identity captured when this retained handle was opened.
     pub(crate) fn opened_file_identity(&self) -> u64 {
         self.inner.opened_file_identity
-    }
-
-    pub(crate) fn is_writable(&self) -> bool {
-        self.inner.writable
     }
 
     pub(crate) fn filesystem_is_read_only(&self) -> bool {

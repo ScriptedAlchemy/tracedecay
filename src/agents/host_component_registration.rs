@@ -1018,7 +1018,7 @@ impl HostComponentRegistrationDelegate {
                 Ok(bytes) => {
                     persisted_directories.push(serde_json::from_slice::<PathBuf>(&bytes).map_err(
                         |_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    )?)
+                    )?);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
                 Err(_) => {

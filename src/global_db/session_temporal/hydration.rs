@@ -199,17 +199,6 @@ pub(crate) struct GlobalDbHydrationBackend<'snapshot> {
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
-    #[cfg(test)]
-    pub(crate) const fn new(
-        read: &'snapshot engine::Connection,
-        storage_root: &'snapshot Path,
-    ) -> Self {
-        Self {
-            read: TemporalSqlRead::engine_connection(read),
-            storage_root,
-        }
-    }
-
     pub(crate) const fn new_registered(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
@@ -225,14 +214,6 @@ pub(crate) type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
-    #[cfg(test)]
-    pub(crate) const fn for_snapshot(
-        read: &'snapshot engine::Connection,
-        storage_root: &'snapshot Path,
-    ) -> Self {
-        Self::new(GlobalDbHydrationBackend::new(read, storage_root))
-    }
-
     pub(crate) const fn for_registered_snapshot(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
@@ -396,33 +377,6 @@ fn canonical_projected_message(
                 && output.message().message_id == message_id
         })
         .map(|output| output.message().clone())
-}
-
-pub(super) async fn hydrate_authorized_anchor_bytes(
-    read: &TemporalSqlRead<'_>,
-    storage_root: &Path,
-    snapshot: &TemporalExecutionSnapshot,
-    anchor_id: &RetrievalAnchorId,
-) -> Result<Zeroizing<Vec<u8>>, HydrationError> {
-    let adapter = SessionTemporalHydrationAdapter::new(GlobalDbHydrationBackend {
-        read: *read,
-        storage_root,
-    });
-    let limits = snapshot.request().limits();
-    let mut bytes = Zeroizing::new(Vec::new());
-    adapter
-        .read_after_recheck(
-            snapshot,
-            anchor_id,
-            limits.hydration_payload_bytes,
-            limits.hydration_chunk_bytes,
-            &mut |chunk| {
-                bytes.extend_from_slice(chunk);
-                Ok(())
-            },
-        )
-        .await?;
-    Ok(bytes)
 }
 
 impl TemporalHydrationBackend for GlobalDbHydrationBackend<'_> {

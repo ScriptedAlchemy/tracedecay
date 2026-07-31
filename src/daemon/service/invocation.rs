@@ -54,7 +54,6 @@ use tracedecay_domain::configuration::{
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
-use tracedecay_domain::feedback::{FeedbackCycleTerminationV1, ProviderEvaluationStateV1};
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
@@ -2301,15 +2300,7 @@ async fn execute_feedback(
     }
 }
 
-async fn execute_feedback_advisory_cycle(
-    wire_request_id: String,
-    _invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
-    _feedback_owner: Option<DaemonFeedbackInvocationOwner>,
-    _document_uri: String,
-    _observed_at: UtcMicros,
-    _deadline: Deadline,
-    _cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
+async fn execute_feedback_advisory_cycle(wire_request_id: String) -> DaemonInvocationResponse {
     application_problem(
         wire_request_id,
         ApplicationProblem::unavailable(SafeDiagnostic {
@@ -4286,49 +4277,6 @@ pub(crate) trait Pr13HookOrchestrationPortV1: Send + Sync {
     fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1;
 }
 
-pub(crate) struct Pr13AdvisoryCycleInvocationRequestV1 {
-    pub request_id: String,
-    pub document_uri: String,
-    pub observed_at: UtcMicros,
-    pub deadline: Deadline,
-    pub cancellation: CancellationContext,
-}
-
-/// Typed terminal state of the four-pillar cycle that minted a diagnostics
-/// handle. `published` separates a complete-coverage cycle recorded in the
-/// shared publication store from a cycle whose canonical result is truthfully
-/// incomplete and therefore not publishable, so callers never read partial
-/// coverage as complete.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct Pr13AdvisoryCycleTerminalV1 {
-    pub termination: FeedbackCycleTerminationV1,
-    pub provider_states: Vec<ProviderEvaluationStateV1>,
-    pub published: bool,
-}
-
-pub(crate) struct Pr13AdvisoryCycleInvocationOutcomeV1 {
-    pub request_handle: String,
-    pub cycle: Pr13AdvisoryCycleTerminalV1,
-}
-
-pub(crate) type Pr13AdvisoryCycleInvocationFutureV1<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<Pr13AdvisoryCycleInvocationOutcomeV1, ApplicationProblem>>
-            + Send
-            + 'a,
-    >,
->;
-
-/// Authenticated explicit entry to the same project-open four-pillar owner
-/// used by LSP and Hook V2. The returned diagnostics handle is minted by that
-/// owner from the cycle it just ran; callers never provide one.
-pub(crate) trait Pr13AdvisoryCycleInvocationPortV1: Send + Sync {
-    fn invoke(
-        &self,
-        request: Pr13AdvisoryCycleInvocationRequestV1,
-    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_>;
-}
-
 type Pr13HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type Pr13HookOrchestrationWorkV1 =
     dyn Fn(Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationFutureV1 + Send + Sync;
@@ -5834,26 +5782,6 @@ impl DaemonAdvisoryRuntimeRegistrar {
             Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
         }
     }
-
-    pub(crate) async fn register_cycle_invoker(
-        &self,
-        project_root: PathBuf,
-        invoker: Arc<dyn Pr13AdvisoryCycleInvocationPortV1>,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
-        if !self
-            .service
-            .project_runtimes
-            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-            .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
-        }
-        self.service
-            .project_runtimes
-            .register(project_root, invoker)
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
-    }
 }
 
 /// Mounts one project's semantic-runtime scheduling handle as daemon-private
@@ -5965,7 +5893,6 @@ pub(crate) struct DaemonLspInvocationOwner {
 
 #[derive(Clone)]
 struct AuthorizedDaemonLspWorkspace {
-    workspace: AuthorizedLspWorkspace,
     scope_set: AuthorizedScopeSet,
     factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
 }
@@ -7983,7 +7910,6 @@ impl DaemonInvocationService {
         let now_ms = now_millis();
         self.expire_sessions(now_ms).await;
         let feedback_service = runtimes.feedback_owner;
-        let advisory_cycle_invoker = runtimes.advisory_cycle_invoker;
         let configuration_runtime = runtimes.configuration;
         let work_runtime = runtimes.work;
         let lsp_owner = runtimes.lsp_owner;
@@ -8121,22 +8047,8 @@ impl DaemonInvocationService {
                 )
                 .await
             }
-            DaemonInvocationPayload::FeedbackAdvisoryCycle {
-                document_uri,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                execute_feedback_advisory_cycle(
-                    request_id,
-                    advisory_cycle_invoker,
-                    feedback_service,
-                    document_uri,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                )
-                .await
+            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
+                execute_feedback_advisory_cycle(request_id).await
             }
             DaemonInvocationPayload::FeedbackImpact {
                 request_handle,
@@ -9214,57 +9126,6 @@ mod tests {
         LspAnalyzerCancellationAuthority, LspRequestId, UnavailableSemanticProvider,
     };
 
-    struct MintedAdvisoryCycleHandle(&'static str, Pr13AdvisoryCycleTerminalV1);
-
-    impl MintedAdvisoryCycleHandle {
-        fn incomplete(request_handle: &'static str) -> Self {
-            Self(
-                request_handle,
-                Pr13AdvisoryCycleTerminalV1 {
-                    termination: FeedbackCycleTerminationV1::IncompleteCoverage,
-                    provider_states: vec![
-                        ProviderEvaluationStateV1::Unavailable,
-                        ProviderEvaluationStateV1::SupportedCompletedComplete,
-                    ],
-                    published: false,
-                },
-            )
-        }
-    }
-
-    impl Pr13AdvisoryCycleInvocationPortV1 for MintedAdvisoryCycleHandle {
-        fn invoke(
-            &self,
-            _request: Pr13AdvisoryCycleInvocationRequestV1,
-        ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
-            Box::pin(async {
-                Ok(Pr13AdvisoryCycleInvocationOutcomeV1 {
-                    request_handle: self.0.to_owned(),
-                    cycle: self.1.clone(),
-                })
-            })
-        }
-    }
-
-    struct RecordingFeedbackHandle(Arc<std::sync::Mutex<Vec<String>>>);
-
-    impl DaemonFeedbackInvocationPort for RecordingFeedbackHandle {
-        fn invoke(
-            &self,
-            request: DaemonFeedbackInvocationRequest,
-        ) -> DaemonFeedbackInvocationFuture<'_> {
-            self.0
-                .lock()
-                .expect("recorded feedback handles")
-                .push(request.request_handle);
-            Box::pin(async {
-                Err(ApplicationProblem::not_found_or_not_authorized(
-                    RetryDirective::Never,
-                ))
-            })
-        }
-    }
-
     #[test]
     fn advisory_cycle_wire_request_has_no_client_selected_handle() {
         let request = DaemonInvocationRequest::feedback_advisory_cycle(
@@ -9281,68 +9142,10 @@ mod tests {
         assert!(value.get("request_handle").is_none());
     }
 
-    #[test]
-    fn advisory_cycle_terminal_state_keeps_incomplete_coverage_explicit() {
-        let terminal = MintedAdvisoryCycleHandle::incomplete("rh.daemon.minted").1;
-        let value = serde_json::to_value(&terminal).expect("advisory cycle terminal");
-
-        assert_eq!(value["termination"], "incomplete_coverage");
-        assert_eq!(value["published"], false);
-        assert_eq!(
-            value["provider_states"],
-            serde_json::json!(["unavailable", "supported_completed_complete"])
-        );
-    }
-
-    #[tokio::test]
-    async fn advisory_cycle_refuses_before_invoking_any_effect() {
-        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let project_id = ProjectId::new("project.feedback-cycle").expect("project");
-        let response = execute_feedback_advisory_cycle(
-            "request.feedback-cycle".to_owned(),
-            Some(Arc::new(MintedAdvisoryCycleHandle::incomplete(
-                "rh.daemon.minted",
-            ))),
-            Some(DaemonFeedbackInvocationOwner::new(
-                project_id,
-                Arc::new(RecordingFeedbackHandle(Arc::clone(&handles))),
-            )),
-            "file:///project/src/lib.rs".to_owned(),
-            UtcMicros(1),
-            Deadline::new(UtcMicros(2)).expect("deadline"),
-            CancellationContext::active("cancel.feedback-cycle").expect("cancellation"),
-        )
-        .await;
-
-        assert!(matches!(
-            response.outcome,
-            DaemonInvocationOutcome::ApplicationProblem {
-                problem: ApplicationProblem::Unavailable {
-                    diagnostic: SafeDiagnostic { ref code, .. },
-                    ..
-                }
-            } if code == "feedback.advisory_cycle_quarantined"
-        ));
-        assert!(
-            handles
-                .lock()
-                .expect("recorded feedback handles")
-                .is_empty()
-        );
-    }
-
     #[tokio::test]
     async fn advisory_cycle_refuses_when_no_effect_authority_is_registered() {
-        let response = execute_feedback_advisory_cycle(
-            "request.feedback-cycle-unmounted".to_owned(),
-            None,
-            None,
-            "file:///project/src/lib.rs".to_owned(),
-            UtcMicros(1),
-            Deadline::new(UtcMicros(2)).expect("deadline"),
-            CancellationContext::active("cancel.feedback-cycle-unmounted").expect("cancellation"),
-        )
-        .await;
+        let response =
+            execute_feedback_advisory_cycle("request.feedback-cycle-unmounted".to_owned()).await;
 
         assert!(matches!(
             response.outcome,
@@ -10990,7 +10793,7 @@ mod tests {
                 &"feedback-atomic-configuration-provenance",
             )
             .expect("configuration provenance"),
-            effective_capabilities: Default::default(),
+            effective_capabilities: std::collections::BTreeSet::default(),
             grant_expires_at: UtcMicros(i64::MAX),
         };
         let incumbent_runtime = Arc::new(

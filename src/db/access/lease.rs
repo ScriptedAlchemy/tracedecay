@@ -111,6 +111,7 @@ pub fn enter_maintenance_database_scope<'lease>(
     })
 }
 
+#[cfg(not(any(test, feature = "test-transport")))]
 pub(crate) fn enter_owned_maintenance_database_scope(
     lifecycle: crate::lifecycle_lease::LifecycleLease,
     profile_root: &Path,

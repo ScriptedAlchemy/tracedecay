@@ -24,7 +24,6 @@ use super::daemon::daemon_tool_json;
 #[derive(Debug)]
 pub(crate) struct ResolvedCliScope {
     pub(crate) project_path: PathBuf,
-    pub(crate) scope: tracedecay_application::ResolvedScope,
 }
 
 /// Resolves an already-selected explicit root, or a path inside one, into the
@@ -109,7 +108,7 @@ fn scope_from_registry_payload(
     // CLI keeps only the registry brokering and selector taxonomy above.
     #[allow(deprecated)]
     // the CLI crosses through the root facade until the application boundary owns resolution
-    let scope = tracedecay::application::context::resolve_registered_root_scope(
+    tracedecay::application::context::resolve_registered_root_scope(
         &canonical,
         requested,
         &project_id,
@@ -122,7 +121,6 @@ fn scope_from_registry_payload(
     })?;
     Ok(ResolvedCliScope {
         project_path: canonical,
-        scope,
     })
 }
 
@@ -206,13 +204,7 @@ mod tests {
         let second = scope_from_registry_payload(&root, &ok_payload(&root)).unwrap();
 
         assert_eq!(first.project_path, root);
-        assert_eq!(first.scope.project_id.as_str(), "project.cli-scope-test");
-        first.scope.validate().unwrap();
-        assert_eq!(
-            first.scope.scope_digest, second.scope.scope_digest,
-            "the same exact root must resolve the same scope digest"
-        );
-        assert_eq!(first.scope, second.scope);
+        assert_eq!(second.project_path, root);
     }
 
     #[test]
@@ -228,7 +220,6 @@ mod tests {
             resolved.project_path, root,
             "a path inside the registered root converges onto its canonical root"
         );
-        assert_eq!(resolved.scope.project_id.as_str(), "project.cli-scope-test");
     }
 
     #[test]

@@ -134,7 +134,6 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
             cg.project_root(),
             store_layout.identity.project_id.as_deref(),
         ),
-        authorized_scope_set: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: super::project_memory_owner(cg)?,
@@ -181,7 +180,6 @@ fn user_state(
         // A profile-owned state has no exact project root; scope resolution
         // fails closed rather than fabricating one from the profile path.
         resolved_scope: None,
-        authorized_scope_set: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,

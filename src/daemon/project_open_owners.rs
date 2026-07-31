@@ -17,13 +17,10 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_GET_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackDiagnosticsReadRequestV1,
-    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1,
-    ProximityEvaluationRequestV1,
+    FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+    GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{
-    ApplicationContractError, ApplicationProblem, ResolvedScope, SafeDiagnostic,
-};
+use tracedecay_application::{ApplicationContractError, ResolvedScope};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -47,10 +44,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
-    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationOutcomeV1,
-    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
-    Pr13AdvisoryCycleTerminalV1, Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
+    Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -76,8 +71,8 @@ use crate::application::advisory::{
     CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
     GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
-    Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
+    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
@@ -126,8 +121,6 @@ struct ProjectOpenAdvisoryFeedbackCycleV1 {
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
-    root_uri: String,
-    feedback_runtime: Arc<crate::application::feedback::concrete::Pr12FeedbackRuntime>,
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -228,83 +221,6 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
             Ok(())
         })
     }
-}
-
-impl Pr13AdvisoryCycleInvocationPortV1 for ProjectOpenAdvisoryFeedbackCycleV1 {
-    fn invoke(
-        &self,
-        request: Pr13AdvisoryCycleInvocationRequestV1,
-    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
-        Box::pin(async move {
-            if request.cancellation.is_cancelled() {
-                return Err(ApplicationProblem::cancelled_before_admission());
-            }
-            if request.deadline.is_elapsed_at(request.observed_at) {
-                return Err(ApplicationProblem::timed_out_before_admission());
-            }
-            let remaining_micros = request
-                .deadline
-                .expires_at
-                .0
-                .saturating_sub(request.observed_at.0)
-                .clamp(1, 5 * 1_000_000);
-            let outcome = self
-                .run_cycle(
-                    FeedbackCycleRequest {
-                        root_uri: self.root_uri.clone(),
-                        document_uri: request.document_uri,
-                        trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
-                    },
-                    MonotonicDeadline::at(
-                        Instant::now()
-                            + Duration::from_micros(
-                                remaining_micros.try_into().unwrap_or(u64::MAX),
-                            ),
-                    ),
-                )
-                .await
-                .map_err(|failure| advisory_cycle_problem(failure.class()))?;
-            // A cycle only earns a shared-store publication when every pillar
-            // reported complete coverage. Incomplete coverage is a truthful
-            // terminal state of a cycle that did run, so the surface reports
-            // that canonical result and its typed states instead of hiding the
-            // cycle behind an "unavailable" problem.
-            let cycle = match &outcome {
-                Pr13AdvisoryCycleOutcomeV1::Cancelled { .. } => {
-                    return Err(ApplicationProblem::cancelled_before_admission());
-                }
-                Pr13AdvisoryCycleOutcomeV1::TimedOut { .. } => {
-                    return Err(ApplicationProblem::timed_out_before_admission());
-                }
-                Pr13AdvisoryCycleOutcomeV1::Completed { cycle, .. } => cycle,
-            };
-            let request_handle = self
-                .feedback_runtime
-                .mint_diagnostics(
-                    format!("{}.diagnostics", request.request_id),
-                    FeedbackDiagnosticsReadRequestV1 {
-                        head_commit_id: cycle.cycle.scope.head_commit_id.clone(),
-                    },
-                    request.observed_at,
-                )
-                .map_err(|_| advisory_cycle_problem("diagnostics-handle"))?;
-            Ok(Pr13AdvisoryCycleInvocationOutcomeV1 {
-                request_handle,
-                cycle: Pr13AdvisoryCycleTerminalV1 {
-                    termination: cycle.cycle.termination,
-                    provider_states: cycle.cycle.provider_states.clone(),
-                    published: outcome.publication().is_some(),
-                },
-            })
-        })
-    }
-}
-
-fn advisory_cycle_problem(reason: &str) -> ApplicationProblem {
-    ApplicationProblem::unavailable(SafeDiagnostic {
-        code: "feedback.advisory_cycle_unavailable".to_owned(),
-        message: format!("The advisory feedback cycle produced no canonical result ({reason})"),
-    })
 }
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
@@ -1850,8 +1766,6 @@ async fn register_production_advisory_owner(
         feedback_scope: feedback_scope_for_work.clone(),
         github_pull_request_id: github_pull_request_id.clone(),
         ci_discovery_config: ci_discovery_config.clone(),
-        root_uri: root_uri.clone(),
-        feedback_runtime: Arc::clone(&feedback_runtime),
     });
     invocation
         .feedback_runtime_registrar()
@@ -1859,13 +1773,6 @@ async fn register_production_advisory_owner(
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory LSP cycle registration failed: {error}"),
-        })?;
-    invocation
-        .advisory_runtime_registrar()
-        .register_cycle_invoker(project_root.to_path_buf(), advisory_cycle)
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open advisory surface registration failed: {error}"),
         })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();

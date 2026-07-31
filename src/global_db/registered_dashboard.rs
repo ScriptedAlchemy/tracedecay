@@ -491,60 +491,6 @@ impl RegisteredGlobalDb {
         Ok(true)
     }
 
-    /// Retires only the exact `(project_id, store_id)` rows collected from
-    /// disk. A store concurrently transferred to another project is preserved.
-    pub(crate) async fn retire_orphan_store_instances(
-        &self,
-        identities: &[(String, String, String, i64, Option<i64>)],
-    ) -> Result<usize> {
-        if identities.is_empty() {
-            return Ok(0);
-        }
-        let transaction = self.begin_write_transaction().await?;
-        let mut retired = 0usize;
-        let mut projects = std::collections::BTreeSet::new();
-        for (project_id, store_id, store_relpath, created_at, last_write_at) in identities {
-            let deleted = transaction
-                .execute(
-                    "DELETE FROM store_instances
-                     WHERE project_id = ?1 AND store_id = ?2
-                       AND store_relpath = ?3 AND created_at = ?4
-                       AND last_write_at IS ?5",
-                    crate::db::engine::params![
-                        project_id.as_str(),
-                        store_id.as_str(),
-                        store_relpath.as_str(),
-                        *created_at,
-                        *last_write_at
-                    ],
-                )
-                .await
-                .map_err(|error| dashboard_error("retire orphan store instance", error))?;
-            if deleted == 1 {
-                retired = retired.saturating_add(1);
-                projects.insert(project_id.as_str());
-            }
-        }
-        for project_id in projects {
-            transaction
-                .execute(
-                    "DELETE FROM code_projects
-                     WHERE project_id = ?1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM store_instances WHERE project_id = ?1
-                       )",
-                    crate::db::engine::params![project_id],
-                )
-                .await
-                .map_err(|error| dashboard_error("retire empty orphan project", error))?;
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| dashboard_error("commit orphan store retirement", error))?;
-        Ok(retired)
-    }
-
     async fn dashboard_snapshot(&self, operation: &'static str) -> Result<ReadSnapshot> {
         self.read_snapshot()
             .await

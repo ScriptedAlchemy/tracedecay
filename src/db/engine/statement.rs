@@ -1,8 +1,7 @@
-use super::{Connection, IntoParams, Result, Transaction};
+use super::{Connection, IntoParams, Result};
 
 enum Target<'a> {
     Connection(&'a Connection),
-    Transaction(&'a Transaction),
 }
 
 pub(crate) struct Statement<'a> {
@@ -19,21 +18,12 @@ impl<'a> Statement<'a> {
         })
     }
 
-    pub(super) fn for_transaction(transaction: &'a Transaction, sql: &str) -> Result<Self> {
-        validate_sql(sql)?;
-        Ok(Self {
-            target: Target::Transaction(transaction),
-            sql: sql.to_owned(),
-        })
-    }
-
     pub(crate) async fn execute<P>(&self, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
         match self.target {
             Target::Connection(connection) => connection.execute(&self.sql, params).await,
-            Target::Transaction(transaction) => transaction.execute(&self.sql, params).await,
         }
     }
 

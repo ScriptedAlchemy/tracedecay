@@ -128,11 +128,12 @@ where
         self.queue.route()
     }
 
+    #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
         self.queue.provider().is_ready() && event_lane::enabled(Some(self.observation_db.as_ref()))
     }
 
-    /// Executions this process is running right now, for bound diagnostics.
+    #[cfg(test)]
     pub(crate) fn in_flight(&self) -> usize {
         self.queue.in_flight()
     }

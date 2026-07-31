@@ -1002,7 +1002,7 @@ pub(crate) mod tests {
                     RetrieverOutcome::Complete(RetrieverBatch {
                         candidates: Vec::new(),
                         evidence_by_occurrence: BTreeMap::<_, ()>::new(),
-                        coverage: Default::default(),
+                        coverage: tracedecay_domain::retrieval::RetrieverCoverage::default(),
                         continuation: None,
                     }),
                 )

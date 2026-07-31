@@ -1579,6 +1579,7 @@ pub(crate) fn git_scope_exists_predicate(
 /// paths use this to short-circuit git-scoped queries against stores predating
 /// the git-correlation schema (returning empty rather than a `no such table`
 /// error).
+#[cfg(test)]
 pub(crate) async fn tables_present(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<bool, GitCorrelationError> {
@@ -1876,9 +1877,7 @@ pub use backfill::{
 };
 pub(crate) use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;
-pub(crate) use store::{
-    AnalyticsSessionTimestampSource, GitCorrelationStore, GitCorrelationWriteTxn,
-};
+pub(crate) use store::{AnalyticsSessionTimestampSource, GitCorrelationWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
