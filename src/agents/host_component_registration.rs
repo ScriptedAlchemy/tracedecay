@@ -3,7 +3,71 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct RegistrationBackupIdentityV1 {
+    schema_version: u16,
+    integration_id: String,
+    canonical_home: PathBuf,
+    canonical_profile: PathBuf,
+    canonical_project: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct RegistrationObservedStateV1 {
+    present: bool,
+    digest: [u8; 32],
+    metadata: Option<crate::agents::HostFileMetadataIdentityV1>,
+}
+
+#[derive(Deserialize)]
+struct HostConfigWriteIntentV2 {
+    schema_version: u16,
+    digest: [u8; 32],
+    metadata: Option<crate::agents::HostFileMetadataIdentityV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct RegistrationMutationPlanV1 {
+    schema_version: u16,
+    integration_id: String,
+    operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+    paths: Vec<PathBuf>,
+}
+
+impl RegistrationBackupIdentityV1 {
+    fn new(
+        integration_id: &str,
+        home: &Path,
+        profile: &Path,
+        project: Option<&Path>,
+    ) -> Result<Self, crate::agents::host_bundle_v2::HostBundleError> {
+        Ok(Self {
+            schema_version: REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION,
+            integration_id: integration_id.to_string(),
+            canonical_home: canonical_path(home)?,
+            canonical_profile: canonical_path(profile)?,
+            canonical_project: project.map(canonical_path).transpose()?,
+        })
+    }
+
+    fn validate(
+        &self,
+        integration_id: &str,
+        home: &Path,
+        profile: &Path,
+        project: Option<&Path>,
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        let observed = Self::new(integration_id, home, profile, project)?;
+        (self == &observed)
+            .then_some(())
+            .ok_or(crate::agents::host_bundle_v2::HostBundleError::WrongTarget)
+    }
+}
 
 pub struct HostComponentRegistrationDelegate {
     integration: Box<dyn crate::agents::AgentIntegration>,
@@ -15,7 +79,6 @@ pub struct HostComponentRegistrationDelegate {
     operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     should_apply: bool,
     confirmed_registration_revision: Option<[u8; 32]>,
-    registration_stage_completed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +133,6 @@ impl HostComponentRegistrationDelegate {
             operation,
             should_apply: false,
             confirmed_registration_revision: None,
-            registration_stage_completed: false,
         })
     }
 
@@ -103,7 +165,6 @@ impl HostComponentRegistrationDelegate {
             operation,
             should_apply: false,
             confirmed_registration_revision: None,
-            registration_stage_completed: false,
         })
     }
 
@@ -141,14 +202,35 @@ impl HostComponentRegistrationDelegate {
             .join(format!("registration-{index}.path.json"))
     }
 
-    fn apply_marker_path(&self, operation_id: [u8; 16]) -> PathBuf {
-        self.backup_dir(operation_id).join("apply")
+    fn registration_permission_marker(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join(format!("registration-{index}.permissions.json"))
     }
 
-    fn should_apply_from_backup(&self, operation_id: [u8; 16]) -> bool {
-        fs::read(self.apply_marker_path(operation_id))
-            .ok()
-            .is_some_and(|bytes| bytes == b"1")
+    fn applied_state_marker(&self, operation_id: [u8; 16], index: usize) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join(format!("registration-{index}.applied.json"))
+    }
+
+    fn identity_path(&self, operation_id: [u8; 16]) -> PathBuf {
+        self.backup_dir(operation_id).join("identity.v1.json")
+    }
+
+    fn backup_complete_path(&self, operation_id: [u8; 16]) -> PathBuf {
+        self.backup_dir(operation_id).join("backup.complete")
+    }
+
+    fn registration_effect_path(&self, operation_id: [u8; 16]) -> PathBuf {
+        self.backup_dir(operation_id)
+            .join("registration-effect.started")
+    }
+
+    fn mutation_plan_path(&self, operation_id: [u8; 16]) -> PathBuf {
+        self.backup_dir(operation_id).join("mutation-plan.v1.json")
+    }
+
+    fn write_intent_root(&self, operation_id: [u8; 16]) -> PathBuf {
+        self.backup_dir(operation_id).join("write-intents")
     }
 
     fn registration_mode(
@@ -161,7 +243,9 @@ impl HostComponentRegistrationDelegate {
         });
         if self.project_path.is_some() {
             CompatibilityRegistrationMode::LegacyIntegration
-        } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
+        } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
             || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
@@ -172,8 +256,11 @@ impl HostComponentRegistrationDelegate {
                 }))
         {
             CompatibilityRegistrationMode::DeployedActivation
-        } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
-            || !includes_core
+        } else if matches!(
+            component_set.host,
+            crate::agents::host_bundle_v2::HostKindV1::CursorDesktop
+                | crate::agents::host_bundle_v2::HostKindV1::OpenCode
+        ) || !includes_core
         {
             CompatibilityRegistrationMode::ArtifactOnly
         } else {
@@ -189,6 +276,10 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> bool {
         self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly
+            || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
+                && component_set.components.len() == 1
+                && component_set.components[0].manifest.component
+                    == crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp)
     }
 
     fn requires_competing_analyzer_preflight(
@@ -326,14 +417,10 @@ impl HostComponentRegistrationDelegate {
         let Some(path) = &self.registration_path else {
             return crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
         };
-        let Ok(contents) = fs::read_to_string(path) else {
+        let Ok(contents) = fs::read(path) else {
             return crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing;
         };
-        if contents.contains("tracedecay") {
-            crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current
-        } else {
-            crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Missing
-        }
+        project_registration_state(self.integration.id(), &contents)
     }
 
     fn registration_paths(
@@ -420,32 +507,62 @@ impl HostComponentRegistrationDelegate {
         let backup_dir = self.backup_dir(operation_id);
         fs::create_dir_all(&backup_dir)
             .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        fs::write(
-            self.apply_marker_path(operation_id),
-            if self.should_apply { b"1" } else { b"0" },
+        tracedecay_application::sync_parent_directory(
+            &backup_dir,
+            tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
         )
         .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+        let identity = RegistrationBackupIdentityV1::new(
+            self.integration.id(),
+            &self.context.home,
+            &self.lifecycle_root,
+            self.project_path.as_deref(),
+        )?;
+        let identity_bytes = serde_json::to_vec(&identity)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        write_registration_backup(&self.identity_path(operation_id), &identity_bytes)?;
+        let registration_paths = self.registration_paths(component_set);
+        let mutation_plan = RegistrationMutationPlanV1 {
+            schema_version: REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION,
+            integration_id: self.integration.id().to_string(),
+            operation: self.operation,
+            paths: registration_paths.clone(),
+        };
+        let mutation_plan = serde_json::to_vec(&mutation_plan)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        write_registration_backup(&self.mutation_plan_path(operation_id), &mutation_plan)?;
+        for (index, path) in registration_paths.iter().enumerate() {
             let path_bytes = serde_json::to_vec(path)
                 .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-            fs::write(
-                self.registration_path_marker(operation_id, index),
-                path_bytes,
-            )
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            write_registration_backup(
+                &self.registration_path_marker(operation_id, index),
+                &path_bytes,
+            )?;
             match fs::symlink_metadata(path) {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
                 }
-                Ok(_) => {
+                Ok(metadata) => {
                     let bytes = fs::read(path).map_err(|_| {
                         crate::agents::host_bundle_v2::HostBundleError::StorageFailure
                     })?;
                     write_registration_backup(&self.backup_path(operation_id, index), &bytes)?;
+                    let permissions =
+                        crate::agents::capture_host_file_metadata(path).map_err(|_| {
+                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                        })?;
+                    let permissions = serde_json::to_vec(&permissions).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    write_registration_backup(
+                        &self.registration_permission_marker(operation_id, index),
+                        &permissions,
+                    )?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    fs::write(self.missing_marker_path(operation_id, index), b"missing").map_err(
-                        |_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure,
+                    write_registration_backup(
+                        &self.missing_marker_path(operation_id, index),
+                        b"missing",
                     )?;
                 }
                 Err(_) => {
@@ -453,7 +570,113 @@ impl HostComponentRegistrationDelegate {
                 }
             }
         }
+        write_registration_backup(&self.backup_complete_path(operation_id), b"complete")?;
         Ok(())
+    }
+
+    fn capture_applied_registration(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+        operation_id: [u8; 16],
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+            let observed = registration_observed_state(path)?;
+            let bytes = serde_json::to_vec(&observed)
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            write_registration_backup(&self.applied_state_marker(operation_id, index), &bytes)?;
+        }
+        Ok(())
+    }
+
+    fn validate_applied_registration(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+        operation_id: [u8; 16],
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        for (index, path) in self.registration_paths(component_set).iter().enumerate() {
+            let expected = fs::read(self.applied_state_marker(operation_id, index))
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+            let expected: RegistrationObservedStateV1 = serde_json::from_slice(&expected)
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+            if registration_observed_state(path)? != expected {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+            }
+        }
+        Ok(())
+    }
+
+    fn original_registration_state(
+        &self,
+        operation_id: [u8; 16],
+        index: usize,
+    ) -> Result<RegistrationObservedStateV1, crate::agents::host_bundle_v2::HostBundleError> {
+        let backup = self.backup_path(operation_id, index);
+        if backup.is_file() {
+            let bytes = fs::read(backup)
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            return Ok(RegistrationObservedStateV1 {
+                present: true,
+                digest: Sha256::digest(bytes).into(),
+                metadata: Some(self.original_registration_permissions(operation_id, index)?),
+            });
+        }
+        if self.missing_marker_path(operation_id, index).is_file() {
+            return Ok(RegistrationObservedStateV1 {
+                present: false,
+                digest: [0; 32],
+                metadata: None,
+            });
+        }
+        Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget)
+    }
+
+    fn original_registration_permissions(
+        &self,
+        operation_id: [u8; 16],
+        index: usize,
+    ) -> Result<
+        crate::agents::HostFileMetadataIdentityV1,
+        crate::agents::host_bundle_v2::HostBundleError,
+    > {
+        let bytes = fs::read(self.registration_permission_marker(operation_id, index))
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+    }
+
+    fn intended_registration_state(
+        &self,
+        operation_id: [u8; 16],
+        path: &Path,
+    ) -> Result<Option<RegistrationObservedStateV1>, crate::agents::host_bundle_v2::HostBundleError>
+    {
+        match fs::read(
+            crate::agents::host_config_write_intent_path(
+                &self.write_intent_root(operation_id),
+                path,
+            )
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+        ) {
+            Ok(intent) if intent != [0] => {
+                let intent: HostConfigWriteIntentV2 = serde_json::from_slice(&intent)
+                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+                if intent.schema_version != 2 {
+                    return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+                }
+                Ok(Some(RegistrationObservedStateV1 {
+                    present: true,
+                    digest: intent.digest,
+                    metadata: intent.metadata,
+                }))
+            }
+            Ok(intent) if intent == [0] => Ok(Some(RegistrationObservedStateV1 {
+                present: false,
+                digest: [0; 32],
+                metadata: None,
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            _ => Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget),
+        }
     }
 
     fn restore_registration(
@@ -461,6 +684,26 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         operation_id: [u8; 16],
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        let identity_bytes = fs::read(self.identity_path(operation_id))
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+        let identity: RegistrationBackupIdentityV1 = serde_json::from_slice(&identity_bytes)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+        identity.validate(
+            self.integration.id(),
+            &self.context.home,
+            &self.lifecycle_root,
+            self.project_path.as_deref(),
+        )?;
+        let mutation_plan = fs::read(self.mutation_plan_path(operation_id))
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+        let mutation_plan: RegistrationMutationPlanV1 = serde_json::from_slice(&mutation_plan)
+            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
+        if mutation_plan.schema_version != REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION
+            || mutation_plan.integration_id != self.integration.id()
+            || mutation_plan.operation != self.operation
+        {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+        }
         let mut persisted_paths = Vec::new();
         for index in 0.. {
             match fs::read(self.registration_path_marker(operation_id, index)) {
@@ -476,19 +719,61 @@ impl HostComponentRegistrationDelegate {
                 }
             }
         }
-        let registration_paths = if persisted_paths.is_empty() {
-            self.registration_paths(component_set)
-        } else {
-            persisted_paths
-        };
+        let registration_paths = self.registration_paths(component_set);
+        if mutation_plan.paths != registration_paths || persisted_paths != registration_paths {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+        }
         for (index, path) in registration_paths.iter().enumerate() {
+            let observed = registration_observed_state(path)?;
+            let original = self.original_registration_state(operation_id, index)?;
+            if observed != original
+                && self
+                    .intended_registration_state(operation_id, path)?
+                    .as_ref()
+                    != Some(&observed)
+            {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+            }
+        }
+        for (index, path) in registration_paths.iter().enumerate() {
+            let observed = registration_observed_state(path)?;
+            let original = self.original_registration_state(operation_id, index)?;
             let backup = self.backup_path(operation_id, index);
             let missing = self.missing_marker_path(operation_id, index);
             if backup.is_file() {
-                let bytes = fs::read(&backup)
+                if observed != original {
+                    let bytes = fs::read(&backup).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    crate::agents::safe_write_bytes_file(path, &bytes, None).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                    #[cfg(feature = "test-transport")]
+                    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE")
+                        .is_some()
+                        || std::env::var_os(
+                            "TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE_PATH",
+                        )
+                        .is_some_and(|expected| Path::new(&expected) == path)
+                    {
+                        std::process::abort();
+                    }
+                }
+                let permissions = fs::read(
+                    self.registration_permission_marker(operation_id, index),
+                )
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+                let permissions: crate::agents::HostFileMetadataIdentityV1 =
+                    serde_json::from_slice(&permissions).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?;
+                crate::agents::restore_host_file_metadata(path, &permissions)
                     .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-                write_registration_backup(path, &bytes)?;
+                sync_registration_metadata(path)?;
             } else if missing.is_file() {
+                if observed == original {
+                    continue;
+                }
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path)
                         .map_err(|_| {
@@ -523,6 +808,35 @@ impl HostComponentRegistrationDelegate {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
         }
+    }
+}
+
+fn project_registration_state(
+    integration_id: &str,
+    contents: &[u8],
+) -> crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 {
+    use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    if integration_id == "claude" {
+        return match std::str::from_utf8(contents) {
+            Ok(text) if text.contains("tracedecay") => State::Current,
+            Ok(_) => State::Missing,
+            Err(_) => State::Corrupt,
+        };
+    }
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(contents) else {
+        return State::Corrupt;
+    };
+    let current = match integration_id {
+        "codex" => document.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay"),
+        "opencode" => document.pointer("/mcp/tracedecay").is_some(),
+        "kimi" | "roo-code" | "kilo" => document.pointer("/mcpServers/tracedecay").is_some(),
+        _ => false,
+    };
+    if current {
+        State::Current
+    } else {
+        State::Missing
     }
 }
 
@@ -568,12 +882,21 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
     fn preflight(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-        _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+        request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         self.refuse_ambiguous_opencode_analyzer(component_set)?;
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             self.should_apply = false;
             return Ok(());
+        }
+        if (self.project_path.is_none()
+            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
+            && request.lifecycle.operation
+                != crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall)
+            || (self.project_path.is_some()
+                && component_set.host == crate::agents::host_bundle_v2::HostKindV1::CursorDesktop)
+        {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
         }
         if let Some(expected) = self.confirmed_registration_revision
             && self.current_registration_revision(component_set)? != expected
@@ -641,7 +964,6 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
         }
         self.backup_registration(component_set, request.operation_id)?;
-        self.registration_stage_completed = true;
         Ok(())
     }
 
@@ -650,60 +972,90 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        match self.registration_mode(component_set) {
-            CompatibilityRegistrationMode::ArtifactOnly => return Ok(()),
-            CompatibilityRegistrationMode::DeployedActivation => {
-                if !self.should_apply {
-                    return Ok(());
-                }
-                let components = component_set
-                    .components
-                    .iter()
-                    .map(|component| component.manifest.component)
-                    .collect::<Vec<_>>();
-                return match request.lifecycle.operation {
-                    crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                        .integration
-                        .deactivate_deployed_host_component_registration(&components, &self.context)
-                        .map_err(Self::registration_error),
-                    crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-                    | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                    | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
-                        .integration
-                        .activate_deployed_host_component_registration(&components, &self.context)
-                        .map_err(Self::registration_error),
-                };
-            }
-            CompatibilityRegistrationMode::LegacyIntegration => {}
-        }
-        if !self.should_apply {
+        let mode = self.registration_mode(component_set);
+        if mode == CompatibilityRegistrationMode::ArtifactOnly {
             return Ok(());
         }
-        if let Some(project_path) = &self.project_path {
-            return match request.lifecycle.operation {
-                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                    .integration
-                    .uninstall_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-                | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
-                    .integration
-                    .install_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-            };
+        if let Some(expected) = self.confirmed_registration_revision
+            && self.current_registration_revision(component_set)? != expected
+        {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
         }
-        match request.lifecycle.operation {
-            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                .integration
-                .uninstall(&self.context)
-                .map_err(Self::registration_error),
-            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
-            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
-                .integration
-                .install(&self.context)
-                .map_err(Self::registration_error),
+        if !self.should_apply {
+            return self.capture_applied_registration(component_set, request.operation_id);
+        }
+        write_registration_backup(
+            &self.registration_effect_path(request.operation_id),
+            b"started",
+        )?;
+        let result =
+            crate::agents::with_host_config_write_intents(
+                self.write_intent_root(request.operation_id),
+                || match mode {
+                    CompatibilityRegistrationMode::ArtifactOnly => unreachable!(),
+                    CompatibilityRegistrationMode::DeployedActivation => {
+                        let components = component_set
+                            .components
+                            .iter()
+                            .map(|component| component.manifest.component)
+                            .collect::<Vec<_>>();
+                        match request.lifecycle.operation {
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => {
+                                self.integration
+                                    .deactivate_deployed_host_component_registration(
+                                        &components,
+                                        &self.context,
+                                    )
+                                    .map_err(Self::registration_error)
+                            }
+                            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => {
+                                self.integration
+                                    .activate_deployed_host_component_registration(
+                                        &components,
+                                        &self.context,
+                                    )
+                                    .map_err(Self::registration_error)
+                            }
+                        }
+                    }
+                    CompatibilityRegistrationMode::LegacyIntegration => {
+                        if let Some(project_path) = &self.project_path {
+                            match request.lifecycle.operation {
+                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
+                            .integration
+                            .uninstall_local(&self.context, project_path)
+                            .map_err(Self::registration_error),
+                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
+                            .integration
+                            .install_local(&self.context, project_path)
+                            .map_err(Self::registration_error),
+                    }
+                        } else {
+                            match request.lifecycle.operation {
+                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
+                            .integration
+                            .uninstall(&self.context)
+                            .map_err(Self::registration_error),
+                        crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install
+                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                        | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => self
+                            .integration
+                            .install(&self.context)
+                            .map_err(Self::registration_error),
+                    }
+                        }
+                    }
+                },
+            );
+        let captured = self.capture_applied_registration(component_set, request.operation_id);
+        match (result, captured) {
+            (_, Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
         }
     }
 
@@ -712,9 +1064,14 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        #[cfg(feature = "test-transport")]
+        if std::env::var_os("TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY").is_some() {
+            return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+        }
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             return Ok(());
         }
+        self.validate_applied_registration(component_set, request.operation_id)?;
         let expected = if request.lifecycle.operation
             == crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
         {
@@ -746,50 +1103,16 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-        match self.registration_mode(component_set) {
-            CompatibilityRegistrationMode::ArtifactOnly => return Ok(()),
-            CompatibilityRegistrationMode::DeployedActivation => {
-                return self.restore_registration(component_set, request.operation_id);
-            }
-            CompatibilityRegistrationMode::LegacyIntegration => {}
-        }
-        if !self.registration_stage_completed && !self.backup_dir(request.operation_id).is_dir() {
+        if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             return Ok(());
         }
-        self.should_apply |= self.should_apply_from_backup(request.operation_id);
-        if !self.should_apply {
-            self.restore_registration(component_set, request.operation_id)?;
+        if !self.backup_complete_path(request.operation_id).is_file()
+            || !self
+                .registration_effect_path(request.operation_id)
+                .is_file()
+        {
             return Ok(());
         }
-        if let Some(project_path) = &self.project_path {
-            let result = match request.lifecycle.operation {
-                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => self
-                    .integration
-                    .uninstall_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                    .integration
-                    .install_local(&self.context, project_path)
-                    .map_err(Self::registration_error),
-                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-                | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => Ok(()),
-            };
-            result?;
-            return self.restore_registration(component_set, request.operation_id);
-        }
-        let result = match request.lifecycle.operation {
-            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install => self
-                .integration
-                .uninstall(&self.context)
-                .map_err(Self::registration_error),
-            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall => self
-                .integration
-                .install(&self.context)
-                .map_err(Self::registration_error),
-            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
-            | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => Ok(()),
-        };
-        result?;
         self.restore_registration(component_set, request.operation_id)
     }
 }
@@ -846,26 +1169,72 @@ fn claim_identifier(name: &str) -> String {
     format!("opaque-{}", hex::encode(&Sha256::digest(name)[..8]))
 }
 
+fn canonical_path(path: &Path) -> Result<PathBuf, crate::agents::host_bundle_v2::HostBundleError> {
+    fs::canonicalize(path)
+        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+}
+
+fn registration_observed_state(
+    path: &Path,
+) -> Result<RegistrationObservedStateV1, crate::agents::host_bundle_v2::HostBundleError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)
+        }
+        Ok(_) => {
+            let bytes = fs::read(path)
+                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            Ok(RegistrationObservedStateV1 {
+                present: true,
+                digest: Sha256::digest(bytes).into(),
+                metadata: Some(
+                    crate::agents::capture_host_file_metadata(path).map_err(|_| {
+                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                    })?,
+                ),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(RegistrationObservedStateV1 {
+                present: false,
+                digest: [0; 32],
+                metadata: None,
+            })
+        }
+        Err(_) => Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
+    }
+}
+
+fn sync_registration_metadata(
+    path: &Path,
+) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .and_then(|()| {
+            tracedecay_application::sync_parent_directory(
+                path,
+                tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+            )
+        })
+        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+}
+
 fn write_registration_backup(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
-    let parent = path
-        .parent()
-        .ok_or(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)?;
-    fs::create_dir_all(parent)
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-    let digest = hex::encode(Sha256::digest(bytes));
-    let temporary = parent.join(format!(".registration-{digest}.tmp"));
-    fs::write(&temporary, bytes)
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-    fs::rename(&temporary, path)
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+    tracedecay_application::atomic_write(
+        path,
+        "host-registration-state",
+        bytes,
+        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
 }
 
 pub fn project_local_registration_path(
     agent_id: &str,
-    home: &Path,
+    _home: &Path,
     project_path: &Path,
 ) -> Option<PathBuf> {
     match agent_id {
@@ -874,13 +1243,64 @@ pub fn project_local_registration_path(
         // repository root (`codex_repo_plugin_install_dir`), not under
         // `.codex/`.
         "codex" => Some(project_path.join("plugins/tracedecay/.codex-plugin/plugin.json")),
-        // Cursor's project-local install registers the shared home plugin;
-        // the project itself carries only receipt markers.
-        "cursor" => Some(home.join(".cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json")),
+        // Cursor exposes no project-local registration surface. The shared
+        // home plugin must never be inventoried as project-owned state.
+        "cursor" => None,
         "kimi" => Some(project_path.join(".kimi-code/mcp.json")),
         "opencode" => Some(project_path.join("opencode.json")),
         "roo-code" => Some(project_path.join(".roo/mcp.json")),
         "kilo" => Some(project_path.join("kilo.json")),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::host_bundle_v2::HostBundleError;
+
+    #[test]
+    fn project_registration_rejects_corrupt_structured_config() {
+        use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        assert_eq!(
+            project_registration_state("opencode", br#"{"mcp":{"tracedecay":"#),
+            State::Corrupt
+        );
+        assert_eq!(
+            project_registration_state(
+                "opencode",
+                br#"{"mcp":{"tracedecay":{"command":"tracedecay"}}}"#
+            ),
+            State::Current
+        );
+    }
+
+    #[test]
+    fn rollback_identity_rejects_other_home_profile_project_and_integration() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let identity = RegistrationBackupIdentityV1::new(
+            "codex",
+            home.path(),
+            profile.path(),
+            Some(project.path()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            identity.validate("codex", home.path(), profile.path(), Some(project.path())),
+            Ok(())
+        );
+        for result in [
+            identity.validate("codex", other.path(), profile.path(), Some(project.path())),
+            identity.validate("codex", home.path(), other.path(), Some(project.path())),
+            identity.validate("codex", home.path(), profile.path(), Some(other.path())),
+            identity.validate("cursor", home.path(), profile.path(), Some(project.path())),
+        ] {
+            assert_eq!(result, Err(HostBundleError::WrongTarget));
+        }
     }
 }

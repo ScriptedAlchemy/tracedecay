@@ -32,12 +32,14 @@ pub mod roo_code;
 pub mod vibe;
 pub mod zed;
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
@@ -823,51 +825,8 @@ pub fn safe_write_json_file(
         });
     }
 
-    // 3. Ensure parent dir
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-            message: format!("cannot create directory {}: {e}", parent.display()),
-        })?;
-    }
-
-    // 4. Write to a NEW sibling file — the original is never opened for
-    //    writing, so an interrupted write or crash only affects the .new file.
     let content = format!("{pretty}\n");
-    let new_path = PathBuf::from(format!("{}.new", path.display()));
-    if let Err(e) = std::fs::write(&new_path, &content) {
-        std::fs::remove_file(&new_path).ok(); // clean up partial write
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "failed to write new config file {}: {e}",
-                new_path.display()
-            ),
-        });
-    }
-
-    // 5. Atomic rename: new → original.
-    //    On POSIX, rename(2) atomically replaces the target.
-    //    If this fails the original file is still intact.
-    if let Err(e) = std::fs::rename(&new_path, path) {
-        std::fs::remove_file(&new_path).ok(); // clean up
-        let hint = if let Some(b) = backup {
-            format!(
-                "\n  Backup is at: {}\n  \
-                 The original file was NOT modified.",
-                b.display()
-            )
-        } else {
-            "\n  The original file was NOT modified.".to_string()
-        };
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "failed to rename {} → {}: {e}{hint}",
-                new_path.display(),
-                path.display()
-            ),
-        });
-    }
-
-    Ok(())
+    safe_write_bytes_file(path, content.as_bytes(), backup)
 }
 
 /// Write text to a file via atomic sibling rename.
@@ -876,32 +835,102 @@ pub fn safe_write_json_file(
 /// plain text rather than structured JSON. The target is not opened for writing
 /// until the final rename, so a failed write leaves the original untouched.
 pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    safe_write_bytes_file(path, contents.as_bytes(), backup)
+}
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(crate) struct HostFileMetadataIdentityV1 {
+    readonly: bool,
+    unix_mode: Option<u32>,
+    posix_acl_supported: bool,
+    posix_acl_access: Option<Vec<u8>>,
+}
+
+pub(crate) fn capture_host_file_metadata(
+    path: &Path,
+) -> std::io::Result<HostFileMetadataIdentityV1> {
+    let permissions = std::fs::metadata(path)?.permissions();
+    #[cfg(unix)]
+    let unix_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(permissions.mode())
+    };
+    #[cfg(not(unix))]
+    let unix_mode = None;
+    #[cfg(target_os = "linux")]
+    let (posix_acl_supported, posix_acl_access) = match xattr::get(path, "system.posix_acl_access")
+    {
+        Ok(acl) => (true, acl),
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => (false, None),
+        Err(error) => return Err(error),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (posix_acl_supported, posix_acl_access) = (false, None);
+    Ok(HostFileMetadataIdentityV1 {
+        readonly: permissions.readonly(),
+        unix_mode,
+        posix_acl_supported,
+        posix_acl_access,
+    })
+}
+
+pub(crate) fn restore_host_file_metadata(
+    path: &Path,
+    state: &HostFileMetadataIdentityV1,
+) -> std::io::Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    #[cfg(unix)]
+    if let Some(mode) = state.unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(mode);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(state.readonly);
+    std::fs::set_permissions(path, permissions)?;
+    #[cfg(target_os = "linux")]
+    if state.posix_acl_supported {
+        match &state.posix_acl_access {
+            Some(acl) => xattr::set(path, "system.posix_acl_access", acl)?,
+            None => match xattr::get(path, "system.posix_acl_access")? {
+                Some(_) => xattr::remove(path, "system.posix_acl_access")?,
+                None => {}
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Atomically replace a host-owned file while preserving existing permissions.
+///
+/// The shared durable writer syncs bytes and the parent entry. When replacing
+/// an existing host config, restore its exact permission bits and durably flush
+/// that metadata before returning.
+pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
             message: format!("cannot create directory {}: {e}", parent.display()),
         })?;
     }
-
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("file");
-    let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let new_name = format!(".{file_name}.{}.{}.new", std::process::id(), unique);
-    let new_path = path
-        .parent()
-        .map_or_else(|| PathBuf::from(&new_name), |parent| parent.join(&new_name));
-    if let Err(e) = std::fs::write(&new_path, contents) {
-        std::fs::remove_file(&new_path).ok();
-        return Err(TraceDecayError::Config {
-            message: format!("failed to write new text file {}: {e}", new_path.display()),
-        });
-    }
-
-    if let Err(e) = std::fs::rename(&new_path, path) {
-        std::fs::remove_file(&new_path).ok();
+    let metadata = match std::fs::metadata(path) {
+        Ok(_) => Some(
+            capture_host_file_metadata(path).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to capture metadata for {}: {e}", path.display()),
+            })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to inspect metadata for {}: {error}", path.display()),
+            });
+        }
+    };
+    persist_host_config_write_intent(path, contents, metadata.as_ref())?;
+    if let Err(e) = tracedecay_application::atomic_write(
+        path,
+        "host-config",
+        contents,
+        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+    ) {
         let hint = if let Some(b) = backup {
             format!(
                 "\n  Backup is at: {}\n  \
@@ -912,15 +941,140 @@ pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) 
             "\n  The original file was NOT modified.".to_string()
         };
         return Err(TraceDecayError::Config {
-            message: format!(
-                "failed to rename {} → {}: {e}{hint}",
-                new_path.display(),
-                path.display()
-            ),
+            message: format!("failed to atomically replace {}: {e}{hint}", path.display()),
         });
     }
-
+    if let Some(metadata) = &metadata {
+        restore_host_file_metadata(path, metadata).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to restore metadata on {}: {e}", path.display()),
+        })?;
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .and_then(|()| {
+                tracedecay_application::sync_parent_directory(
+                    path,
+                    tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+                )
+            })
+            .map_err(|e| TraceDecayError::Config {
+                message: format!(
+                    "failed to durably preserve {} permissions: {e}",
+                    path.display()
+                ),
+            })?;
+    }
+    #[cfg(feature = "test-transport")]
+    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
+        || std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH")
+            .is_some_and(|expected| Path::new(&expected) == path)
+    {
+        std::process::abort();
+    }
     Ok(())
+}
+
+thread_local! {
+    static HOST_CONFIG_WRITE_INTENT_ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+pub fn with_host_config_write_intents<T>(root: PathBuf, effect: impl FnOnce() -> T) -> T {
+    struct ResetIntentRoot(Option<PathBuf>);
+
+    impl Drop for ResetIntentRoot {
+        fn drop(&mut self) {
+            HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| {
+                current.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.replace(Some(root)));
+    let _reset = ResetIntentRoot(previous);
+    effect()
+}
+
+pub fn host_config_write_intent_path(root: &Path, path: &Path) -> Result<PathBuf> {
+    let path_bytes = serde_json::to_vec(path).map_err(|error| TraceDecayError::Config {
+        message: format!("could not bind host config write intent: {error}"),
+    })?;
+    Ok(root.join(format!(
+        "{}.intent",
+        hex::encode(Sha256::digest(path_bytes))
+    )))
+}
+
+pub fn safe_remove_host_file(path: &Path) -> std::io::Result<()> {
+    persist_host_config_remove_intent(path).map_err(std::io::Error::other)?;
+    std::fs::remove_file(path)
+}
+
+#[derive(Serialize)]
+struct HostConfigWriteIntentV2<'a> {
+    schema_version: u16,
+    digest: [u8; 32],
+    metadata: Option<&'a HostFileMetadataIdentityV1>,
+}
+
+fn persist_host_config_write_intent(
+    path: &Path,
+    contents: &[u8],
+    metadata: Option<&HostFileMetadataIdentityV1>,
+) -> Result<()> {
+    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not create host config write intent directory {}: {error}",
+            root.display()
+        ),
+    })?;
+    let intent_path = host_config_write_intent_path(&root, path)?;
+    let intent = serde_json::to_vec(&HostConfigWriteIntentV2 {
+        schema_version: 2,
+        digest: Sha256::digest(contents).into(),
+        metadata,
+    })
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not serialize host config write intent: {error}"),
+    })?;
+    tracedecay_application::atomic_write(
+        &intent_path,
+        "host-config-intent",
+        &intent,
+        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not persist host config write intent {}: {error}",
+            intent_path.display()
+        ),
+    })
+}
+
+fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
+    let Some(root) = HOST_CONFIG_WRITE_INTENT_ROOT.with(|current| current.borrow().clone()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not create host config remove intent directory {}: {error}",
+            root.display()
+        ),
+    })?;
+    let intent_path = host_config_write_intent_path(&root, path)?;
+    tracedecay_application::atomic_write(
+        &intent_path,
+        "host-config-remove-intent",
+        &[0],
+        tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not persist host config remove intent {}: {error}",
+            intent_path.display()
+        ),
+    })
 }
 
 /// Write a JSON value to a file with pretty formatting.
