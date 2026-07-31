@@ -6434,7 +6434,7 @@ async fn production_project_server(
                     Some(state)
                 };
                 let code_index_invocation = invocation.clone();
-                let code_index_project_id = project_id.clone();
+                let code_index_project_id = code_search_project_id.clone();
                 let code_index_project = canonical_project_path.to_path_buf();
                 let code_index_semantic_runtime = semantic_runtime.clone();
                 let code_index_semantic_lifecycle = semantic_lifecycle.clone();
