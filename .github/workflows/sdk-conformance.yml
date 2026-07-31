@@ -13,6 +13,7 @@ on:
       - "sdks/**"
       - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
+      - "scripts/require-exact-test.sh"
       - "src/application_surface.rs"
   push:
     branches: [master]
@@ -114,7 +115,13 @@ jobs:
       - run: npm run build
         working-directory: dashboard
       - run: cargo build --bin tracedecay
-      - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml --test production_daemon -- --ignored
+      - run: >-
+          REQUIRE_EXACT_TEST_COUNT=nonzero
+          scripts/require-exact-test.sh
+          cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
+          --test production_daemon
+          --
+          --ignored
       - run: npm ci
         working-directory: sdks/typescript
       - run: npm run test:installed

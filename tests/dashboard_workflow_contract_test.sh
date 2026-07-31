@@ -148,93 +148,21 @@ for name, workflow, jobs in [
 if "cargo " in release_integrity or "npm run build" in release_integrity:
     raise SystemExit("release PR integrity must remain a read-only path guard")
 
-# --------------------------------------------------------------------------
-# nextest filter clauses must name tests that exist.
-#
-# `windows-pr8-temporal-durable` is the ONLY job that omits
-# TRACEDECAY_SQLITE_UNSAFE_FAST, so it is the only Windows coverage of DELETE +
-# FULL pragmas. Its filter carried `binary(=session_suite) & test(/^lcm_schema::/)`
-# after `mod lcm_schema;` was removed from tests/session_suite/main.rs. nextest
-# does not complain about one empty clause in a union, so the job ran a
-# nonempty set, went green, and silently covered 30 fewer tests.
-#
-# --no-tests=fail (asserted below) only catches a filter that matches nothing at
-# ALL, so it would not have caught this. These checks are the per-clause
-# guarantee: every `test(/^module::/)` clause is resolved back to the module that
-# has to exist for it to match anything.
-# --------------------------------------------------------------------------
+# Windows durable behavior runs as one complete, non-vacuous test target.
 durable_job = job_block(ci, "windows-pr8-temporal-durable")
-filter_match = re.search(r"\$filter = '([^']*)'", durable_job)
-if filter_match is None:
-    raise SystemExit("windows-pr8-temporal-durable must define a $filter expression")
-durable_filter = filter_match.group(1)
-
-durable_commands = "\n".join(
-    line for line in durable_job.splitlines() if not line.lstrip().startswith("#")
-)
-if "--no-tests=fail" not in durable_commands:
-    raise SystemExit(
-        "windows-pr8-temporal-durable must pass --no-tests=fail so a filter that "
-        "matches nothing at all fails instead of reporting success"
-    )
-
-# Split the union into per-binary segments so each test() prefix is checked
-# against the binary it is scoped to.
-binary_segments: dict[str, str] = {}
-binary_positions = [
-    (match.group(1), match.start())
-    for match in re.finditer(r"binary\(=([A-Za-z0-9_]+)\)", durable_filter)
-]
-for index, (binary_name, start) in enumerate(binary_positions):
-    end = (
-        binary_positions[index + 1][1]
-        if index + 1 < len(binary_positions)
-        else len(durable_filter)
-    )
-    binary_segments[binary_name] = durable_filter[start:end]
-
-# Integration-test binaries: `tests/<binary>/main.rs` must declare the module.
-for binary_name in ["session_suite", "storage_suite"]:
-    segment = binary_segments.get(binary_name)
-    if segment is None:
+for required in [
+    "binary(=windows_durable_behavior)",
+    "--no-tests=fail",
+]:
+    if required not in durable_job:
         raise SystemExit(
-            f"durable filter must still cover binary(={binary_name})"
+            f"Windows durable target must preserve {required!r}"
         )
-    modules = re.findall(r"test\(/\^([A-Za-z0-9_]+)::", segment)
-    if not modules:
-        raise SystemExit(f"durable filter names no modules for {binary_name}")
-    main_rs = pathlib.Path("tests") / binary_name / "main.rs"
-    declared = re.findall(r"(?m)^\s*mod ([A-Za-z0-9_]+);", main_rs.read_text(encoding="utf-8"))
-    for module in modules:
-        if module not in declared:
-            raise SystemExit(
-                f"durable filter clause 'binary(={binary_name}) & "
-                f"test(/^{module}::/)' matches nothing: {main_rs.as_posix()} "
-                f"does not declare 'mod {module};'"
-            )
-
-# The LCM schema tests live in the library binary via a #[path] injection, not
-# in session_suite. If that injection moves or is renamed the filter prefix
-# stops matching, so pin the injection and the prefix to each other.
-schema_rs = pathlib.Path("src/global_db/session_temporal/schema.rs")
-injection = re.search(
-    r'#\[path = "\.\./\.\./\.\./tests/session_suite/lcm_schema/mod\.rs"\]\s*\n\s*mod ([A-Za-z0-9_]+);',
-    schema_rs.read_text(encoding="utf-8"),
-)
-if injection is None:
-    raise SystemExit(
-        f"{schema_rs.as_posix()} must keep the #[path] injection of "
-        "tests/session_suite/lcm_schema/mod.rs; the Windows durable filter "
-        "reaches those tests through it"
-    )
-lcm_prefix = f"global_db::session_temporal::schema::{injection.group(1)}::"
-tracedecay_segment = binary_segments.get("tracedecay", "")
-if f"test(/^{lcm_prefix}/)" not in tracedecay_segment:
-    raise SystemExit(
-        "durable filter must cover the LCM schema tests as "
-        f"'binary(=tracedecay) & test(/^{lcm_prefix}/)' - that is where the "
-        "#[path] injection puts them"
-    )
+for retired in ["$requiredFilters", "cargo-nextest nextest list", "$selected.Count"]:
+    if retired in durable_job:
+        raise SystemExit(
+            f"Windows durable target must not retain filter inventory {retired!r}"
+        )
 
 # --------------------------------------------------------------------------
 # libtest-filtered gates must prove a test ran.

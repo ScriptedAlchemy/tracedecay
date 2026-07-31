@@ -7,13 +7,21 @@ use tracedecay::types::*;
 
 use crate::support;
 
+#[path = "db_query_test/analytics_queries.rs"]
 mod analytics_queries;
+#[path = "db_query_test/bootstrap.rs"]
 mod bootstrap;
+#[path = "db_query_test/edge_queries.rs"]
 mod edge_queries;
+#[path = "db_query_test/files_metadata.rs"]
 mod files_metadata;
+#[path = "db_query_test/insert_content.rs"]
 mod insert_content;
+#[path = "db_query_test/insert_edges.rs"]
 mod insert_edges;
+#[path = "db_query_test/node_queries.rs"]
 mod node_queries;
+#[path = "db_query_test/transactions.rs"]
 mod transactions;
 
 struct TestDb {
