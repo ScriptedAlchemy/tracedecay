@@ -9220,12 +9220,11 @@ mod tests {
                 }
             } if code == "feedback.advisory_cycle_quarantined"
         ));
-        assert_eq!(
+        assert!(
             handles
                 .lock()
                 .expect("recorded feedback handles")
-                .as_slice(),
-            []
+                .is_empty()
         );
     }
 
