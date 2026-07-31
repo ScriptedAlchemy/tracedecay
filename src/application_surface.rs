@@ -1315,7 +1315,7 @@ async fn invoke_multi_root_http<T>(
 where
     T: Serialize,
 {
-    let registry = match tracedecay_application::application_executable_binding_registry() {
+    let registry = match tracedecay_application::work_executable_binding_registry() {
         Ok(registry) => registry,
         Err(_) => {
             return work_adapter_unavailable(

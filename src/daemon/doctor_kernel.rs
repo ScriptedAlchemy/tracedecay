@@ -2120,7 +2120,6 @@ async fn dispatch_doctor_owner_operation(
             owners
                 .invocation
                 .mount_code_index(
-                    owners.project_id.clone(),
                     &owners.project_root,
                     owners.code_index_store_root.clone(),
                     Some(&owners.semantic_runtime),

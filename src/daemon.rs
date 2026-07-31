@@ -9069,7 +9069,6 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     "project server response was revoked",
                 ));
             }
-            let _response_write = lifecycle.response_gate().read().await;
             tokio::select! {
                 biased;
                 () = lifecycle.response_revoked().cancelled() => Err(std::io::Error::new(

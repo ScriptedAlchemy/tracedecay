@@ -230,6 +230,7 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
     )
     .await;
 
+    let fixture = rmcp_route_fixture("unix-legacy-production-route").await;
     let response_lifecycle = fixture.server.project_server_response_lifecycle();
     let response_gate = Arc::clone(response_lifecycle.response_gate());
     let gate = response_gate.write().await;
@@ -254,12 +255,12 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
     writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &blocked_tool_request(4)).await;
     write_line(&mut writer, &ping_request(5)).await;
-    writer.shutdown().await.expect("shutdown legacy client");
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
-        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
+        &[ObservedMcpRoute::Legacy],
     )
     .await;
+    writer.shutdown().await.expect("shutdown legacy client");
     drop(gate);
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
         .await
@@ -320,6 +321,7 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     )
     .await;
 
+    let fixture = rmcp_route_fixture("portable-legacy-production-route").await;
     let response_lifecycle = fixture.server.project_server_response_lifecycle();
     let response_gate = Arc::clone(response_lifecycle.response_gate());
     let gate = response_gate.write().await;
@@ -370,12 +372,12 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &blocked_tool_request(4)).await;
     write_line(&mut writer, &ping_request(5)).await;
-    writer.shutdown().await.expect("shutdown legacy client");
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
-        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Legacy],
+        &[ObservedMcpRoute::Legacy],
     )
     .await;
+    writer.shutdown().await.expect("shutdown legacy client");
     drop(gate);
     let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
         .await
