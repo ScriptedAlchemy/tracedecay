@@ -194,9 +194,8 @@ export function BayLegend({ children }: { children: ReactNode }) {
  * gutter so a picked row is legible without a fill wash.
  *
  * Height comes from `--row-height-data` rather than a utility class, because
- * `VirtualList` derives its windowing estimate from the same token — the two
- * had drifted apart (32px rows measured as 36px), which mispositioned every
- * row of a windowed list. One token, one truth.
+ * `VirtualList` derives its windowing estimate from the same token; if the two
+ * disagree, every row of a windowed list is mispositioned.
  *
  * The row is a grid rather than a flex line: a fixed leading gutter means the
  * magnitude rails in a column line up exactly, which is the entire point of
@@ -416,22 +415,13 @@ export function KeyValueTree({ value, depth = 0 }: { value: unknown; depth?: num
       {entries.slice(0, 60).map(([k, v]) => (
         <div
           key={k}
-          // Side-by-side columns compound: each nesting level reserves its
-          // own label track, so three or four levels deep — ordinary for a
-          // settings payload — the reservations alone exceed a 320px
-          // viewport, or even a 768px one once depth stacks up (the
-          // reservation is up to 9rem *per level*). CSS Grid sizes
-          // non-flexible tracks (the label's minmax) before flexible ones,
-          // so the value's `1fr` track was measuring 0px and every value
-          // wrapped one character per line — reproduced with a Playwright
-          // probe at depth 3 even inside a full-width card.
-          //
-          // Only the outermost level reserves a label column; every level
-          // below it stacks label above value unconditionally. That caps the
-          // total reservation at one track no matter how deep the payload
-          // nests or how narrow the surrounding container is (this also
-          // renders inside 352px-wide inspector rails at desktop widths, not
-          // just the full page).
+          // Only the OUTERMOST level reserves a label column; every level
+          // below stacks label above value. Side-by-side columns compound —
+          // up to 9rem reserved per nesting level — and CSS Grid sizes the
+          // label's minmax before the value's `1fr`, so a few levels deep the
+          // value track measures 0px and every value wraps one character per
+          // line. Capping the reservation at one track holds however deep the
+          // payload nests and however narrow the container is.
           className={cn(
             'grid gap-x-2 gap-y-0.5 border-b border-edge-subtle/60 py-1 text-2xs last:border-b-0',
             depth === 0

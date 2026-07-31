@@ -505,27 +505,13 @@ const EVIDENCE_ICON: Record<DoctorEvidenceState, LucideIcon> = {
  * the hue rides a lamp bar and an icon, and the label text sits on an
  * AA-contrast token.
  *
- * The badge used to paint its own label in `evidence.tokenClass`. Those are
- * indicator hues, chosen to read as a lamp against a panel, and as 11px label
- * text on `--surface-2` five of them miss WCAG AA — 4.5:1 is the threshold
- * that applies, since large-text 3:1 needs 18.66px bold or 24px:
- *
- *   light   state-partial 3.91:1 · state-stale 4.08:1 · state-ready 4.23:1
- *   dark    state-error   4.41:1 · state-unknown 4.44:1
- *
- * The light figures are read out of Chromium by `axe-observatory.ts`; the dark
- * pair is computed from the tokens, and axe's own `color-contrast` rule reports
- * three serious violations per dark scan against the old markup, so the theme
- * that comment threads used to call clean was never clean either.
- *
- * `text-text-secondary` measures 8.64:1 on that same surface. The hue is not
- * lost — it moves to the lamp and the glyph, where it is decoration beside a
- * text label rather than the only carrier of meaning, which is the rule the
- * whole state taxonomy is built on.
- *
- * This is why `stories/fixtures/data.ts` served an empty Doctor envelope: a
- * populated one put these badges on screen and the axe gate could not pass with
- * them there. The fixture is populated now, and the gate scans them.
+ * The label must not be painted in `evidence.tokenClass`: those are indicator
+ * hues, and as 11px text on `--surface-2` five of them miss the 4.5:1 WCAG AA
+ * threshold that applies at this size. `text-text-secondary` measures 8.64:1
+ * there. The hue is not lost — it moves to the lamp and the glyph, where it is
+ * decoration beside a text label rather than the only carrier of meaning, which
+ * is the rule the whole state taxonomy is built on. `axe-observatory.ts` scans
+ * these badges against a populated Doctor fixture.
  */
 function EvidenceBadge({ state }: { state: DoctorEvidenceState }) {
   const evidence = doctorEvidencePresentation(state);
