@@ -120,6 +120,11 @@ impl RemoteQueryRequestV1 {
                 field: "remote query expected authority",
             })?;
         self.page.validate()?;
+        if self.page.page_size != 1 || self.page.cursor.is_some() {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote exact observation page bounds",
+            });
+        }
         if self.expected_shards.len() != 1 {
             return Err(ApplicationContractError::InvalidRange {
                 field: "remote query expected shard inventory",
@@ -189,14 +194,14 @@ impl RemoteProtocolBodyV1 for RemoteQueryRequestV1 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteQueryCompleteValueV1 {
-    pub complete_value_present: bool,
+    pub returned_observations: u8,
 }
 
 impl RemoteQueryCompleteValueV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
-        if !self.complete_value_present {
+        if self.returned_observations > 1 {
             return Err(ApplicationContractError::Inconsistent {
-                field: "remote complete query value marker",
+                field: "remote complete query observation count",
             });
         }
         Ok(())

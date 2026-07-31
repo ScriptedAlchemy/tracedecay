@@ -117,11 +117,11 @@ fn remote_query_page_bounds_reject_zero_page_size() {
 #[test]
 fn remote_complete_value_is_wire_distinct_from_null() {
     let value = RemoteQueryCompleteValueV1 {
-        complete_value_present: true,
+        returned_observations: 1,
     };
 
     let json = serde_json::to_string(&value).expect("serialize complete value");
-    assert_eq!(json, r#"{"complete_value_present":true}"#);
+    assert_eq!(json, r#"{"returned_observations":1}"#);
     let round_trip: RemoteQueryCompleteValueV1 =
         serde_json::from_str(&json).expect("deserialize complete value");
     round_trip.validate().expect("validate complete value");
