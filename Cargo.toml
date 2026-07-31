@@ -315,6 +315,9 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 flate2 = "1"
 tar = "0.4"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = "1"
+
 # `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
 # resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
 # file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
