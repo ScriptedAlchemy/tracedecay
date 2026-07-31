@@ -72,7 +72,7 @@ impl AgentIntegration for ClaudeIntegration {
             &claude_md_path,
             crate::automation::skill_targets::SkillInstallTarget::Claude,
         )?;
-        install_clean_local_config();
+        install_clean_local_config(&ctx.project_path)?;
         sync_claude_plugin_cache(&ctx.home, &ctx.tracedecay_bin);
 
         eprintln!();
@@ -300,6 +300,21 @@ impl AgentIntegration for ClaudeIntegration {
 
     fn primary_config_path(&self, home: &Path) -> Option<std::path::PathBuf> {
         Some(plugin_marketplace_manifest_path(home))
+    }
+
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let mut paths = vec![
+            plugin_marketplace_manifest_path(home),
+            known_marketplaces_path(home),
+            home.join(".claude/settings.json"),
+            home.join(".claude/CLAUDE.md"),
+            home.join(".claude.json"),
+        ];
+        if let Ok(project_path) = std::env::current_dir() {
+            paths.push(project_path.join(".mcp.json"));
+            paths.push(project_path.join(".claude/settings.local.json"));
+        }
+        paths
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -1281,49 +1296,68 @@ fn install_claude_md_rules(claude_md_path: &Path) -> Result<()> {
 
 /// Clean up local project config (.mcp.json and settings.local.json) so a
 /// tracedecay MCP server only lives in the plugin, never in per-project config.
-fn install_clean_local_config() {
-    let project_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
+fn install_clean_local_config(project_path: &Path) -> Result<()> {
     let mcp_json_path = project_path.join(".mcp.json");
-    if mcp_json_path.exists()
-        && let Ok(contents) = std::fs::read_to_string(&mcp_json_path)
-        && let Ok(mut mcp_val) = serde_json::from_str::<serde_json::Value>(&contents)
-        && let Some(servers) = mcp_val
+    if mcp_json_path.exists() {
+        let contents =
+            std::fs::read_to_string(&mcp_json_path).map_err(|error| TraceDecayError::Config {
+                message: format!("failed to read {}: {error}", mcp_json_path.display()),
+            })?;
+        let mut mcp_val =
+            serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("failed to parse {}: {error}", mcp_json_path.display()),
+                }
+            })?;
+        let servers = mcp_val
             .get_mut("mcpServers")
-            .and_then(|v| v.as_object_mut())
-    {
-        let removed = servers.remove("tracedecay").is_some();
-        if removed {
-            if servers.is_empty() {
-                std::fs::remove_file(&mcp_json_path).ok();
-                eprintln!(
-                    "\x1b[32m✔\x1b[0m Removed local .mcp.json (plugin provides the MCP server)"
-                );
-            } else if backup_and_write_json(&mcp_json_path, &mcp_val) {
-                eprintln!(
-                    "\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)"
-                );
+            .and_then(|v| v.as_object_mut());
+        if let Some(servers) = servers {
+            let removed = servers.remove("tracedecay").is_some();
+            if removed {
+                if servers.is_empty() {
+                    super::safe_remove_host_file(&mcp_json_path).map_err(|error| {
+                        TraceDecayError::Config {
+                            message: format!(
+                                "failed to remove {}: {error}",
+                                mcp_json_path.display()
+                            ),
+                        }
+                    })?;
+                    eprintln!(
+                        "\x1b[32m✔\x1b[0m Removed local .mcp.json (plugin provides the MCP server)"
+                    );
+                } else {
+                    safe_write_json_file(&mcp_json_path, &mcp_val, None)?;
+                    eprintln!(
+                        "\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)"
+                    );
+                }
             }
         }
     }
 
     let local_settings_path = project_path.join(".claude").join("settings.local.json");
     if local_settings_path.exists() {
-        clean_local_settings_file(&project_path, &local_settings_path);
+        clean_local_settings_file(project_path, &local_settings_path)?;
     }
+    Ok(())
 }
 
 /// Remove tracedecay entries from a local settings.local.json file.
-fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
-    let Ok(contents) = std::fs::read_to_string(local_settings_path) else {
-        return;
-    };
+fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) -> Result<()> {
+    let contents =
+        std::fs::read_to_string(local_settings_path).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", local_settings_path.display()),
+        })?;
     if !contents.contains("tracedecay") {
-        return;
+        return Ok(());
     }
-    let Ok(mut local_val) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
+    let mut local_val = serde_json::from_str::<serde_json::Value>(&contents).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("failed to parse {}: {error}", local_settings_path.display()),
+        }
+    })?;
     let mut modified = false;
 
     if let Some(arr) = local_val
@@ -1355,25 +1389,45 @@ fn clean_local_settings_file(project_path: &Path, local_settings_path: &Path) {
     }
 
     if !modified {
-        return;
+        return Ok(());
     }
 
     let is_empty = local_val.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
-        if std::fs::remove_file(local_settings_path).is_ok() {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Removed {} (tracedecay should only be in the plugin)",
-                local_settings_path.display()
-            );
-            let claude_dir = project_path.join(".claude");
-            std::fs::remove_dir(&claude_dir).ok();
+        super::safe_remove_host_file(local_settings_path).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to remove {}: {error}",
+                    local_settings_path.display()
+                ),
+            }
+        })?;
+        eprintln!(
+            "\x1b[32m✔\x1b[0m Removed {} (tracedecay should only be in the plugin)",
+            local_settings_path.display()
+        );
+        let claude_dir = project_path.join(".claude");
+        match std::fs::remove_dir(&claude_dir) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to remove {}: {error}", claude_dir.display()),
+                });
+            }
         }
-    } else if backup_and_write_json(local_settings_path, &local_val) {
+    } else {
+        safe_write_json_file(local_settings_path, &local_val, None)?;
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay entries from {} (should only be in the plugin)",
             local_settings_path.display()
         );
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
