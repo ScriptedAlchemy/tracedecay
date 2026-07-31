@@ -887,9 +887,18 @@ async fn session_temporal_health_value(
     }
 }
 
+/// Runs the exhaustive observation-authority audit for the routed project
+/// owner.
+///
+/// Returns `(ok, typed reason, observed detail)`. `ok` is tri-state: `Some(true)`
+/// only when the audit ran and passed, `Some(false)` when it ran and failed, and
+/// `None` when it could not run at all. The typed reason uses the vocabulary
+/// Doctor already understands (`authority_invariant_failed`,
+/// `authority_store_unavailable`) so the CLI can classify without parsing the
+/// free-form detail.
 async fn observation_authority_audit(
     registry: Option<&crate::global_db::RegisteredGlobalDb>,
-) -> (Option<bool>, Option<String>) {
+) -> (Option<bool>, Option<&'static str>, Option<String>) {
     match registry {
         Some(registry) => {
             let audit = match registry.read_snapshot().await {
@@ -905,12 +914,21 @@ async fn observation_authority_audit(
                 }),
             };
             match audit {
-                Ok(()) => (Some(true), None),
-                Err(error) => (Some(false), Some(error.to_string())),
+                Ok(()) => (Some(true), None, None),
+                Err(error) => (
+                    Some(false),
+                    Some("authority_invariant_failed"),
+                    Some(error.to_string()),
+                ),
             }
         }
+        // This handler is only reached with a routed project owner, so a missing
+        // handle means the registry could not be attached here; the daemon core
+        // route is the producer that can distinguish a store that is absent on
+        // disk (`authority_store_missing`).
         None => (
             None,
+            Some("authority_store_unavailable"),
             Some("authoritative global registry is unavailable".to_string()),
         ),
     }
@@ -1014,10 +1032,14 @@ pub(super) async fn handle_runtime(
                 }
             }
         );
-        if let Some((authority_audit_ok, authority_audit_error)) = authority
+        if let Some((authority_audit_ok, authority_audit_reason, authority_audit_error)) = authority
             && let Some(database) = value.get_mut("database").and_then(Value::as_object_mut)
         {
             database.insert("authority_audit_ok".to_string(), json!(authority_audit_ok));
+            database.insert(
+                "authority_audit_reason".to_string(),
+                json!(authority_audit_reason),
+            );
             database.insert(
                 "authority_audit_error".to_string(),
                 json!(authority_audit_error),
