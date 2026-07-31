@@ -112,18 +112,47 @@ def make_fake_cargo(path: Path) -> None:
             import sys
             from pathlib import Path
 
-            record = Path(os.environ["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"])
+            record = Path(os.environ["TRACEDECAY_TEST_CARGO_INVOCATIONS"])
             with record.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(sys.argv[1:]) + "\\n")
 
-            if os.environ.get("TRACEDECAY_FAKE_NEXTEST_EMPTY") == "1":
-                print("no tests to run", file=sys.stderr)
-                raise SystemExit(4)
-            if sys.argv[1:3] != ["nextest", "run"]:
-                raise SystemExit("unexpected cargo command")
-            if "--no-tests=fail" not in sys.argv:
-                raise SystemExit("missing anti-vacuity")
-            print("nextest target completed")
+            executable = os.environ["TRACEDECAY_TEST_AUTHORITY_BINARY"]
+            print(json.dumps({
+                "reason": "compiler-artifact",
+                "target": {
+                    "name": "diagnostic_publication_stress",
+                    "kind": ["test"],
+                },
+                "profile": {"test": True},
+                "executable": executable,
+            }))
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def make_fake_authority_test_binary(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            record = Path(os.environ["TRACEDECAY_TEST_AUTHORITY_INVOCATIONS"])
+            with record.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(sys.argv[1:]) + "\\n")
+
+            if os.environ.get("TRACEDECAY_FAKE_ZERO_SELECTED") == "1":
+                print("running 0 tests")
+                print("test result: ok. 0 passed; 0 failed; 0 ignored")
+            else:
+                print("running 1 test")
+                print("test result: ok. 1 passed; 0 failed; 0 ignored")
             """
         ),
         encoding="utf-8",
@@ -426,20 +455,25 @@ class CaptureDispatchTest(unittest.TestCase):
     def test_diagnostic_authority_capture_is_typed_and_process_reaped(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
             root = Path(directory)
-            binary = root / "fake-diagnostic-authority"
-            make_fake_binary(binary)
             cargo = root / "cargo"
             make_fake_cargo(cargo)
-            invocations = root / "nextest-invocations.jsonl"
+            authority_binary = root / "diagnostic_publication_stress"
+            make_fake_authority_test_binary(authority_binary)
+            cargo_invocations = root / "cargo-invocations.jsonl"
+            authority_invocations = root / "authority-invocations.jsonl"
             environment = dict(os.environ)
             environment["PATH"] = f"{root}{os.pathsep}{environment['PATH']}"
-            environment["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"] = str(invocations)
+            environment["TRACEDECAY_TEST_CARGO_INVOCATIONS"] = str(
+                cargo_invocations
+            )
+            environment["TRACEDECAY_TEST_AUTHORITY_BINARY"] = str(authority_binary)
+            environment["TRACEDECAY_TEST_AUTHORITY_INVOCATIONS"] = str(
+                authority_invocations
+            )
             output = root / "diagnostic-authority.json"
 
             result = run_runner(
                 "incident",
-                "--binary",
-                binary,
                 "--workload",
                 "diagnostic-dedup-batch-rate",
                 "--authority-test",
@@ -454,50 +488,93 @@ class CaptureDispatchTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(output.read_text())
-            self.assertEqual(report["authority"]["kind"], "cargo-nextest-target")
+            self.assertEqual(
+                report["authority"]["kind"], "prebuilt-integration-test-scenario"
+            )
             self.assertEqual(
                 report["authority"]["target"], "diagnostic_publication_stress"
             )
+            self.assertEqual(
+                report["authority"]["scenario"],
+                "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
+            )
+            self.assertEqual(
+                report["authority"]["anti_vacuity"],
+                "scripts/require-exact-test.sh",
+            )
+            self.assertEqual(
+                report["authority"]["timing_scope"],
+                "test-executable-scenario-only",
+            )
+            self.assertNotIn("candidate_binary_sha256", report["authority"])
             self.assertEqual(report["sample_count"], 2)
             self.assertEqual(report["event_counts"]["attempted_total"], 20_000)
             self.assertEqual(report["event_counts"]["emitted_total"], 2)
             self.assertEqual(report["event_counts"]["queue_depth_max"], 1)
             self.assertEqual(report["outcome"]["process_leak_count"], 0)
-            commands = [
+            cargo_commands = [
                 json.loads(line)
-                for line in invocations.read_text(encoding="utf-8").splitlines()
+                for line in cargo_invocations.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual(len(commands), 2)
-            for command in commands:
-                self.assertEqual(command[:2], ["nextest", "run"])
-                self.assertIn("--no-tests=fail", command)
+            self.assertEqual(len(cargo_commands), 1)
+            build_command = cargo_commands[0]
+            self.assertEqual(build_command[0], "test")
+            self.assertEqual(
+                build_command[build_command.index("--test") + 1],
+                "diagnostic_publication_stress",
+            )
+            self.assertIn("--no-run", build_command)
+            self.assertIn("--message-format=json", build_command)
+            authority_commands = [
+                json.loads(line)
+                for line in authority_invocations.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(
+                len(authority_commands),
+                3,
+                "one anti-vacuity validation plus two measured samples",
+            )
+            for command in authority_commands:
                 self.assertEqual(
-                    command[command.index("--test") + 1],
-                    "diagnostic_publication_stress",
+                    command,
+                    [
+                        "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
+                        "--exact",
+                        "--test-threads=1",
+                    ],
+                )
+                self.assertNotIn(
+                    "cargo",
+                    command,
                 )
                 self.assertNotIn(
                     "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
-                    command,
+                    build_command,
                 )
 
-    def test_diagnostic_authority_rejects_empty_nextest_selection(self) -> None:
+    def test_diagnostic_authority_rejects_empty_libtest_selection(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
             root = Path(directory)
-            binary = root / "fake-diagnostic-authority"
-            make_fake_binary(binary)
             make_fake_cargo(root / "cargo")
+            authority_binary = root / "diagnostic_publication_stress"
+            make_fake_authority_test_binary(authority_binary)
             output = root / "diagnostic-authority.json"
             environment = dict(os.environ)
             environment["PATH"] = f"{root}{os.pathsep}{environment['PATH']}"
-            environment["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"] = str(
-                root / "nextest-invocations.jsonl"
+            environment["TRACEDECAY_TEST_CARGO_INVOCATIONS"] = str(
+                root / "cargo-invocations.jsonl"
             )
-            environment["TRACEDECAY_FAKE_NEXTEST_EMPTY"] = "1"
+            environment["TRACEDECAY_TEST_AUTHORITY_BINARY"] = str(authority_binary)
+            authority_invocations = root / "authority-invocations.jsonl"
+            environment["TRACEDECAY_TEST_AUTHORITY_INVOCATIONS"] = str(
+                authority_invocations
+            )
+            environment["TRACEDECAY_FAKE_ZERO_SELECTED"] = "1"
 
             result = run_runner(
                 "incident",
-                "--binary",
-                binary,
                 "--workload",
                 "diagnostic-dedup-batch-rate",
                 "--authority-test",
@@ -511,7 +588,26 @@ class CaptureDispatchTest(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("diagnostic authority did not pass", result.stderr)
+            self.assertIn(
+                "diagnostic publication stress scenario did not pass validation",
+                result.stderr,
+            )
+            commands = [
+                json.loads(line)
+                for line in authority_invocations.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(
+                commands,
+                [
+                    [
+                        "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
+                        "--exact",
+                        "--test-threads=1",
+                    ]
+                ],
+            )
             self.assertFalse(output.exists())
 
 

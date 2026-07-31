@@ -10,20 +10,12 @@ Direct behavioral coverage for the PR7 memory/fact/provenance slice. There is
 no measurement harness, owner receipt, gate manifest, content-addressed
 acceptance snapshot, signature, trust root, or attestation in this directory.
 
-## Artifacts
+## Retained provenance
 
-| Path | Role |
-|---|---|
-| [evidence-index.json](evidence-index.json) | Legacy status pointer (`pending`; deprecated `current_acceptance` remains null) |
-| [result-provisional.json](result-provisional.json) | Historical local timings only — not accepted evidence |
-
-## Status: pending
-
-Product behavior is accepted through the cargo tests below. Performance
-numbers in `result-provisional.json` are diagnostic leftovers from a removed
-harness and must not be quoted as accepted PR7 evidence. The retired
-`workload-v1.json` recorded that harness's execution shape; its removal does
-not upgrade the retained result or evidence index into accepted provenance.
+This README is the only historical provenance retained in this directory.
+The former workload, evidence index, and provisional result belonged to a
+removed harness and were not accepted evidence. Product behavior is validated
+directly through the cargo tests below.
 
 ## Direct behavioral tests
 

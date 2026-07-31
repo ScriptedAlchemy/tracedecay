@@ -726,20 +726,74 @@ def _parse_lsp_frames(payload: bytes) -> list[dict[str, Any]]:
     return frames
 
 
-def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
-    if args.events != 10_000:
-        fail("the committed diagnostic authority fixes --events at 10000")
-    binary = require_binary(args.binary)
-    authority_command = (
+def _build_diagnostic_authority(environment: Mapping[str, str]) -> Path:
+    target = "diagnostic_publication_stress"
+    command = (
         "cargo",
-        "nextest",
-        "run",
+        "test",
         "--manifest-path",
         os.fspath(REPOSITORY_ROOT / "crates" / "tracedecay-lsp" / "Cargo.toml"),
         "--test",
-        "diagnostic_publication_stress",
-        "--no-tests=fail",
+        target,
+        "--no-run",
+        "--message-format=json",
+    )
+    completed = subprocess.run(
+        command,
+        cwd=REPOSITORY_ROOT,
+        env=dict(environment),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if completed.returncode != 0:
+        fail(
+            "could not build diagnostic publication authority target: "
+            f"{completed.stderr.strip()}"
+        )
+    executables: set[Path] = set()
+    for line in completed.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        target_metadata = message.get("target")
+        executable = message.get("executable")
+        if (
+            message.get("reason") == "compiler-artifact"
+            and isinstance(target_metadata, dict)
+            and target_metadata.get("name") == target
+            and executable is not None
+        ):
+            executables.add(Path(executable))
+    if len(executables) != 1:
+        fail(
+            "diagnostic publication authority build did not produce exactly "
+            "one target executable"
+        )
+    return require_binary(executables.pop())
+
+
+def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
+    if args.events != 10_000:
+        fail("the committed diagnostic authority fixes --events at 10000")
+    environment = dict(os.environ)
+    test_binary = _build_diagnostic_authority(environment)
+    scenario = "publication_rate_and_queue_memory_stay_bounded_under_backpressure"
+    scenario_arguments = (
+        scenario,
+        "--exact",
         "--test-threads=1",
+    )
+    validation_command = (
+        os.fspath(REPOSITORY_ROOT / "scripts" / "require-exact-test.sh"),
+        os.fspath(test_binary),
+        *scenario_arguments,
+    )
+    authority_command = (
+        os.fspath(test_binary),
+        *scenario_arguments,
     )
     output = Path(args.output)
     samples_path, policy_path = _artifact_paths(output)
@@ -751,11 +805,18 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         Path(tempfile.gettempdir()),
         preserve_on_failure=False,
     ) as workspace:
-        prepared = prepare_fixture_snapshot(
-            workspace.path / "profile",
-            prebuilt_binary=binary,
+        validation = run_host(
+            validation_command,
+            env=environment,
+            log_dir=workspace.path / "validation-logs",
+            timeout=120.0,
+            termination_grace=0.2,
+            check=False,
         )
-        environment = prepared.environment
+        if validation.evidence.process_count_after_cleanup != 0:
+            fail("diagnostic authority validation process tree was not reaped")
+        if validation.evidence.exit_code != 0:
+            fail("diagnostic publication stress scenario did not pass validation")
         for index in range(args.samples):
             started_ns = time.monotonic_ns()
             result = run_host(
@@ -771,12 +832,12 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
             if result.evidence.process_count_after_cleanup != 0:
                 fail("diagnostic authority process tree was not reaped")
             if not authority_passed:
-                fail("prebuilt diagnostic authority did not pass")
+                fail("diagnostic publication stress scenario did not pass")
             digest = hashlib.sha256(result.stdout).hexdigest()
             sample = {
                 "schema_version": SCHEMA_VERSION,
                 "identity": {
-                    "candidate_id": sha256_file(binary)[:16],
+                    "candidate_id": sha256_file(test_binary)[:16],
                     "run_id": f"incident-{uuid.uuid4().hex}",
                     "capture_id": f"capture-{uuid.uuid4().hex}",
                     "crate_id": "tracedecay-lsp",
@@ -860,10 +921,12 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         "report_id": f"incident-{uuid.uuid4().hex}",
         "workload_id": "diagnostic-dedup-batch-rate",
         "authority": {
-            "kind": "cargo-nextest-target",
-            "candidate_binary_sha256": sha256_file(binary),
+            "kind": "prebuilt-integration-test-scenario",
+            "test_binary_sha256": sha256_file(test_binary),
             "target": "diagnostic_publication_stress",
-            "anti_vacuity": "--no-tests=fail",
+            "scenario": scenario,
+            "anti_vacuity": "scripts/require-exact-test.sh",
+            "timing_scope": "test-executable-scenario-only",
         },
         "availability": {"state": "available", "detail": None},
         "sample_count": len(captured),
@@ -1244,6 +1307,10 @@ def _capture_diagnostic_flood(args: argparse.Namespace) -> int:
 
 
 def capture_incident(args: argparse.Namespace) -> int:
+    if args.authority_test and args.binary is not None:
+        fail("--binary is not used with --authority-test")
+    if not args.authority_test and args.binary is None:
+        fail("--binary is required for production incident capture")
     if args.workload == "diagnostic-dedup-batch-rate":
         return _capture_diagnostic_flood(args)
     if args.workload != "missing-daemon-after-shell":
@@ -1901,7 +1968,10 @@ def parser() -> argparse.ArgumentParser:
         "incident",
         help="capture one wired final incident workload",
     )
-    incident_parser.add_argument("--binary", required=True)
+    incident_parser.add_argument(
+        "--binary",
+        help="explicit product binary for production-route incident capture",
+    )
     incident_parser.add_argument("--workload", required=True)
     incident_parser.add_argument("--samples", type=int, default=10)
     incident_parser.add_argument("--events", type=int, default=1_000)
