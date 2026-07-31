@@ -8,6 +8,8 @@
 > branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
 > test names/counts, generated-byte/source-shape checks, PR closure gates, or
 > platform gate lattice.
+> Historical compatibility/migration language applies only to evidenced
+> released callers; branch-local operations change in place.
 
 **Goal:** Move session, memory, feedback, and configuration use-case sequencing
 behind application ports while retaining root SQL/store adapters.
@@ -44,8 +46,9 @@ direct behavior and acceptance live in the applicable numbered V2 plan.
 
 ## Historical migration, rollback, measurement, and deletion notes
 
-Land one operation family at a time with compatibility delegation. Do not
-dual-write. Revert by family if its direct journey fails. Measure application
+Land one operation family at a time. Use compatibility delegation only for an
+evidenced released caller; otherwise change branch-local operations in place.
+Do not dual-write. Revert by family if its direct journey fails. Measure application
 private edits and root handler edits before/after. Delete root orchestration
 only after production callers and all exposed surfaces reach the application
 owner and architecture search finds no reverse dependency.
