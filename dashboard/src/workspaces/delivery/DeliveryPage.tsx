@@ -18,6 +18,7 @@ import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import {
+  Fact,
   Legend,
   Meter,
   Panel,
@@ -687,27 +688,3 @@ function PipelineStage({
   );
 }
 
-function Fact({
-  label,
-  value,
-  muted,
-}: {
-  label: string;
-  value: string;
-  muted?: boolean;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="td-legend">{label}</dt>
-      <dd
-        className={
-          muted
-            ? 'truncate text-3xs text-text-muted'
-            : 'truncate text-3xs text-text-secondary'
-        }
-      >
-        {value}
-      </dd>
-    </div>
-  );
-}

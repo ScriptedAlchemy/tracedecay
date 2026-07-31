@@ -1,11 +1,13 @@
 import { RefreshCw } from 'lucide-react';
+import type { ReactNode } from 'react';
 import {
   assertNever,
   type WireAuthorization,
   type WireCoverage,
+  type WireEnvelope,
   type WireFreshness,
-  type WireLegalActionRef,
 } from '../contracts/wire.ts';
+import type { EnvelopeResult } from '../data/query/envelope.ts';
 import { EvidenceTruthStrip } from './EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from './StateChip';
 
@@ -21,27 +23,20 @@ import { StateChip, type DomainStateKind } from './StateChip';
  * exist.
  */
 export function EnvelopeTruth({
-  state,
-  coverage,
-  freshness,
-  legalActions,
-  authorization,
+  envelope,
   refreshing,
   onRefresh,
 }: {
-  state: DomainStateKind;
-  coverage: WireCoverage;
-  freshness: WireFreshness;
-  legalActions: WireLegalActionRef[];
-  authorization: WireAuthorization;
+  envelope: WireEnvelope<unknown>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
-  const refresh = legalActions.find((action) => action.kind === 'refresh')?.operation;
-  const authorizationChip = authorizationState(authorization);
+  const { coverage, freshness } = envelope;
+  const refresh = envelope.legal_actions.find((action) => action.kind === 'refresh')?.operation;
+  const authorizationChip = authorizationState(envelope.authorization);
   return (
     <div className="flex flex-wrap items-center gap-3 px-4 pt-2">
-      <StateChip kind={state} />
+      <StateChip kind={envelope.domain_state} />
       {/* The authorization outcome is a second, independent axis: a read can be
         * `partial` because a source was slow and separately `redacted` because
         * the identity behind it may not see the content. Folding one into the
@@ -91,6 +86,59 @@ export function authorizationState(authorization: WireAuthorization): DomainStat
     default:
       return assertNever(authorization);
   }
+}
+
+/**
+ * A titled section wrapping one envelope read, which resolves every way the
+ * read can fail to produce an envelope before its body is ever called: still in
+ * flight, no response recorded, or a transport outcome carrying the daemon's
+ * own domain state. The body therefore only ever runs against a decoded
+ * envelope.
+ *
+ * The transport arm lives here rather than at each call site because it is the
+ * same three lines everywhere and the states it renders are the daemon's, not
+ * the surface's — a surface that re-derived them could disagree with the wire.
+ * The detail sentences stay per-site props, since what a reader needs to be
+ * told about a missing store telemetry read is not what they need to be told
+ * about a missing cost projection.
+ */
+export function EnvelopeSection<T>({
+  title,
+  blurb,
+  pending,
+  result,
+  loadingDetail,
+  transportDetail = 'daemon unreachable',
+  className = 'border-b border-edge-subtle',
+  children,
+}: {
+  title: string;
+  /** The line under the heading naming what the read model carries. */
+  blurb?: ReactNode;
+  pending: boolean;
+  result: EnvelopeResult<T> | undefined;
+  /** What the reader is told while the request is in flight. */
+  loadingDetail: string;
+  /** What the reader is told when the transport outcome carries no reason. */
+  transportDetail?: string;
+  className?: string;
+  children: (envelope: WireEnvelope<T>) => ReactNode;
+}) {
+  return (
+    <section className={className} aria-label={title}>
+      <h2 className="px-4 pt-4 text-sm font-semibold tracking-tight">{title}</h2>
+      {blurb ? <p className="px-4 pt-0.5 text-2xs text-text-muted">{blurb}</p> : null}
+      {pending ? (
+        <ReadModelState kind="loading" detail={loadingDetail} />
+      ) : result === undefined ? (
+        <ReadModelState kind="unknown" detail="no response recorded" />
+      ) : result.outcome === 'transport' ? (
+        <ReadModelState kind={result.state} detail={result.detail ?? transportDetail} />
+      ) : (
+        children(result.envelope)
+      )}
+    </section>
+  );
 }
 
 /** A centred state for a read that produced no payload to render. */
