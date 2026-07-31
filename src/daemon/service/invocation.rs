@@ -71,8 +71,8 @@ use tracedecay_lsp::{
     LSP_SESSION_TTL_MS, LspAnalyzerCancellationAuthority, LspEndpointError, LspRequestId,
     LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
     LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
-    MAX_LSP_FRAME_BYTES, MAX_LSP_SESSIONS, MAX_LSP_WORKSPACE_ROOTS, SessionLifecycle,
-    UnavailableSemanticProvider, UpstreamCapabilities,
+    MAX_LSP_FRAME_BYTES, MAX_LSP_WORKSPACE_ROOTS, SessionLifecycle, UnavailableSemanticProvider,
+    UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -7515,100 +7515,26 @@ impl DaemonInvocationService {
     pub(crate) async fn authorize_lsp_workspace(
         &self,
         mut roots: Vec<(PathBuf, String, ResolvedScope)>,
-        observed_at: UtcMicros,
+        _observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
-        if roots.is_empty() {
+        if roots.len() != 1 {
             return None;
         }
         if !canonicalize_lsp_roots(&mut roots) {
             return None;
         }
-        let mut contexts = Vec::with_capacity(roots.len());
-        let mut owners = Vec::with_capacity(roots.len());
-        let mut scope_set_storages = Vec::with_capacity(roots.len());
-        for (ordinal, (project_root, _, scope)) in roots.iter().enumerate() {
-            let owner = self.lsp_owner(Some(project_root)).await?;
-            let owner_storage = owner.scope_set_storage.clone()?;
-            let grant = owner.scope_grant.clone()?;
-            if grant.scope != *scope {
-                return None;
-            }
-            owners.push(owner);
-            scope_set_storages.push(owner_storage);
-            let request_id = RequestId::new(format!("request.lsp.workspace.{ordinal}")).ok()?;
-            let deadline =
-                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?;
-            let cancellation =
-                CancellationContext::active(format!("cancel.lsp.workspace.{ordinal}")).ok()?;
-            contexts.push(
-                RequestContext::new(
-                    grant.issuer.clone(),
-                    scope.clone(),
-                    grant,
-                    request_id,
-                    deadline,
-                    cancellation,
-                )
-                .ok()?,
-            );
-        }
-        let selector_digest = canonical_sha256(&(
-            "tracedecay.daemon.lsp-workspace-selector.v1",
-            roots
-                .iter()
-                .map(|(_, _, scope)| &scope.scope_digest)
-                .collect::<Vec<_>>(),
-        ))
-        .ok()?;
-        let scope_set_id = ScopeSetId::new(format!(
-            "scope-set.lsp.{}",
-            selector_digest.as_str().trim_start_matches("sha256:")
-        ))
-        .ok()?;
-        let capability =
-            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-                .ok()?;
-        let use_case =
-            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
-                .ok()?;
-        let scope_set = AuthorizedScopeSetAuthority::authorize(
-            scope_set_id,
-            ScopeSetRevision::new(1).ok()?,
-            contexts,
-            &capability,
-            &use_case,
-            observed_at,
-        )
-        .ok()?;
-        for storage in &scope_set_storages {
-            self.persist_exact_scope_set(storage, &scope_set).ok()??;
-        }
-        let admitted_roots = roots
-            .iter()
-            .map(|(_, uri, scope)| {
-                AdmittedRoot::authorized(uri.clone(), scope.scope_digest.clone())
-            })
-            .collect::<Vec<_>>();
-        let workspace =
-            AuthorizedLspWorkspace::new(Some(scope_set.digest().clone()), admitted_roots.clone())
-                .ok()?;
-        let factories = admitted_roots
-            .into_iter()
-            .zip(owners.into_iter().map(|owner| owner.factory))
-            .collect();
-        let authorized = AuthorizedDaemonLspWorkspace {
-            workspace: workspace.clone(),
-            scope_set,
-            factories,
+        let [(project_root, uri, scope)] = roots.as_slice() else {
+            return None;
         };
-        let mut workspaces = self.authorized_lsp_workspaces.lock().await;
-        if workspaces.len() >= MAX_LSP_SESSIONS
-            && !workspaces.contains_key(authorized.scope_set.digest())
-        {
+        let owner = self.lsp_owner(Some(project_root)).await?;
+        let grant = owner.scope_grant?;
+        if grant.scope != *scope {
             return None;
         }
-        workspaces.insert(authorized.scope_set.digest().clone(), authorized);
-        Some(workspace)
+        Some(AuthorizedLspWorkspace::single(AdmittedRoot::authorized(
+            uri.clone(),
+            scope.scope_digest.clone(),
+        )))
     }
 
     pub(crate) async fn compare_and_swap_scope_set(
@@ -7885,12 +7811,20 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
-        if matches!(
+        let multi_root_payload = matches!(
             &request.payload,
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
                 | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
                 | DaemonInvocationPayload::MultiRootExecute { .. }
-        ) {
+        );
+        let multi_root_lsp = matches!(
+            &request.payload,
+            DaemonInvocationPayload::LspOpen {
+                workspace_folders,
+                ..
+            } if workspace_folders.len() > 1
+        );
+        if multi_root_payload || multi_root_lsp {
             return match request.validate() {
                 Ok(()) => DaemonInvocationResponse::problem(
                     request_id,
@@ -9276,7 +9210,8 @@ mod tests {
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem {
                 problem: ApplicationProblem::Unavailable {
-                    diagnostic: SafeDiagnostic { ref code, .. }
+                    diagnostic: SafeDiagnostic { ref code, .. },
+                    ..
                 }
             } if code == "feedback.advisory_cycle_quarantined"
         ));
@@ -9306,7 +9241,8 @@ mod tests {
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem {
                 problem: ApplicationProblem::Unavailable {
-                    diagnostic: SafeDiagnostic { ref code, .. }
+                    diagnostic: SafeDiagnostic { ref code, .. },
+                    ..
                 }
             } if code == "feedback.advisory_cycle_quarantined"
         ));

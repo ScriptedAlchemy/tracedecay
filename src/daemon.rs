@@ -2278,7 +2278,7 @@ impl DaemonInvocationState {
         project_path: Option<&Path>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
-        if let Some(response) = quarantined_multi_root_response(&request) {
+        if let Some(response) = quarantined_invocation_response(&request) {
             return response;
         }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
@@ -7844,15 +7844,23 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     Ok(())
 }
 
-fn quarantined_multi_root_response(
+fn quarantined_invocation_response(
     request: &DaemonInvocationRequest,
 ) -> Option<DaemonInvocationResponse> {
-    if !matches!(
+    let multi_root_payload = matches!(
         &request.payload,
         service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead { .. }
             | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
-    ) {
+    );
+    let multi_root_lsp = matches!(
+        &request.payload,
+        service::invocation::DaemonInvocationPayload::LspOpen {
+            workspace_folders,
+            ..
+        } if workspace_folders.len() > 1
+    );
+    if !multi_root_payload && !multi_root_lsp {
         return None;
     }
     Some(match request.validate() {
@@ -7875,7 +7883,7 @@ async fn execute_portable_daemon_invocation(
     request: DaemonInvocationRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = quarantined_multi_root_response(&request) {
+    if let Some(response) = quarantined_invocation_response(&request) {
         return response;
     }
     let request_id = request.request_id.clone();
@@ -8296,8 +8304,10 @@ async fn admitted_lsp_workspace_for_request(
 ) -> Option<AuthorizedLspWorkspace> {
     let requested_uris = match request.lsp_workspace_folders()? {
         [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
-        folders => folders.to_vec(),
+        [folder] => vec![folder.clone()],
+        _ => return None,
     };
+    let active_project_path = project_path.canonicalize().ok()?;
     let graphs = store_administration.mounted_project_graphs().await;
     let mut resolved_roots = Vec::with_capacity(requested_uris.len());
     for requested_uri in requested_uris {
@@ -8306,6 +8316,9 @@ async fn admitted_lsp_workspace_for_request(
             return None;
         }
         let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
+        if requested_path != active_project_path {
+            return None;
+        }
         let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
         let mut candidates = Vec::new();
         for graph in &graphs {
@@ -8396,7 +8409,7 @@ async fn execute_daemon_invocation(
     handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = quarantined_multi_root_response(&request) {
+    if let Some(response) = quarantined_invocation_response(&request) {
         return response;
     }
     let request_id = request.request_id.clone();

@@ -978,14 +978,10 @@ where
         request: LspSessionOpenRequest,
         now_ms: u64,
     ) -> Result<LspSessionAccess, LspEndpointError> {
-        let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
-        if request.workspace_folders.len() > 1
-            && !authorized
-                .workspace
-                .matches_multi_root_hints(&request.workspace_folders)
-        {
+        if request.workspace_folders.len() > 1 {
             return Err(LspEndpointError::AdmissionRejected);
         }
+        let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
         self.registry.register(authorized, now_ms)
     }
 
@@ -1015,6 +1011,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::gateway::AdmittedRoot;
 
@@ -1231,43 +1230,45 @@ mod tests {
     impl LspSessionAdmissionPort for Admission {
         fn admit_lsp_session(
             &self,
-            request: &LspSessionOpenRequest,
+            _request: &LspSessionOpenRequest,
             now_ms: u64,
         ) -> Result<AuthorizedLspSession, LspEndpointError> {
-            let workspace = if request.workspace_folders.len() > 1 {
-                AuthorizedLspWorkspace::new(
-                    Some(ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap()),
-                    request
-                        .workspace_folders
-                        .iter()
-                        .enumerate()
-                        .map(|(index, uri)| {
-                            AdmittedRoot::authorized(
-                                uri,
-                                ManifestDigest::new(format!(
-                                    "sha256:{}",
-                                    if index == 0 { "b" } else { "c" }.repeat(64)
-                                ))
-                                .unwrap(),
-                            )
-                        })
-                        .collect(),
-                )?
-            } else {
-                AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///admitted"))
-            };
             Ok(AuthorizedLspSession {
                 session_id: LspSessionId::new("daemon-session-1").unwrap(),
                 credential: LspSessionCredential::new(vec![7; 16]).unwrap(),
-                workspace,
+                workspace: AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///admitted")),
+                expires_at_ms: now_ms + LSP_SESSION_TTL_MS,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingAdmission {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl LspSessionAdmissionPort for RecordingAdmission {
+        fn admit_lsp_session(
+            &self,
+            _request: &LspSessionOpenRequest,
+            now_ms: u64,
+        ) -> Result<AuthorizedLspSession, LspEndpointError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(AuthorizedLspSession {
+                session_id: LspSessionId::new("recorded-session").unwrap(),
+                credential: LspSessionCredential::new(vec![9; 16]).unwrap(),
+                workspace: AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///admitted")),
                 expires_at_ms: now_ms + LSP_SESSION_TTL_MS,
             })
         }
     }
 
     #[test]
-    fn endpoint_admits_an_exact_authorized_workspace_set() {
-        let mut endpoint = DaemonLspSessionEndpoint::new(Admission);
+    fn endpoint_refuses_multi_root_before_admission_and_keeps_single_root_working() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut endpoint = DaemonLspSessionEndpoint::new(RecordingAdmission {
+            calls: Arc::clone(&calls),
+        });
         let multi = endpoint
             .open(
                 LspSessionOpenRequest {
@@ -1276,17 +1277,10 @@ mod tests {
                 },
                 10,
             )
-            .unwrap();
-        assert_eq!(
-            endpoint
-                .registry_mut()
-                .workspace(&multi, 11)
-                .unwrap()
-                .roots()
-                .len(),
-            2
-        );
-        endpoint.registry_mut().close(&multi, 11).unwrap();
+            .expect_err("multi-root workspace must be quarantined");
+        assert_eq!(multi, LspEndpointError::AdmissionRejected);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(endpoint.registry().active_sessions(), 0);
 
         let access = endpoint
             .open(
@@ -1297,6 +1291,7 @@ mod tests {
                 10,
             )
             .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             endpoint.registry_mut().root(&access, 11).unwrap().uri(),
             "file:///admitted"
