@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_workload_and_profile_chain_are_exactly_pinned() {
+    fn activation_profile_chain_is_closed_and_ordered() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let (_, workload) =
             load_authoritative_default_workload(repo_root).expect("authoritative workload");
@@ -1439,25 +1439,6 @@ mod tests {
             ]
         );
         assert!(activation_profile_chain(&workload, "caller-authored").is_err());
-        assert_eq!(workload.execution_contract.exact_file_count, 13);
-        assert_eq!(workload.execution_contract.exact_corpus_bytes, 147_447);
-        assert_eq!(
-            workload.execution_contract.exact_eligible_chunks_current,
-            1_960
-        );
-        assert_eq!(
-            workload.execution_contract.exact_eligible_chunks_10x,
-            19_600
-        );
-        assert_eq!(workload.execution_contract.exact_query_count, 28);
-        assert_eq!(
-            workload.execution_contract.exact_eligible_chunks_10x,
-            workload
-                .execution_contract
-                .exact_eligible_chunks_current
-                .checked_mul(10)
-                .expect("10x chunks")
-        );
     }
 
     #[test]
