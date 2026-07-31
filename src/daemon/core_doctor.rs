@@ -385,18 +385,44 @@ async fn doctor_runtime_value_inner(
         .registered_profile_database()
         .await
         .ok();
-    let (authority_ok, authority_reason) = match registry.as_ref() {
-        // Registered attachment validates the authority schema contract before
-        // publication, so a retained handle is itself the completed audit.
-        Some(_) => (Some(true), None),
+    // Doctor asked for the exhaustive observation-authority audit, so run it.
+    // A retained registry handle only proves the schema contract held at
+    // publication; it is not evidence that the invariant pass ran now.
+    let (authority_ok, authority_reason, authority_detail) = match registry.as_ref() {
+        Some(registry) => match registry.read_snapshot().await {
+            Ok(snapshot) => {
+                match crate::global_db::schema_stages::validate_observation_authority_connection(
+                    &snapshot,
+                )
+                .await
+                {
+                    Ok(()) => (Some(true), None, None),
+                    Err(error) => (
+                        Some(false),
+                        Some("authority_invariant_failed"),
+                        Some(error.to_string()),
+                    ),
+                }
+            }
+            Err(error) => (
+                None,
+                Some("authority_store_unavailable"),
+                Some(error.to_string()),
+            ),
+        },
         None if handshake.client_identity.global_db_path.is_file() => {
-            (None, Some("authority_store_unavailable"))
+            (None, Some("authority_store_unavailable"), None)
         }
-        None => (None, Some("authority_store_missing")),
+        None => (None, Some("authority_store_missing"), None),
     };
     value["database"]["authority_audit_ok"] = json!(authority_ok);
     value["database"]["authority_audit_reason"] = json!(authority_reason);
-    value["database"]["authority_audit_error"] = json!(authority_reason);
+    // `authority_audit_error` carries the observed detail when there is one and
+    // otherwise mirrors the typed reason so readers that only know the older
+    // key still see the same vocabulary.
+    value["database"]["authority_audit_error"] = json!(
+        authority_detail.or_else(|| authority_reason.map(std::string::ToString::to_string))
+    );
 
     let canonical_session_path = session_path
         .canonicalize()

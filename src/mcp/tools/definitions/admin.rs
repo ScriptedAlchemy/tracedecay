@@ -105,7 +105,7 @@ pub(super) fn def_runtime() -> ToolDefinition {
             "properties": {
                 "authority_audit": {
                     "type": "boolean",
-                    "description": "Run the exhaustive observation-authority audit and include authority_audit_ok/error in database telemetry (default: false)"
+                    "description": "Run the exhaustive observation-authority audit and include authority_audit_ok (true = audit ran and passed, false = audit ran and failed, null = audit did not run), authority_audit_reason (typed: authority_invariant_failed, authority_store_unavailable, authority_store_missing, authority_audit_not_run), and authority_audit_error (observed detail) in database telemetry (default: false)"
                 },
                 "doctor_report": {
                     "type": "boolean",
