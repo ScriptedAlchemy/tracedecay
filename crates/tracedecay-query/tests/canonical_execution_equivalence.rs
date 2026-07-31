@@ -615,11 +615,11 @@ fn equivalent_prepared_queries_emit_identical_stable_cursor_bytes() {
     let first_cursor = first.next_cursor.expect("first continuation cursor");
     let second_cursor = second.next_cursor.expect("second continuation cursor");
     let first_wire = first_cursor
-        .strip_prefix("ccq2.")
-        .expect("versioned prepared-query cursor");
+        .strip_prefix("ccq1.")
+        .expect("canonical prepared-query cursor");
     let second_wire = second_cursor
-        .strip_prefix("ccq2.")
-        .expect("versioned prepared-query cursor");
+        .strip_prefix("ccq1.")
+        .expect("canonical prepared-query cursor");
     assert_eq!(
         hex::decode(first_wire).expect("first cursor bytes"),
         hex::decode(second_wire).expect("second cursor bytes"),
