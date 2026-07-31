@@ -463,6 +463,13 @@ pub enum ObservationReadResultV1 {
 }
 
 /// Diagnostic-family read operations.
+///
+/// The variant set covers the whole read surface of
+/// [`DiagnosticStore`](crate::DiagnosticStore) so a storage cutover cannot
+/// silently drop a lane: `Stale` answers `stale_diagnostics` and
+/// `SupersessionChain` answers `diagnostic_supersession_chain`. Both are
+/// history lanes — they read records that active publication excludes — and
+/// neither may re-admit a stale record into the current set.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticReadOperationV1 {
@@ -473,6 +480,10 @@ pub enum DiagnosticReadOperationV1 {
         file_occurrence_id: FileOccurrenceId,
     },
     ByAnchor(RetrievalAnchorId),
+    /// Superseded and cleared records bound to one generation.
+    Stale(CodeGenerationId),
+    /// The logical finding chain rooted at one diagnostic anchor, oldest first.
+    SupersessionChain(RetrievalAnchorId),
 }
 
 /// Diagnostic-family read results.
