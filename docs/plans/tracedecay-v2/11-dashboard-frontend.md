@@ -65,12 +65,11 @@ and route matrices are run evidence rather than plan invariants.
 Acceptance remains open on the product gaps below. Unavailable data must stay
 truthful rather than being replaced with fabricated values.
 
-- **Plan 11 owner:** the runtime performance budgets — LCP, frame p95,
-  input latency, and heap retention — remain open. HTTP fault coverage,
-  renderer semantic separation, SSE churn bounds, transfer budgets, and the
-  virtualization mount ceiling are delivered.
-- **Plan 11 owner:** browser input latency is measured in a real layout
-  and paint engine; jsdom timing cannot establish this product requirement.
+- **Plan 11 owner:** the runtime performance budgets — LCP, frame p95, input
+  latency, heap retention, and SSE sustain rates — are withdrawn as acceptance
+  criteria by owner decision 2026-07-31 ("dont care about heap or other fe
+  perf stuff"). Performance problems are ordinary bugs, not gates. HTTP fault
+  coverage and renderer semantic separation remain delivered behavior.
 - **Plan 11 owner:** Code still lacks diagnostics, affected tests, code
   health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
@@ -814,44 +813,22 @@ sort/filter, cap/partial status, and next-page availability.
 Deterministic graph tiers are small 1,000/2,000 nodes/edges, representative
 10,000/25,000, large 50,000/150,000, and overflow 100,000/300,000. Raw
 rendering above large is forbidden; overflow uses daemon-provided
-clustering/slicing or semantic pagination. On a pinned Playwright Chromium
-1.60.0 runner from `dashboard/package-lock.json` with 4 vCPU, 8 GiB, 4× CPU
-throttling, 20/10 Mbit/s, and 40 ms RTT, startup uses five discarded warmups
-then ten cold-cache runs and reports the median; interaction uses five
-discarded warmups then 30 warm-cache runs and reports p95. Cold-cache runs
-clear HTTP cache, service workers, IndexedDB, and browser storage; warm-cache
-runs start from one settled representative projection. The artifact records
-browser/build revision, machine profile, samples, median/p95, failures, and
-threshold:
+clustering/slicing or semantic pagination.
 
-- payload-size ceilings withdrawn by owner decision 2026-07-31 (see "Payload
-  budgets withdrawn" above); no shell, chunk, API, or graph byte budget is an
-  acceptance criterion;
-- LCP and keyboard-ready ≤2.5 s, CLS ≤0.1, pending acknowledgement ≤100 ms,
-  loaded selection/filter/brush ≤150 ms, linked selection ≤200 ms, and cached
-  evidence inspector ≤200 ms;
-- the representative execution-topology tier is exactly 500 visible work
-  items, 64 worktree/stack lanes, 2,000 dependency/merge-order edges, and
-  4,096 conflict cells. Its initial payload is ≤512 KiB compressed and ≤2 MiB
-  decoded; larger selections use server grouping/paging. Lane/rail selection,
-  keyboard movement, and one playback step are ≤150 ms p95; cross-lens linked
-  selection and TaskId inspector open are ≤200 ms p95; return-to-live after a
-  settled refetch is ≤500 ms p95. At most 250 row-like DOM elements, 64 lane
-  headers, 512 edge hit targets, and 256 heat cells are mounted at once;
-  accessible pagination exposes all remaining rows without canvas-only data;
-- representative graph frame ≤33 ms p95, large frame ≤50 ms p95, no long task
-  >200 ms, and tasks >50 ms total ≤500 ms during a ten-second journey;
-- first planner progress ≤500 ms, stage/elapsed/cancel/coverage visible after
-  500 ms, progress at least once per second, and first local-daemon result page
-  ≤1 s p95 or remains explicitly pending/partial;
-- representative heap ≤256 MiB and large heap ≤512 MiB; after forced GC the
-  settled first representative frame is the retention baseline, and ten
-  workspace cycles or a drained 30-minute SSE run retain no more than 32 MiB
-  or 10% of that baseline, whichever is smaller;
-- sustain 100 SSE events/s for ten minutes and 1,000/s for ten seconds,
-  coalesce to at most ten renders/s/view, keep input ≤200 ms p95, and bound the
-  queue to 5,000 events or 10 MiB. Overflow marks the projection stale and
-  performs one canonical invalidation/refetch.
+**Performance acceptance withdrawn (owner decision, 2026-07-31).** The owner
+rescinded every frontend performance acceptance criterion ("dont care about
+heap or other fe perf stuff"): the payload ceilings (see "Payload budgets
+withdrawn" above), the pinned Playwright measurement rig, the LCP/CLS/
+keyboard-ready/input-latency targets, the frame-time and long-task budgets,
+the planner first-progress and first-result timing targets, the heap and
+retention ceilings, and the sustained-SSE throughput/coalescing rates. No
+performance number is measured or gated for acceptance; performance problems
+are ordinary bugs. The withdrawal removes only the numeric gates — these
+correctness behaviors stand on their own: SSE queue overflow marks the
+projection stale and performs one canonical invalidation/refetch rather than
+silently dropping events; planner progress remains explicitly pending/partial
+rather than presenting a stall as a result; and larger-than-tier selections
+use server grouping/paging rather than raw rendering.
 
 Usability acceptance uses exactly 12 participants: at least four keyboard-
 only users, three screen-reader users, three users who work at 200–400% zoom
@@ -881,8 +858,8 @@ context; Code/Observatory/Doctor diagnosis with resumable preview,
 confirmation, dispatch, receipt, and verification; complete Sessions, Agents,
 Knowledge, Delivery, Automations, Costs, and Settings workspaces with
 cross-workspace evidence links; and responsive, accessibility,
-assistive-technology, virtualization, renderer parity/fallback, performance,
-SSE-churn, and usability hardening on that same journey.
+assistive-technology, virtualization, renderer parity/fallback, and usability
+hardening on that same journey.
 
 PR17 extends the running product with one executable Work loop: one Plan 24
 selection across Kanban, DAG, timeline, causal, workload, repository,
@@ -893,7 +870,7 @@ no-Git and decoupled cases, dependency commits, merge order, GitHub stack
 capability/fallback, dirty/worktree/lease truth, conflict/proximity, tests/CI,
 TaskId drill-down, and dual-time playback; and governed dry-run/apply/cancel
 controls with stale, denied, locked, unsupported, effect-unknown, crash-safe
-receipt, performance, authority-negative, and Plan 26 parity coverage.
+receipt, authority-negative, and Plan 26 parity coverage.
 
 Supporting contracts and tests land inside those production slices rather than
 as standalone completion phases. Their historical names and layouts are not a
@@ -908,9 +885,8 @@ never product authority, and zero-case or zero-sample runs fail visibly.
 
 Vitest and Testing Library cover contract and DOM behavior, MSW covers
 HTTP/SSE faults, Playwright covers supported-browser keyboard, responsive,
-smoke, and semantic accessibility behavior, automated accessibility tooling
-covers WCAG checks, Lighthouse covers startup and bundles, and browser
-performance tooling covers frame, long-task, and memory behavior. Manual
+smoke, and semantic accessibility behavior, and automated accessibility
+tooling covers WCAG checks. Manual
 NVDA/Firefox and VoiceOver/Safari completion remains required; screenshots or
 automated checks cannot substitute for semantic assertions or assistive-
 technology use.
@@ -926,7 +902,7 @@ or git-hash-tied manifests.
 Focused developer commands and the ordinary aggregate frontend/repository test
 run may be reorganized as the test layout evolves. That run must execute build,
 contract/DOM, accessibility, responsive, renderer parity, authority-negative,
-Work topology, performance, SSE, cross-browser end-to-end, smoke, manual
+Work topology, SSE, cross-browser end-to-end, smoke, manual
 assistive-technology, and usability checks; fail when required cases or samples
 do not execute; and preserve the direct all-feature integration checks. Old
 script bodies, fixture manifests, and command ordering are historical evidence,
@@ -943,14 +919,13 @@ not mandatory recreation.
 - Cross-links preserve scope and provenance across all twelve PR14 workspaces
   and PR17 Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.
-- Performance tests bound initial payloads, long lists, graph rendering, and live-update churn.
+- Performance and payload acceptance criteria are withdrawn (owner decision,
+  2026-07-31); performance problems are ordinary bugs, not gates.
 - Direct frontend journeys exercise contract, DOM, accessibility, responsive,
-  renderer/semantic parity, authority-negative, performance, SSE, and
+  renderer/semantic parity, authority-negative, SSE, and
   end-to-end behavior. Missing, skipped, or unvisited required states remain
   unresolved.
-- Representative graph-size acceptance measures interaction latency for zoom,
-  pan, filter, search, brushing, linked selection, clustering, playback, and
-  evidence expansion. Renderer parity compares semantic selection, scope,
+- Renderer parity compares semantic selection, scope,
   coverage, anchors, state, and keyboard behavior rather than pixels.
 - Task-based usability and accessibility tests cover retaining scope across
   progressive disclosure, distinguishing complete-zero from partial, tracing a
