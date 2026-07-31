@@ -15,6 +15,12 @@ schema-registry names, exact setting-definition files, migration packets, and
 fixture inventories are not. Missing effective behavior or an unreachable
 mutation is a gap; a renamed/deleted declaration scaffold is not.
 
+The existing config files and stored settings/revisions on `origin/master` and
+in live profiles are persistence evidence for the migration below. New
+branch-local setting DTOs, fields, and registry shapes change in place; a
+deprecation, alias, or schema version is added only for an evidenced released
+or live predecessor.
+
 **Reachability correction (updated 2026-07-27).** The former production-write
 gap is closed. `ProductionConfigurationDaemonClient::mutate_direct` now rejects
 scope drift, issues a short-lived exact-project grant, commits through the
