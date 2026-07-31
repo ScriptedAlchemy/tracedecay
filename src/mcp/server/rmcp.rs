@@ -310,8 +310,11 @@ fn request_cancelled_error() -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -361,5 +364,38 @@ mod tests {
         );
         assert!(initialized.capabilities.tools.is_some());
         assert!(initialized.capabilities.resources.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancellation_retries_until_the_live_request_registers() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let registered = Arc::new(Notify::new());
+        let handling_registered = Arc::clone(&registered);
+        let cancel_attempts = Arc::clone(&attempts);
+        let cancel_registered = Arc::clone(&registered);
+
+        let result = await_dispatch_with_cancellation(
+            async move {
+                handling_registered.notified().await;
+                "cancelled"
+            },
+            std::future::ready(()),
+            move || {
+                if cancel_attempts.fetch_add(1, Ordering::SeqCst) == 2 {
+                    cancel_registered.notify_one();
+                    true
+                } else {
+                    false
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, "cancelled");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "cancellation must retry until the request registration is visible"
+        );
     }
 }
