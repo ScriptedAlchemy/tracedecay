@@ -51,6 +51,7 @@ mod project_registry;
 mod protocol;
 mod read_coalescing;
 mod requests;
+mod rmcp;
 mod routing;
 mod session_refresh;
 mod session_retrieval;
@@ -64,11 +65,12 @@ pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use lifecycle::VersionCheckState;
 #[cfg(test)]
 use lifecycle::run_startup_session_catch_up;
+pub(crate) use lifecycle::{ProjectServerResponseLifecycle, VersionCheckState};
 pub(crate) use protocol::*;
 use read_coalescing::*;
+pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use session_retrieval::*;
@@ -567,17 +569,8 @@ pub struct McpServer {
     /// Daemon-owned route liveness. A failed post-open health check revokes
     /// every tool on retained transports before cache retirement can await.
     project_server_live: Option<Arc<AtomicBool>>,
-    /// Linearizes full tool-request execution and its response write with
-    /// project-server retirement. Revocation stops new read leases, then the
-    /// write side waits for every already-admitted request to finish.
-    project_server_response_gate: tokio::sync::RwLock<()>,
-    /// Cancels a pending notification/response transport write when retained
-    /// project health fails. Unlike a one-shot notification, cancellation is
-    /// remembered if revocation wins before the write future is polled.
-    project_server_response_revoked: crate::application::context::CancellationToken,
-    /// Backstop for a retired server whose admitted request does not drain
-    /// within its normal operation deadline.
-    project_server_request_abort: crate::application::context::CancellationToken,
+    /// The transport-visible response lifecycle for a retained project route.
+    project_server_lifecycle: ProjectServerResponseLifecycle,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -1143,9 +1136,7 @@ impl McpServer {
             application_surface_client: tokio::sync::OnceCell::new(),
             application_invocation_executor,
             project_server_live,
-            project_server_response_gate: tokio::sync::RwLock::new(()),
-            project_server_response_revoked: crate::application::context::CancellationToken::new(),
-            project_server_request_abort: crate::application::context::CancellationToken::new(),
+            project_server_lifecycle: ProjectServerResponseLifecycle::default(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
