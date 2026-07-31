@@ -917,12 +917,17 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
     );
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let project_id = ProjectId::new("project.linked-worktrees").expect("valid project");
 
     let mut first_scheduler = registry
-        .open_worktree(first.path(), store.path().join("first"))
+        .open_worktree(
+            project_id.clone(),
+            first.path(),
+            store.path().join("first"),
+        )
         .expect("first scheduler");
     let mut second_scheduler = registry
-        .open_worktree(&linked, store.path().join("second"))
+        .open_worktree(project_id.clone(), &linked, store.path().join("second"))
         .expect("second scheduler");
     let first_publish = published(first_scheduler.reconcile_now().expect("first publish"));
     let second_publish = published(second_scheduler.reconcile_now().expect("second publish"));
@@ -942,6 +947,8 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         "matching parse/chunk artifacts must be physically shared"
     );
     assert_eq!(first_publish.repository_id, second_publish.repository_id);
+    assert_eq!(first_generation.manifest().project_id, project_id);
+    assert_eq!(second_generation.manifest().project_id, project_id);
     assert_ne!(
         first_generation.snapshot().worktree,
         second_generation.snapshot().worktree
