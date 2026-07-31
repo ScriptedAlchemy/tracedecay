@@ -11,8 +11,6 @@ use crate::read_model::{
     DashboardTimeV1, DashboardWatermarkV1, now_micros,
 };
 
-/// Dashboard path for the feedback observation status projection.
-pub const FEEDBACK_STATUS_ROUTE_PATH: &str = "/api/feedback/status";
 /// Operation advertised for re-reading feedback observation status.
 pub const FEEDBACK_STATUS_REFRESH_OPERATION: &str = "feedback_status";
 
@@ -50,8 +48,7 @@ const DASHBOARD_FEEDBACK_READ_ROUTES: [DashboardFeedbackReadRouteV1; 3] = [
 ];
 
 /// Every selected-project feedback read route, in mount order.
-#[must_use]
-pub const fn dashboard_feedback_read_routes() -> &'static [DashboardFeedbackReadRouteV1] {
+const fn dashboard_feedback_read_routes() -> &'static [DashboardFeedbackReadRouteV1] {
     &DASHBOARD_FEEDBACK_READ_ROUTES
 }
 

@@ -23,25 +23,11 @@ pub enum MultiRootHttpOperation {
 }
 
 impl MultiRootHttpOperation {
-    pub const ALL: [Self; 3] = [
-        Self::ScopeSetRead,
-        Self::ScopeSetCompareAndSwap,
-        Self::Execute,
-    ];
-
     pub const fn operation_id(self) -> &'static str {
         match self {
             Self::ScopeSetRead => "operation.multi_root.scope_set_read",
             Self::ScopeSetCompareAndSwap => "operation.multi_root.scope_set_compare_and_swap",
             Self::Execute => "operation.multi_root.execute",
-        }
-    }
-
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::ScopeSetRead => "/application/multi-root/scope-set/read",
-            Self::ScopeSetCompareAndSwap => "/application/multi-root/scope-set/compare-and-swap",
-            Self::Execute => "/application/multi-root/execute",
         }
     }
 }
