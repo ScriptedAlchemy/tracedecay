@@ -35,6 +35,13 @@ examples until separately shipped as public or persisted API; auditors should
 verify the journeys and safety properties, not recreate a former refactor
 schema registry or file inventory.
 
+The published `tracedecay_rename_preview` surface above is release evidence and
+keeps its compatibility obligation. No Plan 34 API-migration plan/apply shape
+has shipped; those branch-local contracts change in place. An alias,
+deprecation, or wrapper is planned only for a predecessor proven on
+`origin/master` or in a published package/release, never solely from source
+moves, PR sequencing, tests, or branch history.
+
 ## User outcome
 
 A user can preview and atomically apply either:
@@ -42,7 +49,7 @@ A user can preview and atomically apply either:
 1. a symbol-aware workspace rename that preserves one symbol's identity and
    semantics; or
 2. a bounded API migration that promotes primary APIs, moves complete consumer
-   families, retains deliberate compatibility aliases/wrappers, replaces whole
+   families, retains evidence-backed compatibility aliases/wrappers, replaces whole
    definitions where needed, and updates selected terminology without
    misrepresenting the change as a rename.
 
@@ -83,8 +90,9 @@ history, tags, or remotes.
    values. It does not infer an untyped rewrite language.
 2. Every compatibility alias/wrapper declares
    `stable_public_contract | temporary`, external consumer, owner, deprecation
-   policy, and—when temporary—the exact PR19 deletion condition. Missing
-   disposition blocks apply.
+   policy, release evidence, and—when temporary—the exact PR19 deletion
+   condition. A branch-local predecessor is replaced directly and is not an
+   alias disposition. Missing required disposition blocks apply.
 3. Primary production consumers move before old names are restricted to
    approved compatibility boundaries. Type aliases are used only when language
    semantics preserve compatibility; otherwise an explicit wrapper/conversion
@@ -95,9 +103,10 @@ history, tags, or remotes.
 5. Replanning may classify operations already satisfied, still pending, or
    invalidated and issues a new preview/digest. It never silently rebases stale
    evidence. Each deliberately sliced apply is atomic for its declared scope.
-6. PR19 removes temporary aliases only after their consumers migrate and their
-   direct compatibility/semantic-equivalence journey passes. Stable public
-   aliases remain thin delegates to the primary implementation.
+6. PR19 removes unreleased temporary aliases directly after their branch
+   consumers migrate. Evidence-backed released aliases retain their declared
+   compatibility/semantic-equivalence journey, and stable public aliases
+   remain thin delegates to the primary implementation.
 
 ## Required behavior
 
@@ -211,8 +220,9 @@ edits for forward store migration.
 - The provider-neutral observation journey migrates request, outcome, error,
   function, projection, session-message projection, and projector-version
   source names together while preserving the projector's persisted value.
-- PR19 uses this journey to remove unapproved V1/delivery names and production
-  consumers while preserving stable compatibility contracts.
+- PR19 uses this journey to remove unapproved unreleased V1/delivery names and
+  production consumers in place while preserving only compatibility contracts
+  evidenced on `origin/master` or in a published package/release.
 
 ### Supported adoption
 
@@ -227,8 +237,9 @@ edits for forward store migration.
 
 The working journeys replace manual multi-call edits and any copied resolver,
 text replacement, transaction, diagnostics, formatter, catalog, or Git writer.
-PR19 deletes temporary migration wrappers after named consumer migration and
-direct equivalence tests. Stable public aliases remain. There is no general
+PR19 deletes unreleased temporary migration wrappers after named consumer
+migration; direct equivalence tests do not create a compatibility window.
+Evidence-backed stable public aliases remain. There is no general
 patch language, autonomous rewrite framework, language-independent regex
 fallback, generated-output editor, LSP `workspace/applyEdit` authority, or
 source-level dual-write/shadow/lazy store migration.
