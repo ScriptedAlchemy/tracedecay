@@ -40,10 +40,6 @@ use crate::migration_sql::{
 };
 use crate::remote_spool::RemoteAuthorityReachabilityPortV1;
 
-#[path = "remote_query.rs"]
-mod query;
-pub use query::RusqliteRemoteExactObservationQueryPortV1;
-
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS remote_authority_v1 (
     shard_key TEXT PRIMARY KEY,

@@ -20,11 +20,11 @@ tokio = { version = "1", default-features = false, features = ["rt", "sync", "ti
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [dev-dependencies]
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
