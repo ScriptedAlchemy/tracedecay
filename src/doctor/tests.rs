@@ -553,14 +553,35 @@ fn database_authority_failures_are_enforced_and_unavailable_is_degraded() {
     assert_eq!(missing_counters.warnings, 1);
 
     let mut bounded_counters = DoctorCounters::new();
+    assert!(
+        matches!(
+            check_database(
+                &mut bounded_counters,
+                &serde_json::json!({
+                    "storage_health": {
+                        "canonical_db_path": "/profile/project.db",
+                        "quick_check_ok": null,
+                        "quick_check_error": null,
+                        "authority_audit_ok": null,
+                        "authority_audit_reason": "authority_audit_not_run"
+                    }
+                }),
+            ),
+            DatabaseHealth::Unknown { .. }
+        ),
+        "an audit that did not run must stay distinguishable, not become healthy"
+    );
+    assert_eq!(bounded_counters.issues, 0);
+    assert_eq!(bounded_counters.warnings, 2);
+
+    // With integrity observed healthy, the authority reason is what survives.
+    let mut not_run_counters = DoctorCounters::new();
     assert_eq!(
         check_database(
-            &mut bounded_counters,
+            &mut not_run_counters,
             &serde_json::json!({
                 "storage_health": {
-                    "canonical_db_path": "/profile/project.db",
-                    "quick_check_ok": null,
-                    "quick_check_error": null,
+                    "quick_check_ok": true,
                     "authority_audit_ok": null,
                     "authority_audit_reason": "authority_audit_not_run"
                 }
@@ -568,11 +589,10 @@ fn database_authority_failures_are_enforced_and_unavailable_is_degraded() {
         ),
         DatabaseHealth::Unknown {
             reason: "authority_audit_not_run".to_string()
-        },
-        "an audit that did not run must stay distinguishable, not become healthy"
+        }
     );
-    assert_eq!(bounded_counters.issues, 0);
-    assert_eq!(bounded_counters.warnings, 2);
+    assert_eq!(not_run_counters.issues, 0);
+    assert_eq!(not_run_counters.warnings, 1);
 }
 
 #[test]

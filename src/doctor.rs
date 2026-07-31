@@ -1060,10 +1060,9 @@ impl DatabaseHealth {
     /// Combines two independent observations, keeping the most severe:
     /// `Failed` > `Unknown` > `Healthy`.
     fn merge(self, other: Self) -> Self {
-        match (&self, &other) {
-            (Self::Failed { .. }, _) => self,
-            (_, Self::Failed { .. }) | (Self::Healthy, Self::Unknown { .. }) => other,
-            (Self::Unknown { .. }, _) => self,
+        match (self, other) {
+            (failed @ Self::Failed { .. }, _) | (_, failed @ Self::Failed { .. }) => failed,
+            (unknown @ Self::Unknown { .. }, _) | (_, unknown @ Self::Unknown { .. }) => unknown,
             (Self::Healthy, Self::Healthy) => Self::Healthy,
         }
     }
