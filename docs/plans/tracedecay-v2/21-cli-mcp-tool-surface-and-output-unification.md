@@ -343,11 +343,11 @@ fixture does not land before its operation is callable.
 - Remove PR17 internal operation inventories, temporary cross-worktree
   registries, exact command/tool/type/file catalogs, generated parity
   manifests, shadow profiles, and declaration-only gates.
-- Compatibility aliases with release evidence may delegate to the canonical
-  operation for a bounded period, but they own no schema or behavior.
+- Compatibility aliases with release evidence delegate to the canonical
+  operation or return an actionable negotiated upgrade, but own no schema or
+  behavior, until an authorized installed-client/host census proves absence.
   Pure source-only aliases are removed in place after internal callers move;
-  branch-era callable aliases remain until an authorized installed-client/host
-  census proves absence.
+  branch-era callable aliases follow the same census gate.
 - Remove any client-side provider launch, hidden fallback, task status write,
   scheduler, or Git implementation.
 

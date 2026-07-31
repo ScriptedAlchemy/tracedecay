@@ -273,9 +273,10 @@ review, CI, proximity, or evidence data.
 
 - Delete bypass LSP implementations after parity; any bounded compatibility
   name with `origin/master` or published-release evidence delegates to the
-  daemon gateway and retains its PR19 removal condition. Pure source-only names
-  are replaced in place; branch-era callable names remain until the authorized
-  installed-client/host census proves absence.
+  daemon gateway or returns an actionable negotiated upgrade until the
+  authorized installed-client/host census proves absence. Pure source-only
+  names are replaced in place; branch-era callable names follow the same census
+  gate.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
   writer schemas while retained decoders continue to accept potentially
   installed prior revisions. Later callable features revise the current writer
