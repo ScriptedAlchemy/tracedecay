@@ -87,6 +87,10 @@ jobs:
     needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
+    # Non-blocking by owner decision 2026-07-31: axe findings stay visible in
+    # the run summary but no longer gate the branch. Zero-axe remains a plan 11
+    # acceptance criterion checked before release, not per push.
+    continue-on-error: true
     # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
     # runs its OWN full `rsbuild build` (see dashboard/e2e/axe-harness.ts: it
     # snapshots app-dist, builds into it, copies the output to scratch, then
