@@ -50,10 +50,6 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
-pub fn io_error(error: impl Into<io::Error>) -> io::Error {
-    error.into()
-}
-
 pub fn file_len(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
