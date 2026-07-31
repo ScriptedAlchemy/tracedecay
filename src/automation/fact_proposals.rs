@@ -13,7 +13,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{ActorId, FactCategoryV1, LocatorDigest, ProvenanceId};
+use tracedecay_domain::{ActorId, LocatorDigest, ProvenanceId};
 use tracedecay_store::{
     CompatibilityFactProposalImportV1, CompatibilityFactProposalLegacyRecordV1,
     CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionV1,
@@ -837,23 +837,12 @@ fn add_request_from_command(
 ) -> AddFactRequest {
     AddFactRequest {
         content: command.content().to_string(),
-        category: memory_category(command.category()),
+        category: MemoryCategory::from(command.category()),
         source: command.source().map(ToOwned::to_owned),
         tags: command.tags().to_vec(),
         entities: command.entities().to_vec(),
         trust: Some(command.default_trust().as_f64()),
         metadata: command.metadata().clone(),
-    }
-}
-
-const fn memory_category(category: FactCategoryV1) -> MemoryCategory {
-    match category {
-        FactCategoryV1::General => MemoryCategory::General,
-        FactCategoryV1::UserPref => MemoryCategory::UserPref,
-        FactCategoryV1::Project => MemoryCategory::Project,
-        FactCategoryV1::Tool => MemoryCategory::Tool,
-        FactCategoryV1::Decision => MemoryCategory::Decision,
-        FactCategoryV1::CodeArea => MemoryCategory::CodeArea,
     }
 }
 
