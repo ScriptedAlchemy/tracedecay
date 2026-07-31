@@ -5,8 +5,6 @@
 //! daemon-owned Git transaction authority.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,9 +20,9 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
-    HttpApplicationRequest, MultiRootHttpOperation, MultiRootHttpRequest, WorkOperation,
-    WorkflowOperation, application_problem_response, sse_response,
+    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationInvocationFuture,
+    HttpApplicationOperation, HttpApplicationRequest, MultiRootHttpOperation, MultiRootHttpRequest,
+    WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -1037,9 +1035,6 @@ pub struct ApplicationSurfaceInvocationResult {
     pub result: ApplicationResult<Value>,
     pub requested_format: RequestedOutputFormat,
 }
-
-pub type HttpApplicationInvocationFuture =
-    Pin<Box<dyn Future<Output = CanonicalInvocationResult<Value>> + Send + 'static>>;
 
 struct HttpApplicationCatalogDispatcher {
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,

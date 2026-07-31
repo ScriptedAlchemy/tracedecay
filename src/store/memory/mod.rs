@@ -868,8 +868,15 @@ impl FactStore for ProjectFactStore<'_> {
         fn commit_fact(batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome>;
         fn query_current_facts(query: CurrentFactsQuery) -> FactStoreResult<Vec<StoredFactV1>>;
         fn query_fact_current(query: FactCurrentQuery) -> FactStoreResult<Option<StoredFactV1>>;
+        fn query_fact_current_response(
+            query: FactCurrentQuery,
+        ) -> FactStoreResult<FactCurrentResponseV1>;
         fn query_fact_as_of(query: FactAsOfQuery) -> FactStoreResult<Option<StoredFactV1>>;
+        fn query_fact_as_of_response(query: FactAsOfQuery) -> FactStoreResult<FactAsOfResponseV1>;
         fn query_fact_lineage(query: FactLineageQuery) -> FactStoreResult<Vec<FactLineageEventV1>>;
+        fn query_fact_lineage_response(
+            query: FactLineageQuery,
+        ) -> FactStoreResult<FactLineageResponseV1>;
         fn resolve_legacy_fact(query: LegacyFactQuery) -> FactStoreResult<Option<FactId>>;
         fn get_retrieval_anchor(
             query: RetrievalAnchorQuery,

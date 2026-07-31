@@ -27,10 +27,10 @@ use super::{
     CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactContradictionStateV1, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStoreError,
-    FactQueryCoverageV1, FactStoreResult, FactWriteBatch, LegacyFactQuery, PromoteFactProposal,
-    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
+    FactLineageQuery, FactLineageResponseV1, FactProposalStoreError, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Authoritative persistence boundary for append-only facts and evidence.
@@ -50,60 +50,35 @@ pub trait FactStore: Send + Sync {
         query: FactCurrentQuery,
     ) -> impl Future<Output = FactStoreResult<Option<StoredFactV1>>> + Send;
 
+    /// Required, never defaulted: a default body could only invent coverage
+    /// counters and a contradiction state that no read observed, so every
+    /// implementor must measure them against its own authority.
     fn query_fact_current_response(
         &self,
         query: FactCurrentQuery,
-    ) -> impl Future<Output = FactStoreResult<FactCurrentResponseV1>> + Send {
-        async move {
-            let fact = self.query_fact_current(query).await?;
-            let coverage = FactQueryCoverageV1::new(0, 0, u64::from(fact.is_some()), 0);
-            Ok(FactCurrentResponseV1::new(
-                fact,
-                coverage,
-                FactContradictionStateV1::Unknown,
-            ))
-        }
-    }
+    ) -> impl Future<Output = FactStoreResult<FactCurrentResponseV1>> + Send;
 
     fn query_fact_as_of(
         &self,
         query: FactAsOfQuery,
     ) -> impl Future<Output = FactStoreResult<Option<StoredFactV1>>> + Send;
 
+    /// Required for the same reason as [`FactStore::query_fact_current_response`].
     fn query_fact_as_of_response(
         &self,
         query: FactAsOfQuery,
-    ) -> impl Future<Output = FactStoreResult<FactAsOfResponseV1>> + Send {
-        async move {
-            let fact = self.query_fact_as_of(query).await?;
-            let coverage = FactQueryCoverageV1::new(0, 0, u64::from(fact.is_some()), 0);
-            Ok(FactAsOfResponseV1::new(
-                fact,
-                coverage,
-                FactContradictionStateV1::Unknown,
-            ))
-        }
-    }
+    ) -> impl Future<Output = FactStoreResult<FactAsOfResponseV1>> + Send;
 
     fn query_fact_lineage(
         &self,
         query: FactLineageQuery,
     ) -> impl Future<Output = FactStoreResult<Vec<FactLineageEventV1>>> + Send;
 
+    /// Required for the same reason as [`FactStore::query_fact_current_response`].
     fn query_fact_lineage_response(
         &self,
         query: FactLineageQuery,
-    ) -> impl Future<Output = FactStoreResult<FactLineageResponseV1>> + Send {
-        async move {
-            let events = self.query_fact_lineage(query).await?;
-            let coverage = FactQueryCoverageV1::new(0, 0, u64::from(!events.is_empty()), 0);
-            Ok(FactLineageResponseV1::new(
-                events,
-                coverage,
-                FactContradictionStateV1::Unknown,
-            ))
-        }
-    }
+    ) -> impl Future<Output = FactStoreResult<FactLineageResponseV1>> + Send;
 
     fn resolve_legacy_fact(
         &self,

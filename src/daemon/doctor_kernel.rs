@@ -1647,9 +1647,16 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     serving: true,
                     startup_converged: graph_authority_current && registered_authority_current,
                     quick_check_ok,
-                    authority_audit_ok: Some(
-                        graph_authority_current && registered_authority_current,
-                    ),
+                    // The observation-authority audit is the exhaustive invariant
+                    // pass (`validate_observation_authority_connection`) that the
+                    // CLI and core Doctor routes run only when a caller asks for
+                    // it. This reader does not run it, so the signal is not-run —
+                    // `None` — rather than a boolean re-derived from schema and
+                    // write-scope currency, which is a different question and is
+                    // already reported through `startup_converged`. A not-run
+                    // signal drops runtime coverage to partial, exactly as the
+                    // coverage split intends.
+                    authority_audit_ok: None,
                     temporal_ok,
                 }),
                 operational_audit: OperationalAuditReadV1 {

@@ -227,17 +227,9 @@ impl McpSemanticExecutionControlV1 {
         mcp_search_request_termination(
             self.deadline.as_ref(),
             self.cancellation.as_ref(),
-            mcp_now_micros(),
+            tracedecay_application::clock::now_micros().0,
         )
     }
-}
-
-fn mcp_now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-        .unwrap_or(i64::MAX)
 }
 
 fn mcp_search_request_termination(
@@ -8257,10 +8249,7 @@ async fn admitted_lsp_workspace_for_request(
         resolved_roots.push((registered_root.clone(), canonical_uri, scope.clone()));
     }
     service
-        .authorize_lsp_workspace(
-            resolved_roots,
-            tracedecay_domain::UtcMicros(mcp_now_micros()),
-        )
+        .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
         .await
 }
 
