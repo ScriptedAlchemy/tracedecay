@@ -17,19 +17,18 @@ use super::query::{
     RemoteExactObservationQueryReadPortV1, RemoteExactObservationQueryServiceV1,
     RemoteExactObservationResultV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
-    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1,
-    query_protocol_failure, remote_exact_observation_query_result_contract_v1,
-    validate_composition, validate_protocol_authority_binding, validate_result_identity,
-    validate_returned_authority, validate_returned_observation_identity,
-    validate_returned_provenance,
+    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
+    remote_exact_observation_query_result_contract_v1, validate_composition,
+    validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
+    validate_returned_observation_identity, validate_returned_provenance,
 };
 use crate::{RequestId, ResolvedScope};
 use tracedecay_domain::{
     AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
-    CurrentRemoteAuthorityV1, EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1,
-    ObservationScopeV1, PrivacyDomainBoundLocatorDigest, ProjectId, ProjectionGenerationId, RefId,
-    RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, RepositoryEvidenceV1,
-    EnrollmentCredentialRecordV1, EntityId, RepositoryId, RepositoryProvenanceV1,
+    CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, EvidenceAvailabilityV1,
+    GenerationBoundRepositoryProvenanceV1, ObservationScopeV1, PrivacyDomainBoundLocatorDigest,
+    ProjectId, ProjectionGenerationId, RefId, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1,
     RepositoryRemoteIdentityV1, RepositoryStateSnapshotId, ShardId, UtcMicros, WorktreeId,
 };
 

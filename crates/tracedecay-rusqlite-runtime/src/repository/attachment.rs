@@ -9,11 +9,11 @@ use std::{
 
 use rusqlite::Transaction;
 use tracedecay_store::{
-    AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1,
-    FrozenWatermarkVectorV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
-    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1,
-    StoreShardScopeV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
+    RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+    VerifiedStoreLocatorV1,
 };
 
 use crate::{
@@ -686,9 +686,10 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                     authority_epoch: request.binding().authority_epoch,
                     commit_sequence: *commit_sequence,
                 };
-                let required = FrozenWatermarkVectorV1::new([observed.clone()]).map_err(|error| {
-                    infrastructure(format!("construct repository required watermark: {error}"))
-                })?;
+                let required =
+                    FrozenWatermarkVectorV1::new([observed.clone()]).map_err(|error| {
+                        infrastructure(format!("construct repository required watermark: {error}"))
+                    })?;
                 let coverage =
                     FrozenWatermarkCoverageV1::new(required, [observed]).map_err(|error| {
                         infrastructure(format!("construct repository read coverage: {error}"))
@@ -703,7 +704,7 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
             }
         };
         RuntimeReadOutcomeV1::new(Some(value), coverage)
-        .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))
+            .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))
     }
 }
 

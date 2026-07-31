@@ -1,19 +1,17 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite. PR8 is complete. PR9/PR10 acceptance and
-PR12/PR13 production integration are active. Draft PR #421 is the consolidated
-delivery vehicle; the former six-separate-PR model for PR8–PR13 is superseded.
-PR14 integration paths have an implemented and focused-suite-verified
-checkpoint, but PR14 acceptance remains blocked on the named Plan 11 gaps and
-on stable active contracts, direct tests, and normal CI. The repository is not
-green; [NEXT.md](NEXT.md) records the current dogfood, semantic, index-freshness,
-and incomplete-full-suite blockers with owners.
+Status: active product rewrite. PR8 is complete. PR9/PR10 retrieval and
+PR12/PR13 production integration are active. PR14 has an implemented
+checkpoint but remains open on the named Plan 11 journeys and on stable active
+contracts, direct tests, and normal CI. [NEXT.md](NEXT.md) records the current
+product outcomes and blockers.
 
-The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
-The active production-integration and incremental-indexing slice is
-[NEXT.md](NEXT.md). These are contributor documents only and never product
-runtime input. Numbered plans define component requirements and boundaries,
-not separate crate-first work queues.
+[00-plan-set-index.md](00-plan-set-index.md) is the sole precedence, rejection,
+delivery, and acceptance authority. [NEXT.md](NEXT.md) tracks current outcomes
+and blockers only; the gap ledger and PR9 contract spine are historical.
+These are contributor documents only and never product runtime input.
+Numbered plans define component behavior and boundaries, not separate
+crate-first work queues.
 
 ## Current product foundation
 
@@ -69,8 +67,7 @@ Every PR13–PR20 section in
 1. Start with the user outcome.
 2. Trace one real supported input through daemon/application behavior and
    durable state or computation to an observable result.
-3. Add only the implementation slices needed to complete that path in the same
-   PR.
+3. Add only the implementation slices needed to complete that path.
 4. Delete legacy or duplicate paths once the production route and recovery
    boundary permit it.
 5. Accept the PR with a direct product journey, focused failure/recovery

@@ -1,5 +1,14 @@
 # Gate A leaf timing receipts — 2026-07-29
 
+> **Archived provenance — not current requirements.** This document preserves
+> historical measurements and results verbatim where useful. Current scope and
+> acceptance come only from
+> [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its branch/worktree/SHA protocol, Gate A/B,
+> timing/JUnit receipts, exact test names/counts, generated-byte/source-shape
+> checks, PR closure gates, or platform gate lattice.
+
 Scope: Gate A of `docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`
 (query and code-index extraction). Measurement validity rules from
 `docs/plans/tracedecay-v2/33-end-to-end-performance-optimization.md`.
@@ -55,7 +64,7 @@ line appended with `>>`, removed by exact-match `sed`; never `git checkout`).
 Receipt 6 corroborates receipt 4 (root warm leaf recheck 25.6–27.2s across two
 different unrelated root files).
 
-## Verdicts vs Gate A criteria
+## Historical verdicts vs Gate A criteria
 
 1. **Query private leaf edit improves ≥20% or ≥8s** — PASS. 0.80s vs the
    121.35s pre-extraction root-inline reference (>99% / 120.5s better), on an

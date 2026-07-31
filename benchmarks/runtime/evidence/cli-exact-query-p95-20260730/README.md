@@ -1,5 +1,11 @@
 # Integrated CLI exact-query p95 evidence
 
+> **Dated runtime evidence — not acceptance authority.** Preserve these raw
+> samples and their provenance, but do not recreate their exact counts,
+> snapshots, receipts, attestations, binary/worktree choreography, or gates as
+> build prerequisites. Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; validate current runtime behavior directly.
+
 This directory records a same-input ABBA comparison between the explicitly
 supplied installed baseline binary and worktree treatment binary. Each variant
 has 40 matching isolated-profile samples, meeting the frozen p95 eligibility

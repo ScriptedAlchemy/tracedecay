@@ -1,50 +1,44 @@
 # PR20 Measured Performance and Cleanup Plan
 
-**Goal:** Close V2 with same-host measured product speed, bounded storage and
-tests, accepted crate-boundary gains, and deletion of superseded paths.
+> **Archived provenance — not current requirements.** This document records
+> historical planning and execution evidence. Current scope and acceptance come
+> only from [`00-plan-set-index.md`](../../../plans/tracedecay-v2/00-plan-set-index.md),
+> [`NEXT.md`](../../../plans/tracedecay-v2/NEXT.md), and the applicable numbered
+> V2 plan. Do not recreate its task checklists, file inventories,
+> branch/worktree/SHA or commit protocol, Gate A/B, timing/JUnit receipts, exact
+> test names/counts, generated-byte/source-shape checks, PR closure gates, or
+> platform gate lattice.
 
-## Files and interfaces
+**Outcome contributed:** Measure and improve production event-to-ready time and
+other user-visible bottlenecks while preserving equivalent product behavior,
+truthful unavailable metrics, and bounded storage.
 
-- Plan 33 benchmark/evidence assets, nextest JUnit and slow-test budgets.
-- Production event-to-ready telemetry, Plan 38 retention/storage evidence.
-- Query/runtime/index optimizations, build/test/package scripts, and final
-  boundary receipts.
+## Retired measurement framework
 
-Interfaces: versioned `MeasurementEnvironment`, `EditClassReceipt`,
-`JourneyTiming`, `EventToReadyReceipt`, `SlowTestBudget`,
-`StorageBudget`, and optimization `Disposition` (`Accept`, `Pending`,
-`Reject`). Each receipt records host, toolchain, features, warmth, samples,
-rebuilt units, semantic digest, and baseline/treatment commits.
+`EditClassReceipt`, boundary receipts, Gate A/B dispositions, JUnit/timing
+receipt schemas, exact test-count or slow-test gates, generated-byte/source-shape
+checks, and the default/all/no-default/lite/package/platform gate lattice are
+retired. Historical receipts may preserve those fields as provenance, but they
+are not prerequisites and must not be recreated.
 
-## Ordered slices
+## Historical work areas
 
-S0. Freeze measurement contract and A/A noise.
-S1. Publish JUnit totals and enforce slow-test budgets.
-S2. Measure production capture/edit/event-to-ready journeys.
-S3. Close Plan 38 storage/index retention and Doctor evidence.
-S4. Optimize only measured runtime/query/index bottlenecks.
-S5. Reduce build/test/package critical paths without contract loss.
-S6. Accept/reject every extraction boundary using Gate A/B evidence.
-S7. Delete dead paths and publish final V2 summary.
+- Measure representative production capture/edit/event-to-ready journeys under
+  comparable conditions.
+- Optimize measured runtime/query/index bottlenecks without semantic drift.
+- Keep retention/storage behavior bounded and surface missing measurements
+  truthfully.
+- Remove superseded paths when the applicable numbered V2 plan permits it.
 
-## Tests
+## Product outcome contributed
 
-Direct: run the same representative user journeys, edit classes, focused tests,
-packages, and storage workloads at baseline/treatment and compare semantic
-digests plus resource use.
+The enduring outcome is measured event-to-ready improvement with equivalent
+behavior. Current representative journeys, equivalence criteria, storage
+bounds, and acceptance are defined by the applicable numbered V2 plans.
 
-Negative: cross-host comparison, cold/warm mismatch, changed features, missing
-sample, A/A-sized delta, semantic drift, masked test, raised timeout, omitted
-JUnit, unbounded storage, and unavailable metric cannot produce `Accept`.
+## Historical measurement notes
 
-## Migration, rollback, measurement, deletion
-
-Every optimization is isolated and reverted if it misses the Linux same-host
-threshold or semantic equivalence. `Pending` names dominant units and remains
-visible; it is never reported as a win. Storage changes retain verified backup
-and restoration evidence.
-
-Delete superseded code, benchmarks, aliases, feature exceptions, and temporary
-façades only after default/all/no-default/lite/package/platform gates, JUnit,
-event-to-ready, retention, accepted boundaries, direct journeys, and designated
-safe dogfood pass.
+Historical experiments isolated optimizations, compared like-for-like samples,
+and rejected semantic drift or false claims from unavailable data. Their
+thresholds, receipt types, boundary dispositions, platform matrix, and deletion
+choreography do not define current closure.

@@ -1,5 +1,11 @@
 # PR7 structural quality report
 
+> **Archived review record — not implementation authority.** This report
+> preserves historical findings and migration evidence. Current requirements
+> come only from the `docs/plans/tracedecay-v2/` hierarchy. Exact commit ranges,
+> issue matrices, source anchors, test counts, and fix-wave choreography below
+> are not rebuild instructions; validate current structure and behavior directly.
+
 Scope: the PR7 memory/facts/provenance arc (`12c32a68..d1057484`, ~52k inserted
 lines across 132 files), audited by one line-level review of the contract and
 transaction cores plus four delegated deep reviews (application wiring

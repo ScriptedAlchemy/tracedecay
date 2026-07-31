@@ -1,9 +1,10 @@
 # Holographic dashboard test blockers
 
-> Historical follow-up for the legacy plugin harness. The `test:node`,
-> `test:dom`, and `dashboard/test/**` paths below are retired; current
-> single-app checks are `npm test` and `npm run visual:audit` from
-> `dashboard/`.
+> **Archived follow-up — not implementation authority.** This document
+> preserves legacy plugin-harness evidence. Current requirements come only from
+> the `docs/plans/tracedecay-v2/` hierarchy. The `test:node`, `test:dom`,
+> `dashboard/test/**`, exact helper inventory, and deferred gate list below are
+> not rebuild instructions; validate current single-app interactions directly.
 
 This follow-up keeps the existing pure-helper coverage and adds a DOM-capable harness for the highest-value interaction seams.
 

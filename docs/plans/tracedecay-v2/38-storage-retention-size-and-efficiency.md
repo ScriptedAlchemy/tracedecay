@@ -34,13 +34,11 @@ it. In particular, `source_cursor_advances` lives inside the single profile
 `global.db`, whose entire measured size is 0.98 GiB; its retention obstacle is
 qualitative, not a table-size claim.
 
-Commits `4444833b8` and `76895d201` additionally wire real storage-budget
-findings and preserve unreadable storage roles instead of converting them to
-clean zeros. As of 2026-07-27 the Rust `dashboard_api_test` suite completes
-successfully (58/58 on two consecutive all-feature runs), so this
-dashboard/API checkpoint is no longer blocked on that suite. That focused
-verification does not complete this plan's retention, measured-size, debris,
-generation-GC, or full-profile acceptance requirements.
+Real storage-budget findings preserve unreadable storage roles instead of
+converting them to clean zeros. Direct dashboard/API coverage reaches that
+behavior, but it does not complete this plan's retention, measured-size,
+debris, generation-GC, or full-profile acceptance requirements. Historical
+suite names and counts are run evidence, not plan requirements.
 
 ## Measured failure classes (evidence, one dogfood profile)
 

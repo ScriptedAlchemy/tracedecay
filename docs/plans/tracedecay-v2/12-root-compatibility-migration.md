@@ -48,143 +48,18 @@ formats remain compatibility contracts until their declared migration or
 retirement completes; acceptance otherwise follows the direct upgrade,
 recovery, platform, and regression behavior below.
 
-## Measured crate-extraction sequencing (adjudicated 2026-07-28)
+## Future package-boundary seam
 
-The root crate's compilation wall is the current developer-experience
-priority. [Plan 33](33-end-to-end-performance-optimization.md) owns the
-reproducible 121.35 s root-check baseline and every baseline-versus-treatment
-comparison. This section owns the dependency order and root-compatibility
-mechanics; it does not declare that every named boundary is already, or must
-become, a package.
+Plan 12 does not prescribe crate-breakup sequencing, source moves, package
+counts, worktrees, commits, or delivery gates. Plans 05, 19, 25, and 33 own any
+future query, code-index, convergence, or build-performance boundary.
 
-The executable slice registry, gates, commit policy, and exact-SHA worktree
-procedure are in the canonical
-[`docs/superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md`](../../superpowers/plans/2026-07-28-v2-delivery-root-crate-breakup.md)
-and its `v2/` child plans. Those plans apply this section; they do not replace
-its leaves-first dependency authority.
-
-The sequencing evidence came from a read-only source scan of `crate::` and
-`pub(crate)` edges with `rg`. The TraceDecay MCP server was unavailable and
-the equivalent CLI graph calls timed out, so these counts are useful
-architecture observations rather than graph-certified dependency proof. Each
-slice must leave the workspace compiling, use the measured baseline rather
-than package count or line count as a proxy, and retain its crate only if a
-same-host comparison shows the frequently touched compile graph improved.
-
-The measured root-module footprint (lines/files, with `src/daemon.rs` called
-out separately) explains the leaves-first order:
-
-| Root area | Lines / files |
-| --- | ---: |
-| `daemon` | 97,022 / 110, plus `src/daemon.rs`: 6,914 |
-| `application` | 85,413 / 111 |
-| `sessions` | 77,410 / 113 |
-| `global_db` | 68,138 / 88 |
-| `mcp` | 64,406 / 89 |
-| `extraction` | 45,022 / 60 |
-| `agents` | 34,343 / 34 |
-| `migrate` | 32,290 / 43 |
-| `db` | 31,293 / 69 |
-| `query` | 30,864 / 46 |
-| `dashboard` | 26,818 / 47 |
-| `automation` | 24,928 / 47 |
-| `store` | 20,896 / 32 |
-| `hooks` | 16,471 / 20 |
-| `semantic_code` | 14,476 / 11 |
-| `code_index` | 13,606 / 19 |
-
-### Sequenced slices
-
-1. **Prepare domain contracts, then extract query first.** Split
-   `src/types.rs` by its actual destination: graph/extraction/traversal
-   records enter the domain `code_intelligence` vocabulary; edit/move DTOs
-   enter application `source_edit`; and `CostTurn` becomes a domain
-   observability contract. Make protobuf node variants unconditional domain
-   vocabulary to remove the feature-shape cycle. Then move all of
-   `src/query/**` (30,864 lines / 46 files) to `tracedecay-query` while the
-   root preserves existing paths with `pub use tracedecay_query as query;`.
-   The scan found 234 inbound `crate::query` sites in 43 files, but one
-   outbound root dependency:
-   `query/retrieval/lexical/projection.rs` imports
-   `code_index::chunks::ExtractionAdmittedCodeSearchChunkV1`. Move that chunk
-   contract to domain first, so query is a clean leaf.
-2. **Extract `tracedecay-code-index`.** Move `src/code_index/**` and
-   `src/extraction/**` together (58,628 lines / 79 files), including the
-   `lite`/`medium`/`full`/`lang-*` features and the WGSL `cc` build step. Keep
-   `src/extraction_worker.rs` in root because it owns subprocess lifecycle,
-   not deterministic indexing. Split `src/ast_grep_search.rs` so only the
-   grammar/pattern/matcher core moves.
-3. **Separate pure projector reducers.** Extract roughly 1,709 pure lines:
-   all of `sessions/claude/canonical_projection.rs`, deterministic derivation
-   from `global_db/observation_projection/apply.rs`, and pure lineage and
-   transition-classification symbols. Projectors return effects; adapters
-   apply them; no projector receives a database connection.
-4. **Move capture by provider family.** After introducing sink, cursor, and
-   admission ports, move roughly 36,074 lines / 55 files one provider family
-   at a time: Claude; Codex; Cursor/Cline/Kiro/Vibe; Hermes; Cursor Composer;
-   and the privacy sanitizer.
-5. **Converge application by use case.** Move concrete adapters out before
-   moving each use-case family, so application consumes narrow ports rather
-   than carrying its current infrastructure with it.
-6. **Cut over hooks after their delivery port exists.** Move the 16,471-line
-   hooks area only after a hook runtime/delivery port is in place. Root hooks
-   presently reach about 16 root modules, so they are not yet the thin
-   adapters described by [Plan 07](07-hooks-crate.md).
-7. **Cut over HTTP and dashboard one route family at a time.** Keep static
-   assets injected by root while routes are moved. This converts the
-   [Plan 10](10-api-crate.md) boundary without letting handlers retain
-   business or store ownership.
-8. **Consolidate the rusqlite runtime last.** Move `src/db/**`,
-   `src/global_db/**`, and `src/store/**` (120,327 lines / 189 files) only
-   after dependency inversion. This is the highest-risk slice because it
-   changes the runtime authority rather than a leaf.
-
-[Plans 05](05-query-crate.md) and
-[25](25-code-intelligence-indexing-crate.md) already make their respective
-crate extractions optional: same-host compile evidence, dependency isolation,
-and reuse must justify each boundary. [Plan 19](19-system-defragmentation-convergence-and-extensibility.md)
-and Plan 33 require a baseline-versus-treatment measurement before retaining
-each crate. No slice may be presumed beneficial because the root is large.
-
-Plans [03](03-capture-crate.md) and [04](04-projectors-crate.md) specify
-capture and projector boundaries, not crate-first framework projects.
-`tracedecay-capture` and `tracedecay-projectors` are convenient names inferred
-from those plan filenames, not binding package declarations.
-
-### Compatibility, current debt, and extraction risks
-
-The root remains composition, daemon lifecycle, discovery, upgrade handoff,
-and a deliberately small compatibility façade. The query re-export is the
-first example. If a move needs visibility outside the former root module,
-introduce a narrow typed port; do not broadly convert `pub(crate)` internals
-to `pub`. The unimplemented API-migration planner/apply journey in
-[Plan 34](34-workspace-refactoring-and-api-migration.md) is not an extraction
-dependency: ordinary source moves, explicit façades, and narrow ports must
-stand on their own.
-
-The review found known layout debt that this sequence must reduce rather than
-repackage:
-
-- projector logic is physically interleaved with SQL;
-- capture files combine parsing, admission, and concrete persistence;
-- root application mixes use cases and infrastructure;
-- root dashboard handlers retain business/store logic despite Plan 10;
-- `src/store/**` contains adapters, not `tracedecay-store` contract content; and
-- two `RequestContext` models remain unconverged, with only the crate model
-  carrying `ResolvedScope`.
-
-Before and after every slice, account for these risks:
-
-- Moving DTO ownership can rename generated `schemars` definitions and drift
-  the generated dashboard contracts.
-- The root `Cargo.toml` `include` whitelist will no longer package moved
-  source, so each new crate must package its own fixtures, vendored grammar
-  inputs, and benches.
-- Moving code-index without its WGSL build ownership leaves the root
-  invalidation problem intact.
-- A root compatibility façade may need public symbols where callers currently
-  use `pub(crate)` visibility; solve that with explicit narrow ports, not
-  wholesale visibility widening.
+A package boundary is retained only when a direct same-host developer journey
+improves and production callers preserve public contracts, generated schemas,
+packaging, feature behavior, runtime authority, migration, and normal CI.
+Source scans, line/file counts, dependency-shape tables, and moved-module
+layouts are diagnostic observations, not acceptance. If no measured product or
+developer benefit appears, the current module placement remains valid.
 
 ## User outcome
 

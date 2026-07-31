@@ -7,7 +7,6 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_application::{OperationBudgetUsage, ResolvedScope};
 use tracedecay_application::remote::auth::{
     RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
     RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentAuthorityErrorV1,
@@ -17,15 +16,16 @@ use tracedecay_application::remote::auth::{
 use tracedecay_application::remote::capture::{
     RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1,
 };
+use tracedecay_application::remote::query::{
+    RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
+    RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
+};
 use tracedecay_application::remote::replay::{
     RemoteReplayApplicationErrorV1, RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1,
     RemoteReplayFrameV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
     RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1,
 };
-use tracedecay_application::remote::query::{
-    RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
-    RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
-};
+use tracedecay_application::{OperationBudgetUsage, ResolvedScope};
 use tracedecay_domain::{
     BrainId, BrainNodeId, CanonicalObservationIdV1, CurrentRemoteAuthorityStateV1,
     CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1,
@@ -39,6 +39,10 @@ use crate::migration_sql::{
     MigrationSqlTransaction, MigrationSqlValue,
 };
 use crate::remote_spool::RemoteAuthorityReachabilityPortV1;
+
+#[path = "remote_query.rs"]
+mod query;
+pub use query::RusqliteRemoteExactObservationQueryPortV1;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS remote_authority_v1 (
@@ -696,11 +700,9 @@ impl RegisteredRemoteQueryPolicyAuthorityV1 {
         &self,
         repository_scope: &RemoteRepositoryScopeV1,
     ) -> Result<RemoteQueryPolicyRecordV1, RemoteExactObservationQueryErrorV1> {
-        let scope_digest = canonical_sha256(&(
-            "tracedecay.remote-query-policy-scope.v1",
-            repository_scope,
-        ))
-        .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
+        let scope_digest =
+            canonical_sha256(&("tracedecay.remote-query-policy-scope.v1", repository_scope))
+                .map_err(|_| RemoteExactObservationQueryErrorV1::PolicyUnavailable)?;
         let rows = self
             .handle
             .query(
