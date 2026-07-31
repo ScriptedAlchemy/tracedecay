@@ -28,10 +28,11 @@ contract without establishing milestone status. Historical packet/type names,
 exact source layouts, schema registries, and fixture matrices are evidence only
 unless separately declared public or persisted API.
 
-The PR12 transient feedback-read requests/responses and TraceDecay LSP
-extension payloads have no predecessor on `origin/master` or in a published
-package/release, so they change to their final schemas in place. LSP revision
-negotiation remains required for independently deployed clients. Durable
+The PR12 feedback-read and TraceDecay LSP extension payloads have no
+predecessor on `origin/master` or in a published package/release, but packaged
+hosts or independently deployed dogfood clients may retain prior revisions.
+Keep LSP negotiation and prior-revision decoding until a separately authorized
+installed-client/host census proves absence. Durable
 feedback findings, review snapshots, cursors, journals, checkpoints, and
 receipts remain backward-readable/recoverable until a separately authorized
 registered-store/profile census proves absence; branch history, an

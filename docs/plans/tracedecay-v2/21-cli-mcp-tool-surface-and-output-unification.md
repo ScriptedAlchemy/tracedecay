@@ -343,7 +343,9 @@ fixture does not land before its operation is callable.
   manifests, shadow profiles, and declaration-only gates.
 - Compatibility aliases with release evidence may delegate to the canonical
   operation for a bounded period, but they own no schema or behavior.
-  Branch-local aliases are removed in place after callers move.
+  Pure source-only aliases are removed in place after internal callers move;
+  branch-era callable aliases remain until an authorized installed-client/host
+  census proves absence.
 - Remove any client-side provider launch, hidden fallback, task status write,
   scheduler, or Git implementation.
 

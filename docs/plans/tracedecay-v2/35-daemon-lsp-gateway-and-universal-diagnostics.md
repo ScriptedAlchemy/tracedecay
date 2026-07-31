@@ -12,10 +12,12 @@ and protocol fixture inventories are not milestones.
 
 Standard LSP 3.17 compatibility and explicit negotiation with independently
 deployed clients remain real external protocol obligations. The TraceDecay
-context-extension's transient request/response schemas are unreleased and
-absent from `origin/master`, so PR12/PR13 revise their final shape in place;
-experimental version tags, branch fixtures, and planned SDK consumers do not
-require parallel readers or a version bump. Durable diagnostic snapshots,
+context-extension's request/response schemas are absent from `origin/master`
+and a published release, but packaged hosts or independently deployed dogfood
+clients may retain prior revisions. Keep negotiation and prior-revision
+decoding until a separately authorized installed-client/host census proves
+absence; experimental version tags and fixtures alone do not require a version
+bump. Durable diagnostic snapshots,
 cursors, journals, checkpoints, and receipts remain backward-readable until a
 separately authorized registered-store/profile census proves absence.
 
@@ -271,13 +273,14 @@ review, CI, proximity, or evidence data.
 
 - Delete bypass LSP implementations after parity; any bounded compatibility
   name with `origin/master` or published-release evidence delegates to the
-  daemon gateway and retains its PR19 removal condition. Branch-local names
-  are replaced in place.
+  daemon gateway and retains its PR19 removal condition. Pure source-only names
+  are replaced in place; branch-era callable names remain until the authorized
+  installed-client/host census proves absence.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
-  wire schemas. Later callable features revise the unreleased schema in place;
-  a new transient contract revision is required only after release or
-  independently deployed-client evidence establishes a predecessor. Persisted
-  diagnostics remain governed by the census-gated reader rule above.
+  writer schemas while retained decoders continue to accept potentially
+  installed prior revisions. Later callable features revise the current writer
+  shape; the installed-client/host census gates decoder retirement. Persisted
+  diagnostics remain governed by the registered-store census rule above.
 - Remove duplicate architecture/ownership prose, exact source-file and
   fixture inventories, standalone worktree milestone gates, generated protocol
   matrices that restate negotiation code, and placeholder benchmark packets.

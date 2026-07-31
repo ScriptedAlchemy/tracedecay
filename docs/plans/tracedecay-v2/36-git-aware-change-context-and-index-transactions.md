@@ -279,8 +279,9 @@ provable terminal outcome.
    persisted provenance/anchors proven in live or released storage and
    supported CLI/MCP names,
    `HunkRef`/receipt behavior, and rendering, remain compatible delegates to
-   the production kernels. A PR12 binding merely callable on this branch
-   changes to its final shape in place. Branch-written provenance, anchors,
+   the production kernels. Pure source-only PR12 bindings change in place;
+   branch-era callable names remain until an authorized installed-client/host
+   census proves absence. Branch-written provenance, anchors,
    snapshots, indexes, journals, and receipts remain backward-readable until a
    separately authorized registered-store/profile census proves absence.
    Forward migration imports only prior read-only evidence whose typed
