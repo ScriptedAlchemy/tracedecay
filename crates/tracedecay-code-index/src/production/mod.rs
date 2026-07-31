@@ -425,7 +425,7 @@ impl FileGenerationArtifactsV1 {
         let extraction = rebind_extraction_batch(&self.authority, &self.extraction, file)
             .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
         Ok(Self {
-            authority: self.authority.clone(),
+            authority: file.authority().clone(),
             extraction,
             artifacts,
             exact_authority,
