@@ -166,12 +166,16 @@ fn write(root: &Path, path: &str, source: &str) {
     std::fs::write(path, source).expect("write fixture source");
 }
 
+fn test_project_id() -> ProjectId {
+    ProjectId::new("project.code-index-tests").expect("valid test project identity")
+}
+
 fn scheduler(
     fixture: &GitFixture,
     store_root: PathBuf,
     bytes: Arc<SharedCodeIndexBytePoolV1>,
 ) -> CodeIndexWorktreeSchedulerV1 {
-    CodeIndexWorktreeSchedulerV1::open(fixture.path(), store_root, bytes)
+    CodeIndexWorktreeSchedulerV1::open(test_project_id(), fixture.path(), store_root, bytes)
         .expect("open worktree scheduler")
 }
 
@@ -619,7 +623,12 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     let mut publications = registry.subscribe_generation_publications();
 
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     let initial = tokio::time::timeout(Duration::from_secs(2), publications.recv())
@@ -662,7 +671,12 @@ async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -1109,7 +1123,12 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -1200,7 +1219,12 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -1332,6 +1356,7 @@ fn restart_rejects_corrupt_sealed_generation() {
     std::fs::write(&generation_path, bytes).expect("corrupt sealed generation");
 
     let result = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
         fixture.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -1366,6 +1391,7 @@ fn restart_rejects_pointer_generation_mismatch() {
     .expect("write mismatched pointer");
 
     let result = CodeIndexWorktreeSchedulerV1::open(
+        test_project_id(),
         fixture.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -1383,7 +1409,12 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
         registry
-            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
             .await
             .expect("mount daemon-owned scheduler")
     );
@@ -1418,7 +1449,12 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     };
     assert!(
         registry
-            .mount_worktree(fixture.path(), store.path().to_path_buf(), Some(first_hook),)
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                Some(first_hook),
+            )
             .await
             .expect("mount scheduler")
     );
@@ -1442,6 +1478,7 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     assert!(
         !registry
             .mount_worktree(
+                test_project_id(),
                 fixture.path(),
                 store.path().to_path_buf(),
                 Some(second_hook),
@@ -1479,7 +1516,12 @@ async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
     let disabled_calls = second_calls.load(Ordering::SeqCst);
     assert!(
         !registry
-            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
             .await
             .expect("remount without semantics")
     );
@@ -1511,7 +1553,12 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     for fixture in [&slow, &fast] {
         assert!(
             registry
-                .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+                .mount_worktree(
+                    test_project_id(),
+                    fixture.path(),
+                    store.path().to_path_buf(),
+                    None,
+                )
                 .await
                 .expect("mount worktree")
         );
@@ -1576,7 +1623,12 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     let expected = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -1620,7 +1672,12 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     let scheduler = registry
@@ -1656,7 +1713,12 @@ async fn background_reconciles_are_globally_bounded_across_worktrees() {
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     for fixture in [&first, &second] {
         registry
-            .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
             .await
             .expect("mount worktree");
     }
@@ -1714,7 +1776,12 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -1896,7 +1963,12 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount daemon-owned scheduler");
     let generation = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -2239,8 +2311,14 @@ fn scheduler_with_policy(
     bytes: Arc<SharedCodeIndexBytePoolV1>,
     policy: CodeIndexHintPolicyV1,
 ) -> CodeIndexWorktreeSchedulerV1 {
-    CodeIndexWorktreeSchedulerV1::open_with_policy(fixture.path(), store_root, bytes, policy)
-        .expect("open worktree scheduler with policy")
+    CodeIndexWorktreeSchedulerV1::open_with_policy(
+        test_project_id(),
+        fixture.path(),
+        store_root,
+        bytes,
+        policy,
+    )
+    .expect("open worktree scheduler with policy")
 }
 
 /// gix status classification keeps committed/staged/unstaged/untracked/deleted
@@ -2818,7 +2896,12 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount scheduler");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -2849,7 +2932,12 @@ async fn freshness_failure_does_not_serve_a_stale_complete_generation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -2873,7 +2961,12 @@ async fn expired_query_does_not_wait_for_a_busy_scheduler() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount scheduler");
     let generation = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -2999,11 +3092,21 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     registry
-        .mount_worktree(first.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            ProjectId::new("project.unpinned.first").expect("valid project"),
+            first.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount first worktree");
     registry
-        .mount_worktree(target.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            ProjectId::new("project.unpinned.target").expect("valid project"),
+            target.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount target worktree");
     wait_for_initial_generation(&registry, first.path()).await;
@@ -3064,7 +3167,12 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -3211,11 +3319,21 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
     registry
-        .mount_worktree(owner.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            ProjectId::new("project.pinned.owner").expect("valid project"),
+            owner.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount owner worktree");
     registry
-        .mount_worktree(requester.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            ProjectId::new("project.pinned.requester").expect("valid project"),
+            requester.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount requester worktree");
     let owner_generation = wait_for_initial_generation(&registry, owner.path()).await;
@@ -3261,7 +3379,12 @@ async fn symbol_search_is_generation_bound_and_uses_mounted_authority() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
     let generation = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -3332,7 +3455,12 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount daemon-owned scheduler");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -3416,7 +3544,12 @@ async fn pinned_query_bypasses_freshness_resolution() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount daemon-owned scheduler");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
@@ -3548,7 +3681,12 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     assert!(
         registry
-            .mount_worktree(fixture.path(), store_root.path().to_path_buf(), None)
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store_root.path().to_path_buf(),
+                None,
+            )
             .await
             .expect("mount daemon-owned scheduler")
     );
@@ -4010,7 +4148,12 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
 
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount with retained generation");
 
@@ -4051,7 +4194,12 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
 
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount retained");
     wait_for_initial_generation(&registry, fixture.path()).await;
@@ -4104,7 +4252,12 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount");
     let expected = wait_for_initial_generation(&registry, fixture.path()).await;

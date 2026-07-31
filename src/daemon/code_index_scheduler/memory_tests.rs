@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tracedecay_domain::ProjectId;
 
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
@@ -45,8 +46,10 @@ fn fixture() -> TempDir {
 #[test]
 fn latest_complete_reuses_the_immutable_generation_allocation() {
     let project = fixture();
+    let project_id = ProjectId::new("project.code-index-memory").expect("valid project");
     let store = TempDir::new().expect("store root");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
         project.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -71,6 +74,7 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
     drop(scheduler);
 
     let reopened = CodeIndexWorktreeSchedulerV1::open(
+        project_id,
         project.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -94,7 +98,12 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(project.path(), store.path().to_path_buf(), None)
+        .mount_worktree(
+            ProjectId::new("project.code-index-memory").expect("valid project"),
+            project.path(),
+            store.path().to_path_buf(),
+            None,
+        )
         .await
         .expect("mount worktree");
 

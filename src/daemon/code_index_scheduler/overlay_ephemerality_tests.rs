@@ -26,6 +26,10 @@ struct Semantics;
 
 impl SemanticProviderPort for Semantics {}
 
+fn project_id() -> tracedecay_domain::ProjectId {
+    tracedecay_domain::ProjectId::new("project.overlay-ephemerality").expect("valid project")
+}
+
 #[test]
 fn unsaved_lsp_overlay_leaves_durable_code_index_generation_and_storage_unchanged() {
     let worktree = TempDir::new().expect("worktree");
@@ -46,6 +50,7 @@ fn unsaved_lsp_overlay_leaves_durable_code_index_generation_and_storage_unchange
 
     let store = TempDir::new().expect("code-index store");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id(),
         worktree.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -183,6 +188,7 @@ fn cancelled_superseding_code_index_work_retains_prior_active_generation() {
 
     let store = TempDir::new().expect("code-index store");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id(),
         worktree.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -227,6 +233,7 @@ fn cancelled_superseding_code_index_work_retains_prior_active_generation() {
     assert_eq!(storage_image(store.path()), storage_before);
 
     let reopened = CodeIndexWorktreeSchedulerV1::open(
+        project_id(),
         worktree.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
