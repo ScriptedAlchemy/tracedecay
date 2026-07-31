@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +69,99 @@ fn controls(suffix: &str, observed_at: UtcMicros) -> (Deadline, CancellationCont
         Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000))).expect("deadline"),
         CancellationContext::active(format!("cancel.multi-root.{suffix}")).expect("cancellation"),
     )
+}
+
+fn assert_stale_digest_rejected<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    scope_set_id: &'a ScopeSetId,
+    scope_set: &'a AuthorizedScopeSet,
+    operation: &'a MultiRootOperationV1,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let observed_at = now();
+        let (deadline, cancellation) = controls("stale-digest", observed_at);
+        let stale_digest = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::multi_root_execute(
+                "request.multi-root.stale-digest",
+                MultiRootExecuteRequestV1::new(
+                    scope_set_id.clone(),
+                    scope_set.revision(),
+                    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+                        .expect("stale digest"),
+                    operation.clone(),
+                    0,
+                    None,
+                )
+                .expect("stale digest request"),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        assert!(matches!(
+            stale_digest.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+            }
+        ));
+    })
+}
+
+fn assert_git_preflight<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    scope_set_id: &'a ScopeSetId,
+    scope_set: &'a AuthorizedScopeSet,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let observed_at = now();
+        let (deadline, cancellation) = controls("git-preflight", observed_at);
+        let git_preflight = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::multi_root_execute(
+                "request.multi-root.git-preflight",
+                MultiRootExecuteRequestV1::new(
+                    scope_set_id.clone(),
+                    scope_set.revision(),
+                    scope_set.digest().clone(),
+                    MultiRootOperationV1::Git {
+                        request: json!({
+                            "operation": "git_status",
+                            "request": {}
+                        }),
+                    },
+                    0,
+                    None,
+                )
+                .expect("Git preflight request"),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        let DaemonInvocationOutcome::MultiRootQueryPage {
+            outcome: ApplicationOutcome::Evidence(git_preflight),
+            ..
+        } = git_preflight.outcome
+        else {
+            panic!("Git preflight must reach the production daemon");
+        };
+        let git_preflight = git_preflight.payload.expect("Git preflight page");
+        assert!(matches!(git_preflight.aggregate, ScopeOutcome::Exact(_)));
+        assert_eq!(git_preflight.roots.len(), 2);
+        assert!(
+            git_preflight
+                .roots
+                .iter()
+                .all(|root| matches!(root.outcome, ScopeOutcome::Exact(_)))
+        );
+    })
 }
 
 #[cfg(unix)]
@@ -171,6 +266,22 @@ async fn two_registered_roots_survive_cas_partial_query_and_restart() {
     assert_eq!(applied.status, MultiRootScopeSetCasStatusV1::Applied);
     let scope_set = applied.scope_set.expect("applied scope set");
     assert_eq!(scope_set.roots().len(), 2);
+
+    let work_operation = MultiRootOperationV1::Work {
+        request: serde_json::to_value(WorkApplicationInvocationV1::Snapshot(
+            WorkProjectionSnapshotRequestV1 { page_size: 100 },
+        ))
+        .expect("snapshot request"),
+    };
+    assert_stale_digest_rejected(
+        &engine,
+        &first_handshake,
+        &scope_set_id,
+        &scope_set,
+        &work_operation,
+    )
+    .await;
+    assert_git_preflight(&engine, &first_handshake, &scope_set_id, &scope_set).await;
 
     let observed_at = now();
     let (deadline, cancellation) = controls("stale", observed_at);
