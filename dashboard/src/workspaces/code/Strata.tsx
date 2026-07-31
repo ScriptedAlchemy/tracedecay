@@ -140,7 +140,8 @@ function StrataReading({ measurement }: { measurement: StrataMeasurementV1 }) {
                   fraction={
                     boundaryCeiling > 0 ? cluster.boundary_edges / boundaryCeiling : null
                   }
-                  className="h-[3px] w-full"
+                  height="row"
+                  className="w-full"
                 />
                 <span className="text-3xs leading-snug text-text-muted">
                   {cluster.file_count} {cluster.file_count === 1 ? 'file' : 'files'} ·{' '}
