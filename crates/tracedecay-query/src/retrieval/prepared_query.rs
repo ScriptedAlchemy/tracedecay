@@ -17,8 +17,8 @@ use tracedecay_domain::{
 use super::fusion::{PREPARED_QUERY_CURSOR_MAC_DOMAIN_V1, QueryDigestAuthenticationError};
 use super::{Pr9QueryAuthorityErrorV1, Pr9QueryAuthorityV1};
 
-const PREPARED_QUERY_CURSOR_PREFIX_V2: &str = "ccq2.";
-const PREPARED_QUERY_CURSOR_REVISION_V2: u16 = 2;
+const PREPARED_QUERY_CURSOR_PREFIX_V1: &str = "ccq1.";
+const PREPARED_QUERY_CURSOR_REVISION_V1: u16 = 1;
 const PREPARED_QUERY_CURSOR_TTL_MICROS_V1: i64 = 15 * 60 * 1_000_000;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -181,7 +181,7 @@ impl PreparedQueryV1 {
                 ),
             };
             let payload = PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V1,
                 operation: bindings.operation.clone(),
                 scope_digest: bindings.scope_digest.clone(),
                 generation: bindings.generation.clone(),
@@ -299,7 +299,7 @@ fn encode_cursor(
     })
     .map_err(|_| PreparedQueryErrorV1::Unavailable)?;
     Ok(format!(
-        "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+        "{PREPARED_QUERY_CURSOR_PREFIX_V1}{}",
         hex::encode(bytes)
     ))
 }
@@ -308,7 +308,7 @@ fn decode_cursor(
     encoded: &str,
 ) -> Result<AuthenticatedPreparedQueryCursorV1, PreparedQueryErrorV1> {
     let encoded = encoded
-        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+        .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
         .ok_or(PreparedQueryErrorV1::Invalid)?;
     let bytes = hex::decode(encoded).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if hex::encode(&bytes) != encoded {
@@ -317,7 +317,7 @@ fn decode_cursor(
     let cursor: AuthenticatedPreparedQueryCursorV1 =
         serde_json::from_slice(&bytes).map_err(|_| PreparedQueryErrorV1::Invalid)?;
     if serde_json::to_vec(&cursor).map_err(|_| PreparedQueryErrorV1::Invalid)? != bytes
-        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V2
+        || cursor.payload.revision != PREPARED_QUERY_CURSOR_REVISION_V1
     {
         return Err(PreparedQueryErrorV1::Invalid);
     }
@@ -346,7 +346,7 @@ mod tests {
     fn cursor(next_offset: u32, expires_at: UtcMicros) -> String {
         encode_cursor(
             PreparedQueryCursorPayloadV1 {
-                revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+                revision: PREPARED_QUERY_CURSOR_REVISION_V1,
                 operation: "code_exact_occurrence".to_owned(),
                 scope_digest: digest("scope"),
                 generation: CodeGenerationId::new("generation.callable-page").expect("generation"),
@@ -394,9 +394,9 @@ mod tests {
         assert_eq!(decode_cursor(&tampered), Err(PreparedQueryErrorV1::Invalid));
 
         let uppercase = format!(
-            "{PREPARED_QUERY_CURSOR_PREFIX_V2}{}",
+            "{PREPARED_QUERY_CURSOR_PREFIX_V1}{}",
             encoded
-                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .trim_start_matches(PREPARED_QUERY_CURSOR_PREFIX_V1)
                 .to_ascii_uppercase()
         );
         assert_eq!(
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(first, second);
         let first_bytes = hex::decode(
             first
-                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V2)
+                .strip_prefix(PREPARED_QUERY_CURSOR_PREFIX_V1)
                 .expect("prepared cursor prefix"),
         )
         .expect("prepared cursor bytes");
@@ -429,7 +429,7 @@ mod tests {
         // The authentication payload is domain-separated for prepared cursors and
         // must never embed query sanitizer/normalization revision strings.
         let payload = PreparedQueryCursorPayloadV1 {
-            revision: PREPARED_QUERY_CURSOR_REVISION_V2,
+            revision: PREPARED_QUERY_CURSOR_REVISION_V1,
             operation: "code_exact_occurrence".to_owned(),
             scope_digest: digest("scope"),
             generation: CodeGenerationId::new("generation.callable-page").expect("generation"),

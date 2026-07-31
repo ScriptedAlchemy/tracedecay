@@ -21,16 +21,11 @@ use crate::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationOperation, ResultContractRef,
 };
 
-/// Historical redesign-branch digest domain. Never shipped on `origin/master`.
-/// Kept only so tests can prove final-v2 digests are intentionally distinct.
-#[cfg(test)]
 const API_MIGRATION_PLAN_DIGEST_DOMAIN_V1: &str = "tracedecay.application.api-migration-plan.v1";
-/// Final V2 plan digest domain for plans that wire `deletion_condition`.
-const API_MIGRATION_PLAN_DIGEST_DOMAIN_V2: &str = "tracedecay.application.api-migration-plan.v2";
 const API_MIGRATION_DEFINITION_DIGEST_DOMAIN_V1: &str =
     "tracedecay.application.api-migration-definition.v1";
 const API_MIGRATION_FILE_DIGEST_DOMAIN_V1: &str = "tracedecay.api-migration.file.v1";
-const API_MIGRATION_SCHEMA_REVISION_V2: u32 = 2;
+const API_MIGRATION_SCHEMA_REVISION_V1: u32 = 1;
 
 pub fn api_migration_definition_digest(
     source: &str,
@@ -83,11 +78,7 @@ pub struct ApiCompatibilityDispositionV1 {
     pub owner: String,
     pub deprecation_policy: String,
     /// Product sunset predicate for temporary compatibility inserts.
-    ///
-    /// Final V2 wire field. The redesign-branch name `pr19_deletion_condition`
-    /// is rejected (`deny_unknown_fields`); there is no shipped persisted
-    /// authority on `origin/master` that requires a lossless v1 migration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deletion_condition: Option<String>,
 }
 
@@ -416,7 +407,7 @@ pub struct ApiMigrationPlanV1 {
 impl ApiMigrationPlanV1 {
     pub fn compute_digest(&self) -> Result<ManifestDigest, ApplicationContractError> {
         Ok(canonical_sha256(&(
-            API_MIGRATION_PLAN_DIGEST_DOMAIN_V2,
+            API_MIGRATION_PLAN_DIGEST_DOMAIN_V1,
             &self.family_id,
             &self.repository_revision,
             &self.graph_revision,
@@ -791,7 +782,7 @@ pub fn api_migration_catalog_contribution()
     let mut bindings = Vec::new();
     let mut binding_ids = Vec::new();
     for (surface, name) in [(BindingSurface::Cli, "cli"), (BindingSurface::Mcp, "mcp")] {
-        let binding_id = BindingId::new(format!("binding.{name}.api-migration-plan.v2"))?;
+        let binding_id = BindingId::new(format!("binding.{name}.api-migration-plan.v1"))?;
         bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
             binding_id: binding_id.clone(),
             capability_id: operation.capability_id().clone(),
@@ -867,7 +858,7 @@ pub fn api_migration_catalog_contribution()
 fn api_migration_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.api-migration.{suffix}"))?,
-        API_MIGRATION_SCHEMA_REVISION_V2,
+        API_MIGRATION_SCHEMA_REVISION_V1,
     )?)
 }
 
@@ -950,35 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pr19_deletion_condition_is_rejected() {
-        let legacy = serde_json::json!({
-            "lifetime": "temporary",
-            "external_consumer": "published users",
-            "owner": "api",
-            "deprecation_policy": "warn for one release",
-            "pr19_deletion_condition": "legacy wire sunset predicate"
-        });
-        assert!(
-            serde_json::from_value::<ApiCompatibilityDispositionV1>(legacy).is_err(),
-            "final V2 disposition must reject redesign-branch pr19_deletion_condition"
-        );
-
-        let both = serde_json::json!({
-            "lifetime": "temporary",
-            "external_consumer": "published users",
-            "owner": "api",
-            "deprecation_policy": "warn for one release",
-            "deletion_condition": "product sunset",
-            "pr19_deletion_condition": "legacy wire sunset predicate"
-        });
-        assert!(
-            serde_json::from_value::<ApiCompatibilityDispositionV1>(both).is_err(),
-            "legacy and final field names must not coexist"
-        );
-    }
-
-    #[test]
-    fn final_v2_plan_digest_domain_binds_deletion_condition() {
+    fn plan_digest_binds_deletion_condition() {
         let expected = "pub fn current() {}\n";
         let replacement = "pub fn legacy() { current(); }\n";
         let intended = format!("{expected}{replacement}");
@@ -1016,21 +979,6 @@ mod tests {
         );
         plan.validate().unwrap();
 
-        let historical_v1 = canonical_sha256(&(
-            API_MIGRATION_PLAN_DIGEST_DOMAIN_V1,
-            &plan.family_id,
-            &plan.repository_revision,
-            &plan.graph_revision,
-            &plan.operations,
-            &plan.sites,
-            &plan.files,
-            plan.blocked,
-        ))
-        .unwrap();
-        assert_ne!(
-            plan.plan_digest, historical_v1,
-            "final V2 digest domain must not collide with redesign-branch v1 digests"
-        );
         assert_eq!(plan.compute_digest().unwrap(), plan.plan_digest);
 
         let mut mutated = plan.clone();
@@ -1047,11 +995,11 @@ mod tests {
     }
 
     #[test]
-    fn api_migration_catalog_advertises_final_v2_bindings_and_schema_revision() {
+    fn api_migration_catalog_advertises_canonical_bindings_and_schema_revision() {
         let contribution = api_migration_catalog_contribution().unwrap();
         for binding in contribution.bindings() {
             assert!(
-                binding.binding_id().as_str().ends_with("api-migration-plan.v2"),
+                binding.binding_id().as_str().ends_with("api-migration-plan.v1"),
                 "unexpected binding {}",
                 binding.binding_id().as_str()
             );
@@ -1062,11 +1010,11 @@ mod tests {
             .expect("api migration capability");
         assert_eq!(
             capability.request_schema().revision(),
-            API_MIGRATION_SCHEMA_REVISION_V2
+            API_MIGRATION_SCHEMA_REVISION_V1
         );
         assert_eq!(
             capability.result_schema().revision(),
-            API_MIGRATION_SCHEMA_REVISION_V2
+            API_MIGRATION_SCHEMA_REVISION_V1
         );
     }
 
