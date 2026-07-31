@@ -15,6 +15,7 @@ on:
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/require-exact-test.sh"
       - "src/application_surface.rs"
+      - "tests/sdk_conformance_non_vacuity_test.sh"
   push:
     branches: [master]
 
@@ -115,6 +116,8 @@ jobs:
       - run: npm run build
         working-directory: dashboard
       - run: cargo build --bin tracedecay
+      - name: Verify ignored conformance anti-vacuity
+        run: tests/sdk_conformance_non_vacuity_test.sh
       - run: >-
           REQUIRE_EXACT_TEST_COUNT=nonzero
           scripts/require-exact-test.sh
