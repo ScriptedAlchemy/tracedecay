@@ -742,6 +742,37 @@ pub struct FeedbackSystemQualityReadModelV1 {
 }
 
 impl FeedbackObservationReadModelV1 {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: 1,
+            total_count: 0,
+            first_observed_at: None,
+            last_observed_at: None,
+            event_counts: BTreeMap::new(),
+            coverage: Plan26CoverageV1::Unknown,
+            watermark: FeedbackObservationWatermarkV1 {
+                producer_boot_id: None,
+                producer_sequence: None,
+                observed_through: None,
+            },
+            denominators: FeedbackObservationDenominatorsV1 {
+                eligible: 0,
+                persisted: 0,
+                emitted: 0,
+                delayed: 0,
+                dropped: 0,
+                retention_dropped: 0,
+                incomplete_boots: 0,
+            },
+            system_quality: FeedbackSystemQualityReadModelV1::project(
+                &[],
+                0,
+                0,
+                Plan26CoverageV1::Unknown,
+            ),
+        }
+    }
+
     pub fn project(observations: &[FeedbackObservationEnvelopeV1]) -> Option<Self> {
         Self::project_with_accounting(observations, 0, 0)
     }

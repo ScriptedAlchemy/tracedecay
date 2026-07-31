@@ -92,10 +92,11 @@ fn status_envelope(
         producer_sequence: payload.watermark.producer_sequence,
         payload,
     });
-    feedback_status_envelope(scope_from_state(state), presentation, || {
-        FeedbackObservationReadModelV1::project(&[])
-            .expect("empty feedback observation projection is canonical")
-    })
+    feedback_status_envelope(
+        scope_from_state(state),
+        presentation,
+        FeedbackObservationReadModelV1::empty,
+    )
 }
 
 #[cfg(test)]
