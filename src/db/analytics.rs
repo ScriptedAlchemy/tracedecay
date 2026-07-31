@@ -2,7 +2,7 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::Database;
-use super::rows::row_to_node;
+use super::rows::{NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{collect_rows, path_prefix_like_value};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
@@ -113,12 +113,13 @@ impl Database {
     /// `search`. Multiple nodes can share a name (overloads, same-named items
     /// across modules); `LIMIT 200` caps pathological cases.
     pub async fn get_nodes_by_name(&self, name: &str) -> Result<Vec<Node>> {
-        let sql = "SELECT id, kind, name, qualified_name, file_path,
-                          start_line, end_line, start_column, end_column,
-                          docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                   FROM nodes
-                   WHERE name = ?1
-                   LIMIT 200";
+        let sql = concat!(
+            "SELECT ",
+            node_select_columns!(),
+            " FROM nodes
+              WHERE name = ?1
+              LIMIT 200"
+        );
         let mut rows = self
             .engine_conn()
             .query(sql, params![name])
@@ -145,12 +146,13 @@ impl Database {
         // Bare names retain find_exact_symbol's indexed name-lookup behavior.
         // Qualified requests are handled below and never fall back to this path.
         if !lookup.is_qualified() {
-            let bare_sql = "SELECT id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column,
-                            docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                     FROM nodes
-                     WHERE name = ?1
-                     LIMIT 200";
+            let bare_sql = concat!(
+                "SELECT ",
+                node_select_columns!(),
+                " FROM nodes
+                  WHERE name = ?1
+                  LIMIT 200"
+            );
             let mut rows = snapshot
                 .query(bare_sql, params![lookup.terminal_name.as_str()])
                 .await
@@ -166,11 +168,12 @@ impl Database {
 
         // Prefer a stored fully-qualified name exactly as before. This keeps
         // cross-run callers that persist a graph-qualified name deterministic.
-        let exact_sql = "SELECT id, kind, name, qualified_name, file_path,
-                          start_line, end_line, start_column, end_column,
-                          docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                   FROM nodes
-                   WHERE qualified_name = ?1";
+        let exact_sql = concat!(
+            "SELECT ",
+            node_select_columns!(),
+            " FROM nodes
+              WHERE qualified_name = ?1"
+        );
         let mut rows = snapshot
             .query(exact_sql, params![lookup.normalized.as_str()])
             .await
@@ -193,12 +196,13 @@ impl Database {
         // requested terminal name, then match canonical module, crate, path,
         // and suffix forms in memory. A wrong module therefore remains empty
         // instead of silently selecting a same-named callable elsewhere.
-        let candidates_sql = "SELECT id, kind, name, qualified_name, file_path,
-                              start_line, end_line, start_column, end_column,
-                              docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                       FROM nodes
-                       WHERE name = ?1
-                       LIMIT 200";
+        let candidates_sql = concat!(
+            "SELECT ",
+            node_select_columns!(),
+            " FROM nodes
+              WHERE name = ?1
+              LIMIT 200"
+        );
         let mut candidate_rows = snapshot
             .query(candidates_sql, params![lookup.terminal_name.as_str()])
             .await
@@ -430,9 +434,7 @@ impl Database {
         };
 
         let sql = format!(
-            "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id,
+            "SELECT {NODE_SELECT_COLUMNS},
                     (end_line - start_line + 1) AS lines
              FROM nodes
              {where_clause}
@@ -913,9 +915,7 @@ impl Database {
         let (sql, param_values): (String, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 format!(
-                    "SELECT id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column,
-                            docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+                    "SELECT {NODE_SELECT_COLUMNS}
                      FROM nodes
                      WHERE visibility = 'public'
                        AND (docstring IS NULL OR docstring = '')
@@ -931,9 +931,7 @@ impl Database {
             ),
             None => (
                 format!(
-                    "SELECT id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column,
-                            docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+                    "SELECT {NODE_SELECT_COLUMNS}
                      FROM nodes
                      WHERE visibility = 'public'
                        AND (docstring IS NULL OR docstring = '')
@@ -1045,11 +1043,7 @@ impl Database {
             .map(|(i, _)| format!("?{}", i + 2))
             .collect();
         let sql = format!(
-            "SELECT id, kind, name, qualified_name, file_path,
-                    start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async,
-                    branches, loops, returns, max_nesting,
-                    unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
+            "SELECT {NODE_SELECT_COLUMNS}
              FROM nodes
              WHERE file_path LIKE ?1 || '%' AND kind IN ({})
              ORDER BY file_path, start_line",
