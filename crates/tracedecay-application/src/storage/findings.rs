@@ -79,8 +79,8 @@ fn evidence(
     let reference = format!(
         "storage.{}.{}.{}",
         kind_slug(kind),
-        truncate_ascii(store.as_str(), 200),
-        truncate_ascii(detail, 200),
+        truncate_at_char_boundary(store.as_str(), 200),
+        truncate_at_char_boundary(detail, 200),
     );
     Ok(DoctorEvidenceRefV1::new(
         DoctorFindingFamilyV1::Storage,
@@ -88,8 +88,9 @@ fn evidence(
     ))
 }
 
-/// Truncate at a char boundary, keeping the reference identifier valid.
-fn truncate_ascii(value: &str, max: usize) -> String {
+/// Truncate to at most `max` bytes, cutting at a char boundary so the result
+/// stays valid UTF-8 (and a truncated reference identifier stays well formed).
+pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_string();
     }
@@ -410,7 +411,7 @@ pub fn stale_branch_dbs_finding(
             completeness,
             &format!(
                 "branch-{}.size-{}b",
-                truncate_ascii(record.branch.as_str(), 120),
+                truncate_at_char_boundary(record.branch.as_str(), 120),
                 record.size_bytes.get()
             ),
             "branch-scoped store whose git ref is gone awaits lifecycle removal",
@@ -494,7 +495,7 @@ pub fn retention_backlog_finding(
             completeness,
             &format!(
                 "table-{}.bytes-{}b",
-                truncate_ascii(record.table.as_str(), 100),
+                truncate_at_char_boundary(record.table.as_str(), 100),
                 record.past_window_bytes.get()
             ),
             "retention-eligible rows are past their window awaiting collection",
