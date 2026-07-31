@@ -382,7 +382,14 @@ impl CleanGenerationDiagnosticSnapshotBuilderV1 {
             severity: contribution.severity,
             message: contribution.message,
             // Replaced below; the canonical digest is derived, never supplied.
-            message_digest: self.scope.analyzer_revision_digest_placeholder(),
+            message_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "0".repeat(64)
+            ))
+            .map_err(|error| DiagnosticContributionRejectionV1::InvalidRecord {
+                anchor: key.clone(),
+                reason: error.to_string(),
+            })?,
             provenance: DiagnosticProvenanceV1 {
                 producer_kind: pillar.producer_kind(),
                 producer,
@@ -426,16 +433,6 @@ impl CleanGenerationDiagnosticSnapshotBuilderV1 {
         store
             .publish_clean_generation(&self.scope.generation_id, &self.records())
             .await
-    }
-}
-
-impl CleanGenerationDiagnosticScopeV1 {
-    /// Placeholder digest overwritten by the canonical message digest before
-    /// validation. Reusing an already-validated identity keeps the
-    /// intermediate record constructible without unwrapping.
-    fn analyzer_revision_digest_placeholder(&self) -> tracedecay_domain::ManifestDigest {
-        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-            .expect("constant placeholder digest is canonical")
     }
 }
 

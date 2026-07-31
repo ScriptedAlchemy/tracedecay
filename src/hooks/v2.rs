@@ -636,7 +636,7 @@ async fn dispatch_decoded(
                 delivery,
             )
             .await
-            .unwrap_or_else(|_| HookFeedbackDeliveryV1 {
+            .unwrap_or(HookFeedbackDeliveryV1 {
                 feedback: None,
                 outcome: None,
             });
