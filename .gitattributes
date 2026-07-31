@@ -20,3 +20,8 @@ src/sessions/claude_observation_benchmark/** text eol=lf
 benchmarks/pr5-observation/** text eol=lf
 # PR7 workload/evidence JSON stays LF for portable checkout digests.
 benchmarks/pr7-memory/** text eol=lf
+# Vendored, patched tree-sitter grammars: generated parser sources are
+# reviewed upstream-of-generation (grammar.js + patches), not line-by-line.
+# Collapse them out of PR diffs and language stats.
+vendor/** linguist-generated=true
+crates/tracedecay-code-extraction/vendor/** linguist-generated=true
