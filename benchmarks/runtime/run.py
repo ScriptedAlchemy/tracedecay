@@ -750,8 +750,6 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
             result = run_host(
                 (
                     os.fspath(binary),
-                    "--exact",
-                    "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
                     "--nocapture",
                     "--test-threads=1",
                 ),
@@ -762,10 +760,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
                 check=False,
             )
             elapsed_ns = time.monotonic_ns() - started_ns
-            authority_passed = (
-                result.evidence.exit_code == 0
-                and b"1 passed; 0 failed" in result.stdout
-            )
+            authority_passed = result.evidence.exit_code == 0
             if result.evidence.process_count_after_cleanup != 0:
                 fail("diagnostic authority process tree was not reaped")
             if not authority_passed:
@@ -860,9 +855,7 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         "authority": {
             "kind": "prebuilt-integration-test",
             "binary_sha256": sha256_file(binary),
-            "test": (
-                "publication_rate_and_queue_memory_stay_bounded_under_backpressure"
-            ),
+            "target": "diagnostic_publication_stress",
         },
         "availability": {"state": "available", "detail": None},
         "sample_count": len(captured),

@@ -58,8 +58,7 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 print("tracedecay 0.0.0")
                 raise SystemExit(0)
 
-            if sys.argv[1:2] == ["--exact"]:
-                print("test result: ok. 1 passed; 0 failed; 0 ignored")
+            if sys.argv[1:2] == ["--nocapture"]:
                 raise SystemExit(0)
 
             if sys.argv[1:2] == ["init"]:

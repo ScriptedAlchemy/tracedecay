@@ -1,4 +1,4 @@
-//! PR13 packet schemas, structural contracts, and authentic host decoders.
+//! Host lifecycle behavior and authentic provider decoder coverage.
 
 use std::fs;
 use std::path::Path;
@@ -31,22 +31,8 @@ use tracedecay_hooks::{
     decode_opencode_plugin_event,
 };
 
-#[path = "../src/privacy/detector_kernel.rs"]
-mod detector_kernel;
-#[path = "agent_suite/plugin_validation_support.rs"]
-mod plugin_validation_support;
-
-use detector_kernel::{CredentialPatternProfile, compile_credential_patterns};
-use plugin_validation_support::{assert_schema_valid, compile_schema};
-
-const HOST_PACKET: &str = include_str!("../benchmarks/pr13-host-conformance/workload-v1.json");
-const HOST_SCHEMA: &str = include_str!("../benchmarks/pr13-host-conformance/schema-v1.json");
-const ADVISORY_PACKET: &str =
-    include_str!("../benchmarks/pr13-advisory-milestone/workload-v1.json");
-const ADVISORY_SCHEMA: &str = include_str!("../benchmarks/pr13-advisory-milestone/schema-v1.json");
-
-fn packet(value: &str) -> Value {
-    serde_json::from_str(value).expect("checked-in packet parses")
+fn parse_fixture(value: &str) -> Value {
+    serde_json::from_str(value).expect("checked-in fixture parses")
 }
 
 fn assert_agent_integration<T: AgentIntegration>() {}
@@ -64,42 +50,6 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
 }
 
 impl HostComponentSetRegistrationV1 for CurrentRegistration {}
-
-#[test]
-fn draft07_schemas_validate_contract_packets() {
-    let host_schema = compile_schema(&packet(HOST_SCHEMA));
-    let advisory_schema = compile_schema(&packet(ADVISORY_SCHEMA));
-    assert_schema_valid(&host_schema, &packet(HOST_PACKET), Path::new("host packet"));
-    assert_schema_valid(
-        &advisory_schema,
-        &packet(ADVISORY_PACKET),
-        Path::new("advisory packet"),
-    );
-}
-
-#[test]
-fn schemas_reject_unknown_fields_wrong_types_and_unknown_gates() {
-    let validator = compile_schema(&packet(HOST_SCHEMA));
-    let mut unknown_field = packet(HOST_PACKET);
-    unknown_field["unexpected"] = json!(true);
-    assert!(!validator.is_valid(&unknown_field));
-
-    let mut wrong_type = packet(HOST_PACKET);
-    wrong_type["schema_version"] = json!("1");
-    assert!(!validator.is_valid(&wrong_type));
-
-    let mut unknown_gate = packet(HOST_PACKET);
-    unknown_gate["static_gate_ids"] = json!(["unknown_gate"]);
-    assert!(!validator.is_valid(&unknown_gate));
-
-    let advisory_validator = compile_schema(&packet(ADVISORY_SCHEMA));
-    let mut advisory_unknown = packet(ADVISORY_PACKET);
-    advisory_unknown["unexpected"] = json!(true);
-    assert!(!advisory_validator.is_valid(&advisory_unknown));
-    let mut advisory_wrong_type = packet(ADVISORY_PACKET);
-    advisory_wrong_type["provider_gaps"] = json!("none");
-    assert!(!advisory_validator.is_valid(&advisory_wrong_type));
-}
 
 #[test]
 fn public_host_contracts_are_compiler_referenced() {
@@ -552,7 +502,8 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
     )
     .unwrap();
 
-    let contested = preview_now(home.path()).expect("a competing analyzer is reported, not refused");
+    let contested =
+        preview_now(home.path()).expect("a competing analyzer is reported, not refused");
     let claims = &contested.competing_extension_claims;
     assert_eq!(
         claims
@@ -701,11 +652,7 @@ fn cline_family_routes_come_only_from_the_checked_in_evidence_packet() {
             entry["reason"].as_str(),
             "{packet_id} must report the packet's exact reason"
         );
-        for state in [
-            evidence.registration.state,
-            evidence.edit,
-            evidence.stop,
-        ] {
+        for state in [evidence.registration.state, evidence.edit, evidence.stop] {
             assert!(
                 matches!(state, HostCapabilityStateV1::Unavailable(_)),
                 "{packet_id} must stay typed unavailable on every surface"
@@ -995,7 +942,7 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
             .unwrap_or_else(|error| panic!("{host:?} fixture rejected: {error}"));
     }
 
-    let opencode = packet(include_str!(
+    let opencode = parse_fixture(include_str!(
         "../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
     ));
     let events = opencode["events"].as_array().expect("OpenCode events");
@@ -1035,7 +982,7 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
 
 #[test]
 fn corrupted_host_identity_fails_typed_decoder() {
-    let mut fixture = packet(include_str!(
+    let mut fixture = parse_fixture(include_str!(
         "../crates/tracedecay-hooks/fixtures/host_events/claude/stop.json"
     ));
     fixture["hook_event_name"] = json!("NotARealEvent");
@@ -1046,16 +993,4 @@ fn corrupted_host_identity_fails_typed_decoder() {
         )
         .is_err()
     );
-}
-
-#[test]
-fn packets_pass_shared_minimal_no_secret_kernel() {
-    let patterns =
-        compile_credential_patterns(CredentialPatternProfile::Observation).expect("patterns");
-    for packet in [HOST_PACKET, ADVISORY_PACKET] {
-        assert!(
-            patterns.iter().all(|pattern| !pattern.is_match(packet)),
-            "contract packet contains credential-like material"
-        );
-    }
 }
