@@ -14,10 +14,16 @@
 #
 # usage: scripts/require-exact-test.sh cargo test --test foo the_test -- --exact
 #
-# Set REQUIRE_EXACT_TEST_COUNT to expect a number other than 1.
+# Set REQUIRE_EXACT_TEST_COUNT to a number other than 1, or to `nonzero` for a
+# single-target suite whose membership may evolve but must never become empty.
 set -uo pipefail
 
 readonly EXPECTED="${REQUIRE_EXACT_TEST_COUNT:-1}"
+
+if [[ $EXPECTED != nonzero && ! $EXPECTED =~ ^[0-9]+$ ]]; then
+    echo "require-exact-test: REQUIRE_EXACT_TEST_COUNT must be an integer or nonzero" >&2
+    exit 2
+fi
 
 if [ "$#" -eq 0 ]; then
     echo "usage: $0 <command...>" >&2
@@ -44,8 +50,15 @@ if [ "$summaries" -ne 1 ]; then
     exit 1
 fi
 
-if ! grep -Eq "^test result: ok\. ${EXPECTED} passed; 0 failed" "$output"; then
-    echo "require-exact-test: expected '${EXPECTED} passed; 0 failed' but got:" >&2
+if [[ $EXPECTED == nonzero ]]; then
+    expected_pattern='^test result: ok\. [1-9][0-9]* passed; 0 failed'
+    expected_description='at least one passed; 0 failed'
+else
+    expected_pattern="^test result: ok\\. ${EXPECTED} passed; 0 failed"
+    expected_description="${EXPECTED} passed; 0 failed"
+fi
+if ! grep -Eq "$expected_pattern" "$output"; then
+    echo "require-exact-test: expected '$expected_description' but got:" >&2
     grep '^test result: ' "$output" >&2
     echo "The filter matched no test (libtest exits 0 for that), so this gate" \
         "proved nothing. Fix the test name, feature set, or #[cfg]." >&2

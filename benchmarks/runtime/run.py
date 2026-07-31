@@ -730,6 +730,17 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
     if args.events != 10_000:
         fail("the committed diagnostic authority fixes --events at 10000")
     binary = require_binary(args.binary)
+    authority_command = (
+        "cargo",
+        "nextest",
+        "run",
+        "--manifest-path",
+        os.fspath(REPOSITORY_ROOT / "crates" / "tracedecay-lsp" / "Cargo.toml"),
+        "--test",
+        "diagnostic_publication_stress",
+        "--no-tests=fail",
+        "--test-threads=1",
+    )
     output = Path(args.output)
     samples_path, policy_path = _artifact_paths(output)
     for path in (output, samples_path, policy_path):
@@ -748,14 +759,10 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         for index in range(args.samples):
             started_ns = time.monotonic_ns()
             result = run_host(
-                (
-                    os.fspath(binary),
-                    "--nocapture",
-                    "--test-threads=1",
-                ),
+                authority_command,
                 env=environment,
                 log_dir=workspace.path / f"logs-{index}",
-                timeout=20.0,
+                timeout=120.0,
                 termination_grace=0.2,
                 check=False,
             )
@@ -853,9 +860,10 @@ def _capture_diagnostic_authority(args: argparse.Namespace) -> int:
         "report_id": f"incident-{uuid.uuid4().hex}",
         "workload_id": "diagnostic-dedup-batch-rate",
         "authority": {
-            "kind": "prebuilt-integration-test",
-            "binary_sha256": sha256_file(binary),
+            "kind": "cargo-nextest-target",
+            "candidate_binary_sha256": sha256_file(binary),
             "target": "diagnostic_publication_stress",
+            "anti_vacuity": "--no-tests=fail",
         },
         "availability": {"state": "available", "detail": None},
         "sample_count": len(captured),

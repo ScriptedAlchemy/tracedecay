@@ -905,6 +905,9 @@ jobs:
       - name: Run blocking Clippy policy without default features
         run: cargo clippy --workspace --all-targets --no-default-features --locked -- -D warnings
 
+      - name: Run blocking Clippy policy with production features
+        run: cargo clippy --no-default-features --features production --locked -- -D warnings
+
   fmt:
     name: Format
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}

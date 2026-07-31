@@ -58,9 +58,6 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 print("tracedecay 0.0.0")
                 raise SystemExit(0)
 
-            if sys.argv[1:2] == ["--nocapture"]:
-                raise SystemExit(0)
-
             if sys.argv[1:2] == ["init"]:
                 raise SystemExit(0)
 
@@ -98,6 +95,35 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 raise SystemExit(0)
 
             raise SystemExit("unexpected command")
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def make_fake_cargo(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            record = Path(os.environ["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"])
+            with record.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(sys.argv[1:]) + "\\n")
+
+            if os.environ.get("TRACEDECAY_FAKE_NEXTEST_EMPTY") == "1":
+                print("no tests to run", file=sys.stderr)
+                raise SystemExit(4)
+            if sys.argv[1:3] != ["nextest", "run"]:
+                raise SystemExit("unexpected cargo command")
+            if "--no-tests=fail" not in sys.argv:
+                raise SystemExit("missing anti-vacuity")
+            print("nextest target completed")
             """
         ),
         encoding="utf-8",
@@ -402,6 +428,12 @@ class CaptureDispatchTest(unittest.TestCase):
             root = Path(directory)
             binary = root / "fake-diagnostic-authority"
             make_fake_binary(binary)
+            cargo = root / "cargo"
+            make_fake_cargo(cargo)
+            invocations = root / "nextest-invocations.jsonl"
+            environment = dict(os.environ)
+            environment["PATH"] = f"{root}{os.pathsep}{environment['PATH']}"
+            environment["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"] = str(invocations)
             output = root / "diagnostic-authority.json"
 
             result = run_runner(
@@ -417,15 +449,70 @@ class CaptureDispatchTest(unittest.TestCase):
                 "2",
                 "--output",
                 output,
+                environment=environment,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(output.read_text())
+            self.assertEqual(report["authority"]["kind"], "cargo-nextest-target")
+            self.assertEqual(
+                report["authority"]["target"], "diagnostic_publication_stress"
+            )
             self.assertEqual(report["sample_count"], 2)
             self.assertEqual(report["event_counts"]["attempted_total"], 20_000)
             self.assertEqual(report["event_counts"]["emitted_total"], 2)
             self.assertEqual(report["event_counts"]["queue_depth_max"], 1)
             self.assertEqual(report["outcome"]["process_leak_count"], 0)
+            commands = [
+                json.loads(line)
+                for line in invocations.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertEqual(command[:2], ["nextest", "run"])
+                self.assertIn("--no-tests=fail", command)
+                self.assertEqual(
+                    command[command.index("--test") + 1],
+                    "diagnostic_publication_stress",
+                )
+                self.assertNotIn(
+                    "publication_rate_and_queue_memory_stay_bounded_under_backpressure",
+                    command,
+                )
+
+    def test_diagnostic_authority_rejects_empty_nextest_selection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-diagnostic-authority"
+            make_fake_binary(binary)
+            make_fake_cargo(root / "cargo")
+            output = root / "diagnostic-authority.json"
+            environment = dict(os.environ)
+            environment["PATH"] = f"{root}{os.pathsep}{environment['PATH']}"
+            environment["TRACEDECAY_TEST_NEXTEST_INVOCATIONS"] = str(
+                root / "nextest-invocations.jsonl"
+            )
+            environment["TRACEDECAY_FAKE_NEXTEST_EMPTY"] = "1"
+
+            result = run_runner(
+                "incident",
+                "--binary",
+                binary,
+                "--workload",
+                "diagnostic-dedup-batch-rate",
+                "--authority-test",
+                "--events",
+                "10000",
+                "--samples",
+                "1",
+                "--output",
+                output,
+                environment=environment,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("diagnostic authority did not pass", result.stderr)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
