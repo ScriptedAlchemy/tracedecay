@@ -539,9 +539,9 @@ fn receipt_owned_paths(
     .unwrap_or_default()
 }
 
-/// Per-path disposition for the dry run. A foreign claim never reaches here —
-/// the planner refuses the whole preview with a typed ownership conflict — so
-/// the reportable dispositions are the three the plan can actually contain.
+/// Per-path disposition for the dry run. A foreign claim never reaches here:
+/// the planner refuses the whole preview with a typed ownership conflict, so
+/// `refuse-foreign` surfaces as that error rather than as a plan entry.
 fn artifact_disposition(
     action: &tracedecay::agents::host_bundle_v2::HostArtifactActionV1,
     receipt_owned: &std::collections::BTreeSet<String>,
