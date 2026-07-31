@@ -5,7 +5,6 @@ use crate::db::Database;
 use tracedecay_domain::{
     ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
-use tracedecay_store::FactContradictionStateV1;
 use tracedecay_store::{
     CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
     CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
@@ -32,16 +31,17 @@ use tracedecay_store::{
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactQueryCoverageV1, FactStore, FactStoreResult, FactWriteBatch,
+    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch,
     LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
     StoredFactV1,
 };
 
 use crud::{
     PROMOTE_OPERATION, add_compatibility_fact_tx, compatibility_fact_feedback_history_tx,
-    compatibility_fact_history_tx, find_compatibility_fact_by_content_digest_tx,
-    get_compatibility_fact_tx, get_retrieval_anchor_tx, inspect_compatibility_fact_tx,
-    list_compatibility_facts_tx, promote_compatibility_fact_proposal_tx,
+    compatibility_fact_history_tx, fact_response_metadata_tx,
+    find_compatibility_fact_by_content_digest_tx, get_compatibility_fact_tx,
+    get_retrieval_anchor_tx, inspect_compatibility_fact_tx, list_compatibility_facts_tx,
+    promote_compatibility_fact_proposal_tx,
     promote_compatibility_fact_proposal_with_disposition_tx, promote_fact_proposal_tx,
     query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
     query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
@@ -205,13 +205,22 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactCurrentQuery,
     ) -> FactStoreResult<FactCurrentResponseV1> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            let fact = runtime::query_fact_current(runtime, query)?;
-            let observed = u64::from(fact.is_some());
-            return Ok(FactCurrentResponseV1::new(
-                fact,
-                FactQueryCoverageV1::new(0, 0, observed, 0),
-                FactContradictionStateV1::Unknown,
-            ));
+            // The runtime read port answers the fact itself. It admits no
+            // response-shaped operation, so coverage and contradiction are
+            // measured from the retained authority the runtime is mounted on —
+            // `validate_mount` proves it is the identical SQLite file — instead
+            // of being reported as constants that no read ever observed.
+            let fact = runtime::query_fact_current(runtime, query.clone())?;
+            let snapshot = self
+                .db
+                .begin_memory_read_transaction(QUERY_OPERATION)
+                .await
+                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+            let metadata =
+                fact_response_metadata_tx(&snapshot, query.owner(), query.fact_id(), fact.as_ref())
+                    .await;
+            let (coverage, contradiction) = finish_read_snapshot(snapshot, metadata).await?;
+            return Ok(FactCurrentResponseV1::new(fact, coverage, contradiction));
         }
         let snapshot = self
             .db
@@ -269,13 +278,29 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactLineageQuery,
     ) -> FactStoreResult<FactLineageResponseV1> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            let events = runtime::query_fact_lineage(runtime, query)?;
-            let observed = u64::from(!events.is_empty());
-            return Ok(FactLineageResponseV1::new(
-                events,
-                FactQueryCoverageV1::new(0, 0, observed, 0),
-                FactContradictionStateV1::Unknown,
-            ));
+            // As in `query_fact_current_response`: the runtime answers the
+            // lineage page, and the accompanying coverage and contradiction are
+            // measured from the retained authority rather than fabricated.
+            let events = runtime::query_fact_lineage(runtime, query.clone())?;
+            let snapshot = self
+                .db
+                .begin_memory_read_transaction(QUERY_OPERATION)
+                .await
+                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+            let metadata = async {
+                let current =
+                    query_fact_current_tx(&snapshot, query.owner(), query.fact_id()).await?;
+                fact_response_metadata_tx(
+                    &snapshot,
+                    query.owner(),
+                    query.fact_id(),
+                    current.as_ref(),
+                )
+                .await
+            }
+            .await;
+            let (coverage, contradiction) = finish_read_snapshot(snapshot, metadata).await?;
+            return Ok(FactLineageResponseV1::new(events, coverage, contradiction));
         }
         let snapshot = self
             .db
@@ -973,6 +998,10 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
         ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1>;
     }
 }
+
+#[cfg(test)]
+#[path = "fact_response_metadata_test.rs"]
+mod fact_response_metadata_test;
 
 #[cfg(test)]
 #[path = "memory_repair_test.rs"]
