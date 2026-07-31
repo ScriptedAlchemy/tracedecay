@@ -90,7 +90,7 @@ impl SessionRequestBinding {
             self.budgets,
         )
         .map_err(|_| SessionAuthorizationError::WrongContext)?;
-        if &digest != &context.grant().digest {
+        if digest != context.grant().digest {
             return Err(SessionAuthorizationError::WrongContext);
         }
         Ok(())
