@@ -31,9 +31,8 @@ use tracedecay_store::{
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch,
-    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
+    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{

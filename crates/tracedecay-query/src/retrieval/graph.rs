@@ -48,16 +48,9 @@ pub struct GraphLaneRequest {
 
 impl GraphLaneRequest {
     pub fn validate(&self) -> Result<(), RetrievalPortError> {
-        self.base
-            .budget
-            .validate()
-            .map_err(contract_error)?;
-        self.budget
-            .validate()
-            .map_err(contract_error)?;
-        self.generation
-            .validate()
-            .map_err(contract_error)?;
+        self.base.budget.validate().map_err(contract_error)?;
+        self.budget.validate().map_err(contract_error)?;
+        self.generation.validate().map_err(contract_error)?;
         if self.max_depth == 0 {
             return Err(RetrievalPortError::Contract(
                 "graph traversal depth must be positive".to_owned(),
@@ -240,9 +233,7 @@ where
         request: &GraphLaneRequest,
         batch: &RetrieverBatch<GraphLaneEvidence>,
     ) -> Result<RetrieverBatch<GraphLaneEvidence>, RetrievalPortError> {
-        batch
-            .validate()
-            .map_err(contract_error)?;
+        batch.validate().map_err(contract_error)?;
         if batch.coverage.eligible < batch.candidates.len() as u64 {
             return Err(RetrievalPortError::Contract(
                 "graph coverage cannot report fewer eligible candidates than it emitted".to_owned(),
@@ -326,9 +317,7 @@ where
                 exhausted: source_exhausted && truncated == 0,
             }),
         };
-        rebuilt
-            .validate()
-            .map_err(contract_error)?;
+        rebuilt.validate().map_err(contract_error)?;
         Ok(rebuilt)
     }
 }

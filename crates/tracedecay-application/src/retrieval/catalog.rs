@@ -12,10 +12,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
 };
 
+use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::current_bindings;
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";

@@ -648,12 +648,7 @@ impl McpServer {
     /// Returns the `SQLite` schema documentation as a markdown resource.
     /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
     pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
-        Self::resource_contents(
-            id,
-            "tracedecay://schema",
-            "text/markdown",
-            SCHEMA_MARKDOWN,
-        )
+        Self::resource_contents(id, "tracedecay://schema", "text/markdown", SCHEMA_MARKDOWN)
     }
 
     /// Returns graph statistics as a JSON resource.

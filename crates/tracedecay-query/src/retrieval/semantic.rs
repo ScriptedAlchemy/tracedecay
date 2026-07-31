@@ -447,9 +447,7 @@ where
                 exhausted: truncated == 0,
             }),
         };
-        batch
-            .validate()
-            .map_err(contract_error)?;
+        batch.validate().map_err(contract_error)?;
         if self.control.is_cancelled() {
             return Ok(RetrieverOutcome::Cancelled);
         }

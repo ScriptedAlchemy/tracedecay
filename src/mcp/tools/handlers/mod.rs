@@ -1710,9 +1710,9 @@ mod tests {
             McpToolDispatchGroup::Edit => {
                 owned(dispatch_edit_tools(tool_name, cg, invalid_args, options).await)
             }
-            McpToolDispatchGroup::Health => owned(
-                dispatch_health_tools(tool_name, cg, invalid_args, None, None, options).await,
-            ),
+            McpToolDispatchGroup::Health => {
+                owned(dispatch_health_tools(tool_name, cg, invalid_args, None, None, options).await)
+            }
             McpToolDispatchGroup::Memory => {
                 owned(dispatch_memory_tools(tool_name, cg, invalid_args, options).await)
             }

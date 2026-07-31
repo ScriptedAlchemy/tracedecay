@@ -96,9 +96,7 @@ impl DiagnosticRecordStateKindV1 {
 /// Projects a typed record state onto its `(record_state, state_generation)`
 /// column pair. The back-pointer borrows from `state`, so a caller that needs
 /// an owned column value copies it explicitly.
-pub fn diagnostic_state_columns(
-    state: &DiagnosticRecordStateV1,
-) -> (&'static str, Option<&str>) {
+pub fn diagnostic_state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<&str>) {
     match state {
         DiagnosticRecordStateV1::Current => (DIAGNOSTIC_STATE_CURRENT, None),
         DiagnosticRecordStateV1::Superseded {
@@ -210,8 +208,8 @@ mod tests {
         ];
         for state in cases {
             let (column, back_pointer) = diagnostic_state_columns(&state);
-            let kind = DiagnosticRecordStateKindV1::parse(column)
-                .expect("encoded state text must decode");
+            let kind =
+                DiagnosticRecordStateKindV1::parse(column).expect("encoded state text must decode");
             assert_eq!(kind.as_str(), column);
             assert_eq!(
                 kind.state_generation_field().is_some(),

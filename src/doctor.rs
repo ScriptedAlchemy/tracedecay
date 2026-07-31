@@ -281,9 +281,7 @@ fn report_host_component_state(
 
 /// Name the exact receipt-owned paths whose bytes moved, so the warning points
 /// at files rather than at a component label.
-fn drifted_paths(
-    component: &agents::host_bundle_v2::HostBundleComponentDoctorResultV1,
-) -> String {
+fn drifted_paths(component: &agents::host_bundle_v2::HostBundleComponentDoctorResultV1) -> String {
     use agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
 
     let paths = component

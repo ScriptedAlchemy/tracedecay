@@ -10,10 +10,10 @@ use tracedecay_tool_catalog::{
     TerminalStateContract, UseCaseId,
 };
 
+use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::current_bindings;
 
 use super::callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
