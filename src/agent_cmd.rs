@@ -88,7 +88,10 @@ pub(crate) async fn handle_host_bundle_component_command(
             }
             // A skipped host is a reported unavailable result, never a silent
             // success for the sweep that contained it.
-            eprintln!("skipped: {}", unsupported_host_component_set_message(agent_id));
+            eprintln!(
+                "skipped: {}",
+                unsupported_host_component_set_message(agent_id)
+            );
             continue;
         };
         if options.dry_run {
@@ -129,12 +132,13 @@ pub(crate) async fn handle_host_bundle_component_command(
 /// Truthful reason a host component set is unavailable, so a skipped or
 /// refused agent never reads as an empty success.
 fn unsupported_host_component_set_message(agent: &str) -> String {
-    match host_kind_for_agent(agent).ok().and_then(
-        tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason,
-    ) {
-        Some(reason) => format!(
-            "agent {agent:?} has no installable first-party host component set: {reason:?}"
-        ),
+    match host_kind_for_agent(agent)
+        .ok()
+        .and_then(tracedecay::agents::host_bundle_registry::unsupported_host_component_set_reason)
+    {
+        Some(reason) => {
+            format!("agent {agent:?} has no installable first-party host component set: {reason:?}")
+        }
         None => format!("agent {agent:?} has no canonical first-party host component set"),
     }
 }

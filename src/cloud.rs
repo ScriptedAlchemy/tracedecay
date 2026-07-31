@@ -241,7 +241,7 @@ pub fn is_beta() -> bool {
     env!("CARGO_PKG_VERSION").contains('-')
 }
 
-/// Returns true if `latest` is strictly newer than `current` using SemVer
+/// Returns true if `latest` is strictly newer than `current` using `SemVer`
 /// precedence (`Version::cmp_precedence`), so build metadata does not affect
 /// ordering. Stable and beta remain separate channels: a prerelease never
 /// dominates a stable release (or the reverse), even when the numeric core is

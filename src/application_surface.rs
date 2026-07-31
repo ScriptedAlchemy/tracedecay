@@ -1410,7 +1410,7 @@ where
             ),
         )
         .into_http_response();
-    };
+    }
     let Some((scope, outcome)) = select_outcome(outcome) else {
         return work_adapter_unavailable(
             request_id,
@@ -3194,13 +3194,15 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::AffectedTests => {
             let request: AffectedTestsSurfaceRequest = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-            FeedbackSurfaceRequest::new(request.request_handle.clone())?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
             Ok(ApplicationSurfaceRequest::AffectedTests(request))
         }
         ApplicationSurfaceOperation::FeedbackImpact => {
             let request: FeedbackImpactSurfaceRequest = serde_json::from_value(value)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-            FeedbackSurfaceRequest::new(request.request_handle.clone())?;
+            FeedbackSurfaceRequest::new(request.request_handle.clone())
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidRequestHandle)?;
             Ok(ApplicationSurfaceRequest::FeedbackImpact(request))
         }
         ApplicationSurfaceOperation::TestResults => serde_json::from_value(value)

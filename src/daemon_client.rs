@@ -747,13 +747,8 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                     };
                     let request = match (operation, typed) {
                         (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
-                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                                request,
-                            ),
-                        )
-                        | (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
                             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                                 request,
                             ),

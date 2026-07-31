@@ -2,8 +2,7 @@
 
 use tracedecay_automation::AutomationRunRecord;
 pub(crate) use tracedecay_automation::apply_policy::{
-    MemoryApplyDecision, MemoryApplyPolicy, MemoryApplySubject, record_has_auto_applied_memory_ops,
-    value_as_usize,
+    MemoryApplyDecision, MemoryApplyPolicy, record_has_auto_applied_memory_ops, value_as_usize,
 };
 
 use super::run_ledger::AutomationRunLedgerRecord;

@@ -245,14 +245,16 @@ fn exact_query_snapshot_is_atomic_and_publication_gated() {
     ));
 
     let other_project = id::<ProjectId>("project.other");
-    assert!(store
-        .query_authority_snapshot(
-            &other_project,
-            &writer.scope,
-            &writer.authority.fence,
-            observed_at,
-        )
-        .is_err());
+    assert!(
+        store
+            .query_authority_snapshot(
+                &other_project,
+                &writer.scope,
+                &writer.authority.fence,
+                observed_at,
+            )
+            .is_err()
+    );
 }
 
 #[test]

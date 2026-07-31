@@ -325,11 +325,12 @@ mod tests {
     }
 
     struct Sink {
+        id: String,
         installed: Cell<bool>,
     }
     impl DurableFenceSinkV1 for Sink {
         fn sink_id(&self) -> &str {
-            "writer"
+            &self.id
         }
         fn install_fence(
             &self,
@@ -393,6 +394,7 @@ mod tests {
     #[test]
     fn every_sink_is_installed_before_serving() {
         let sink = Sink {
+            id: "writer".to_owned(),
             installed: Cell::new(false),
         };
         let coordinator = RemotePromotionCoordinatorV1 {

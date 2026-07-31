@@ -13,8 +13,7 @@ use tracedecay_migrate::{
     FinalV2PreservationReceipt, FinalV2SchemaEvidence, FinalV2TransformReceipt,
     LAST_RELEASED_SCHEMA_ID, PublicationCasGrant, ReadOnlyReleasedSchemaInspection,
     ReleasedDurableFamily, ReleasedSchemaFixture, ReleasedStoreKind, ReleasedV0067Fixture,
-    VerifiedBackupIdentity,
-    execute_final_v2_migration_with_faults,
+    VerifiedBackupIdentity, execute_final_v2_migration_with_faults,
 };
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,

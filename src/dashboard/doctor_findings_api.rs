@@ -42,6 +42,7 @@ pub(crate) struct DashboardDoctorRemediationDescriptorV1 {
 }
 
 impl DashboardDoctorRemediationDescriptorV1 {
+    #[cfg(test)]
     fn operation(&self) -> &tracedecay_application::doctor::DoctorOwningOperationRefV1 {
         self.descriptor.operation()
     }

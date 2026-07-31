@@ -58,10 +58,14 @@ async fn request_path(
         service.endpoint()
     );
     if let Some(authorization) = authorization {
-        request.push_str(&format!("Authorization: {authorization}\r\n"));
+        request.push_str("Authorization: ");
+        request.push_str(authorization);
+        request.push_str("\r\n");
     }
     if let Some(origin) = origin {
-        request.push_str(&format!("Origin: {origin}\r\n"));
+        request.push_str("Origin: ");
+        request.push_str(origin);
+        request.push_str("\r\n");
     }
     request.push_str("\r\n");
     stream

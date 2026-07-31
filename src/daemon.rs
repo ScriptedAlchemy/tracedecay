@@ -2722,7 +2722,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                 tracedecay_application::InvocationTarget::CurrentProject => {
                     tracedecay_application::InvocationTarget::Resolved(self.scope.clone())
                 }
-                target => target,
+                target @ tracedecay_application::InvocationTarget::Resolved(_) => target,
             };
             match request {
                 tracedecay_application::ApplicationRequest::Surface { binding, payload } => {
@@ -2752,13 +2752,8 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                     };
                     let request = match (operation, typed) {
                         (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
-                            crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                                request,
-                            ),
-                        )
-                        | (
-                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+                            crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet
+                            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
                             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                                 request,
                             ),

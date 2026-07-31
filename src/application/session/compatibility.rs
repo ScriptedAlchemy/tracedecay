@@ -242,7 +242,10 @@ mod tests {
             content.ends_with("::lossless-tail"),
             "source content must remain byte-exact after derivation"
         );
-        assert_eq!(content.chars().count(), 300_000 + "::lossless-tail".chars().count());
+        assert_eq!(
+            content.chars().count(),
+            300_000 + "::lossless-tail".chars().count()
+        );
         assert_eq!(
             crate::sessions::lcm::MAX_DERIVED_TEXT_CHARS,
             MAX_DERIVED_TEXT_CHARS,
