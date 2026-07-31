@@ -408,7 +408,7 @@ async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
     std::fs::write(&layout.sessions_db_path, b"preserve-sessions")?;
 
     let mut counters = DoctorCounters::new();
-    let healthy = check_database(
+    let health = check_database(
         &mut counters,
         &serde_json::json!({
             "storage_health": {
@@ -422,7 +422,7 @@ async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
         }),
     );
 
-    assert!(!healthy);
+    assert!(matches!(health, DatabaseHealth::Failed { .. }));
     assert_eq!(counters.issues, 1);
     assert_eq!(std::fs::read(&layout.graph_db_path)?, corrupt_db);
     assert_eq!(std::fs::read(&wal_path)?, b"preserve-wal");
@@ -472,7 +472,7 @@ async fn database_check_is_read_only_while_a_writer_is_live()
     );
 
     let mut counters = DoctorCounters::new();
-    let healthy = check_database(
+    let health = check_database(
         &mut counters,
         &serde_json::json!({
             "storage_health": {
@@ -487,7 +487,7 @@ async fn database_check_is_read_only_while_a_writer_is_live()
             }
         }),
     );
-    assert!(healthy);
+    assert_eq!(health, DatabaseHealth::Healthy);
 
     let freelist_after: i64 = {
         let mut rows = writer.conn().query("PRAGMA freelist_count", ()).await?;
@@ -521,7 +521,10 @@ fn database_authority_failures_are_enforced_and_unavailable_is_degraded() {
         }
     });
     let mut healthy_counters = DoctorCounters::new();
-    assert!(check_database(&mut healthy_counters, &healthy_status));
+    assert_eq!(
+        check_database(&mut healthy_counters, &healthy_status),
+        DatabaseHealth::Healthy
+    );
     assert_eq!(healthy_counters.issues, 0);
 
     let failed_status = serde_json::json!({
@@ -532,32 +535,143 @@ fn database_authority_failures_are_enforced_and_unavailable_is_degraded() {
         }
     });
     let mut failed_counters = DoctorCounters::new();
-    assert!(!check_database(&mut failed_counters, &failed_status));
+    assert!(matches!(
+        check_database(&mut failed_counters, &failed_status),
+        DatabaseHealth::Failed { .. }
+    ));
     assert_eq!(failed_counters.issues, 1);
 
     let mut missing_counters = DoctorCounters::new();
-    assert!(check_database(
-        &mut missing_counters,
-        &serde_json::json!({ "storage_health": { "quick_check_ok": true } }),
+    assert!(matches!(
+        check_database(
+            &mut missing_counters,
+            &serde_json::json!({ "storage_health": { "quick_check_ok": true } }),
+        ),
+        DatabaseHealth::Unknown { .. }
     ));
     assert_eq!(missing_counters.issues, 0);
     assert_eq!(missing_counters.warnings, 1);
 
     let mut bounded_counters = DoctorCounters::new();
-    assert!(check_database(
-        &mut bounded_counters,
-        &serde_json::json!({
-            "storage_health": {
-                "canonical_db_path": "/profile/project.db",
-                "quick_check_ok": null,
-                "quick_check_error": null,
-                "authority_audit_ok": null,
-                "authority_audit_reason": "authority_audit_not_run"
-            }
-        }),
-    ));
+    assert!(
+        matches!(
+            check_database(
+                &mut bounded_counters,
+                &serde_json::json!({
+                    "storage_health": {
+                        "canonical_db_path": "/profile/project.db",
+                        "quick_check_ok": null,
+                        "quick_check_error": null,
+                        "authority_audit_ok": null,
+                        "authority_audit_reason": "authority_audit_not_run"
+                    }
+                }),
+            ),
+            DatabaseHealth::Unknown { .. }
+        ),
+        "an audit that did not run must stay distinguishable, not become healthy"
+    );
     assert_eq!(bounded_counters.issues, 0);
     assert_eq!(bounded_counters.warnings, 2);
+
+    // With integrity observed healthy, the authority reason is what survives.
+    let mut not_run_counters = DoctorCounters::new();
+    assert_eq!(
+        check_database(
+            &mut not_run_counters,
+            &serde_json::json!({
+                "storage_health": {
+                    "quick_check_ok": true,
+                    "authority_audit_ok": null,
+                    "authority_audit_reason": "authority_audit_not_run"
+                }
+            }),
+        ),
+        DatabaseHealth::Unknown {
+            reason: "authority_audit_not_run".to_string()
+        }
+    );
+    assert_eq!(not_run_counters.issues, 0);
+    assert_eq!(not_run_counters.warnings, 1);
+}
+
+#[test]
+fn authority_audit_failure_preserves_the_observed_detail() {
+    assert_eq!(
+        authority_audit_failure_message("authority_invariant_failed", Some("2 orphaned rows")),
+        "Observation database authority audit failed [authority_invariant_failed]: 2 orphaned rows"
+    );
+    assert_eq!(
+        authority_audit_failure_message("authority_invariant_failed", None),
+        "Observation database authority audit failed [authority_invariant_failed]"
+    );
+    // Older producers mirrored the reason into the detail key.
+    assert_eq!(
+        authority_audit_failure_message(
+            "authority_invariant_failed",
+            Some("authority_invariant_failed")
+        ),
+        "Observation database authority audit failed [authority_invariant_failed]"
+    );
+    assert_eq!(
+        authority_audit_failure_message("something_else", Some("detail")),
+        "Observation database authority audit failed [authority_audit_failed]: detail"
+    );
+}
+
+#[test]
+fn unavailable_reason_falls_back_to_the_legacy_error_key() {
+    let mut counters = DoctorCounters::new();
+    let health = check_database(
+        &mut counters,
+        &serde_json::json!({
+            "storage_health": {
+                "quick_check_ok": true,
+                "authority_audit_ok": null,
+                "authority_audit_error": "authority_store_missing"
+            }
+        }),
+    );
+
+    assert_eq!(
+        health,
+        DatabaseHealth::Unknown {
+            reason: "authority_store_missing".to_string()
+        },
+        "a producer that only wrote the legacy error key must not be flattened to \
+         authority_audit_unavailable"
+    );
+    assert_eq!(counters.issues, 0);
+    assert_eq!(counters.warnings, 1);
+}
+
+#[test]
+fn unknown_storage_health_is_not_a_healthy_verdict_and_does_not_gate() {
+    let unknown = DatabaseHealth::Unknown {
+        reason: "authority_audit_not_run".to_string(),
+    };
+    assert_ne!(unknown, DatabaseHealth::Healthy);
+
+    // Non-fatal for the exit code...
+    let counters = DoctorCounters::new();
+    super::doctor_result(&counters, Ok(serde_json::json!({})), &unknown).unwrap();
+
+    // ...but never laundered into health, and still severity-ordered below a
+    // real failure.
+    assert_eq!(
+        DatabaseHealth::Healthy.merge(unknown.clone()),
+        unknown,
+        "unknown must dominate healthy"
+    );
+    let failed = DatabaseHealth::Failed {
+        reason: "integrity_check_failed".to_string(),
+    };
+    assert_eq!(
+        unknown.clone().merge(failed.clone()),
+        failed,
+        "failed must dominate unknown"
+    );
+    assert_eq!(failed.clone().merge(unknown), failed);
 }
 
 #[tokio::test]
@@ -1980,7 +2094,8 @@ fn doctor_result_fails_when_checks_report_issues() {
     let mut counters = DoctorCounters::new();
     counters.fail("broken integration");
 
-    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap_err();
+    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), &DatabaseHealth::Healthy)
+        .unwrap_err();
     assert_eq!(error.to_string(), "config error: doctor found 1 issue(s)");
 }
 
@@ -1989,7 +2104,7 @@ fn doctor_result_allows_warnings_without_issues() {
     let mut counters = DoctorCounters::new();
     counters.warn("optional check unavailable");
 
-    super::doctor_result(&counters, Ok(serde_json::json!({})), true).unwrap();
+    super::doctor_result(&counters, Ok(serde_json::json!({})), &DatabaseHealth::Healthy).unwrap();
 }
 
 #[test]
@@ -2000,13 +2115,17 @@ fn doctor_result_preserves_daemon_and_storage_errors() {
         message: "daemon unavailable".to_string(),
     };
 
-    let error = super::doctor_result(&counters, Err(daemon_error), false).unwrap_err();
+    let failed = DatabaseHealth::Failed {
+        reason: "daemon_diagnostics_unavailable".to_string(),
+    };
+
+    let error = super::doctor_result(&counters, Err(daemon_error), &failed).unwrap_err();
     assert_eq!(error.to_string(), "config error: daemon unavailable");
 
-    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), false).unwrap_err();
+    let error = super::doctor_result(&counters, Ok(serde_json::json!({})), &failed).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "config error: doctor storage health check failed"
+        "config error: doctor storage health check failed [daemon_diagnostics_unavailable]"
     );
 }
 

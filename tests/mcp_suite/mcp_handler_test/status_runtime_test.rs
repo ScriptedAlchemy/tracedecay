@@ -297,6 +297,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     // journal_mode should remain visible through the canonical database status surface.
     assert!(db["journal_mode"].is_string() || db["journal_mode"].is_null());
     assert!(db.get("authority_audit_ok").is_none());
+    assert!(db.get("authority_audit_reason").is_none());
     assert!(db.get("authority_audit_error").is_none());
 }
 
@@ -354,6 +355,15 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     let db = &parsed["database"];
     assert_eq!(db["authority_audit_ok"], true);
+    // A passing audit publishes the key but leaves both the typed reason and
+    // the observed detail empty; a reason is only present when the audit failed
+    // or could not run.
+    assert!(
+        db.as_object()
+            .is_some_and(|fields| fields.contains_key("authority_audit_reason")),
+        "an audit that ran must publish the reason key: {db}"
+    );
+    assert!(db["authority_audit_reason"].is_null());
     assert!(db["authority_audit_error"].is_null());
 }
 
