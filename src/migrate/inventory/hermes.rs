@@ -8,7 +8,7 @@ use super::project::{
 use super::sqlite::sqlite_quick_check;
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
-use crate::yaml_scalar::decode_yaml_scalar;
+use tracedecay_automation::skill_frontmatter::decode_yaml_scalar;
 use tracedecay_migrate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
     StoreBrand, StoreInventory, StoreRole, StoreStatus,
@@ -103,17 +103,25 @@ async fn inspect_hermes_profile_dir(
     .await?;
     inspect_hermes_state_db(profile_dir, seen_state_dbs, stores, options.integrity).await;
 
-    if let Some(project_root) = read_hermes_project_pin(&profile_dir.join("config.yaml")) {
-        inspect_data_dir_candidate(
-            &project_root,
-            TRACEDECAY_DIR,
-            options,
-            seen_data_dirs,
-            stores,
-            skipped,
-            StoreRole::CodeProjectStore,
-        )
-        .await?;
+    let config_path = profile_dir.join("config.yaml");
+    match read_hermes_project_pin(&config_path) {
+        HermesProjectPin::Pinned(project_root) => {
+            inspect_data_dir_candidate(
+                &project_root,
+                TRACEDECAY_DIR,
+                options,
+                seen_data_dirs,
+                stores,
+                skipped,
+                StoreRole::CodeProjectStore,
+            )
+            .await?;
+        }
+        HermesProjectPin::Malformed(reason) => skipped.push(SkippedPath {
+            path: config_path,
+            reason,
+        }),
+        HermesProjectPin::Absent => {}
     }
 
     Ok(())
@@ -188,12 +196,28 @@ fn push_unique_path(candidates: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, 
     }
 }
 
-fn read_hermes_project_pin(config_path: &Path) -> Option<PathBuf> {
-    let config = std::fs::read_to_string(config_path).ok()?;
+/// What a Hermes `config.yaml` says about the `tracedecay` plugin's pinned
+/// project root.
+enum HermesProjectPin {
+    /// Unreadable config, no `plugins` section, no `tracedecay` block, or no
+    /// `project_root` key — nothing to inventory and nothing to report.
+    Absent,
+    /// A `project_root` is pinned but its YAML scalar does not decode. The
+    /// project store behind it is real and would be missed by a migration, so
+    /// this has to surface rather than read as "no pin".
+    Malformed(String),
+    Pinned(PathBuf),
+}
+
+fn read_hermes_project_pin(config_path: &Path) -> HermesProjectPin {
+    let Ok(config) = std::fs::read_to_string(config_path) else {
+        return HermesProjectPin::Absent;
+    };
     let lines = config.lines().collect::<Vec<_>>();
-    let (plugins_start, plugins_end) = find_top_level_section(&lines, "plugins")?;
+    let Some((plugins_start, plugins_end)) = find_top_level_section(&lines, "plugins") else {
+        return HermesProjectPin::Absent;
+    };
     read_project_pin_from_plugin_block(&lines, plugins_start, plugins_end, "tracedecay")
-        .map(PathBuf::from)
 }
 
 fn read_project_pin_from_plugin_block(
@@ -201,23 +225,28 @@ fn read_project_pin_from_plugin_block(
     plugins_start: usize,
     plugins_end: usize,
     plugin_key: &str,
-) -> Option<String> {
-    let (block_start, block_end) =
-        find_indented_section(lines, plugins_start + 1, plugins_end, 2, plugin_key)?;
-    lines
+) -> HermesProjectPin {
+    let Some((block_start, block_end)) =
+        find_indented_section(lines, plugins_start + 1, plugins_end, 2, plugin_key)
+    else {
+        return HermesProjectPin::Absent;
+    };
+    let pinned = lines
         .iter()
         .take(block_end)
         .skip(block_start + 1)
         .find_map(|line| line.trim().strip_prefix("project_root:"))
-        .and_then(|value| {
-            let value = value.trim();
-            if value.is_empty() {
-                return None;
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match pinned {
+        None => HermesProjectPin::Absent,
+        Some(value) => match decode_yaml_scalar(value) {
+            Ok(decoded) => HermesProjectPin::Pinned(PathBuf::from(decoded.into_owned())),
+            Err(error) => {
+                HermesProjectPin::Malformed(format!("malformed tracedecay project_root: {error}"))
             }
-            decode_yaml_scalar(value)
-                .ok()
-                .map(std::borrow::Cow::into_owned)
-        })
+        },
+    }
 }
 
 fn find_top_level_section(lines: &[&str], key: &str) -> Option<(usize, usize)> {

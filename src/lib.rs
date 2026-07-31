@@ -130,4 +130,3 @@ pub mod version;
 #[cfg(windows)]
 mod windows_file;
 pub mod worktree;
-mod yaml_scalar;
