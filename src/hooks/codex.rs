@@ -132,19 +132,7 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
 
 async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let prompt = prompt_like_text(&parsed)?;
-    let session_id = event_session_id(&parsed);
-    match event_project_root_with_identity(&parsed).await {
-        Some(root) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                &root,
-                session_id.as_deref(),
-                &prompt,
-            ))
-            .await
-        }
-        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
-    }
+    memory_inject::prompt_memory_recall(&parsed, || event_project_root_with_identity(&parsed)).await
 }
 
 /// Builds Codex session/prompt context.

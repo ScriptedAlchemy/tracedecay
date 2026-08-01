@@ -265,19 +265,10 @@ async fn ingest_kiro_transcript_for_event(
 
 async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let prompt = super::prompt_like_text(&parsed)?;
-    let session_id = event_session_id(&parsed);
-    match event_project_root(&parsed) {
-        Some(root) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                &root,
-                session_id.as_deref(),
-                &prompt,
-            ))
-            .await
-        }
-        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
-    }
+    // Kiro resolves the root from the event `cwd` alone, without the registry
+    // lookup Codex and Cursor make.
+    memory_inject::prompt_memory_recall(&parsed, || std::future::ready(event_project_root(&parsed)))
+        .await
 }
 
 async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytics::HookTimingSpan) {

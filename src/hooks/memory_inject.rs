@@ -645,6 +645,37 @@ pub async fn combined_prompt_memory_recall(
     Some(text)
 }
 
+/// Prompt-shaped memory recall for a host's prompt-submit hook.
+///
+/// Codex, Cursor, and Kiro each carried a byte-identical copy of this: read the
+/// prompt text, read the session id, resolve the project root, then route to
+/// project-scoped or user-scoped recall. Only the root resolver genuinely
+/// differs per host (identity-aware for Codex and Cursor, `cwd`-only for Kiro),
+/// so it arrives as a lazily invoked closure — an event with no prompt still
+/// costs no root resolution.
+pub(super) async fn prompt_memory_recall<F, Fut>(
+    parsed: &serde_json::Value,
+    resolve_root: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<std::path::PathBuf>>,
+{
+    let prompt = super::prompt_like_text(parsed)?;
+    let session_id = super::event_session_id(parsed);
+    match resolve_root().await {
+        Some(root) => {
+            Box::pin(combined_prompt_memory_recall(
+                &root,
+                session_id.as_deref(),
+                &prompt,
+            ))
+            .await
+        }
+        None => user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cursor materialized memory rule
 // ---------------------------------------------------------------------------
