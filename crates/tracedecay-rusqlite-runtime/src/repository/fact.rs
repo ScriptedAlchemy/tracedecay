@@ -11,7 +11,10 @@ use tracedecay_store::{
     StoredFactV1,
 };
 
-use super::support::{decode, encode, invalid, usize_to_i64};
+use super::support::{
+    Column, ColumnValue, decode, encode, idempotent_insert, insert_row, invalid, stored_row_matches,
+    usize_to_i64,
+};
 
 #[derive(Clone, Default)]
 pub struct FactExecutor;
@@ -264,130 +267,167 @@ fn assertion_header_json(assertion: &FactAssertionV1) -> rusqlite::Result<String
     })
 }
 
+/// Everything the write path persists for one assertion, derived once.
+///
+/// Both the insert and the replay comparison read from this, so the stored row
+/// and the row a replay is checked against cannot drift apart.
+struct PersistedAssertion<'a> {
+    /// The four columns every row of an assertion is filed under.
+    scope: Vec<Column<'a>>,
+    /// `memory_v2_assertions` keyed by `assertion_id` alone, matching the
+    /// `UNIQUE(assertion_id, owner_json)` that a colliding write would trip.
+    header: Vec<Column<'a>>,
+    supersession: Vec<String>,
+    payload: Vec<Column<'a>>,
+    evidence: Vec<EvidenceRow>,
+}
+
+/// One assertion evidence row in canonical ordinal order.
+type EvidenceRow = (String, String, String, String);
+
+impl<'a> PersistedAssertion<'a> {
+    fn derive(owner: &OwnerColumns, assertion: &FactAssertionV1) -> rusqlite::Result<Self> {
+        let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
+        Ok(Self {
+            scope: vec![
+                ("assertion_id", assertion.assertion_id().as_str().into()),
+                ("fact_id", assertion.fact_id().as_str().into()),
+                ("owner_kind", owner.kind.into()),
+                ("project_id", owner.project_id.clone().into()),
+            ],
+            header: vec![
+                ("fact_id", assertion.fact_id().as_str().into()),
+                ("owner_kind", owner.kind.into()),
+                ("project_id", owner.project_id.clone().into()),
+                ("owner_json", owner.json.clone().into()),
+                (
+                    "assertion_header_json",
+                    assertion_header_json(assertion)?.into(),
+                ),
+                ("kind_json", encode(assertion.kind())?.into()),
+                ("payload_reference_json", encode(&payload_reference)?.into()),
+                (
+                    "receipt_json",
+                    encode(assertion.payload().receipt())?.into(),
+                ),
+                ("asserted_at", assertion.asserted_at().0.into()),
+                (
+                    "actor_id",
+                    assertion.actor_id().map(|actor| actor.as_str()).into(),
+                ),
+            ],
+            supersession: superseded_assertions(assertion.kind())
+                .into_iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
+            payload: vec![
+                ("payload_json", encode(assertion.payload())?.into()),
+                ("content", assertion.payload().content().into()),
+            ],
+            evidence: assertion
+                .evidence()
+                .iter()
+                .map(|evidence| {
+                    Ok((
+                        evidence.evidence_id().as_str().to_owned(),
+                        encode(evidence)?,
+                        owner.json.clone(),
+                        evidence.anchor_id().as_str().to_owned(),
+                    ))
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        })
+    }
+
+    fn header_key(&self) -> &[Column<'a>] {
+        &self.scope[..1]
+    }
+
+    fn scope_bindings(&self) -> impl Iterator<Item = &ColumnValue> {
+        self.scope.iter().map(|(_, value)| value)
+    }
+}
+
 fn insert_assertion(
     savepoint: &Savepoint<'_>,
     owner: &OwnerColumns,
     assertion: &FactAssertionV1,
 ) -> rusqlite::Result<()> {
-    if assertion_exists(savepoint, assertion.assertion_id())? {
-        return if assertion_matches(savepoint, owner, assertion)? {
+    let persisted = PersistedAssertion::derive(owner, assertion)?;
+    if let Some(header_matches) = stored_row_matches(
+        savepoint,
+        "memory_v2_assertions",
+        persisted.header_key(),
+        &persisted.header,
+    )? {
+        return if header_matches
+            && assertion_children_match(savepoint, owner, assertion.fact_id(), &persisted)?
+        {
             Ok(())
         } else {
             Err(invalid("assertion identity collision"))
         };
     }
-    let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
-    let header = assertion_header_json(assertion)?;
-    savepoint.execute(
-        "INSERT INTO memory_v2_assertions (
-            assertion_id, fact_id, owner_kind, project_id, owner_json,
-            assertion_header_json, kind_json, payload_reference_json,
-            receipt_json, asserted_at, actor_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            assertion.assertion_id().as_str(),
-            assertion.fact_id().as_str(),
-            owner.kind,
-            owner.project_id,
-            owner.json,
-            header,
-            encode(assertion.kind())?,
-            encode(&payload_reference)?,
-            encode(assertion.payload().receipt())?,
-            assertion.asserted_at().0,
-            assertion.actor_id().map(|actor| actor.as_str()),
-        ],
+    insert_row(
+        savepoint,
+        "memory_v2_assertions",
+        &[persisted.header_key(), &persisted.header].concat(),
     )?;
-    for (ordinal, superseded) in superseded_assertions(assertion.kind()).iter().enumerate() {
-        savepoint.execute(
-            "INSERT INTO memory_v2_assertion_supersession (
-                assertion_id, fact_id, owner_kind, project_id,
-                superseded_assertion_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                assertion.assertion_id().as_str(),
-                assertion.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-                superseded.as_str(),
-                usize_to_i64(ordinal, "assertion supersession ordinal")?,
-            ],
+    for (ordinal, superseded) in persisted.supersession.iter().enumerate() {
+        insert_row(
+            savepoint,
+            "memory_v2_assertion_supersession",
+            &[
+                persisted.scope.as_slice(),
+                &[
+                    ("superseded_assertion_id", superseded.as_str().into()),
+                    (
+                        "ordinal",
+                        usize_to_i64(ordinal, "assertion supersession ordinal")?.into(),
+                    ),
+                ],
+            ]
+            .concat(),
         )?;
     }
-    savepoint.execute(
-        "INSERT INTO memory_v2_assertion_payloads (
-            assertion_id, fact_id, owner_kind, project_id, payload_json, content
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            assertion.assertion_id().as_str(),
-            assertion.fact_id().as_str(),
-            owner.kind,
-            owner.project_id,
-            encode(assertion.payload())?,
-            assertion.payload().content(),
-        ],
+    insert_row(
+        savepoint,
+        "memory_v2_assertion_payloads",
+        &[persisted.scope.as_slice(), &persisted.payload].concat(),
     )?;
-    for (ordinal, evidence) in assertion.evidence().iter().enumerate() {
-        let evidence_json = encode(evidence)?;
-        let changed = savepoint.execute(
-            "INSERT OR IGNORE INTO memory_v2_evidence (
-                evidence_id, fact_id, owner_kind, project_id,
-                owner_json, anchor_id, evidence_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                evidence.evidence_id().as_str(),
-                assertion.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-                owner.json,
-                evidence.anchor_id().as_str(),
-                evidence_json.as_str(),
+    for (ordinal, (evidence_id, evidence_json, owner_json, anchor_id)) in
+        persisted.evidence.iter().enumerate()
+    {
+        idempotent_insert(
+            savepoint,
+            "memory_v2_evidence",
+            &[
+                ("evidence_id", evidence_id.as_str().into()),
+                ("fact_id", assertion.fact_id().as_str().into()),
+                ("owner_kind", owner.kind.into()),
+                ("project_id", owner.project_id.clone().into()),
             ],
+            &[
+                ("owner_json", owner_json.as_str().into()),
+                ("anchor_id", anchor_id.as_str().into()),
+                ("evidence_json", evidence_json.as_str().into()),
+            ],
+            "evidence identity collision",
         )?;
-        if changed == 0 {
-            let stored = savepoint
-                .query_row(
-                    "SELECT evidence_json, owner_json, anchor_id
-                     FROM memory_v2_evidence
-                     WHERE evidence_id = ?1 AND fact_id = ?2
-                       AND owner_kind = ?3 AND project_id = ?4",
-                    params![
-                        evidence.evidence_id().as_str(),
-                        assertion.fact_id().as_str(),
-                        owner.kind,
-                        owner.project_id,
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let Some((stored_json, stored_owner, stored_anchor)) = stored else {
-                return Err(invalid("evidence insert disappeared"));
-            };
-            if stored_json != evidence_json
-                || stored_owner != owner.json
-                || stored_anchor != evidence.anchor_id().as_str()
-            {
-                return Err(invalid("evidence identity collision"));
-            }
-        }
-        savepoint.execute(
-            "INSERT INTO memory_v2_assertion_evidence (
-                assertion_id, evidence_id, fact_id, owner_kind, project_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                assertion.assertion_id().as_str(),
-                evidence.evidence_id().as_str(),
-                assertion.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-                usize_to_i64(ordinal, "assertion evidence ordinal")?,
-            ],
+        insert_row(
+            savepoint,
+            "memory_v2_assertion_evidence",
+            &[
+                persisted.scope.as_slice(),
+                &[
+                    ("evidence_id", evidence_id.as_str().into()),
+                    (
+                        "ordinal",
+                        usize_to_i64(ordinal, "assertion evidence ordinal")?.into(),
+                    ),
+                ],
+            ]
+            .concat(),
         )?;
     }
     Ok(())
@@ -401,132 +441,45 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
     }
 }
 
-fn assertion_exists(
-    connection: &rusqlite::Connection,
-    assertion_id: &FactAssertionId,
-) -> rusqlite::Result<bool> {
-    connection.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM memory_v2_assertions WHERE assertion_id = ?1
-         )",
-        [assertion_id.as_str()],
-        |row| row.get::<_, bool>(0),
-    )
-}
-
-/// Compare a stored assertion against the one being written across every
-/// column the write path persists: the assertion header row, its supersession
-/// list, its payload, and its ordered evidence.
+/// Compare the rows hanging off a stored assertion header against the ones the
+/// caller would have written: the supersession list, the payload, and the
+/// ordered evidence.
 ///
 /// This mirrors the root commit engine so an exact replay is idempotent and a
 /// reused assertion id with different content is a collision, rather than a raw
 /// primary-key violation from the driver.
-fn assertion_matches(
+fn assertion_children_match(
     connection: &rusqlite::Connection,
     owner: &OwnerColumns,
-    assertion: &FactAssertionV1,
+    fact_id: &FactId,
+    persisted: &PersistedAssertion<'_>,
 ) -> rusqlite::Result<bool> {
-    let stored = connection
-        .query_row(
-            "SELECT fact_id, owner_kind, project_id, owner_json,
-                    assertion_header_json, kind_json, payload_reference_json,
-                    receipt_json, asserted_at, actor_id
-             FROM memory_v2_assertions WHERE assertion_id = ?1",
-            [assertion.assertion_id().as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        stored_fact_id,
-        stored_owner_kind,
-        stored_project_id,
-        stored_owner_json,
-        stored_header,
-        stored_kind,
-        stored_payload_reference,
-        stored_receipt,
-        stored_asserted_at,
-        stored_actor,
-    )) = stored
-    else {
-        return Ok(false);
-    };
-    let payload_reference = assertion.payload().payload_reference().map_err(invalid)?;
-    if stored_fact_id != assertion.fact_id().as_str()
-        || stored_owner_kind != owner.kind
-        || stored_project_id != owner.project_id
-        || stored_owner_json != owner.json
-        || stored_header != assertion_header_json(assertion)?
-        || stored_kind != encode(assertion.kind())?
-        || stored_payload_reference != encode(&payload_reference)?
-        || stored_receipt != encode(assertion.payload().receipt())?
-        || stored_asserted_at != assertion.asserted_at().0
-        || stored_actor.as_deref() != assertion.actor_id().map(|actor| actor.as_str())
-    {
-        return Ok(false);
-    }
-
     let mut supersession = connection.prepare(
         "SELECT superseded_assertion_id FROM memory_v2_assertion_supersession
          WHERE assertion_id = ?1 AND fact_id = ?2
            AND owner_kind = ?3 AND project_id = ?4 ORDER BY ordinal",
     )?;
-    let rows = supersession.query_map(
-        params![
-            assertion.assertion_id().as_str(),
-            assertion.fact_id().as_str(),
-            owner.kind,
-            owner.project_id,
-        ],
-        |row| row.get::<_, String>(0),
-    )?;
-    let mut stored_supersession = Vec::new();
-    for row in rows {
-        stored_supersession.push(row?);
-    }
-    let expected_supersession = superseded_assertions(assertion.kind())
-        .into_iter()
-        .map(|id| id.as_str().to_owned())
-        .collect::<Vec<_>>();
-    if stored_supersession != expected_supersession {
+    let stored_supersession = supersession
+        .query_map(
+            params_from_iter(persisted.scope_bindings()),
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if stored_supersession != persisted.supersession {
         return Ok(false);
     }
 
-    let stored_payload = connection
-        .query_row(
-            "SELECT payload_json, content FROM memory_v2_assertion_payloads
-             WHERE assertion_id = ?1 AND fact_id = ?2
-               AND owner_kind = ?3 AND project_id = ?4",
-            params![
-                assertion.assertion_id().as_str(),
-                assertion.fact_id().as_str(),
-                owner.kind,
-                owner.project_id,
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    let payload_matches = match stored_payload {
-        Some((payload_json, content)) => {
-            payload_json == encode(assertion.payload())? && content == assertion.payload().content()
-        }
-        None => payload_is_purged_projection(connection, owner, assertion.fact_id())?,
-    };
-    if !payload_matches {
-        return Ok(false);
+    let payload_matches = stored_row_matches(
+        connection,
+        "memory_v2_assertion_payloads",
+        &persisted.scope,
+        &persisted.payload,
+    )?;
+    match payload_matches {
+        Some(false) => return Ok(false),
+        // A missing payload row is only consistent with a purged projection.
+        None if !payload_is_purged_projection(connection, owner, fact_id)? => return Ok(false),
+        Some(true) | None => {}
     }
 
     let mut evidence = connection.prepare(
@@ -544,39 +497,17 @@ fn assertion_matches(
            AND assertion_evidence.project_id = ?4
          ORDER BY assertion_evidence.ordinal",
     )?;
-    let rows = evidence.query_map(
-        params![
-            assertion.assertion_id().as_str(),
-            assertion.fact_id().as_str(),
-            owner.kind,
-            owner.project_id,
-        ],
-        |row| {
+    let stored_evidence = evidence
+        .query_map(params_from_iter(persisted.scope_bindings()), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
             ))
-        },
-    )?;
-    let mut stored_evidence = Vec::new();
-    for row in rows {
-        stored_evidence.push(row?);
-    }
-    let expected_evidence = assertion
-        .evidence()
-        .iter()
-        .map(|evidence| {
-            Ok((
-                evidence.evidence_id().as_str().to_owned(),
-                encode(evidence)?,
-                owner.json.clone(),
-                evidence.anchor_id().as_str().to_owned(),
-            ))
-        })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(stored_evidence == expected_evidence)
+    Ok(stored_evidence == persisted.evidence)
 }
 
 /// A missing payload row is only consistent with a purged projection, matching
