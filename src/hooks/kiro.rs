@@ -10,12 +10,13 @@ use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
 use super::claude::is_code_research_prompt;
-use super::codex::codex_project_root_from_event;
 use super::memory_inject;
+use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
-    read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,
+    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
+    event_project_root_or_process_cwd, event_session_id, read_hook_event, record_hook_invoked,
+    record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
@@ -28,7 +29,7 @@ const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_mi
 /// Blocks with exit code 2 and stderr, per Kiro's hook contract.
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = event_project_root_from_json(&event);
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "preToolUse", &event);
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
@@ -136,7 +137,7 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = event_project_root_from_json(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
     if let Some(root) = root.as_deref()
@@ -180,10 +181,17 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// fail-open.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
-    notify_kiro_post_tool_use(&event, &hook_telemetry).await;
+    // One parse for the root, the analytics row, and the notification.
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root(&parsed);
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Kiro,
+        "postToolUse",
+        &event,
+        &parsed,
+    );
+    notify_kiro_post_tool_use(&parsed, &hook_telemetry).await;
     0
 }
 
@@ -265,34 +273,26 @@ async fn ingest_kiro_transcript_for_event(
 
 async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let prompt = super::prompt_like_text(&parsed)?;
-    let session_id = event_session_id(&parsed);
-    match codex_project_root_from_event(event_json) {
-        Some(root) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                &root,
-                session_id.as_deref(),
-                &prompt,
-            ))
-            .await
-        }
-        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
-    }
+    // Kiro resolves the root from the event `cwd` alone, without the registry
+    // lookup Codex and Cursor make.
+    memory_inject::prompt_memory_recall(&parsed, || std::future::ready(event_project_root(&parsed)))
+        .await
 }
 
-async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytics::HookTimingSpan) {
-    let Some(project_root) = kiro_project_root(event_json) else {
+async fn notify_kiro_post_tool_use(parsed: &Value, telemetry: &super::analytics::HookTimingSpan) {
+    let Some(project_root) = event_project_root_or_process_cwd(parsed) else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
-        return;
-    }
-    let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
-    super::notify_hook_event_with_telemetry(
+    let cwd = event_cwd_from_parsed(parsed);
+    // Kiro's event reports the session `cwd` alongside the paths, so it is sent
+    // even when no edited path landed inside the project.
+    notify_edited_paths(
         &project_root,
-        DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
-            .with_route(hook_route_metadata_from_event(event_json, &project_root)),
-        telemetry,
+        parsed,
+        || kiro_post_tool_use_rel_paths_from_parsed(parsed, &project_root),
+        |rel_paths| DaemonHookEvent::kiro_post_tool_use(rel_paths, cwd),
+        EmptyPathPolicy::Send,
+        Some(telemetry),
     )
     .await;
 }
@@ -301,7 +301,11 @@ pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Ve
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return Vec::new();
     };
-    let cwd = event_cwd_from_parsed(&parsed).unwrap_or_else(|| project_root.to_path_buf());
+    kiro_post_tool_use_rel_paths_from_parsed(&parsed, project_root)
+}
+
+fn kiro_post_tool_use_rel_paths_from_parsed(parsed: &Value, project_root: &Path) -> Vec<String> {
+    let cwd = event_cwd_from_parsed(parsed).unwrap_or_else(|| project_root.to_path_buf());
     let tool_input = parsed
         .get("tool_input")
         .or_else(|| parsed.get("toolInput"))
@@ -309,7 +313,7 @@ pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Ve
         .unwrap_or(&Value::Null);
 
     let mut paths = Vec::new();
-    collect_event_path_fields(&parsed, &mut paths);
+    collect_event_path_fields(parsed, &mut paths);
     collect_event_path_fields(tool_input, &mut paths);
 
     let mut rels = Vec::new();
@@ -347,9 +351,14 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Kiro write events may omit `cwd`, so the hook falls back to its own working
+/// directory before resolving. Shares the host-neutral resolver with every other
+/// `cwd`-carrying host.
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
-    let cwd = event_cwd(event_json).or_else(|| std::env::current_dir().ok())?;
-    crate::config::discover_project_root(&cwd)
+    // An unreadable payload names no directory, so it takes the same
+    // process-cwd fallback a payload without `cwd` does.
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    event_project_root_or_process_cwd(&parsed)
 }
 
 #[cfg(test)]

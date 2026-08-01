@@ -11,7 +11,9 @@ use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::memory_inject;
-use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
+use super::post_tool_use::{
+    EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
+};
 use super::steering::{
     append_context_block, append_context_recovery_hint, build_cursor_session_context,
     cursor_index_signals_for_root, session_start_from_compaction,
@@ -20,7 +22,8 @@ use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
     append_tool_hint, deduped_project_hint_with_id, event_session_id, format_tool_hint,
     hook_route_metadata_from_event, mint_hint_id, nearest_project_like_root, prompt_like_text,
-    read_hook_event, record_hint_analytics, record_hook_invoked, rel_under_root, text_field,
+    read_hook_event, record_hint_analytics, record_hook_invoked, record_hook_invoked_parsed,
+    rel_under_root, text_field,
 };
 
 /// Largest tail the `beforeSubmitPrompt` hot path will read in one call. Larger
@@ -186,19 +189,10 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
 
 async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let prompt = prompt_like_text(&parsed)?;
-    let session_id = event_session_id(&parsed);
-    match cursor_project_root_from_parsed_event_with_identity(&parsed).await {
-        Some(root) => {
-            Box::pin(memory_inject::combined_prompt_memory_recall(
-                &root,
-                session_id.as_deref(),
-                &prompt,
-            ))
-            .await
-        }
-        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
-    }
+    memory_inject::prompt_memory_recall(&parsed, || {
+        cursor_project_root_from_parsed_event_with_identity(&parsed)
+    })
+    .await
 }
 
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
@@ -306,9 +300,16 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 ///    dedupe and initialized-store gating as `postToolUse`.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
+    // One parse for the root, the analytics row, and the daemon notification.
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Cursor,
+        "afterFileEdit",
+        &event,
+        &parsed,
+    );
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::v2::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
@@ -324,7 +325,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         }
         return 0;
     }
-    notify_cursor_after_file_edit(&event, &hook_telemetry).await;
+    notify_cursor_after_file_edit(&parsed, &hook_telemetry).await;
     if let Some(decision) = cursor_after_file_edit_decision(&event) {
         println!("{decision}");
     }
@@ -651,7 +652,13 @@ pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return Vec::new();
     };
+    cursor_after_file_edit_rel_paths_from_parsed(&parsed, project_root)
+}
 
+fn cursor_after_file_edit_rel_paths_from_parsed(
+    parsed: &Value,
+    project_root: &Path,
+) -> Vec<String> {
     let mut abs_paths: Vec<String> = Vec::new();
     if let Some(p) = parsed
         .get("file_path")
@@ -716,24 +723,21 @@ pub fn cursor_session_start_json(project_root: Option<&Path>, additional_context
 /// Resolves the edited repo-relative paths locally, then lets the daemon own
 /// scheduling and sync execution. No-ops when no in-project paths were edited.
 async fn notify_cursor_after_file_edit(
-    event_json: &str,
+    parsed: &Value,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
-    let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
+    let Some(root) = cursor_project_root_from_parsed_event_with_identity(parsed).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
-        return;
-    }
-    let rels = cursor_after_file_edit_rel_paths(event_json, &root);
-    if rels.is_empty() {
-        return;
-    }
-    super::notify_hook_event_with_telemetry(
+    // Cursor's event carries nothing but the edited paths, so an edit that
+    // touched nothing inside the project is not sent.
+    notify_edited_paths(
         &root,
-        DaemonHookEvent::cursor_after_file_edit(rels)
-            .with_route(hook_route_metadata_from_event(event_json, &root)),
-        telemetry,
+        parsed,
+        || cursor_after_file_edit_rel_paths_from_parsed(parsed, &root),
+        DaemonHookEvent::cursor_after_file_edit,
+        EmptyPathPolicy::Skip,
+        Some(telemetry),
     )
     .await;
 }
