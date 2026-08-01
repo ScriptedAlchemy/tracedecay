@@ -46,7 +46,7 @@ use crate::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
-use crate::types::{NodeKind, Visibility};
+use crate::types::{FileRecord, NodeKind, Visibility};
 
 use super::super::ToolResult;
 use super::super::definitions;

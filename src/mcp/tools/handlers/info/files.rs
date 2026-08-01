@@ -51,61 +51,46 @@ pub(crate) async fn handle_files(
         &args,
         &payload,
         touched_files,
-        || render_files_md(&payload),
+        || render_files_md(&files, layout),
     ))
 }
 
-fn render_files_md(value: &Value) -> String {
+/// Renders the listing from the records the handler already holds, rather than
+/// reading the keys back out of the JSON payload it just built.
+fn render_files_md(files: &[FileRecord], layout: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Files");
-    md.field(
-        "indexed files",
-        &render::field_i64(value, "count").to_string(),
-    );
-    let layout = render::field_str(value, "layout");
+    md.field("indexed files", &files.len().to_string());
     md.field("layout", layout);
 
-    let files = value
-        .get("files")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     if files.is_empty() {
         md.blank().empty_note("No indexed files matched.");
         return md.render();
     }
 
     if layout == "flat" {
-        let lines = files
+        let listing = files
             .iter()
-            .filter_map(|file| {
-                let path = file.get("path").and_then(Value::as_str)?;
-                let symbols = render::field_i64(file, "symbols");
-                let bytes = render::field_i64(file, "bytes");
-                Some(format!("- {path} ({symbols} symbols, {bytes} bytes)"))
+            .map(|file| {
+                format!(
+                    "- {} ({} symbols, {} bytes)",
+                    file.path, file.node_count, file.size
+                )
             })
-            .collect::<Vec<_>>();
-        let listing = lines.join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
         md.blank().code("text", &listing);
         return md.render();
     }
 
-    let paths = files
-        .iter()
-        .filter_map(|file| {
-            file.get("path")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .collect::<Vec<_>>();
     let suffixes = files
         .iter()
-        .map(|file| format!(" ({} symbols)", render::field_i64(file, "symbols")))
+        .map(|file| format!(" ({} symbols)", file.node_count))
         .collect::<Vec<_>>();
-    let annotated = paths
+    let annotated = files
         .iter()
         .zip(suffixes.iter())
-        .map(|(path, suffix)| (path.as_str(), suffix.as_str()));
+        .map(|(file, suffix)| (file.path.as_str(), suffix.as_str()));
     let listing = format_compact_annotated_path_list(annotated, "- ", "");
     md.blank().code("text", &listing);
     md.render()

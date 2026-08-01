@@ -46,25 +46,27 @@ pub(crate) async fn handle_type_hierarchy(cg: &TraceDecay, args: Value) -> Resul
         &args,
         &payload,
         touched_files,
-        || render_type_hierarchy_md(&payload),
+        || render_type_hierarchy_md(&root, max_depth, &tree),
     ))
 }
 
-fn render_type_hierarchy_md(value: &Value) -> String {
+/// Renders from the root node and tree the handler already holds, rather than
+/// reading them back out of the JSON payload it just built.
+fn render_type_hierarchy_md(root: &crate::types::Node, max_depth: usize, tree: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Type Hierarchy");
-    if let Some(root) = value.get("root") {
-        let name = render::field_str(root, "name");
-        let kind = render::field_str(root, "kind");
-        let file = render::field_str(root, "file");
-        let line = render::field_i64(root, "line");
-        md.field("root", &format!("{name} ({kind}) - {file}:{line}"));
-    }
     md.field(
-        "max_depth",
-        &render::field_i64(value, "max_depth").to_string(),
+        "root",
+        &format!(
+            "{} ({}) - {}:{}",
+            root.name,
+            root.kind.as_str(),
+            root.file_path,
+            root.start_line
+        ),
     );
-    md.blank().code("text", render::field_str(value, "tree"));
+    md.field("max_depth", &max_depth.to_string());
+    md.blank().code("text", tree);
     md.render()
 }
 
