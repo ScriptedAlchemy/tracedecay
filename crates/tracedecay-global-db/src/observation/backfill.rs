@@ -30,7 +30,7 @@ use super::schema::{
 /// writer that appends observations the backfill has already passed -- the
 /// consolidator merges a source tail above the target frontier -- can clear it
 /// and re-arm convergence.
-pub(crate) const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str =
+pub const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str =
     "observation-repository-provenance-v1";
 
 /// Observations covered per committed backfill page. Each page runs in its
@@ -60,7 +60,7 @@ pub(super) enum BackfillPageOutcome {
 /// committed pages. Must run outside the schema-upgrade mega-transaction so
 /// each page's progress survives a cancelled open; converged stores return
 /// after a single marker probe.
-pub(crate) async fn converge_observation_repository_provenance(
+pub async fn converge_observation_repository_provenance(
     conn: &Connection,
 ) -> crate::errors::Result<()> {
     if migration_recorded(conn, OBSERVATION_PROVENANCE_SCHEMA_MIGRATION).await? {
@@ -76,7 +76,7 @@ pub(crate) async fn converge_observation_repository_provenance(
 
 /// Converges the retrieval-anchor backfill through bounded, individually
 /// committed pages, under the same constraints as the provenance pass above.
-pub(crate) async fn converge_observation_retrieval_anchors(
+pub async fn converge_observation_retrieval_anchors(
     conn: &Connection,
 ) -> crate::errors::Result<()> {
     if migration_recorded(conn, OBSERVATION_ANCHOR_SCHEMA_MIGRATION).await? {

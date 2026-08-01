@@ -221,13 +221,13 @@ const TRANSCRIPT_SCHEMA: &str = "
 
 /// Installs and migrates the global/session schema through the exact
 /// registered runtime connection. No database path is resolved or reopened.
-pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors::Result<()> {
+pub async fn ensure_registered_schema(conn: &Connection) -> crate::errors::Result<()> {
     let convergence = ensure_registered_schema_for_admission(conn).await?;
     converge_registered_schema(conn, convergence).await
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct RegisteredSchemaConvergence {
+pub struct RegisteredSchemaConvergence {
     force_exhaustive: bool,
     is_fresh: bool,
 }
@@ -235,7 +235,7 @@ pub(crate) struct RegisteredSchemaConvergence {
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
-pub(crate) async fn ensure_registered_schema_for_admission(
+pub async fn ensure_registered_schema_for_admission(
     conn: &Connection,
 ) -> crate::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
@@ -359,7 +359,7 @@ pub(crate) async fn ensure_registered_schema_for_admission(
 
 /// Completes resumable historical convergence after the registered runtime is
 /// available. Every stage retains its existing durable checkpoint semantics.
-pub(crate) async fn converge_registered_schema(
+pub async fn converge_registered_schema(
     conn: &Connection,
     convergence: RegisteredSchemaConvergence,
 ) -> crate::errors::Result<()> {
@@ -406,20 +406,20 @@ async fn table_exists(conn: &impl QueryExecutor, table: &str) -> crate::errors::
         .map_err(|error| global_db_operation_error("inspect registered global schema", error))
 }
 
-pub(crate) async fn validate_observation_authority_connection(
+pub async fn validate_observation_authority_connection(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
 }
 
-pub(crate) async fn begin_observation_authority_canonical_repair(
+pub async fn begin_observation_authority_canonical_repair(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     suspend_immutability_for_canonical_repair(conn).await
 }
 
-pub(crate) async fn finish_observation_authority_canonical_repair(
+pub async fn finish_observation_authority_canonical_repair(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     restore_immutability_after_canonical_repair(conn).await

@@ -13,7 +13,7 @@ use super::super::query::{
 };
 use super::persist::*;
 
-pub(crate) async fn validate_final_projection_receipt(
+pub async fn validate_final_projection_receipt(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
@@ -276,7 +276,7 @@ pub(super) fn digest_bytes(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
-pub(crate) async fn record_canonical_observation_effect(
+pub async fn record_canonical_observation_effect(
     conn: &impl Executor,
     sequence: u64,
     observation: &tracedecay_domain::DurableObservationV1,

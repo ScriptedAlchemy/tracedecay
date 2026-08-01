@@ -3,7 +3,7 @@ use std::path::Path;
 use super::{RegisteredGlobalDb, SavingsDay, SavingsTotal, global_db_operation_error};
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
+    pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
         if let Err(error) = self
             .try_upsert_project_tokens(project_path, tokens_saved)
             .await
@@ -12,7 +12,7 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub(crate) async fn try_upsert_project_tokens(
+    pub async fn try_upsert_project_tokens(
         &self,
         project_path: &Path,
         tokens_saved: u64,
@@ -37,7 +37,7 @@ impl RegisteredGlobalDb {
     /// A project with no registry row has genuinely saved nothing, so an
     /// absent row is `Ok(0)`. Every other outcome is a failed read and stays
     /// an error rather than becoming that same zero.
-    pub(crate) async fn try_get_project_tokens(&self, project_path: &Path) -> Result<u64, String> {
+    pub async fn try_get_project_tokens(&self, project_path: &Path) -> Result<u64, String> {
         let path = super::project_path_alias_key(project_path);
         let snapshot = self
             .read_snapshot()
@@ -64,11 +64,11 @@ impl RegisteredGlobalDb {
             .map_err(|_| format!("project tokens saved cannot be negative: {total}"))
     }
 
-    pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {
+    pub async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {
         self.try_get_project_tokens(project_path).await.ok()
     }
 
-    pub(crate) async fn try_global_tokens_saved(&self) -> Result<u64, String> {
+    pub async fn try_global_tokens_saved(&self) -> Result<u64, String> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -88,11 +88,11 @@ impl RegisteredGlobalDb {
         u64::try_from(total).map_err(|_| format!("global tokens saved cannot be negative: {total}"))
     }
 
-    pub(crate) async fn global_tokens_saved(&self) -> Option<u64> {
+    pub async fn global_tokens_saved(&self) -> Option<u64> {
         self.try_global_tokens_saved().await.ok()
     }
 
-    pub(crate) async fn record_savings(
+    pub async fn record_savings(
         &self,
         project_path: &str,
         tool_name: &str,
@@ -114,7 +114,7 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub(crate) async fn try_record_savings(
+    pub async fn try_record_savings(
         &self,
         project_path: &str,
         tool_name: &str,
@@ -158,7 +158,7 @@ impl RegisteredGlobalDb {
         );
     }
 
-    pub(crate) async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
+    pub async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
         self.sum_savings_by_project_id(project.as_deref(), since)
@@ -167,7 +167,7 @@ impl RegisteredGlobalDb {
 
     /// Same aggregation for an already-resolved canonical project identity.
     /// Application read models use this to avoid reinterpreting identity as a path.
-    pub(crate) async fn sum_savings_by_project_id(
+    pub async fn sum_savings_by_project_id(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -182,7 +182,7 @@ impl RegisteredGlobalDb {
 
     /// Checked form used by denominator-safe read models. A failed read must
     /// remain unavailable instead of becoming a trustworthy zero.
-    pub(crate) async fn sum_savings_by_project_id_checked(
+    pub async fn sum_savings_by_project_id_checked(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -192,7 +192,7 @@ impl RegisteredGlobalDb {
             .map(|(totals, _)| totals)
     }
 
-    pub(crate) async fn savings_totals_with_watermark(
+    pub async fn savings_totals_with_watermark(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -256,7 +256,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) async fn savings_history(
+    pub async fn savings_history(
         &self,
         project: Option<&str>,
         since: i64,
@@ -314,7 +314,7 @@ impl RegisteredGlobalDb {
         history
     }
 
-    pub(crate) async fn insert_turn(&self, turn: &tracedecay_domain::observability::CostTurn) -> bool {
+    pub async fn insert_turn(&self, turn: &tracedecay_domain::observability::CostTurn) -> bool {
         let Ok(transaction) = self.begin_write_transaction().await else {
             return false;
         };
@@ -336,7 +336,7 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub(crate) async fn insert_turns(&self, turns: &[tracedecay_domain::observability::CostTurn]) -> usize {
+    pub async fn insert_turns(&self, turns: &[tracedecay_domain::observability::CostTurn]) -> usize {
         if turns.is_empty() {
             return 0;
         }
@@ -371,7 +371,7 @@ impl RegisteredGlobalDb {
     ///
     /// A cursor failure rolls back every turn from the same scanned frontier,
     /// so retry cannot duplicate a partially acknowledged file segment.
-    pub(crate) async fn insert_turns_with_cursor(
+    pub async fn insert_turns_with_cursor(
         &self,
         turns: &[tracedecay_domain::observability::CostTurn],
         cursor_path: &str,
@@ -412,7 +412,7 @@ impl RegisteredGlobalDb {
         Ok((inserted, cost_usd, tokens))
     }
 
-    pub(crate) async fn try_total_cost_since(&self, since: u64) -> Result<f64, String> {
+    pub async fn try_total_cost_since(&self, since: u64) -> Result<f64, String> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -433,7 +433,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode total cost: {error}"))
     }
 
-    pub(crate) async fn try_total_tokens_since(&self, since: u64) -> Result<u64, String> {
+    pub async fn try_total_tokens_since(&self, since: u64) -> Result<u64, String> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -458,7 +458,7 @@ impl RegisteredGlobalDb {
     }
 
     /// One-snapshot denominator and aggregate for the canonical turn store.
-    pub(crate) async fn accounting_totals_since(&self, since: u64) -> Option<(u64, u64, f64, i64)> {
+    pub async fn accounting_totals_since(&self, since: u64) -> Option<(u64, u64, f64, i64)> {
         let snapshot = self.read_snapshot().await.ok()?;
         let mut rows = snapshot
             .query(
@@ -480,7 +480,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) async fn try_token_breakdown_since(
+    pub async fn try_token_breakdown_since(
         &self,
         since: u64,
     ) -> Result<(u64, u64, u64), String> {
@@ -513,7 +513,7 @@ impl RegisteredGlobalDb {
         Ok((read(0)?, read(1)?, read(2)?))
     }
 
-    pub(crate) async fn try_cost_by_model_since(
+    pub async fn try_cost_by_model_since(
         &self,
         since: u64,
     ) -> Result<Vec<(String, f64, u64)>, String> {
@@ -551,13 +551,13 @@ impl RegisteredGlobalDb {
         Ok(out)
     }
 
-    pub(crate) async fn cost_by_model_since(&self, since: u64) -> Vec<(String, f64, u64)> {
+    pub async fn cost_by_model_since(&self, since: u64) -> Vec<(String, f64, u64)> {
         self.try_cost_by_model_since(since)
             .await
             .unwrap_or_default()
     }
 
-    pub(crate) async fn try_cost_by_category_since(
+    pub async fn try_cost_by_category_since(
         &self,
         since: u64,
     ) -> Result<Vec<(String, f64, u64)>, String> {

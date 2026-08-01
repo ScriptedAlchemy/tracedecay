@@ -30,7 +30,7 @@ const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) async fn project_observation_with_engine(
+pub async fn project_observation_with_engine(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
@@ -46,7 +46,7 @@ pub(crate) async fn project_observation_with_engine(
     Ok(outcome)
 }
 
-pub(crate) async fn rebuild_projection_with_engine(
+pub async fn rebuild_projection_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {

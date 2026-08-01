@@ -975,7 +975,7 @@ async fn apply_provenance(
 /// True when this observation already carries a durable `output_collision`
 /// disposition: it must project as a skip everywhere (drain, audit, replay)
 /// because its output identity is owned by a different observation.
-pub(crate) async fn output_collision_disposed(
+pub async fn output_collision_disposed(
     conn: &impl QueryExecutor,
     observation_id: &str,
 ) -> ProjectionStoreResult<bool> {
@@ -1077,7 +1077,7 @@ async fn apply_message_effect(
     apply_provenance(conn, sequence, projection, message_created).await
 }
 
-pub(crate) async fn verify_effect(
+pub async fn verify_effect(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
@@ -1104,7 +1104,7 @@ pub(crate) async fn verify_effect(
     }
 }
 
-pub(crate) async fn verify_workflow_effects(
+pub async fn verify_workflow_effects(
     conn: &impl QueryExecutor,
     workflow_facts: &[WorkflowFactProjection],
 ) -> ProjectionStoreResult<()> {

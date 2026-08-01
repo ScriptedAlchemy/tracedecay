@@ -7,7 +7,7 @@ use crate::global_db_operation_error;
 /// one mutable phase/epoch state; terminal receipts are append-only.  A
 /// repository quarantine is retained after a proven resolution rather than
 /// deleted, so recovery evidence survives restart.
-pub(crate) async fn ensure_git_index_transaction_schema(
+pub async fn ensure_git_index_transaction_schema(
     connection: &impl Executor,
 ) -> crate::errors::Result<()> {
     connection

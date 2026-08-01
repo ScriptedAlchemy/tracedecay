@@ -23,14 +23,14 @@ pub(super) use persist::{
     persist_session_temporal_projection_batch_in_transaction,
     seed_active_projection_in_transaction, session_temporal_projection_record_count,
 };
-pub(crate) use receipts::record_canonical_observation_effect;
+pub use receipts::record_canonical_observation_effect;
 pub(super) use receipts::validate_final_projection_receipt;
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn pending_session_temporal_refresh_requests_result(
+    pub async fn pending_session_temporal_refresh_requests_result(
         &self,
         limit: usize,
     ) -> SessionStoreResult<Vec<SessionRefreshBeginOrJoinRequestV1>> {
@@ -110,7 +110,7 @@ impl RegisteredGlobalDb {
         Ok(requests)
     }
 
-    pub(crate) async fn materialize_session_temporal_refresh_batch_result(
+    pub async fn materialize_session_temporal_refresh_batch_result(
         &self,
         recovery: &SessionRefreshRecoveryV1,
     ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>>
@@ -122,7 +122,7 @@ impl RegisteredGlobalDb {
         materialize_session_temporal_refresh_batch_in_transaction(&snapshot, recovery).await
     }
 
-    pub(crate) async fn persist_session_temporal_projection_batch_result(
+    pub async fn persist_session_temporal_projection_batch_result(
         &self,
         batch: SessionTemporalProjectionBatchV1,
     ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {

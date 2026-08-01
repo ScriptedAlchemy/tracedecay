@@ -2749,14 +2749,14 @@ fn complete_snapshot_for_current_registry(
 }
 
 impl<'db> GlobalDbConfigurationControlStore<'db> {
-    pub(crate) const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
+    pub const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
     /// Appends the daemon-owned binding to revisions created before canonical
     /// genesis carried it. Competing authority stays denied; only an absent
     /// key or the stable daemon binding after a repository move is repaired.
-    pub(crate) fn ensure_daemon_source_binding(
+    pub fn ensure_daemon_source_binding(
         &self,
         binding: ScopeSourceBinding,
         occurred_at: UtcMicros,
@@ -3093,7 +3093,7 @@ pub struct OwnedGlobalDbConfigurationControlStore {
 }
 
 impl OwnedGlobalDbConfigurationControlStore {
-    pub(crate) fn from_registered_project_runtime_db(db: Arc<RegisteredGlobalDb>) -> Self {
+    pub fn from_registered_project_runtime_db(db: Arc<RegisteredGlobalDb>) -> Self {
         Self { db }
     }
 
@@ -3101,7 +3101,7 @@ impl OwnedGlobalDbConfigurationControlStore {
         Arc::clone(&self.db)
     }
 
-    pub(crate) fn record_component_activation(
+    pub fn record_component_activation(
         &self,
         component: String,
         observed_revision_id: Option<ConfigurationRevisionId>,
@@ -3235,12 +3235,12 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
     }
 }
 
-pub(crate) struct ConfigurationDirectCommitOutcomeV1 {
+pub struct ConfigurationDirectCommitOutcomeV1 {
     pub receipt: ConfigurationMutationReceipt,
     pub current: ConfigurationCurrentStateV1,
 }
 
-pub(crate) async fn commit_direct_in_transaction<E>(
+pub async fn commit_direct_in_transaction<E>(
     transaction: &E,
     authority: &ConfigurationMutationAuthority,
     mutation: &DirectConfigurationMutation,

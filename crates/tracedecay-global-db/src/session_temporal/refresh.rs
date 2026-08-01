@@ -149,7 +149,7 @@ impl SessionRefreshRecoveryV1 {
 }
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn begin_or_join_session_refresh_result(
+    pub async fn begin_or_join_session_refresh_result(
         &self,
         request: SessionRefreshBeginOrJoinRequestV1,
     ) -> SessionStoreResult<SessionRefreshBeginOrJoinReceiptV1> {
@@ -279,7 +279,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) async fn persist_session_refresh_projection_batch_result(
+    pub async fn persist_session_refresh_projection_batch_result(
         &self,
         progress: SessionRefreshProgressV1,
         batch: SessionTemporalProjectionBatchV1,
@@ -359,7 +359,7 @@ impl RegisteredGlobalDb {
         Ok((progress, receipt))
     }
 
-    pub(crate) async fn persist_session_refresh_progress_result(
+    pub async fn persist_session_refresh_progress_result(
         &self,
         progress: SessionRefreshProgressV1,
     ) -> SessionStoreResult<SessionRefreshProgressV1> {
@@ -435,7 +435,7 @@ impl RegisteredGlobalDb {
         Ok(progress)
     }
 
-    pub(crate) async fn session_refresh_progress_result(
+    pub async fn session_refresh_progress_result(
         &self,
         request: SessionRefreshProgressRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
@@ -446,7 +446,7 @@ impl RegisteredGlobalDb {
         read_progress(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    pub(crate) async fn complete_session_refresh_result(
+    pub async fn complete_session_refresh_result(
         &self,
         request: SessionRefreshCompletionRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
@@ -537,7 +537,7 @@ impl RegisteredGlobalDb {
         Ok(SessionRefreshReceiptV1::completed(request, terminal_at))
     }
 
-    pub(crate) async fn fail_session_refresh_result(
+    pub async fn fail_session_refresh_result(
         &self,
         request: SessionRefreshFailureRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
@@ -626,7 +626,7 @@ impl RegisteredGlobalDb {
         Ok(SessionRefreshReceiptV1::failed(request, terminal_at))
     }
 
-    pub(crate) async fn cancel_session_refresh_result(
+    pub async fn cancel_session_refresh_result(
         &self,
         request: SessionRefreshCancellationRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
@@ -714,7 +714,7 @@ impl RegisteredGlobalDb {
         Ok(SessionRefreshReceiptV1::cancelled(request, terminal_at))
     }
 
-    pub(crate) async fn session_refresh_receipt_result(
+    pub async fn session_refresh_receipt_result(
         &self,
         request: SessionRefreshReceiptRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
@@ -725,7 +725,7 @@ impl RegisteredGlobalDb {
         read_receipt(&snapshot, request.session_id(), request.operation_id()).await
     }
 
-    pub(crate) async fn session_refresh_recovery_result(
+    pub async fn session_refresh_recovery_result(
         &self,
         session_id: &SessionId,
     ) -> SessionStoreResult<Option<SessionRefreshRecoveryV1>> {
@@ -737,7 +737,7 @@ impl RegisteredGlobalDb {
         Ok(recoveries.pop())
     }
 
-    pub(crate) async fn running_session_refreshes_result(
+    pub async fn running_session_refreshes_result(
         &self,
     ) -> SessionStoreResult<Vec<SessionRefreshRecoveryV1>> {
         let snapshot = self

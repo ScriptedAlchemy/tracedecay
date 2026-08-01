@@ -12,10 +12,10 @@ use serde_json::Value;
 use crate::application::session::compatibility::projected_content_hash;
 use crate::sessions::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
-pub(crate) use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
+pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
-pub(crate) const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
+pub const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";
 pub(super) const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +159,7 @@ impl CanonicalPublicationManifest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct FrozenPublicationReceipt {
+pub struct FrozenPublicationReceipt {
     pub summary_id: String,
     pub disposition: String,
     pub published_at: i64,
@@ -169,7 +169,7 @@ pub(crate) struct FrozenPublicationReceipt {
     pub publication_manifest_digest: String,
 }
 
-pub(crate) fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
+pub fn receipt_id(summary_id: &str, summary_hash: &str) -> String {
     format!(
         "receipt_summary_{}",
         projected_content_hash(&format!("{summary_id}\0{summary_hash}"))

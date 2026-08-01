@@ -390,7 +390,7 @@ pub async fn run_observation_retention(
     run_observation_retention_authorized(conn, generation, config, mode, now, &|_| Ok(())).await
 }
 
-pub(crate) async fn run_observation_retention_authorized(
+pub async fn run_observation_retention_authorized(
     conn: &Connection,
     generation: Option<&str>,
     config: &ObservationRetentionConfig,

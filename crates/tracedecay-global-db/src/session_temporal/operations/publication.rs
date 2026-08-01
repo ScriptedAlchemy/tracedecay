@@ -19,12 +19,12 @@ use super::{
     unixepoch,
 };
 
-pub(crate) struct GlobalDbLcmSummaryPublication<'a, E> {
+pub struct GlobalDbLcmSummaryPublication<'a, E> {
     conn: &'a E,
 }
 
 impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
-    pub(crate) const fn new(conn: &'a E) -> Self {
+    pub const fn new(conn: &'a E) -> Self {
         Self { conn }
     }
 }
@@ -46,7 +46,7 @@ enum PublicationRule<'a> {
     Successor { predecessor: &'a str },
 }
 
-pub(crate) async fn publish_immutable_summary(
+pub async fn publish_immutable_summary(
     conn: &impl Executor,
     publication: LcmImmutableSummaryPublication,
 ) -> Result<LcmSummaryPublicationReceipt, LcmError> {

@@ -481,7 +481,7 @@ pub(super) async fn derive_retained_projection_relations(
     ))
 }
 
-pub(crate) async fn canonical_parent_message_resolver(
+pub async fn canonical_parent_message_resolver(
     conn: &impl QueryExecutor,
     session_id: &str,
     source_frontier: u64,
@@ -601,6 +601,6 @@ impl ParentMessageResolver {
 }
 
 #[derive(Default)]
-pub(crate) struct ParentMessageResolver {
+pub struct ParentMessageResolver {
     occurrences: BTreeMap<String, BTreeSet<String>>,
 }

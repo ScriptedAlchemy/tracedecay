@@ -386,7 +386,7 @@ BEFORE DELETE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
 ";
 
-pub(crate) async fn ensure_configuration_schema(
+pub async fn ensure_configuration_schema(
     connection: &impl Executor,
 ) -> Result<(), ConfigurationSchemaError> {
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;

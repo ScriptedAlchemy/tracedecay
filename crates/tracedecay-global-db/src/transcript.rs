@@ -103,7 +103,7 @@ enum TranscriptWritePolicy {
 }
 
 #[derive(Debug)]
-pub(crate) enum TranscriptPersistenceError {
+pub enum TranscriptPersistenceError {
     Conflict {
         expected: ParseOffset,
         actual: ParseOffset,
@@ -115,7 +115,7 @@ pub(crate) enum TranscriptPersistenceError {
 }
 
 impl TranscriptPersistenceError {
-    pub(crate) fn storage(
+    pub fn storage(
         operation: &'static str,
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
@@ -125,7 +125,7 @@ impl TranscriptPersistenceError {
         }
     }
 
-    pub(crate) fn message(operation: &'static str, message: impl Into<String>) -> Self {
+    pub fn message(operation: &'static str, message: impl Into<String>) -> Self {
         Self::storage(operation, std::io::Error::other(message.into()))
     }
 }
@@ -308,7 +308,7 @@ impl RegisteredGlobalDb {
             .flatten()
     }
 
-    pub(crate) async fn get_session_result(
+    pub async fn get_session_result(
         &self,
         provider: &str,
         session_id: &str,
@@ -670,7 +670,7 @@ impl RegisteredGlobalDb {
         .is_ok()
     }
 
-    pub(crate) async fn persist_transcript_batch_result(
+    pub async fn persist_transcript_batch_result(
         &self,
         session: &SessionRecord,
         messages: &[SessionMessageRecord],
@@ -693,7 +693,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub(crate) async fn persist_transcript_offset_result(
+    pub async fn persist_transcript_offset_result(
         &self,
         parse_offset_path: &str,
         expected_offset: ParseOffset,
@@ -710,7 +710,7 @@ impl RegisteredGlobalDb {
 
     /// Atomically persists transcript rows, direct commit evidence, and the
     /// parse cursor so a failed attribution write is replayed on the next sync.
-    pub(crate) async fn persist_transcript_batch_with_git_evidence_result(
+    pub async fn persist_transcript_batch_with_git_evidence_result(
         &self,
         batch: &TranscriptBatch,
         commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
@@ -860,7 +860,7 @@ impl RegisteredGlobalDb {
         self.get_parse_offset_result(path).await.ok().flatten()
     }
 
-    pub(crate) async fn get_parse_offset_result(
+    pub async fn get_parse_offset_result(
         &self,
         path: &str,
     ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
@@ -884,7 +884,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("commit transcript parse offset: {error}"))
     }
 
-    pub(crate) async fn advance_parse_offset_result(
+    pub async fn advance_parse_offset_result(
         &self,
         path: &str,
         offset: ParseOffset,

@@ -22,7 +22,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    pub(crate) async fn session_ingest_health_for_provider(
+    pub async fn session_ingest_health_for_provider(
         &self,
         provider: Option<&str>,
     ) -> Result<SessionIngestHealth, String> {
@@ -116,7 +116,7 @@ impl RegisteredGlobalDb {
         Ok(health)
     }
 
-    pub(crate) async fn has_session_message(
+    pub async fn has_session_message(
         &self,
         provider: &str,
         message_id: &str,
@@ -145,7 +145,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode session message existence: {error}"))
     }
 
-    pub(crate) async fn session_message_count(&self) -> Result<i64, String> {
+    pub async fn session_message_count(&self) -> Result<i64, String> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -163,7 +163,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode session message count: {error}"))
     }
 
-    pub(crate) async fn session_message_count_for_project(
+    pub async fn session_message_count_for_project(
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
@@ -190,7 +190,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode project session message count: {error}"))
     }
 
-    pub(crate) async fn session_messages_after(
+    pub async fn session_messages_after(
         &self,
         provider: &str,
         session_id: &str,
@@ -238,7 +238,7 @@ impl RegisteredGlobalDb {
         Ok(out)
     }
 
-    pub(crate) async fn latest_session_activity_secs(&self) -> Option<i64> {
+    pub async fn latest_session_activity_secs(&self) -> Option<i64> {
         let snapshot = self.read_snapshot().await.ok()?;
         let mut rows = snapshot
             .query(
@@ -275,7 +275,7 @@ impl RegisteredGlobalDb {
         latest
     }
 
-    pub(crate) async fn get_session_message(
+    pub async fn get_session_message(
         &self,
         provider: &str,
         message_id: &str,
@@ -294,7 +294,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Searches message text for a provider, optionally constrained to one project.
-    pub(crate) async fn search_session_messages(
+    pub async fn search_session_messages(
         &self,
         provider: &str,
         project_key: Option<&str>,
@@ -394,7 +394,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Lists each session's latest canonical goal state, newest first.
-    pub(crate) async fn recent_session_goals(
+    pub async fn recent_session_goals(
         &self,
         project_key: Option<&str>,
         limit: usize,
@@ -531,7 +531,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Reads the canonical workflow fact columns used by projection acceptance.
-    pub(crate) async fn workflow_fact_rows(
+    pub async fn workflow_fact_rows(
         &self,
     ) -> crate::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
         let snapshot = self.read_snapshot().await.map_err(|error| {

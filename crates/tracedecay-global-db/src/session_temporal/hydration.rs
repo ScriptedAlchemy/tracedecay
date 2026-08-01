@@ -32,13 +32,13 @@ use super::sql::TemporalSqlRead;
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
 
 #[derive(Clone)]
-pub(crate) enum HydrationResolution {
+pub enum HydrationResolution {
     Available(PayloadDescriptor),
     Unavailable(HydrationStateV1),
 }
 
 #[derive(Clone)]
-pub(crate) struct PayloadDescriptor {
+pub struct PayloadDescriptor {
     source: PayloadSource,
     byte_count: usize,
     content_hash: String,
@@ -82,7 +82,7 @@ impl fmt::Debug for PayloadSource {
     }
 }
 
-pub(crate) trait TemporalHydrationBackend: Send + Sync {
+pub trait TemporalHydrationBackend: Send + Sync {
     fn resolve_current<'a>(
         &'a self,
         snapshot: &'a TemporalExecutionSnapshot,
@@ -97,12 +97,12 @@ pub(crate) trait TemporalHydrationBackend: Send + Sync {
     ) -> BackendFuture<'a, Zeroizing<Vec<u8>>>;
 }
 
-pub(crate) struct SessionTemporalHydrationAdapter<B> {
+pub struct SessionTemporalHydrationAdapter<B> {
     backend: B,
 }
 
 impl<B> SessionTemporalHydrationAdapter<B> {
-    pub(crate) const fn new(backend: B) -> Self {
+    pub const fn new(backend: B) -> Self {
         Self { backend }
     }
 }
@@ -193,13 +193,13 @@ impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydra
     }
 }
 
-pub(crate) struct GlobalDbHydrationBackend<'snapshot> {
+pub struct GlobalDbHydrationBackend<'snapshot> {
     read: TemporalSqlRead<'snapshot>,
     storage_root: &'snapshot Path,
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
-    pub(crate) const fn new_registered(
+    pub const fn new_registered(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {
@@ -210,11 +210,11 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
     }
 }
 
-pub(crate) type GlobalDbTemporalHydrationPort<'snapshot> =
+pub type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
-    pub(crate) const fn for_registered_snapshot(
+    pub const fn for_registered_snapshot(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
     ) -> Self {

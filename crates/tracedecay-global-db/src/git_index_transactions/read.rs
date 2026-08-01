@@ -27,18 +27,18 @@ use super::store::GlobalDbGitIndexTransactionStore;
 
 /// Answers the code family of the repository read port over one already-open
 /// canonical `RegisteredGlobalDb` transaction store.
-pub(crate) struct GitIndexReadExecutor<'store, 'db> {
+pub struct GitIndexReadExecutor<'store, 'db> {
     store: &'store GlobalDbGitIndexTransactionStore<'db>,
 }
 
 impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
-    pub(crate) const fn new(store: &'store GlobalDbGitIndexTransactionStore<'db>) -> Self {
+    pub const fn new(store: &'store GlobalDbGitIndexTransactionStore<'db>) -> Self {
         Self { store }
     }
 
     /// Dispatches one closed [`CodeReadOperationV1`] to its canonical store
     /// projection and returns the matching [`CodeReadResultV1`] arm.
-    pub(crate) async fn execute_read(
+    pub async fn execute_read(
         &self,
         operation: &CodeReadOperationV1,
     ) -> GitIndexTransactionStoreResult<CodeReadResultV1> {

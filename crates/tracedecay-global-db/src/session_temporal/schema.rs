@@ -1039,7 +1039,7 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     ("session_summary_nodes_fts", &["summary_text", "index_text"]),
 ];
 
-pub(crate) async fn ensure_session_temporal_schema(
+pub async fn ensure_session_temporal_schema(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     let version = schema_version(conn).await?;
@@ -1079,7 +1079,7 @@ pub(crate) async fn ensure_session_temporal_schema(
     Ok(())
 }
 
-pub(crate) async fn repair_session_temporal_state(
+pub async fn repair_session_temporal_state(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     let Some(version) = schema_version(conn).await? else {

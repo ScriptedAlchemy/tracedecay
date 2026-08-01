@@ -18,7 +18,7 @@ use super::query::{
 };
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn begin_session_generation_rebuild_result(
+    pub async fn begin_session_generation_rebuild_result(
         &self,
         request: SessionGenerationRebuildRequestV1,
     ) -> SessionStoreResult<SessionGenerationRebuildReceiptV1> {
@@ -89,7 +89,7 @@ impl RegisteredGlobalDb {
         SessionGenerationRebuildReceiptV1::new(&request, disposition, recorded_at)
     }
 
-    pub(crate) async fn activate_session_temporal_generation_result(
+    pub async fn activate_session_temporal_generation_result(
         &self,
         request: SessionGenerationActivationRequestV1,
     ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {

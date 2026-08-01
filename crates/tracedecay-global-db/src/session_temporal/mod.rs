@@ -3,7 +3,7 @@ mod direct;
 mod doctor_health;
 mod expand;
 mod hydration;
-pub(crate) mod operations;
+pub mod operations;
 mod projection;
 mod query;
 mod rebuild;
@@ -49,24 +49,24 @@ use tracedecay_temporal_query::ports::{
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
-pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
-pub(crate) use self::direct::ResolvedDirectAnchor;
+pub use self::cursor_keys::GlobalDbCursorKeyProvider;
+pub use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 
 // Consumed by the pr8/transport cold-Doctor route when that branch is integrated.
 #[allow(unused_imports)]
-pub(crate) use doctor_health::{
+pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
     session_temporal_doctor_health_at,
 };
-pub(crate) use projection::record_canonical_observation_effect;
+pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
-pub(crate) use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
+pub use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn ensure_active_session_cursor_key_result(
+    pub async fn ensure_active_session_cursor_key_result(
         &self,
     ) -> tracedecay_store::SessionStoreResult<SignedCursorKeyRefV1> {
         const OPERATION: &str = "provision registered session cursor authentication key";
@@ -83,7 +83,7 @@ impl RegisteredGlobalDb {
         Ok(key)
     }
 
-    pub(crate) async fn load_session_cursor_key_provider_result(
+    pub async fn load_session_cursor_key_provider_result(
         &self,
     ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
         let key = self
@@ -101,16 +101,16 @@ impl RegisteredGlobalDb {
 }
 
 /// Transitional PR8 rendering adapter over one registry-owned session shard.
-pub(crate) struct RegisteredGlobalDbSessionTemporalExecution<'db> {
+pub struct RegisteredGlobalDbSessionTemporalExecution<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
 impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
-    pub(crate) const fn new(db: &'db RegisteredGlobalDb) -> Self {
+    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
     }
 
-    pub(crate) async fn session_message_from_hydrated_occurrence(
+    pub async fn session_message_from_hydrated_occurrence(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
@@ -135,7 +135,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
-    pub(crate) async fn resolve_lcm_describe_target(
+    pub async fn resolve_lcm_describe_target(
         &self,
         provider: &str,
         session_id: &SessionId,
@@ -155,7 +155,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         .await
     }
 
-    pub(crate) async fn resolve_lcm_expand_target(
+    pub async fn resolve_lcm_expand_target(
         &self,
         provider: &str,
         session_id: &SessionId,
@@ -175,7 +175,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         .await
     }
 
-    pub(crate) async fn render_lcm_describe(
+    pub async fn render_lcm_describe(
         &self,
         request: LcmDescribeRequest,
     ) -> Result<LcmDescribeResponse, SessionTemporalExecutionError> {
@@ -189,7 +189,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .map_err(map_lcm_error)
     }
 
-    pub(crate) async fn render_lcm_expand(
+    pub async fn render_lcm_expand(
         &self,
         request: LcmExpandRequest,
         canonical_content: &str,
@@ -204,7 +204,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .map_err(map_lcm_error)
     }
 
-    pub(crate) async fn hydrate_lcm_summary_sources(
+    pub async fn hydrate_lcm_summary_sources(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         provider: &str,
@@ -326,7 +326,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
-    pub(crate) async fn encode_lcm_source_cursor(
+    pub async fn encode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         binding: &str,
@@ -348,7 +348,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         .map_err(map_lcm_cursor_error)
     }
 
-    pub(crate) async fn decode_lcm_source_cursor(
+    pub async fn decode_lcm_source_cursor(
         &self,
         snapshot: &TemporalExecutionSnapshot,
         binding: &str,

@@ -1746,7 +1746,7 @@ async fn trigger_matches(
         && normalize_trigger_sql(&sql) == normalize_trigger_sql(trigger.create_sql))
 }
 
-pub(crate) async fn suspend_immutability_for_canonical_repair(
+pub async fn suspend_immutability_for_canonical_repair(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
@@ -1765,7 +1765,7 @@ pub(crate) async fn suspend_immutability_for_canonical_repair(
     Ok(())
 }
 
-pub(crate) async fn restore_immutability_after_canonical_repair(
+pub async fn restore_immutability_after_canonical_repair(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
@@ -1780,7 +1780,7 @@ pub(crate) async fn restore_immutability_after_canonical_repair(
     Ok(())
 }
 
-pub(crate) async fn suspend_session_invariants_for_schema_upgrade(
+pub async fn suspend_session_invariants_for_schema_upgrade(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     for invariant in INVARIANTS {

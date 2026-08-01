@@ -814,7 +814,7 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 /// Distinct paths are resolved before any write, then each verified alias is
 /// updated idempotently. Updating `project_key` only when it matched the old
 /// path preserves provider-native keys while keeping path-shaped keys aligned.
-pub(crate) async fn converge_session_project_paths(
+pub async fn converge_session_project_paths(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
     let mut rows = conn

@@ -18,14 +18,14 @@ use crate::{
     store::observation::GlobalDbObservationStore,
 };
 
-pub(crate) struct RegisteredGlobalDb {
+pub struct RegisteredGlobalDb {
     read_connection: ReadConnection,
     write_connection: Connection,
     runtime: StoreRuntimeHandle,
     authority: DatabaseAuthority,
 }
 
-pub(crate) struct RegisteredWorkApplicationServicesV1 {
+pub struct RegisteredWorkApplicationServicesV1 {
     commands:
         tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
     projections: tracedecay_application::WorkProjectionReadService<
@@ -34,14 +34,14 @@ pub(crate) struct RegisteredWorkApplicationServicesV1 {
 }
 
 impl RegisteredWorkApplicationServicesV1 {
-    pub(crate) fn commands(
+    pub fn commands(
         &self,
     ) -> &tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
     {
         &self.commands
     }
 
-    pub(crate) fn projections(
+    pub fn projections(
         &self,
     ) -> &tracedecay_application::WorkProjectionReadService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
@@ -56,7 +56,7 @@ impl RegisteredWorkApplicationServicesV1 {
 /// tables through the exact handle `WorkSqliteStorage` owns.
 ///
 /// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
-pub(crate) struct RegisteredWorkflowApplicationServicesV1 {
+pub struct RegisteredWorkflowApplicationServicesV1 {
     definitions: tracedecay_application::WorkflowDefinitionService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     >,
@@ -66,7 +66,7 @@ pub(crate) struct RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
-    pub(crate) fn definitions(
+    pub fn definitions(
         &self,
     ) -> &tracedecay_application::WorkflowDefinitionService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
@@ -74,7 +74,7 @@ impl RegisteredWorkflowApplicationServicesV1 {
         &self.definitions
     }
 
-    pub(crate) fn handoffs(
+    pub fn handoffs(
         &self,
     ) -> &tracedecay_application::TaskHandoffService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
@@ -86,7 +86,7 @@ impl RegisteredWorkflowApplicationServicesV1 {
 impl RegisteredGlobalDb {
     /// Migrates an already-published runtime before validating and exposing
     /// the registered global database facade. No path is reopened.
-    pub(crate) async fn migrate_and_attach(
+    pub async fn migrate_and_attach(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
@@ -102,7 +102,7 @@ impl RegisteredGlobalDb {
 
     /// Installs only admission-critical schema before publishing a daemon
     /// runtime. The returned plan owns resumable historical convergence.
-    pub(crate) async fn migrate_and_attach_for_daemon(
+    pub async fn migrate_and_attach_for_daemon(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
@@ -125,14 +125,14 @@ impl RegisteredGlobalDb {
         Ok((database, convergence))
     }
 
-    pub(crate) async fn converge_schema(
+    pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
     ) -> crate::errors::Result<()> {
         super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
     }
 
-    pub(crate) async fn release_connection_memory(&self) -> crate::errors::Result<()> {
+    pub async fn release_connection_memory(&self) -> crate::errors::Result<()> {
         self.write_connection
             .execute_batch("PRAGMA shrink_memory")
             .await
@@ -155,15 +155,15 @@ impl RegisteredGlobalDb {
         Ok(database)
     }
 
-    pub(crate) fn read_connection(&self) -> &ReadConnection {
+    pub fn read_connection(&self) -> &ReadConnection {
         &self.read_connection
     }
 
-    pub(crate) async fn read_snapshot(&self) -> crate::db::engine::Result<ReadSnapshot> {
+    pub async fn read_snapshot(&self) -> crate::db::engine::Result<ReadSnapshot> {
         self.read_connection.read_snapshot().await
     }
 
-    pub(crate) async fn snapshot_to(&self, destination: &Path) -> crate::errors::Result<()> {
+    pub async fn snapshot_to(&self, destination: &Path) -> crate::errors::Result<()> {
         if destination == self.authority.canonical_database_path() {
             return Err(registered_error(
                 "snapshot registered global database",
@@ -214,7 +214,7 @@ impl RegisteredGlobalDb {
     }
 
     #[doc(hidden)]
-    pub(crate) async fn validate_registry_schema_contract_for_test(
+    pub async fn validate_registry_schema_contract_for_test(
         &self,
     ) -> crate::errors::Result<()> {
         let snapshot = self
@@ -224,7 +224,7 @@ impl RegisteredGlobalDb {
         super::schema_contract::validate_registry_schema_contract(&snapshot).await
     }
 
-    pub(crate) fn writer_connection(
+    pub fn writer_connection(
         &self,
     ) -> crate::errors::Result<RegisteredGlobalDbWriterConnection<'_>> {
         self.authority
@@ -235,7 +235,7 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub(crate) async fn advance_projection_version_migration_until_cancelled(
+    pub async fn advance_projection_version_migration_until_cancelled(
         &self,
         cancelled: &AtomicBool,
     ) -> crate::errors::Result<bool> {
@@ -249,7 +249,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| registered_error("advance observation projection migration", error))
     }
 
-    pub(crate) async fn begin_write_transaction(
+    pub async fn begin_write_transaction(
         &self,
     ) -> crate::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
         self.authority
@@ -267,11 +267,11 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub(crate) fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1 {
         self.runtime.binding()
     }
 
-    pub(crate) fn evidence_assembly_store(
+    pub fn evidence_assembly_store(
         &self,
     ) -> tracedecay_store::EvidenceAssemblyStoreResult<
         crate::application::evidence_assembly::RuntimeEvidenceAssemblyStore,
@@ -283,7 +283,7 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub(crate) fn work_storage(
+    pub fn work_storage(
         &self,
     ) -> crate::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage> {
         let handle = self
@@ -301,7 +301,7 @@ impl RegisteredGlobalDb {
         Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
     }
 
-    pub(crate) fn authorized_scope_set_storage(
+    pub fn authorized_scope_set_storage(
         &self,
     ) -> crate::errors::Result<
         tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
@@ -328,7 +328,7 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub(crate) fn work_application_services(
+    pub fn work_application_services(
         &self,
     ) -> crate::errors::Result<RegisteredWorkApplicationServicesV1> {
         let storage = self.work_storage()?;
@@ -341,7 +341,7 @@ impl RegisteredGlobalDb {
     /// Attaches the PR17 workflow-definition/task-handoff authority over the
     /// registered Work migration-SQL handle. Installs `workflow_*` tables
     /// idempotently through the same handle `work_storage` validates.
-    pub(crate) fn workflow_storage(
+    pub fn workflow_storage(
         &self,
     ) -> crate::errors::Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
         let storage = self.work_storage()?;
@@ -351,7 +351,7 @@ impl RegisteredGlobalDb {
             })
     }
 
-    pub(crate) fn workflow_application_services(
+    pub fn workflow_application_services(
         &self,
     ) -> crate::errors::Result<RegisteredWorkflowApplicationServicesV1> {
         let authority = self.workflow_storage()?;
@@ -361,7 +361,7 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub(crate) fn work_runtime(
+    pub fn work_runtime(
         self: &Arc<Self>,
         authority: tracedecay_domain::WorkAuthority,
         config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
@@ -383,7 +383,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) fn storage_telemetry_handle(
+    pub fn storage_telemetry_handle(
         &self,
     ) -> crate::errors::Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
         self.runtime.telemetry_read_handle().map_err(|error| {
@@ -394,7 +394,7 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub(crate) fn external_source_store(
+    pub fn external_source_store(
         &self,
     ) -> Result<
         crate::application::external_source_store::RuntimeExternalSourceStore,
@@ -406,7 +406,7 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub(crate) fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
+    pub fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
         self.runtime
             .storage_page_counts(std::time::Duration::from_secs(5))
             .map_err(|error| {
@@ -417,7 +417,7 @@ impl RegisteredGlobalDb {
             })
     }
 
-    pub(crate) async fn run_bounded_incremental_compaction(
+    pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
     ) -> crate::errors::Result<()> {
@@ -432,7 +432,7 @@ impl RegisteredGlobalDb {
             })
     }
 
-    pub(crate) async fn run_session_lcm_retention(
+    pub async fn run_session_lcm_retention(
         &self,
         provider: &str,
         session_id: Option<&str>,
@@ -465,7 +465,7 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
-    pub(crate) async fn run_observation_retention(
+    pub async fn run_observation_retention(
         &self,
         generation: Option<&str>,
         config: &super::observation::retention::ObservationRetentionConfig,
@@ -484,15 +484,15 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub(crate) fn observation_store(&self) -> GlobalDbObservationStore<'_> {
+    pub fn observation_store(&self) -> GlobalDbObservationStore<'_> {
         GlobalDbObservationStore::with_runtime(&self.runtime, &self.authority)
     }
 
-    pub(crate) fn db_path(&self) -> &Path {
+    pub fn db_path(&self) -> &Path {
         self.authority.canonical_database_path()
     }
 
-    pub(crate) fn git_index_transaction_store(
+    pub fn git_index_transaction_store(
         &self,
     ) -> super::git_index_transactions::GlobalDbGitIndexTransactionStore<'_> {
         super::git_index_transactions::GlobalDbGitIndexTransactionStore::new(self)
@@ -526,13 +526,13 @@ impl MigrationSqlWriteAuthority for DatabaseAuthority {
     }
 }
 
-pub(crate) struct RegisteredGlobalDbWriterConnection<'a> {
+pub struct RegisteredGlobalDbWriterConnection<'a> {
     connection: &'a Connection,
     authority: &'a DatabaseAuthority,
 }
 
 impl RegisteredGlobalDbWriterConnection<'_> {
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -540,7 +540,7 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.connection.execute(sql, params).await
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -548,7 +548,7 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.connection.query(sql, params).await
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.require_active("execute registered global database batch")?;
         self.connection.execute_batch(sql).await
     }
@@ -567,7 +567,7 @@ impl WalCheckpointExecutor for RegisteredGlobalDbWriterConnection<'_> {
     }
 }
 
-pub(crate) struct RegisteredGlobalDbWriteTransaction<'a> {
+pub struct RegisteredGlobalDbWriteTransaction<'a> {
     transaction: Transaction,
     authority: &'a DatabaseAuthority,
 }
@@ -606,7 +606,7 @@ impl crate::db::engine::DatabaseAttachmentExecutor for RegisteredGlobalDbWriteTr
 }
 
 impl RegisteredGlobalDbWriteTransaction<'_> {
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -614,7 +614,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -622,12 +622,12 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.require_active("execute registered global database transaction batch")?;
         self.transaction.execute_batch(sql).await
     }
 
-    pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
+    pub async fn commit(self) -> crate::db::engine::Result<()> {
         if let Err(error) = self
             .authority
             .require_active_write_scope("commit registered global database transaction")
@@ -645,7 +645,7 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.commit().await
     }
 
-    pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
+    pub async fn rollback(self) -> crate::db::engine::Result<()> {
         self.transaction.rollback().await
     }
 
