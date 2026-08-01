@@ -3,15 +3,11 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
-    WorkAttemptPersistencePort, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkDispatchBoundsV1, WorkDispatchError, WorkExecutionError,
-    WorkExecutionQueueV1, WorkExecutionService, WorkProviderExecutionError,
-    WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
+    WorkAttemptAcquireLeaseRequestV1, WorkAttemptPersistencePort, WorkAttemptResponseV1,
+    WorkDispatchBoundsV1, WorkDispatchError, WorkExecutionError, WorkExecutionQueueV1,
+    WorkExecutionService, WorkProviderExecutionError, WorkProviderSettlementV1, WorkStorageError,
+    WorkStoragePort,
 };
 #[cfg(test)]
 use tracedecay_domain::WorkProviderRouteV1;
@@ -24,6 +20,7 @@ use tracedecay_domain::{
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
+use crate::daemon_contract::WorkAttemptInvocationV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 
@@ -38,40 +35,6 @@ use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
 
 /// Provider executions one daemon project runtime may run at once.
 const DEFAULT_WORK_EXECUTION_CAPACITY: usize = 4;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "attempt_operation",
-    content = "request",
-    rename_all = "snake_case"
-)]
-pub(crate) enum WorkAttemptInvocationV1 {
-    AcquireLease(Box<WorkAttemptAcquireLeaseRequestV1>),
-    RenewLease(WorkAttemptRenewLeaseRequestV1),
-    Start(WorkAttemptStartRequestV1),
-    PublishProgress(WorkAttemptPublishProgressRequestV1),
-    PublishArtifact(WorkAttemptPublishArtifactRequestV1),
-    Cancel(WorkAttemptCancelRequestV1),
-    Recover(WorkAttemptRecoverRequestV1),
-    Finish(WorkAttemptFinishRequestV1),
-    Terminalize(WorkAttemptTerminalizeRequestV1),
-}
-
-impl WorkAttemptInvocationV1 {
-    pub(crate) const fn operation_key(&self) -> &'static str {
-        match self {
-            Self::AcquireLease(_) => "attempt_acquire_lease",
-            Self::RenewLease(_) => "attempt_renew_lease",
-            Self::Start(_) => "attempt_start",
-            Self::PublishProgress(_) => "attempt_publish_progress",
-            Self::PublishArtifact(_) => "attempt_publish_artifact",
-            Self::Cancel(_) => "attempt_cancel",
-            Self::Recover(_) => "attempt_recover",
-            Self::Finish(_) => "attempt_finish",
-            Self::Terminalize(_) => "attempt_terminalize",
-        }
-    }
-}
 
 pub(crate) struct DaemonWorkRuntimeV1<S>
 where
