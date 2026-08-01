@@ -333,16 +333,31 @@ impl McpServer {
     /// [`Self::maybe_sync_if_stale`] still protect writes, exactly as
     /// before this hot-swap existed.
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
+        self.reopen_if_branch_drifted_memoized().await.0
+    }
+
+    /// [`reopen_if_branch_drifted`](Self::reopen_if_branch_drifted) that also
+    /// hands back this request's single branch resolution, so the rest of the
+    /// request reads the live branch from the memo instead of re-opening the
+    /// repository. The memo is request-scoped and never retained.
+    pub(crate) async fn reopen_if_branch_drifted_memoized(
+        &self,
+    ) -> (Arc<TraceDecay>, crate::branch::BranchMemo) {
         let current = self.cg_snapshot().await;
-        if !current.branch_drifted() {
-            return current;
+        // One resolution serves the fast-path check, the re-check under the
+        // reopen lock, and every later live-branch read in this request.
+        let live_branch = current.branch_memo();
+        if !current.branch_drifted_with(&live_branch) {
+            return (current, live_branch);
         }
         let Ok(_reopen_guard) = self.branch_reopen.try_lock() else {
-            return current;
+            return (current, live_branch);
         };
+        // Re-check against a *fresh snapshot*: a concurrent request may have
+        // already swapped the served instance onto this same live branch.
         let current = self.cg_snapshot().await;
-        if !current.branch_drifted() {
-            return current;
+        if !current.branch_drifted_with(&live_branch) {
+            return (current, live_branch);
         }
         let fresh = match current.reopen_for_current_branch().await {
             Ok(fresh) => Arc::new(fresh),
@@ -352,7 +367,7 @@ impl McpServer {
                     serving_branch = current.serving_branch().unwrap_or("<none>"),
                     "branch drift detected but index reopen failed"
                 );
-                return current;
+                return (current, live_branch);
             }
         };
         tracing::info!(
@@ -368,7 +383,7 @@ impl McpServer {
         }
         // New branch DB ⇒ new file set; refresh the token accounting map.
         self.refresh_file_token_map().await;
-        fresh
+        (fresh, live_branch)
     }
 
     pub(crate) async fn reopen_after_branch_tracking_added(&self) {
@@ -605,6 +620,11 @@ impl McpServer {
         // reject the write anyway. `tools/call` reopens onto the live branch
         // via [`Self::reopen_if_branch_drifted`] *before* invoking this, so
         // the guard only fires on a checkout racing the current call.
+        //
+        // R4: deliberately resolves its own branch rather than taking the
+        // request memo. The `CooldownGate` claim above rate-limits this path
+        // to once per 30s, so it is not a per-request cost, and re-reading
+        // HEAD here keeps the racing-checkout guard genuine.
         if cg.branch_drifted() {
             return;
         }
@@ -634,7 +654,16 @@ impl McpServer {
     /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
     /// `background_refresh_running` flag, and the underlying cross-process
     /// sync lock. At most one refresh runs at a time.
-    pub(crate) fn maybe_spawn_read_refresh(&self, cg: &Arc<TraceDecay>) {
+    ///
+    /// R4: this runs before any cooldown claim, so it is on the hot path of
+    /// every read tool call. It takes the caller's request-scoped branch memo
+    /// — the same resolution `reopen_if_branch_drifted` already made for this
+    /// request — instead of re-opening the repository.
+    pub(crate) fn maybe_spawn_read_refresh(
+        &self,
+        cg: &Arc<TraceDecay>,
+        live_branch: &crate::branch::BranchMemo,
+    ) {
         if !self.sync_config.read_refresh {
             return;
         }
@@ -642,7 +671,7 @@ impl McpServer {
         // old branch's DB; `tools/call` reopens onto the live branch before
         // dispatch, so this only fires on an in-flight race. Skip it — the
         // next call runs on the reopened snapshot.
-        if cg.branch_drifted() {
+        if cg.branch_drifted_with(live_branch) {
             return;
         }
 

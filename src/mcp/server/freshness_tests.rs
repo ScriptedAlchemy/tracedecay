@@ -347,7 +347,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // Assert it does not block by bounding the call duration well under a
     // real sync (~hundreds of ms); the spawn does the work off-thread.
     let start = std::time::Instant::now();
-    server.maybe_spawn_read_refresh(&cg_snapshot);
+    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_millis(100),
@@ -368,7 +368,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // spawned. We verify by confirming the stamp does not change to a new
     // value on a back-to-back call within the cooldown window.
     let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
-    server.maybe_spawn_read_refresh(&cg_snapshot);
+    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
     let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
     assert_eq!(
         stamp_after_first, stamp_after_second,
