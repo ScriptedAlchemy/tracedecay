@@ -8,8 +8,6 @@ pub use tracedecay_usecases::host_admission::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use rusqlite::{Connection as RusqliteConnection, OpenFlags, types::ValueRef};
-use sha2::{Digest as _, Sha256};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -1012,89 +1010,12 @@ impl HostAdmissionTestRuntimeV1 {
 }
 
 fn canonical_session_domain_sha256(path: &Path) -> Result<[u8; 32]> {
-    let connection = RusqliteConnection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| session_domain_digest_error("open session database", error))?;
-    let mut table_statement = connection
-        .prepare(
-            "SELECT name
-             FROM sqlite_schema
-             WHERE type = 'table'
-               AND name NOT LIKE 'sqlite_%'
-               AND name <> 'analytics_events'
-             ORDER BY name",
-        )
-        .map_err(|error| session_domain_digest_error("prepare session table inventory", error))?;
-    let tables = table_statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| session_domain_digest_error("query session table inventory", error))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| session_domain_digest_error("read session table inventory", error))?;
-    drop(table_statement);
-
-    let mut digest = Sha256::new();
-    digest.update(b"tracedecay.session-domain-state.v1\0");
-    for table in tables {
-        digest_len_prefixed(&mut digest, table.as_bytes());
-        let escaped = table.replace('"', "\"\"");
-        let mut statement = connection
-            .prepare(&format!("SELECT * FROM \"{escaped}\""))
-            .map_err(|error| session_domain_digest_error("prepare session table read", error))?;
-        let column_count = statement.column_count();
-        let order = (1..=column_count)
-            .map(|index| index.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("SELECT * FROM \"{escaped}\" ORDER BY {order}");
-        drop(statement);
-        statement = connection
-            .prepare(&sql)
-            .map_err(|error| session_domain_digest_error("prepare ordered session read", error))?;
-        let mut rows = statement
-            .query([])
-            .map_err(|error| session_domain_digest_error("query session table", error))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|error| session_domain_digest_error("read session table row", error))?
-        {
-            digest.update(b"row\0");
-            for index in 0..column_count {
-                match row.get_ref(index).map_err(|error| {
-                    session_domain_digest_error("decode session table value", error)
-                })? {
-                    ValueRef::Null => digest.update([0]),
-                    ValueRef::Integer(value) => {
-                        digest.update([1]);
-                        digest.update(value.to_le_bytes());
-                    }
-                    ValueRef::Real(value) => {
-                        digest.update([2]);
-                        digest.update(value.to_bits().to_le_bytes());
-                    }
-                    ValueRef::Text(value) => {
-                        digest.update([3]);
-                        digest_len_prefixed(&mut digest, value);
-                    }
-                    ValueRef::Blob(value) => {
-                        digest.update([4]);
-                        digest_len_prefixed(&mut digest, value);
-                    }
-                }
-            }
+    tracedecay_rusqlite_runtime::canonical_session_domain_content_sha256(path).map_err(|error| {
+        TraceDecayError::Database {
+            operation: error.operation.to_owned(),
+            message: error.message,
         }
-    }
-    Ok(digest.finalize().into())
-}
-
-fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
-    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
-    digest.update(value);
-}
-
-fn session_domain_digest_error(operation: &str, error: rusqlite::Error) -> TraceDecayError {
-    TraceDecayError::Database {
-        operation: operation.to_owned(),
-        message: error.to_string(),
-    }
+    })
 }
 
 const fn registered_authority_unavailable_outcome() -> HostAdmissionOutcome {

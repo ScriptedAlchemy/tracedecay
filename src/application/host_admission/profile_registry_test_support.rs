@@ -1,5 +1,5 @@
 use super::*;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
