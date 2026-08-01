@@ -520,7 +520,6 @@ impl super::Database {
         }
         Ok(history)
     }
-
 }
 
 impl RetrievalAnchorDispositionStore for super::Database {
