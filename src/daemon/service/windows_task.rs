@@ -72,7 +72,7 @@ pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure>
-      <Interval>PT2S</Interval>
+      <Interval>PT1M</Interval>
       <Count>255</Count>
     </RestartOnFailure>
     <Enabled>true</Enabled>
@@ -771,7 +771,7 @@ mod tests {
         assert!(!xml.contains("<UserId>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
-        assert!(xml.contains("<Interval>PT2S</Interval>"));
+        assert!(xml.contains("<Interval>PT1M</Interval>"));
         assert!(xml.contains("<Count>255</Count>"));
         assert!(xml.contains("<Enabled>true</Enabled>"));
     }
