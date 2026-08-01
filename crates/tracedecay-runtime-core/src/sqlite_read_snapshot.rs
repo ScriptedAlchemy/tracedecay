@@ -596,6 +596,46 @@ pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// How long a bounded probe waits on a lock before giving up.
+///
+/// Short on purpose, and the same bound everywhere: a probe reports its store
+/// as unsampled rather than delaying a live daemon writing to it.
+pub const BOUNDED_PROBE_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Opens `path` strictly read-only with a bounded busy timeout, for callers
+/// that only need to read a pragma or check whether a table exists.
+///
+/// This is the deliberately cheap counterpart to [`SnapshotSet::capture_in`]:
+/// it copies nothing and freezes nothing, so it is only appropriate where a
+/// torn read is acceptable and a busy store degrades to "not sampled" instead
+/// of being retried. Anything that needs a consistent view of a live family
+/// must take a real snapshot.
+///
+/// `SQLITE_OPEN_NO_MUTEX` is sound here because `rusqlite::Connection` is not
+/// `Sync`, so the returned connection stays owned by one thread at a time.
+pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(busy_timeout)?;
+    Ok(connection)
+}
+
+/// Reads `PRAGMA <pragma>` as a non-negative count, or `None` when the pragma
+/// is unavailable or does not answer with an integer.
+///
+/// A negative answer clamps to zero: every pragma read through this is a page
+/// or byte count, for which a negative value is not a smaller number but a
+/// missing one.
+#[must_use]
+pub fn pragma_u64(connection: &Connection, pragma: &str) -> Option<u64> {
+    connection
+        .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
+        .ok()
+        .map(|value: i64| value.max(0) as u64)
+}
+
 fn prepare_one(
     source: &Path,
     scratch: &ScratchDirectory,

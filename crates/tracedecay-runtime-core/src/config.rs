@@ -112,28 +112,7 @@ fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
     if !path.is_absolute() {
         return path;
     }
-    canonicalize_path_or_existing_parent(&path)
-}
-
-fn canonicalize_path_or_existing_parent(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
-    }
-
-    let mut current = path;
-    let mut missing_suffix = PathBuf::new();
-    while let Some(name) = current.file_name() {
-        missing_suffix = Path::new(name).join(missing_suffix);
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        current = parent;
-        if let Ok(canonical_parent) = current.canonicalize() {
-            return canonical_parent.join(missing_suffix);
-        }
-    }
-
-    path.to_path_buf()
+    crate::path_safety::canonicalize_path_or_existing_parent(&path)
 }
 
 /// Walks up from `start` looking for the nearest ancestor that hosts an

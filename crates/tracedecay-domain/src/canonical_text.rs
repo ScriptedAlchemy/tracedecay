@@ -8,6 +8,8 @@
 //! Only the predicate is shared — never the error, so no contract's
 //! accept/reject reporting changes by reusing it.
 
+use sha2::{Digest, Sha256};
+
 use crate::research::DomainError;
 
 /// Byte bound shared by canonical identities and labels across the contracts.
@@ -77,6 +79,26 @@ pub fn encode_tagged_lowercase_hex(tag: &str, bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
     encoded
+}
+
+/// Length-prefixed SHA-256 over a domain separator and an ordered list of
+/// parts, encoded as lowercase hex.
+///
+/// Every frame — the domain tag included — is preceded by its big-endian
+/// `u64` byte length, so no two different splits of the same concatenated
+/// bytes can collide. This is an identity primitive: derived ids already
+/// written to disk depend on the exact framing, so the byte layout must never
+/// change.
+#[must_use]
+pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    encode_lowercase_hex(&hasher.finalize())
 }
 
 /// Canonical bounded string that reports an empty value distinctly from a

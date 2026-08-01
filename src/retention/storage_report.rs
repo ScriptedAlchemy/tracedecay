@@ -25,7 +25,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+
+use tracedecay_runtime_core::sqlite_read_snapshot::{
+    BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
+};
 
 use super::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
@@ -39,11 +42,6 @@ const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
-
-/// How long a size sample will wait on a lock before giving up and reporting
-/// the store's free-page fields as unsampled. A live daemon writing to the
-/// store must never be delayed by a report.
-const SAMPLE_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// One registered profile-sharded store's size/free-page snapshot.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -736,17 +734,12 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free-page pragmas over a strictly read-only connection with a
-/// short busy timeout. Returns `None` on any failure — a store held by a busy
-/// writer, a corrupt file, or a WAL database whose `-shm` cannot be mapped
-/// read-only. A report must degrade, never block and never repair.
+/// Reads the free-page pragmas over the shared bounded read-only probe.
+/// Returns `None` on any failure — a store held by a busy writer, a corrupt
+/// file, or a WAL database whose `-shm` cannot be mapped read-only. A report
+/// must degrade, never block and never repair.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
-    let connection = rusqlite::Connection::open_with_flags(
-        graph_db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .ok()?;
-    connection.busy_timeout(SAMPLE_BUSY_TIMEOUT).ok()?;
+    let connection = open_read_only_probe(graph_db_path, BOUNDED_PROBE_BUSY_TIMEOUT).ok()?;
     let page_size = pragma_u64(&connection, "page_size")?;
     let page_count = pragma_u64(&connection, "page_count")?;
     let freelist = pragma_u64(&connection, "freelist_count")?;
@@ -757,13 +750,6 @@ fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
     #[allow(clippy::cast_precision_loss)]
     let free_page_ratio = freelist as f64 / page_count as f64;
     Some((free_bytes, free_page_ratio))
-}
-
-fn pragma_u64(connection: &rusqlite::Connection, pragma: &str) -> Option<u64> {
-    connection
-        .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
-        .ok()
-        .map(|value: i64| value.max(0) as u64)
 }
 
 fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>) -> (usize, u64) {
