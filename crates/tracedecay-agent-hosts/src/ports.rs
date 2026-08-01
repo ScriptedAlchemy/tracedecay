@@ -30,3 +30,4 @@ pub mod hook_runtime;
 pub mod mcp_tools;
 pub mod pricing;
 pub mod session_evidence;
+pub mod session_store;

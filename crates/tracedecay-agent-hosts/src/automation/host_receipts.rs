@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::daemon::{HookRouteMetadata, HookTerminalReceipt};
+use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::PrivateStoreIo;
 use crate::tracedecay::current_timestamp;
