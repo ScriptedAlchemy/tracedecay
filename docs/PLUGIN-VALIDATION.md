@@ -6,7 +6,7 @@
 > `plugin/hooks/hooks-<host>.json`; host READMEs in `plugin/README-<host>.md`.
 > Cursor's workflow dispatchers deploy as native Cursor 1.6+ commands from
 > `plugin/overlays/cursor/commands/*.md`; Claude uses `plugin/commands/*.md`.
-> `src/agents/plugin_bundle.rs` owns each host's deployed file set.
+> `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs` owns each host's deployed file set.
 
 How the bundled agent plugins (shared `plugin/` tree) and their
 skills are validated, where each check runs, and how to extend the system
@@ -134,7 +134,7 @@ skilldoctor, skillkit) and Cursor's skills docs:
 ### 3. Shared source and host projections (cargo test)
 
 There is one source tree: `plugin/`. Host bundles are filtered projections of
-that tree, composed by `src/agents/plugin_bundle.rs`:
+that tree, composed by `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs`:
 
 - Claude deploys manifest, MCP config, hooks, agents, commands, README, and
   every file under `plugin/skills/`.
@@ -144,7 +144,7 @@ that tree, composed by `src/agents/plugin_bundle.rs`:
   commands, Cursor agents, and the shared skill files **except** the
   `tracedecay-*` dispatcher skills. Those slugs are native Cursor commands.
 
-`src/agents/plugin_bundle.rs` unit tests check that recursive skill embedding
+`crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs` unit tests check that recursive skill embedding
 matches every file under `plugin/skills/`, that Cursor filtering stays
 intentional, and that the host file lists remain deterministic. Contract tests
 then validate each projected surface: shared skills once, Cursor commands and
@@ -159,7 +159,7 @@ Beyond validating the *source* bundles, install-time output is validated.
 [cursor.com/docs/plugins](https://cursor.com/docs/plugins) and the official
 [cursor/plugins](https://github.com/cursor/plugins) marketplace repo). This
 repo already conforms — `plugin/.cursor-plugin/plugin.json` in source,
-and `src/agents/cursor.rs` renders it to
+and `crates/tracedecay-agent-hosts/src/agents/cursor.rs` renders it to
 `~/.cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json`. The layout is
 pinned by existing assertions in `tests/agent_suite/agent_cursor_test.rs` and
 `tests/agent_suite/update_plugin_test.rs`. Note that plain `ls` hides the
@@ -304,9 +304,9 @@ To ship a bundle for another agent host:
 
 1. **Add host-specific source files** under `plugin/` or
    `plugin/overlays/<host>/`, keeping shared skills in `plugin/skills/`.
-2. **Add the integration** in `src/agents/<host>.rs`, compose its deployed
-   file set from `src/agents/plugin_bundle.rs`, and register it in
-   `src/agents/mod.rs`.
+2. **Add the integration** in `crates/tracedecay-agent-hosts/src/agents/<host>.rs`, compose its deployed
+   file set from `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs`, and register it in
+   `crates/tracedecay-agent-hosts/src/agents/mod.rs`.
 3. **Extend the contract tests:** add any host frontmatter allowlist,
    host-specific manifest/config assertions, and install-output validation.
    `tests/agent_suite/` is a single test binary, so new modules must be
@@ -330,7 +330,7 @@ To ship a bundle for another agent host:
 | mcp.json / hooks.json schema validation | `tests/agent_suite/plugin_config_schema_test.rs` | `cargo test` |
 | Unified intersection skill contract (frontmatter/description/body/hygiene/layout) + Cursor commands + agent overlay | `tests/agent_suite/shared_skill_contract_test.rs` | `cargo test` |
 | Metadata budget + openai.yaml + per-host frontmatter + install byte-copy parity | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
-| Recursive-embed coverage (skill tree fully embedded) | `src/agents/{claude,codex,cursor,plugin_bundle}.rs` unit tests | `cargo test` |
+| Recursive-embed coverage (skill tree fully embedded) | `crates/tracedecay-agent-hosts/src/agents/{claude,codex,cursor,plugin_bundle}.rs` unit tests | `cargo test` |
 | Manifest path + rendered output | `tests/agent_suite/agent_cursor_test.rs`, `tests/agent_suite/update_plugin_test.rs` | `cargo test` |
 | Cursor reference-integrity + native-command lint | `tests/agent_suite/skill_lint_cursor_test.rs` | `cargo test` |
 | Claude Code portability rules | `tests/agent_suite/skill_lint_claude_test.rs` | `cargo test` |

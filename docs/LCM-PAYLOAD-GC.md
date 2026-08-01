@@ -85,7 +85,7 @@ future session/message delete API, and by an operator `doctor` reap of one ref.
 ### 3.1 Signature
 
 ```rust
-// src/sessions/lcm/payload.rs (or a new gc.rs)
+// crates/tracedecay-sessions/src/runtime/lcm/payload.rs (or a new gc.rs)
 pub(crate) async fn delete_external_payload(
     conn: &Connection,
     storage_root: &Path,

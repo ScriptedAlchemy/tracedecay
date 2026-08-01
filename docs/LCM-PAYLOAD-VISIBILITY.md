@@ -48,17 +48,17 @@ scratch.
 
 | Surface | Anchor | What it exposes today |
 |---|---|---|
-| Storage status type | `LcmPayloadStatus` `src/sessions/lcm/types.rs:517-527` | `externalized_count`, `missing_count`, `unreferenced_count`, `placeholder_ref_count`, `missing_placeholder_metadata_count`, `missing_placeholder_file_count`, `gc_candidate_count` (== unreferenced), `root_contained` |
-| Storage status builder | `status()` `src/sessions/lcm/query.rs:450-518` | Populates `LcmStatus.payload` (no bytes, no `last_gc`, no orphan-file count, no tombstoned) |
-| Doctor diagnostics | `payload_diagnostics()` `src/sessions/lcm/doctor.rs:310-381` | Already classifies `missing_files`, `missing_payload_refs`, `orphan_files`, `orphan_payload_refs`, `unreferenced_metadata`, `placeholder_refs_total`, `missing_placeholder_metadata`, `missing_placeholder_files`, `gc_candidate_files`, `gc_candidate_payload_refs` (read-only; up to `MAX_SAMPLES=20` ref samples) |
-| Doctor doctor() wrapper | `src/sessions/lcm/doctor.rs:44-93` | Returns `{status, dry_run, apply, diagnostics, repairs}`; `status ∈ {ok, issues_found, repaired}` |
+| Storage status type | `LcmPayloadStatus` `crates/tracedecay-sessions/src/runtime/lcm/types.rs:517-527` | `externalized_count`, `missing_count`, `unreferenced_count`, `placeholder_ref_count`, `missing_placeholder_metadata_count`, `missing_placeholder_file_count`, `gc_candidate_count` (== unreferenced), `root_contained` |
+| Storage status builder | `status()` `crates/tracedecay-sessions/src/runtime/lcm/query.rs:450-518` | Populates `LcmStatus.payload` (no bytes, no `last_gc`, no orphan-file count, no tombstoned) |
+| Doctor diagnostics | `payload_diagnostics()` `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs:310-381` | Already classifies `missing_files`, `missing_payload_refs`, `orphan_files`, `orphan_payload_refs`, `unreferenced_metadata`, `placeholder_refs_total`, `missing_placeholder_metadata`, `missing_placeholder_files`, `gc_candidate_files`, `gc_candidate_payload_refs` (read-only; up to `MAX_SAMPLES=20` ref samples) |
+| Doctor doctor() wrapper | `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs:44-93` | Returns `{status, dry_run, apply, diagnostics, repairs}`; `status ∈ {ok, issues_found, repaired}` |
 | MCP `lcm_status` | `def_lcm_status` `src/mcp/tools/definitions.rs`; handler `handle_lcm_status` `src/mcp/tools/handlers/session.rs` | Args `{provider, session_id?}` → `LcmStatus` for the active registered project's user-profile store |
 | MCP `lcm_doctor` | `def_lcm_doctor` `src/mcp/tools/definitions.rs:1906-1944`; mode parsing `lcm_doctor_mode` `handlers/session.rs:667-671` | Modes `diagnose | repair | retention | clean`; `apply` bool; `doctor_clean_apply_enabled` safety gate for `clean`+`apply` (`handlers/session.rs:677`) |
-| Dashboard LCM routes | `router()` `src/dashboard/mod.rs:289-301` | `GET /api/plugins/hermes-lcm/{overview,search,session/{id},node/{id},timeline,compression}` |
+| Dashboard LCM routes | `router()` `src/dashboard.rs:289-301` | `GET /api/plugins/hermes-lcm/{overview,search,session/{id},node/{id},timeline,compression}` |
 | Dashboard LCM overview | `overview()` `src/dashboard/lcm_api.rs:213-344` | `messages_total`, `sessions_total`, role/source counts, summary-node stats, compression ratio, `latest_sessions` — **no payload-health block at all** |
-| Dashboard capabilities | `capabilities()` `src/dashboard/mod.rs:323-348` | `features.lcm`, `lcm_scope`, `dashboards:["…","hermes-lcm",…]` |
+| Dashboard capabilities | `capabilities()` `src/dashboard.rs:323-348` | `features.lcm`, `lcm_scope`, `dashboards:["…","hermes-lcm",…]` |
 | Dashboard frontend | bundled `dashboard/lcm/dist/{index.js,style.css}` (`assets.rs:33-34`); plugin label "LCM" (`mod.rs:365-373`) | LCM tab UI (messages/sessions/summaries); no payload-health card |
-| Hermes plugin wrapper | `src/agents/hermes/templates.rs:81-106, 396-399, 556-562` | Exposes `lcm_status` / `lcm_doctor` as tracedecay tools; `tracedecay doctor` subcommand (`templates.rs:3449-3481`) is **installation/agent-integration** health, not LCM payload health |
+| Hermes plugin wrapper | `crates/tracedecay-agent-hosts/src/agents/hermes/templates.rs:81-106, 396-399, 556-562` | Exposes `lcm_status` / `lcm_doctor` as tracedecay tools; `tracedecay doctor` subcommand (`templates.rs:3449-3481`) is **installation/agent-integration** health, not LCM payload health |
 | CLI | `src/cli.rs:14-263` | Top-level `Doctor` subcommand = tracedecay install/agent health. **No dedicated `tracedecay lcm` CLI subcommand**; LCM is reachable only via MCP tool dispatch (`tool_command.rs:43-47` allowlist) |
 
 **Gap summary.** Counts exist (mostly) but (a) no **byte totals** anywhere, (b) no

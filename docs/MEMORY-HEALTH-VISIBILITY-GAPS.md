@@ -50,8 +50,8 @@ Read, in full:
   `Memory`, `Cost`, `Branch`), `src/doctor.rs`, `src/runtime_telemetry.rs`.
 - MCP: `src/mcp/tools/definitions.rs`, `src/mcp/tools/handlers/mod.rs`,
   `src/mcp/tools/handlers/memory.rs`, and the LCM doctor at
-  `src/sessions/lcm/doctor.rs` (for the contrast baseline).
-- Dashboard backend: `src/dashboard/mod.rs`, `src/dashboard/memory_api.rs`
+  `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (for the contrast baseline).
+- Dashboard backend: `src/dashboard.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`
   (`overview_payload`, `trust_histogram`, `hrr_coverage`).
 - Dashboard frontend: `dashboard/holographic/src/HolographicMemoryPage.tsx`,
   `CurationPanel.tsx`, `api.ts`.
@@ -68,12 +68,12 @@ Read-only SQL against the live DB to ground each gap in current numbers.
 
 | Surface | LCM session store | Holographic memory |
 |---|---|---|
-| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `src/sessions/lcm/doctor.rs` | ❌ none |
+| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` | ❌ none |
 | Status/telemetry | ✅ `tracedecay_lcm_status` | ⚠️ `tracedecay_memory_status` (counts only — no integrity/health) |
 | Plan + apply repairs (dry-run → backup → apply) | ✅ `doctor(mode=repair/clean)` | ❌ none (`memory curate` is dedup-only) |
 | Cleanup candidates w/ backup | ✅ `clean_lcm_noise` | ❌ none |
 
-`src/sessions/lcm/doctor.rs` gathers schema version, FTS rebuild-needed flags,
+`crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` gathers schema version, FTS rebuild-needed flags,
 payload orphan/missing-file diagnostics, summary-source integrity, lifecycle
 frontier checks, retention candidates, and noise cleanup candidates — then plans
 safe repairs, backs up the DB, and applies them, all behind `mode`/`apply`
@@ -138,7 +138,7 @@ repair: { missing_vectors_repaired, banks_rebuilt }
 
 **Status at audit time (historical):** this object was reachable **only** via
 the `tracedecay_memory_status` MCP tool; the dashboard never called it (the only
-callers were side-effecting readiness probes in `dashboard/mod.rs:141` and
+callers were side-effecting readiness probes in `dashboard.rs:141` and
 `memory_curate.rs:117`, whose return value was discarded), and the `tracedecay`
 CLI had no `memory status` subcommand (`MemoryAction` had no `Status` variant).
 So the richest existing health object was invisible to humans.
@@ -146,7 +146,7 @@ So the richest existing health object was invisible to humans.
 **Resolved by Q3 (landed):** a `Status` arm was added to `MemoryAction`
 (`src/cli.rs`, `src/main.rs`), giving `tracedecay memory status` (human +
 `--json`); the dashboard route `GET /api/plugins/holographic/status`
-(`src/dashboard/mod.rs:265`, `src/dashboard/memory_api.rs`) returns the same
+(`src/dashboard.rs:265`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) returns the same
 payload (plus largest-bank utilization); and a Memory Health card renders it in
 the dashboard. The MCP tool doc now cross-references the CLI and dashboard
 equivalents (`src/mcp/tools/definitions.rs:1801`). **G2 is closed.**
@@ -199,7 +199,7 @@ backend endpoint/data needed. Tiers: **T1** = reuses existing data, low effort;
 
 ### 5.3 Backend — the missing memory doctor (highest-leverage new work)
 
-Model it on `src/sessions/lcm/doctor.rs`: a `gather_diagnostics` →
+Model it on `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs`: a `gather_diagnostics` →
 `plan_and_apply_repairs` pipeline with `mode ∈ {diagnose, repair, clean}` and
 `apply: bool`, plus a pre-apply DB backup (LCM already has
 `backup_database`/`checkpoint_wal_for_backup` to reuse).
@@ -250,7 +250,7 @@ Model it on `src/sessions/lcm/doctor.rs`: a `gather_diagnostics` →
 To support §5.1–§5.4 the backend needs:
 
 1. ~~**`GET /api/plugins/holographic/status`** — wraps `cg.memory_status()`.~~
-   **Done (Q3).** Route wired at `src/dashboard/mod.rs:265` returning
+   **Done (Q3).** Route wired at `src/dashboard.rs:265` returning
    `memory_status()` + largest-bank utilization; unblocks D1/C1. (Additive field
    — preserves the shape-compat rules in `DASHBOARD-API-AUDIT.md` §6 P18/P19.)
 2. **`GET /api/plugins/holographic/health`** (or `/doctor?mode=diagnose`) — the
@@ -296,8 +296,8 @@ story.
   `src/runtime_telemetry.rs` (`RuntimeSnapshot:27`, `DatabaseSnapshot:55`).
 - MCP: `src/mcp/tools/definitions.rs:1789` (`def_memory_status`),
   `src/mcp/tools/handlers/memory.rs:333` (`handle_memory_status`),
-  `src/sessions/lcm/doctor.rs` (parity baseline).
-- Dashboard backend: `src/dashboard/memory_api.rs:184` (`overview_payload`),
+  `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (parity baseline).
+- Dashboard backend: `crates/tracedecay-dashboard-api/src/memory_api.rs:184` (`overview_payload`),
   `:145` (`trust_histogram`), `:225` (`hrr_coverage`).
 - Dashboard frontend: `dashboard/holographic/src/HolographicMemoryPage.tsx`,
   `CurationPanel.tsx:32` (`DIAGNOSTIC_COUNT_KEYS`), `api.ts`.
