@@ -1,7 +1,7 @@
 //! Durable incident-debris quarantine and retention collection (Plan 38 §5).
 
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 #[cfg(not(windows))]
@@ -71,19 +71,22 @@ struct StoreDebrisCapability {
     root: Dir,
 }
 
+/// Resolves the owner profile once per sweep: the containment fence below
+/// compares every store against it, and the answer cannot change mid-sweep.
+fn canonical_profile_root(profile_root: &Path) -> Result<PathBuf, IncidentDebrisFailureKind> {
+    profile_root
+        .canonicalize()
+        .map_err(|_| IncidentDebrisFailureKind::InspectFailed)
+}
+
 impl StoreDebrisCapability {
-    fn open(
-        entry: &StoreCensusEntry,
-        profile_root: &Path,
-    ) -> Result<Self, IncidentDebrisFailureKind> {
-        let profile = profile_root
-            .canonicalize()
-            .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
+    /// `profile` must already be canonical (see [`canonical_profile_root`]).
+    fn open(entry: &StoreCensusEntry, profile: &Path) -> Result<Self, IncidentDebrisFailureKind> {
         let store = entry
             .data_root
             .canonicalize()
             .map_err(|_| IncidentDebrisFailureKind::InspectFailed)?;
-        if store == profile || !store.starts_with(&profile) {
+        if store == profile || !store.starts_with(profile) {
             return Err(IncidentDebrisFailureKind::OutsideProfile);
         }
         let root = Dir::open_ambient_dir(&store, ambient_authority())
@@ -137,8 +140,17 @@ pub fn sweep_incident_debris(
             }));
         return report;
     }
+    let profile = match canonical_profile_root(profile_root) {
+        Ok(profile) => profile,
+        Err(kind) => {
+            report
+                .errors
+                .extend(census.iter().map(|entry| failure(entry, kind)));
+            return report;
+        }
+    };
     for entry in census {
-        let capability = match StoreDebrisCapability::open(entry, profile_root) {
+        let capability = match StoreDebrisCapability::open(entry, &profile) {
             Ok(capability) => capability,
             Err(kind) => {
                 report.errors.push(failure(entry, kind));
@@ -159,7 +171,7 @@ pub fn scan_incident_debris(
     profile_root: &Path,
     now: i64,
 ) -> Result<IncidentDebrisScanV1, IncidentDebrisFailureKind> {
-    let capability = StoreDebrisCapability::open(entry, profile_root)?;
+    let capability = StoreDebrisCapability::open(entry, &canonical_profile_root(profile_root)?)?;
     let store = StoreKeyV1::new(entry.store_id.clone())
         .map_err(|_| IncidentDebrisFailureKind::MetadataInvalid)?;
     let observed_at = UtcMicros(now.saturating_mul(1_000_000));
