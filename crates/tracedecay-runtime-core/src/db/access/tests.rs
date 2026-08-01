@@ -903,7 +903,13 @@ fn ambient_test_authority_fails_closed_while_foreign_daemon_lock_is_held() {
     let db_path = profile.join("projects/p1/tracedecay.db");
     std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
+    #[cfg(windows)]
+    let lock_path = profile
+        .join("daemon-authority")
+        .join("daemon-authority.lock");
+    #[cfg(not(windows))]
     let lock_path = profile.join("daemon-authority.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     let lock = options.open(&lock_path).unwrap();
