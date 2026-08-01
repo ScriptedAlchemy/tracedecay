@@ -32,15 +32,9 @@ use tracedecay::types::{Node, NodeKind, Visibility};
 /// generated guidance, so every suite must read the same authority; keeping the
 /// `include_str!` sites here means one edit repoints them all after a move.
 pub mod host_sources {
-    pub const HERMES_INSTALLER: &str =
-        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes.rs");
-    pub const HERMES_TEMPLATES_MODULE: &str =
-        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates.rs");
     pub const HERMES_PLUGIN_INIT_PY: &str = include_str!(
         "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
     );
-    pub const HERMES_CLI_PY: &str =
-        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/cli.py");
     pub const HERMES_SKILL_MD: &str =
         include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md");
 }

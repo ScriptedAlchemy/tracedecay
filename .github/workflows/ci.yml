@@ -321,7 +321,7 @@ jobs:
         # ran was deleted, but lite-profile compile coverage stays.
         run: cargo check --locked --no-default-features --features lite
 
-      - name: PR13 default-feature platform lifecycle
+      - name: Host-bundle default-feature platform lifecycle
         run: |
           set -euo pipefail
           # The ONLY default-feature (not --all-features) lifecycle run.
@@ -471,8 +471,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  windows-pr8-temporal-durable:
-    name: Test Windows PR8 temporal durable (DELETE+FULL)
+  windows-sqlite-durable-journal:
+    name: Test Windows SQLite durable journal (DELETE+FULL)
     if: ${{ needs.windows-build.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
     needs: windows-build
     runs-on: windows-latest
@@ -507,7 +507,7 @@ jobs:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
 
-      - name: Run Windows PR8 temporal durable tests
+      - name: Run Windows SQLite durable journal tests
         shell: pwsh
         timeout-minutes: 24
         # --extract-to must be the workspace so target/ lands at the same
@@ -525,11 +525,11 @@ jobs:
         if: always()
         uses: ./.github/actions/clean-windows-test-children
 
-      - name: Upload Windows PR8 temporal durable nextest report
+      - name: Upload Windows SQLite durable journal nextest report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: windows-pr8-temporal-durable-junit-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: windows-sqlite-durable-junit-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
@@ -602,7 +602,7 @@ jobs:
         shell: bash
         run: cargo check --locked --no-default-features --features lite
 
-      - name: PR13 default-feature platform lifecycle
+      - name: Host-bundle default-feature platform lifecycle
         shell: bash
         run: cargo test --locked --test pr13_host_bundle_acceptance
 

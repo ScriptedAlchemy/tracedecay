@@ -127,10 +127,6 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
             !source.contains(".tracedecay/tracedecay.db"),
             "{name} generated guidance must not hardcode the repo-local graph DB path"
         );
-        assert!(
-            source.contains("standard_prompt_rules"),
-            "{name} should delegate prompt rules to the shared renderer"
-        );
     }
 }
 

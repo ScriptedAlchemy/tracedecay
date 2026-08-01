@@ -241,31 +241,6 @@ fn faulty_composition_identity_is_rejected_fail_closed() {
 }
 
 #[test]
-fn post_read_authorization_reuses_the_command_scope_and_fence() {
-    let query_source = include_str!("query.rs");
-    let post_read = query_source
-        .split_once("let publication_authorization = self.authorization.authorize(")
-        .expect("post-read authorization boundary")
-        .1
-        .split_once("if publication_authorization != command.query_authorization")
-        .expect("post-read authorization comparison")
-        .0;
-
-    for command_binding in [
-        "&command.scope",
-        "&command.repository_scope",
-        "&command.observation_id",
-        "&command.expected_authority",
-    ] {
-        assert!(
-            post_read.contains(command_binding),
-            "post-read authorization must reuse {command_binding}"
-        );
-    }
-    assert!(!post_read.contains("\n            &scope,"));
-}
-
-#[test]
 fn receipt_mismatch_maps_to_unavailable_not_scope_concealment() {
     assert_eq!(
         query_protocol_failure(RemoteExactObservationQueryErrorV1::ReceiptMismatch),

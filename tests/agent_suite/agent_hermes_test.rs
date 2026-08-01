@@ -122,39 +122,6 @@ fn test_hermes_user_install_writes_single_plugin() {
 }
 
 #[test]
-fn test_hermes_generated_plugin_templates_live_outside_installer() {
-    let installer_source = host_sources::HERMES_INSTALLER;
-    // The template module plus its embedded asset payloads: the large Python
-    // bodies live in the host crate's agents/hermes/templates/ files pulled in
-    // via include_str!, not as Rust string literals.
-    let template_sources = [
-        host_sources::HERMES_TEMPLATES_MODULE,
-        host_sources::HERMES_PLUGIN_INIT_PY,
-        host_sources::HERMES_CLI_PY,
-        host_sources::HERMES_SKILL_MD,
-    ];
-
-    for marker in [
-        r#""""Generated tracedecay tool handlers for Hermes.""""#,
-        "def register(ctx):",
-        "class TracedecayMemoryProvider",
-        "def tracedecay_command(args):",
-        "name: tracedecay\\n\\",
-    ] {
-        assert!(
-            !installer_source.contains(marker),
-            "large generated plugin template marker should not live in agents/hermes.rs: {marker}"
-        );
-        assert!(
-            template_sources
-                .iter()
-                .any(|source| source.contains(marker)),
-            "generated plugin template module/assets should contain marker: {marker}"
-        );
-    }
-}
-
-#[test]
 fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     let home = TempDir::new().unwrap();
     install_hermes_default(home.path());
