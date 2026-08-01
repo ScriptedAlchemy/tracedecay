@@ -15,7 +15,6 @@ use tracedecay_agent_hosts::ports::project_runtime::{
 use tracedecay_domain::RefId;
 use tracedecay_store::{
     CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    StoreSnapshotIdV1,
 };
 
 use super::registry::{
@@ -96,8 +95,12 @@ pub(crate) fn register_profile_sessions_port() {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredSchemaConvergenceStatus {
     Pending,
+    #[cfg(test)]
     Complete,
-    Degraded { message: String },
+    #[cfg(test)]
+    Degraded {
+        message: String,
+    },
 }
 
 struct RegisteredSchemaConvergenceMaintenance {
@@ -121,6 +124,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         }
     }
 
+    #[cfg(test)]
     fn status(&self, shard_id: &StoreShardIdV1) -> Option<RegisteredSchemaConvergenceStatus> {
         self.statuses
             .lock()
@@ -137,6 +141,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             .or_insert(RegisteredSchemaConvergenceStatus::Pending);
     }
 
+    #[cfg(test)]
     fn schedule(
         &self,
         database: Arc<RegisteredGlobalDb>,
@@ -596,6 +601,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    #[cfg(test)]
     pub(crate) fn registered_schema_convergence_status(
         &self,
         shard_id: &StoreShardIdV1,
@@ -705,28 +711,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         )
         .await?;
         Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
-    }
-
-    pub(crate) async fn code_graph(
-        &self,
-        shard_id: StoreShardIdV1,
-        database_path: PathBuf,
-        database_authority: DatabaseAuthority,
-    ) -> Result<StoreRuntimeHandle> {
-        let initialize_if_missing = !matches!(
-            &shard_id.scope,
-            tracedecay_store::StoreShardScopeV1::Code {
-                scope: CodeShardScopeV1::Snapshot { .. },
-                ..
-            }
-        );
-        self.code_graph_with_authority(
-            shard_id,
-            database_path,
-            Some(database_authority),
-            initialize_if_missing,
-        )
-        .await
     }
 
     async fn code_graph_with_authority(
@@ -911,39 +895,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             )
             .await?;
         Database::publish_runtime(runtime, access).await
-    }
-
-    /// Mounts an immutable graph generation for cross-branch comparison. A
-    /// snapshot identity is caller-supplied from durable branch/generation
-    /// truth; the current worktree identity is still resolved and bound here.
-    pub(crate) async fn code_graph_snapshot(
-        &self,
-        project_root: &Path,
-        project_id: ProjectId,
-        snapshot_id: StoreSnapshotIdV1,
-        database_path: PathBuf,
-        database_authority: DatabaseAuthority,
-    ) -> Result<Database> {
-        let identity = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
-            project_root,
-        )
-        .map_err(|error| {
-            session_registry_error("resolve code-snapshot identity", error.to_string())
-        })?;
-        let shard_id = StoreShardIdV1::code(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-            identity.repository_id().clone(),
-            CodeShardScopeV1::Snapshot {
-                worktree_id: Some(identity.worktree_id().clone()),
-                snapshot_id,
-            },
-        );
-        let runtime = self
-            .code_graph(shard_id, database_path, database_authority)
-            .await?;
-        Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
     }
 }
 
