@@ -19,7 +19,7 @@ use crate::config::retrieval::{
     RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
@@ -178,7 +178,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         mutation: &DirectConfigurationMutation,
         expected_revision: &tracedecay_domain::ConfigurationRevisionId,
     ) -> Result<
-        crate::global_db::configuration::store::ConfigurationDirectCommitOutcomeV1,
+        tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1,
         SemanticConfigurationBackendErrorV1,
     > {
         let transaction = self
@@ -186,7 +186,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
             .begin_write_transaction()
             .await
             .map_err(|_| SemanticConfigurationBackendErrorV1::Unavailable)?;
-        let preview = crate::global_db::configuration::store::commit_direct_in_transaction(
+        let preview = tracedecay_global_db::configuration::store::commit_direct_in_transaction(
             &transaction,
             authority,
             mutation,
@@ -517,7 +517,7 @@ impl SemanticRetrievalConfigurationPortV1 for ProductionSemanticRetrievalConfigu
             {
                 return Err(SemanticConfigurationBackendErrorV1::Conflict);
             }
-            let central = crate::global_db::configuration::store::commit_direct_in_transaction(
+            let central = tracedecay_global_db::configuration::store::commit_direct_in_transaction(
                 &transaction,
                 &prepared.authority,
                 &prepared.mutation,

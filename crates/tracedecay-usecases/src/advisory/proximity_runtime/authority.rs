@@ -25,7 +25,7 @@ use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::git_correlation::{
     GitRefFilter, SessionsForQuery, normalize_worktree, sessions_for,
 };

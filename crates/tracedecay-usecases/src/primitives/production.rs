@@ -63,8 +63,8 @@ use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
 };
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::session_temporal::GlobalDbCursorKeyProvider;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use crate::mcp::tools::handlers::git::{
     affected_test_proximity, collect_affected_test_files, rank_affected_tests,
 };

@@ -16,7 +16,7 @@ use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
     RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 type ProductionOwner = SemanticRuntimeOwnerV1<
     OwnedGlobalDbConfigurationControlStore,
@@ -102,7 +102,7 @@ impl ProductionSemanticActivationCoordinatorV1 {
         mutation: &DirectConfigurationMutation,
         expected_revision: &tracedecay_domain::ConfigurationRevisionId,
     ) -> Result<
-        crate::global_db::configuration::store::ConfigurationDirectCommitOutcomeV1,
+        tracedecay_global_db::configuration::store::ConfigurationDirectCommitOutcomeV1,
         SemanticActivationCoordinationErrorV1,
     > {
         self.configuration

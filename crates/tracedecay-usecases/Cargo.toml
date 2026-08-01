@@ -25,6 +25,10 @@ test-transport = [
 
 [dependencies]
 cap-std = "4.0.2"
+getrandom = "0.2"
+gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+glob = "0.3"
+hex = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 same-file = "1"
 schemars = "1.2.1"
@@ -44,6 +48,7 @@ tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }

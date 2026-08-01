@@ -62,8 +62,8 @@ use crate::advisory::{
 };
 use crate::configuration::ConfigurationCurrentStateV1;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
