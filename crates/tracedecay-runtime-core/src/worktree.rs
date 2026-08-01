@@ -105,7 +105,7 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
     crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
 }
 
-pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
+pub fn is_linked_worktree(dir: &Path) -> bool {
     git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
 }
 
@@ -152,7 +152,7 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
 /// somewhere in its ancestor chain or the caller overrides discovery via
 /// `GIT_DIR`. Spawning `git` costs ~100-300ms on Windows, so callers skip
 /// the spawn when it is guaranteed to fail anyway.
-pub(crate) fn git_may_resolve_repo(dir: &Path) -> bool {
+pub fn git_may_resolve_repo(dir: &Path) -> bool {
     if std::env::var_os("GIT_DIR").is_some() {
         return true;
     }
@@ -194,7 +194,7 @@ pub fn detect_worktree_index_mismatch(
 /// Detect a borrowed index for the client scope represented by a daemon-held
 /// project. The daemon process's own current directory is unrelated to the
 /// client and must never participate in this decision.
-pub(crate) fn detect_scoped_worktree_index_mismatch(
+pub fn detect_scoped_worktree_index_mismatch(
     index_root: &Path,
     scope_prefix: Option<&str>,
 ) -> Option<WorktreeIndexMismatch> {

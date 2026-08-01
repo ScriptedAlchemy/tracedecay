@@ -793,7 +793,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 /// through this one type and its `db_path() == graph_db_path` routing
 /// predicate, instead of each maintaining its own near-duplicate enum kept in
 /// sync only by hand.
-pub(crate) enum ProjectMemoryDbHandle<'a> {
+pub enum ProjectMemoryDbHandle<'a> {
     /// The database this instance already serves, when it already is the
     /// shared project store rather than a branch shard.
     Active(&'a Database),
@@ -804,7 +804,7 @@ pub(crate) enum ProjectMemoryDbHandle<'a> {
 
 impl<'a> ProjectMemoryDbHandle<'a> {
     /// Borrows the resolved database regardless of ownership.
-    pub(crate) fn as_db(&self) -> &Database {
+    pub fn as_db(&self) -> &Database {
         match self {
             Self::Active(db) => db,
             Self::Owned(db) => db.as_ref(),
@@ -814,7 +814,7 @@ impl<'a> ProjectMemoryDbHandle<'a> {
     /// Consumes the resolved handle into a fact store that owns it, so a
     /// single accessor can build a memory application whose authority
     /// outlives the resolving call.
-    pub(crate) fn into_fact_store(self) -> ProjectFactStore<'a> {
+    pub fn into_fact_store(self) -> ProjectFactStore<'a> {
         ProjectFactStore { db: self }
     }
 }

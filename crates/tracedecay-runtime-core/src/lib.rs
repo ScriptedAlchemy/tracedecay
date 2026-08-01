@@ -52,9 +52,9 @@
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
 // The kernel was extracted from a single crate where every intra-crate item
-// was reachable through `pub(crate)`. Crossing the crate boundary promotes
-// those to `pub`; the root shims re-export them so the public surface is an
-// artifact of the split, not new API.
+// was reachable through crate-restricted visibility. Crossing the crate
+// boundary promoted those to `pub`; the root shims re-export them, so this
+// public surface is an artifact of the split, not new API.
 #![allow(unreachable_pub)]
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]

@@ -33,14 +33,14 @@ pub struct MemoryStore<'a> {
 }
 
 impl<'a> MemoryStore<'a> {
-    pub(crate) const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
+    pub const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
         Self {
             conn: MemoryConnection::runtime(conn),
             encoder: HolographicEncoder::new(),
         }
     }
 
-    pub(crate) const fn new_engine_transaction(
+    pub const fn new_engine_transaction(
         transaction: &'a crate::db::engine::Transaction,
     ) -> Self {
         Self {
@@ -49,7 +49,7 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-    pub(crate) const fn new_database_transaction(
+    pub const fn new_database_transaction(
         transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
     ) -> Self {
         Self {
@@ -280,7 +280,7 @@ impl<'a> MemoryStore<'a> {
         Ok(relations)
     }
 
-    pub(crate) async fn query<P>(&self, operation: &str, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, operation: &str, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {

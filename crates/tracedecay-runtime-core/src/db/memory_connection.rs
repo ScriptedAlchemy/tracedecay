@@ -17,17 +17,17 @@ impl From<engine::Error> for SqliteDriverError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum MemoryConnectionError {
+pub enum MemoryConnectionError {
     #[error(transparent)]
     Runtime(#[from] engine::Error),
     #[error("nested memory transactions are unsupported")]
     NestedTransaction,
 }
 
-pub(crate) type Result<T> = std::result::Result<T, MemoryConnectionError>;
+pub type Result<T> = std::result::Result<T, MemoryConnectionError>;
 
 #[derive(Clone, Copy)]
-pub(crate) enum MemoryConnection<'a> {
+pub enum MemoryConnection<'a> {
     Runtime(&'a engine::Connection),
     RuntimeTransaction(&'a engine::Transaction),
     Transaction(&'a MemoryTransaction),
@@ -35,25 +35,25 @@ pub(crate) enum MemoryConnection<'a> {
 }
 
 impl<'a> MemoryConnection<'a> {
-    pub(crate) const fn runtime(connection: &'a engine::Connection) -> Self {
+    pub const fn runtime(connection: &'a engine::Connection) -> Self {
         Self::Runtime(connection)
     }
 
-    pub(crate) const fn runtime_transaction(transaction: &'a engine::Transaction) -> Self {
+    pub const fn runtime_transaction(transaction: &'a engine::Transaction) -> Self {
         Self::RuntimeTransaction(transaction)
     }
 
-    pub(crate) const fn transaction(transaction: &'a MemoryTransaction) -> Self {
+    pub const fn transaction(transaction: &'a MemoryTransaction) -> Self {
         Self::Transaction(transaction)
     }
 
-    pub(crate) const fn database_transaction(
+    pub const fn database_transaction(
         transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
     ) -> Self {
         Self::DatabaseTransaction(transaction)
     }
 
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
@@ -79,7 +79,7 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
@@ -105,7 +105,7 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         match self {
             Self::Runtime(connection) => connection.execute_batch(sql).await.map_err(Into::into),
             Self::RuntimeTransaction(transaction) => {
@@ -118,7 +118,7 @@ impl<'a> MemoryConnection<'a> {
         }
     }
 
-    pub(crate) async fn transaction_with_behavior(
+    pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
     ) -> Result<MemoryTransaction> {
@@ -135,12 +135,12 @@ impl<'a> MemoryConnection<'a> {
     }
 }
 
-pub(crate) enum MemoryTransaction {
+pub enum MemoryTransaction {
     Runtime(engine::Transaction),
 }
 
 impl MemoryTransaction {
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
@@ -153,7 +153,7 @@ impl MemoryTransaction {
         }
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
@@ -166,19 +166,19 @@ impl MemoryTransaction {
         }
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.execute_batch(sql).await.map_err(Into::into),
         }
     }
 
-    pub(crate) async fn commit(self) -> Result<()> {
+    pub async fn commit(self) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.commit().await.map_err(Into::into),
         }
     }
 
-    pub(crate) async fn rollback(self) -> Result<()> {
+    pub async fn rollback(self) -> Result<()> {
         match self {
             Self::Runtime(transaction) => transaction.rollback().await.map_err(Into::into),
         }

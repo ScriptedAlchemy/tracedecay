@@ -46,7 +46,7 @@ mod registry;
 
 pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
 #[cfg(test)]
-pub(crate) use pragmas::{
+pub use pragmas::{
     adaptive_cache_sizes, platform_safe_journal_mode, platform_safe_mmap_size,
     platform_safe_synchronous_mode,
 };
@@ -158,7 +158,7 @@ impl StoreRuntimeResolver for ExactTestRuntimeResolver {
 /// presence: one writable runtime can issue both read-only and read-write
 /// database facades without opening the `SQLite` path again.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DatabaseAccessMode {
+pub enum DatabaseAccessMode {
     ReadOnly,
     ReadWrite,
 }
@@ -202,7 +202,7 @@ static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
 /// second path-derived `SQLite` open.
-pub(crate) struct DatabaseWriterConnection<'a> {
+pub struct DatabaseWriterConnection<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     conn: Connection,
 }
@@ -212,16 +212,16 @@ pub(crate) struct DatabaseWriterConnection<'a> {
 /// The retained graph connection remains private to this adapter while the
 /// daemon runtime cutover replaces its physical owner.
 #[derive(Clone)]
-pub(crate) struct DatabaseEngineConnection {
+pub struct DatabaseEngineConnection {
     conn: Connection,
 }
 
-pub(crate) struct DatabaseEngineStatement<'a> {
+pub struct DatabaseEngineStatement<'a> {
     target: DatabaseEngineStatementTarget<'a>,
     sql: String,
 }
 
-pub(crate) struct DatabaseEngineReadSnapshot {
+pub struct DatabaseEngineReadSnapshot {
     snapshot: ReadSnapshot,
 }
 
@@ -231,7 +231,7 @@ enum DatabaseEngineStatementTarget<'a> {
 
 /// Driver-neutral transaction used by the canonical memory store during the
 /// physical database cutover.
-pub(crate) enum DatabaseMemoryTransaction<'a> {
+pub enum DatabaseMemoryTransaction<'a> {
     Read(DatabaseEngineReadSnapshot),
     Write(DatabaseWriteTransaction<'a>),
 }
@@ -247,35 +247,35 @@ pub struct DatabaseMemoryWriter<'a> {
 
 /// An immediate transaction that retains the canonical writer lane until the
 /// transaction commits, rolls back, or is dropped.
-pub(crate) struct DatabaseWriteTransaction<'a> {
+pub struct DatabaseWriteTransaction<'a> {
     transaction: Transaction,
     guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl DatabaseWriterConnection<'_> {
-    pub(crate) fn engine_connection(&self) -> &Connection {
+    pub fn engine_connection(&self) -> &Connection {
         &self.conn
     }
 
     #[cfg(test)]
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
     }
 
     #[cfg(test)]
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
         self.conn.execute(sql, params).await
     }
 
-    pub(crate) fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
+    pub fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
         crate::memory::store::MemoryStore::new_runtime(&self.conn)
     }
 
     #[cfg(test)]
-    pub(crate) async fn execute_engine<P>(
+    pub async fn execute_engine<P>(
         &self,
         sql: &str,
         params: P,
@@ -287,7 +287,7 @@ impl DatabaseWriterConnection<'_> {
     }
 
     #[cfg(test)]
-    pub(crate) async fn query_engine<P>(
+    pub async fn query_engine<P>(
         &self,
         sql: &str,
         params: P,
@@ -300,7 +300,7 @@ impl DatabaseWriterConnection<'_> {
 }
 
 impl DatabaseEngineConnection {
-    pub(crate) async fn query<P>(
+    pub async fn query<P>(
         &self,
         sql: &str,
         params: P,
@@ -326,7 +326,7 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineConnection {
 }
 
 impl DatabaseEngineStatement<'_> {
-    pub(crate) async fn execute<P>(&self, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
@@ -337,11 +337,11 @@ impl DatabaseEngineStatement<'_> {
         }
     }
 
-    pub(crate) fn reset(&self) {}
+    pub fn reset(&self) {}
 }
 
 impl DatabaseEngineReadSnapshot {
-    pub(crate) async fn query<P>(
+    pub async fn query<P>(
         &self,
         sql: &str,
         params: P,
@@ -352,12 +352,12 @@ impl DatabaseEngineReadSnapshot {
         self.snapshot.query(sql, params).await
     }
 
-    pub(crate) async fn commit(self) -> crate::db::engine::Result<()> {
+    pub async fn commit(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())
     }
 
-    pub(crate) async fn rollback(self) -> crate::db::engine::Result<()> {
+    pub async fn rollback(self) -> crate::db::engine::Result<()> {
         drop(self);
         Ok(())
     }
@@ -377,15 +377,15 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadSnapshot {
 }
 
 impl<'a> DatabaseMemoryTransaction<'a> {
-    pub(crate) fn read(snapshot: DatabaseEngineReadSnapshot) -> Self {
+    pub fn read(snapshot: DatabaseEngineReadSnapshot) -> Self {
         Self::Read(snapshot)
     }
 
-    pub(crate) fn write(transaction: DatabaseWriteTransaction<'a>) -> Self {
+    pub fn write(transaction: DatabaseWriteTransaction<'a>) -> Self {
         Self::Write(transaction)
     }
 
-    pub(crate) async fn query<P>(
+    pub async fn query<P>(
         &self,
         sql: &str,
         params: P,
@@ -399,7 +399,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
@@ -411,7 +411,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         match self {
             Self::Read(_) => Err(crate::db::engine::Error::Runtime(
                 "cannot execute a write in a memory read snapshot".to_owned(),
@@ -420,7 +420,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    pub(crate) async fn commit(self) -> Result<()> {
+    pub async fn commit(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
                 snapshot
@@ -435,7 +435,7 @@ impl<'a> DatabaseMemoryTransaction<'a> {
         }
     }
 
-    pub(crate) async fn rollback(self) -> Result<()> {
+    pub async fn rollback(self) -> Result<()> {
         match self {
             Self::Read(snapshot) => {
                 snapshot
@@ -511,14 +511,14 @@ impl DatabaseMemoryWriter<'_> {
 }
 
 impl DatabaseWriteTransaction<'_> {
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
         self.transaction.execute(sql, params).await
     }
 
-    pub(crate) async fn query<P>(
+    pub async fn query<P>(
         &self,
         sql: &str,
         params: P,
@@ -529,15 +529,15 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
-    pub(crate) async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch_engine(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.transaction.execute_batch(sql).await
     }
 
-    pub(crate) async fn execute_engine<P>(
+    pub async fn execute_engine<P>(
         &self,
         sql: &str,
         params: P,
@@ -548,7 +548,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    pub(crate) async fn query_engine<P>(
+    pub async fn query_engine<P>(
         &self,
         sql: &str,
         params: P,
@@ -559,7 +559,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    pub(crate) async fn prepare_engine(
+    pub async fn prepare_engine(
         &self,
         sql: &str,
     ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
@@ -570,7 +570,7 @@ impl DatabaseWriteTransaction<'_> {
         })
     }
 
-    pub(crate) async fn commit(self) -> Result<()> {
+    pub async fn commit(self) -> Result<()> {
         let Self { transaction, guard } = self;
         let transaction = transaction.commit().await;
         drop(guard);
@@ -581,7 +581,7 @@ impl DatabaseWriteTransaction<'_> {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn rollback(self) -> Result<()> {
+    pub async fn rollback(self) -> Result<()> {
         let Self { transaction, guard } = self;
         let transaction = transaction.rollback().await;
         drop(guard);
@@ -629,12 +629,12 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseWriteTransaction<
 }
 
 impl Database {
-    pub(crate) fn retained_runtime(&self) -> &StoreRuntimeHandle {
+    pub fn retained_runtime(&self) -> &StoreRuntimeHandle {
         &self.inner._runtime
     }
 
     /// Canonical path held by this database's verified runtime locator.
-    pub(crate) fn canonical_database_path(&self) -> &Path {
+    pub fn canonical_database_path(&self) -> &Path {
         &self.inner.canonical_path
     }
 
@@ -648,17 +648,17 @@ impl Database {
     }
 
     /// Physical `SQLite` identity captured when this retained handle was opened.
-    pub(crate) fn opened_file_identity(&self) -> u64 {
+    pub fn opened_file_identity(&self) -> u64 {
         self.inner.opened_file_identity
     }
 
-    pub(crate) fn filesystem_is_read_only(&self) -> bool {
+    pub fn filesystem_is_read_only(&self) -> bool {
         std::fs::metadata(self.canonical_database_path())
             .is_ok_and(|metadata| metadata.permissions().readonly())
     }
 
     /// Clones the originating revocable write capability for actor-time checks.
-    pub(crate) fn write_authority(&self) -> Result<DatabaseAuthority> {
+    pub fn write_authority(&self) -> Result<DatabaseAuthority> {
         if !self.inner.writable {
             return Err(integrity::read_only_upgrade_error(
                 self.canonical_database_path(),
@@ -681,7 +681,7 @@ impl Database {
     /// opened file identity. A read-write facade additionally retains the
     /// originating authority; a read-only facade never requests it. Neither
     /// mode derives identity from a path or extracts the physical attachment.
-    pub(crate) async fn publish_runtime(
+    pub async fn publish_runtime(
         runtime: StoreRuntimeHandle,
         access: DatabaseAccessMode,
     ) -> Result<Self> {
@@ -984,7 +984,7 @@ impl Database {
     ///
     /// Mutations must use [`Self::writer_connection`] or an isolated
     /// transaction while holding [`Self::writer`].
-    pub(crate) fn conn(&self) -> &Connection {
+    pub fn conn(&self) -> &Connection {
         &self.inner.conn
     }
 
@@ -1042,7 +1042,7 @@ impl Database {
         self.query_scalar(operation, sql, (value,)).await
     }
 
-    pub(crate) fn engine_conn(&self) -> DatabaseEngineConnection {
+    pub fn engine_conn(&self) -> DatabaseEngineConnection {
         DatabaseEngineConnection {
             conn: self.inner.conn.clone(),
         }
@@ -1061,7 +1061,7 @@ impl Database {
         self.execute_write_engine(operation, sql, params).await
     }
 
-    pub(crate) async fn execute_write_engine<P>(
+    pub async fn execute_write_engine<P>(
         &self,
         operation: &str,
         sql: &str,
@@ -1100,7 +1100,7 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
-    pub(crate) async fn writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub async fn writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.inner.writer.lock().await
     }
 
@@ -1133,7 +1133,7 @@ impl Database {
     /// Opens an isolated writer while holding the process-local writer lane.
     /// The handle cannot escape the guard, preventing raw DML from bypassing
     /// serialization or joining a transaction on the retained reader.
-    pub(crate) async fn writer_connection(
+    pub async fn writer_connection(
         &self,
         operation: &str,
     ) -> Result<DatabaseWriterConnection<'_>> {
@@ -1155,7 +1155,7 @@ impl Database {
         })
     }
 
-    pub(crate) async fn load_or_capture_memory_v2_frontiers(
+    pub async fn load_or_capture_memory_v2_frontiers(
         &self,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
@@ -1166,7 +1166,7 @@ impl Database {
         memory_v2::load_or_capture_memory_v2_frontiers(&writer.conn, owner, source_store_id).await
     }
 
-    pub(crate) async fn backfill_memory_v2_batch(
+    pub async fn backfill_memory_v2_batch(
         &self,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
@@ -1188,7 +1188,7 @@ impl Database {
 
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
-    pub(crate) async fn begin_isolated_read_snapshot(
+    pub async fn begin_isolated_read_snapshot(
         &self,
         operation: &str,
     ) -> Result<ReadSnapshot> {
@@ -1202,7 +1202,7 @@ impl Database {
             })
     }
 
-    pub(crate) async fn begin_engine_read_snapshot(
+    pub async fn begin_engine_read_snapshot(
         &self,
         operation: &str,
     ) -> Result<DatabaseEngineReadSnapshot> {
@@ -1211,7 +1211,7 @@ impl Database {
             .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
     }
 
-    pub(crate) async fn begin_memory_read_transaction(
+    pub async fn begin_memory_read_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseMemoryTransaction<'_>> {
@@ -1222,7 +1222,7 @@ impl Database {
 
     /// Starts an immediate transaction that owns the canonical writer lane.
     /// Dropping the returned capability rolls back before releasing the lane.
-    pub(crate) async fn begin_write_transaction(
+    pub async fn begin_write_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
@@ -1245,7 +1245,7 @@ impl Database {
     /// transaction lease while continuously making progress. The runtime's
     /// migration policy renews that lease only after successful commands;
     /// idle transactions, revoked authority, and shutdown still cancel it.
-    pub(crate) async fn begin_bulk_write_transaction(
+    pub async fn begin_bulk_write_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
@@ -1260,7 +1260,7 @@ impl Database {
         Ok(DatabaseWriteTransaction { transaction, guard })
     }
 
-    pub(crate) async fn begin_memory_write_transaction(
+    pub async fn begin_memory_write_transaction(
         &self,
         operation: &str,
     ) -> Result<DatabaseMemoryTransaction<'_>> {
@@ -1284,7 +1284,7 @@ impl Database {
         self.checkpoint_unguarded().await
     }
 
-    pub(crate) async fn release_connection_memory(&self) -> Result<()> {
+    pub async fn release_connection_memory(&self) -> Result<()> {
         self.inner
             .conn
             .execute_batch("PRAGMA shrink_memory")
@@ -1311,7 +1311,7 @@ impl Database {
     /// only an exclusive-maintenance authority may use it, and success means
     /// `SQLite` reported no busy readers and no remaining log frames. Offline
     /// migration artifacts need that proof before they can be attached.
-    pub(crate) async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
+    pub async fn truncate_wal_for_offline_maintenance(&self) -> Result<()> {
         self.require_active_write_scope("truncate WAL for offline maintenance")?;
         let authority = self.write_authority()?;
         if authority.role() != super::DatabaseAuthorityRole::Maintenance {
@@ -1392,7 +1392,7 @@ impl Database {
         self.truncate_wal_for_offline_maintenance().await
     }
 
-    pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
+    pub async fn checkpoint_unguarded(&self) -> Result<()> {
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(
             CheckpointBlockers::default(),
@@ -1430,7 +1430,7 @@ impl Database {
         self.snapshot_to_unguarded(destination).await
     }
 
-    pub(crate) async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
+    pub async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
         if destination.to_str().is_none() {
             return Err(TraceDecayError::Database {
                 message: format!(
@@ -1526,7 +1526,7 @@ impl Database {
     /// Checks the retained post-open connection and repairs only a proven
     /// `nodes_fts`-only failure. The existing rebuild path owns the canonical
     /// writer lane, so concurrent writers complete before repair starts.
-    pub(crate) async fn repair_fts_after_open(&self) -> Result<Option<String>> {
+    pub async fn repair_fts_after_open(&self) -> Result<Option<String>> {
         let problem = match self.health_on_fresh_reader("post_open_health").await? {
             DatabaseHealth::Healthy => return Ok(None),
             DatabaseHealth::FtsOnlyCorruption(problem) => problem,
@@ -1584,7 +1584,7 @@ impl Database {
         result
     }
 
-    pub(crate) async fn rebuild_fts_unguarded(
+    pub async fn rebuild_fts_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
@@ -1615,7 +1615,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn begin_bulk_load_unguarded(
+    pub async fn begin_bulk_load_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
@@ -1661,7 +1661,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn end_bulk_load_unguarded(
+    pub async fn end_bulk_load_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {

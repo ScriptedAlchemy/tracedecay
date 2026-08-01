@@ -18,7 +18,7 @@ use crate::db::engine::{
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) async fn backup_live_sqlite_database(
+pub async fn backup_live_sqlite_database(
     source: &Path,
     destination: &Path,
 ) -> io::Result<()> {
@@ -42,7 +42,7 @@ pub(crate) async fn backup_live_sqlite_database(
     .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
 }
 
-pub(crate) struct SnapshotConnection {
+pub struct SnapshotConnection {
     connection: Arc<Mutex<Connection>>,
     #[cfg_attr(not(test), allow(dead_code))]
     interrupt: rusqlite::InterruptHandle,
@@ -59,26 +59,26 @@ impl SnapshotConnection {
         })
     }
 
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: IntoParams,
     {
         Executor::execute(self, sql, params).await
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
         QueryExecutor::query(self, sql, params).await
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         Executor::execute_batch(self, sql).await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn interrupt(&self) {
+    pub fn interrupt(&self) {
         self.interrupt.interrupt();
     }
 }
@@ -205,7 +205,7 @@ fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> Eng
     }
 }
 
-pub(crate) struct SnapshotDatabase {
+pub struct SnapshotDatabase {
     connection: SnapshotConnection,
     source: PathBuf,
     source_state: Vec<FileState>,
@@ -223,16 +223,16 @@ pub(crate) struct SnapshotDatabase {
 }
 
 impl SnapshotDatabase {
-    pub(crate) fn connection(&self) -> &SnapshotConnection {
+    pub fn connection(&self) -> &SnapshotConnection {
         &self.connection
     }
 
     #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
+    pub fn attach_token(&self) -> io::Result<SnapshotAttachToken<'_>> {
         let file_identity = crate::db::sqlite_generation_identity(&self.identity_path)
             .map_err(|_| io::Error::other("could not identify immutable SQLite snapshot"))?;
         Ok(SnapshotAttachToken {
@@ -241,7 +241,7 @@ impl SnapshotDatabase {
         })
     }
 
-    pub(crate) fn validate_source(&self) -> io::Result<()> {
+    pub fn validate_source(&self) -> io::Result<()> {
         let current = family_state(&self.source)?;
         if durable_family_state(&self.source, &current)
             == durable_family_state(&self.source, &self.source_state)
@@ -254,7 +254,7 @@ impl SnapshotDatabase {
         )))
     }
 
-    pub(crate) fn source_generation(&self) -> SourceGeneration {
+    pub fn source_generation(&self) -> SourceGeneration {
         SourceGeneration {
             source: self.source.clone(),
             states: self.source_state.clone(),
@@ -265,7 +265,7 @@ impl SnapshotDatabase {
     ///
     /// The backup reads only the already-captured immutable/copy connection;
     /// it never opens the live source authority.
-    pub(crate) async fn backup_to(&self, destination: &Path) -> io::Result<()> {
+    pub async fn backup_to(&self, destination: &Path) -> io::Result<()> {
         let source = Arc::clone(&self.connection.connection);
         let destination = destination.to_path_buf();
         tokio::task::spawn_blocking(move || {
@@ -288,18 +288,18 @@ impl SnapshotDatabase {
     }
 
     #[cfg(test)]
-    pub(crate) fn copied_bytes(&self) -> u64 {
+    pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
 }
 
-pub(crate) struct SnapshotAttachToken<'snapshot> {
+pub struct SnapshotAttachToken<'snapshot> {
     snapshot: &'snapshot SnapshotDatabase,
     file_identity: u64,
 }
 
 impl SnapshotAttachToken<'_> {
-    pub(crate) fn verified_path(&self) -> io::Result<&Path> {
+    pub fn verified_path(&self) -> io::Result<&Path> {
         self.snapshot.validate_source()?;
         let current = crate::db::sqlite_generation_identity(&self.snapshot.identity_path)
             .map_err(|_| io::Error::other("could not re-identify immutable SQLite snapshot"))?;
@@ -322,13 +322,13 @@ impl SnapshotAttachToken<'_> {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SourceGeneration {
+pub struct SourceGeneration {
     source: PathBuf,
     states: Vec<FileState>,
 }
 
 impl SourceGeneration {
-    pub(crate) fn validate(&self) -> io::Result<()> {
+    pub fn validate(&self) -> io::Result<()> {
         let current = family_state(&self.source)?;
         if durable_family_state(&self.source, &current)
             == durable_family_state(&self.source, &self.states)
@@ -342,7 +342,7 @@ impl SourceGeneration {
     }
 }
 
-pub(crate) struct SnapshotSet {
+pub struct SnapshotSet {
     databases: BTreeMap<PathBuf, SnapshotDatabase>,
     copied_bytes: u64,
     #[allow(dead_code)]
@@ -351,12 +351,12 @@ pub(crate) struct SnapshotSet {
 
 impl SnapshotSet {
     #[cfg(test)]
-    pub(crate) async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
+    pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
     }
 
-    pub(crate) async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
+    pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
         let scratch = Arc::new(create_scratch_directory(root, expected_owner(paths)?)?);
         let mut unique = paths.to_vec();
         unique.sort();
@@ -388,7 +388,7 @@ impl SnapshotSet {
         })
     }
 
-    pub(crate) fn get(&self, path: &Path) -> io::Result<&SnapshotDatabase> {
+    pub fn get(&self, path: &Path) -> io::Result<&SnapshotDatabase> {
         self.databases.get(path).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -397,19 +397,19 @@ impl SnapshotSet {
         })
     }
 
-    pub(crate) fn validate_sources_unchanged(&self) -> io::Result<()> {
+    pub fn validate_sources_unchanged(&self) -> io::Result<()> {
         for database in self.databases.values() {
             database.validate_source()?;
         }
         Ok(())
     }
 
-    pub(crate) fn copied_bytes(&self) -> u64 {
+    pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
 
     #[cfg(test)]
-    pub(crate) fn database_count(&self) -> usize {
+    pub fn database_count(&self) -> usize {
         self.databases.len()
     }
 }
@@ -464,7 +464,7 @@ struct FileState {
 /// directly through `SQLite` immutable mode. WAL-backed DBs are reflinked when
 /// supported, then fall back to one full copy with WAL/SHM copied alongside.
 #[cfg(test)]
-pub(crate) async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
+pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
@@ -474,7 +474,7 @@ pub(crate) async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     })
 }
 
-pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
+pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture_in(&[path.to_path_buf()], root).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
@@ -487,7 +487,7 @@ pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotData
 /// Inspects a checkpointed, offline database through the canonical immutable
 /// snapshot boundary. This is intentionally purpose-bound: callers cannot
 /// obtain a connection or issue arbitrary SQL.
-pub(crate) fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
+pub fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
     let mut has_rows = false;
     for table in tables {
         if table.is_empty()
@@ -558,7 +558,7 @@ pub(crate) fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -
     Ok(has_rows)
 }
 
-pub(crate) fn family_fingerprint(path: &Path) -> io::Result<String> {
+pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     use std::io::Read;
 
     let _authority = crate::db::DatabaseAuthority::for_runtime(
@@ -1084,7 +1084,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
+pub fn immutable_uri(path: &Path) -> io::Result<String> {
     Ok(format!("{}&immutable=1", read_only_uri(path)?))
 }
 

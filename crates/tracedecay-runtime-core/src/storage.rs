@@ -32,13 +32,13 @@ static DURABLE_ATOMIC_WRITE_FAULT: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(any(test, feature = "test-transport"))]
 #[derive(Clone, Copy)]
-pub(crate) enum DurableAtomicWriteFaultForTest {
+pub enum DurableAtomicWriteFaultForTest {
     AfterTempSync = 1,
     AfterRename = 2,
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-pub(crate) fn set_durable_atomic_write_fault_for_test(fault: DurableAtomicWriteFaultForTest) {
+pub fn set_durable_atomic_write_fault_for_test(fault: DurableAtomicWriteFaultForTest) {
     DURABLE_ATOMIC_WRITE_FAULT.store(fault as u8, Ordering::SeqCst);
 }
 
@@ -72,7 +72,7 @@ pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 /// This is deliberately file-only: opening `SQLite` may create or rewrite WAL/SHM
 /// sidecars before reporting that the main file is not a database. Recovery
 /// paths use this preflight to preserve the complete on-disk recovery set.
-pub(crate) fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
+pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
     let mut file = fs::File::open(path)?;
     let mut header = [0_u8; 16];
     match file.read_exact(&mut header) {
@@ -347,13 +347,13 @@ pub struct StoreArtifactPath {
 /// An existing profile-sharded store whose root, manifest, and session database
 /// have been validated without creating or opening the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidatedProfileShard {
+pub struct ValidatedProfileShard {
     store_root: PathBuf,
     sessions_db_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProfileShardValidationError {
+pub enum ProfileShardValidationError {
     Unavailable { path: PathBuf },
     NonCanonical { reason: String },
 }
@@ -638,7 +638,7 @@ fn project_id_for_identity_root(identity_root: &Path) -> String {
 /// ever minted for this exact directory" — and answering it with the
 /// repository id would report every linked worktree of an initialized
 /// repository as independently initialized.
-pub(crate) fn path_local_profile_project_id(project_root: &Path) -> String {
+pub fn path_local_profile_project_id(project_root: &Path) -> String {
     project_id_for_identity_root(
         &project_root
             .canonicalize()
@@ -664,7 +664,7 @@ pub fn default_profile_project_id(project_root: &Path) -> String {
 ///
 /// See [`path_local_profile_project_id`] for why discovery must not consult
 /// the repository-collapsed identity here.
-pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
+pub fn has_path_local_profile_store(project_root: &Path) -> bool {
     let Ok(profile_root) = default_profile_root() else {
         return false;
     };
@@ -726,7 +726,7 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
     default_profile_sharded_layout(project_root, profile_root)
 }
 
-pub(crate) fn resolve_persisted_layout(
+pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<Option<StoreLayout>> {
@@ -761,7 +761,7 @@ pub(crate) fn resolve_persisted_layout(
 /// path-derived project id but still name this exact local checkout, or one of
 /// its linked worktrees, in their manifest. Remote URLs are deliberately not
 /// considered: two clones of one remote are different local identities.
-pub(crate) fn matching_legacy_profile_layouts(
+pub fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
@@ -899,7 +899,7 @@ where
     Ok((layouts, selected_is_sole_exact_root))
 }
 
-pub(crate) fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
+pub fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
     let source = layout
         .manifest_path
         .as_ref()
@@ -1080,7 +1080,7 @@ pub fn read_store_manifest(path: &Path) -> Result<StoreManifest> {
 impl ValidatedProfileShard {
     /// Resolves an already-registered profile shard without creating artifacts
     /// or letting the database library touch an invalid database family.
-    pub(crate) fn resolve_existing(
+    pub fn resolve_existing(
         profile_root: &Path,
         project_id: &str,
     ) -> std::result::Result<Self, ProfileShardValidationError> {
@@ -1141,11 +1141,11 @@ impl ValidatedProfileShard {
         })
     }
 
-    pub(crate) fn store_root(&self) -> &Path {
+    pub fn store_root(&self) -> &Path {
         &self.store_root
     }
 
-    pub(crate) fn sessions_db_path(&self) -> &Path {
+    pub fn sessions_db_path(&self) -> &Path {
         &self.sessions_db_path
     }
 }
@@ -1552,7 +1552,7 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
-pub(crate) fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
+pub fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
     let is_absolute = path.is_absolute();
     let mut current = PathBuf::new();
     let mut normal_components = 0usize;
@@ -1596,7 +1596,7 @@ fn path_parent(path: &Path) -> &Path {
 
 /// Sibling `<file>.lock` path used to serialize appends without locking the
 /// data file's own handle. Shared with the automation run ledger writer.
-pub(crate) fn append_lock_path(path: &Path) -> PathBuf {
+pub fn append_lock_path(path: &Path) -> PathBuf {
     let mut lock_name = path
         .file_name()
         .map_or_else(|| OsString::from("append"), std::ffi::OsStr::to_os_string);
@@ -1653,7 +1653,7 @@ fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::File> {
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for
 /// the read+write-handle rationale.
-pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
     let file = open_lock_file(lock_path, false)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(file)),
@@ -1665,7 +1665,7 @@ pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs
 /// Blocking sidecar lock acquisition. Returns the held lock file once the
 /// exclusive lock is granted. See the sidecar-lock module note above for the
 /// read+write-handle rationale.
-pub(crate) fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
+pub fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
     acquire_lock_file_blocking(lock_path, false)
 }
 
@@ -1679,7 +1679,7 @@ fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs:
 /// append lock. When `private`, the data file is created owner-only and both
 /// the data and lock paths are symlink-checked (the private-store contract);
 /// otherwise a plain create+append handle is used (the automation run ledger).
-pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
+pub fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
     let lock_path = append_lock_path(path);
     if private {
         reject_symlink_components(&lock_path, "private store lock file")?;
@@ -1714,7 +1714,7 @@ fn append_line_plain(path: &Path, line: &str) -> io::Result<()> {
 /// (32), and `ERROR_LOCK_VIOLATION` (33). The retries total well under ~250ms
 /// and the final error is always propagated. On non-Windows platforms `op`
 /// runs exactly once.
-pub(crate) fn retry_transient_file_op<F>(mut op: F) -> io::Result<()>
+pub fn retry_transient_file_op<F>(mut op: F) -> io::Result<()>
 where
     F: FnMut() -> io::Result<()>,
 {
@@ -1806,7 +1806,7 @@ fn validate_enrollment_marker(marker: &EnrollmentMarker, path: &Path) -> Result<
     })
 }
 
-pub(crate) fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
+pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
     if project_id.is_empty() {
         return Err("project_id must not be empty");
     }
@@ -1870,7 +1870,7 @@ fn has_current_dir_segment(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-pub(crate) fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
+pub fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
@@ -1878,7 +1878,7 @@ pub(crate) fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)] // Keep platform implementations signature-compatible.
-pub(crate) fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
+pub fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

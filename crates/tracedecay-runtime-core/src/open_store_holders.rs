@@ -7,16 +7,16 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpenStoreHolder {
-    pub(crate) pid: u32,
-    pub(crate) command: String,
-    pub(crate) executable: Option<PathBuf>,
-    pub(crate) version: Option<String>,
-    pub(crate) paths: Vec<PathBuf>,
+pub struct OpenStoreHolder {
+    pub pid: u32,
+    pub command: String,
+    pub executable: Option<PathBuf>,
+    pub version: Option<String>,
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OpenStoreHolderScan {
+pub enum OpenStoreHolderScan {
     Supported(Vec<OpenStoreHolder>),
     Unsupported { reason: String },
 }
@@ -28,15 +28,15 @@ pub(crate) enum OpenStoreHolderScan {
 /// opt in to the current process and omit only transaction-owned verification
 /// descriptors.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct OpenStoreHolderScanOptions {
-    pub(crate) include_current_process: bool,
-    pub(crate) excluded_current_process_fds: BTreeSet<u32>,
+pub struct OpenStoreHolderScanOptions {
+    pub include_current_process: bool,
+    pub excluded_current_process_fds: BTreeSet<u32>,
 }
 
 /// Finds processes that currently hold any member of the supplied `SQLite`
 /// database families. The scan never signals or terminates a process.
 #[cfg_attr(test, allow(dead_code))]
-pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan> {
+pub fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan> {
     scan_with_options(database_paths, &OpenStoreHolderScanOptions::default())
 }
 
@@ -46,7 +46,7 @@ pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan
     not(any(target_os = "linux", target_os = "macos")),
     allow(clippy::unnecessary_wraps)
 )] // Keep unsupported-platform scans fallible for caller fail-closed parity.
-pub(crate) fn scan_with_options(
+pub fn scan_with_options(
     database_paths: &[PathBuf],
     options: &OpenStoreHolderScanOptions,
 ) -> io::Result<OpenStoreHolderScan> {

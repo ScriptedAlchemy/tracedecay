@@ -1,6 +1,6 @@
 use std::fmt;
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -97,18 +97,18 @@ impl From<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> for Err
 }
 
 impl Error {
-    pub(crate) fn invalid_operation(message: impl Into<String>) -> Self {
+    pub fn invalid_operation(message: impl Into<String>) -> Self {
         Self::InvalidOperation(message.into())
     }
 
-    pub(crate) const fn sqlite_code(&self) -> Option<i32> {
+    pub const fn sqlite_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { code, .. } => *code,
             _ => None,
         }
     }
 
-    pub(crate) const fn sqlite_extended_code(&self) -> Option<i32> {
+    pub const fn sqlite_extended_code(&self) -> Option<i32> {
         match self {
             Self::Sqlite { extended_code, .. } => *extended_code,
             _ => None,

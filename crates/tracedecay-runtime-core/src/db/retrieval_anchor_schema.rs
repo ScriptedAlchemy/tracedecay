@@ -722,7 +722,7 @@ async fn upgrade_dispositions_if_needed(
 /// Existing one-column alias foreign keys are upgraded with a resumable,
 /// validated copy; conflicting or ownerless rows are retained and reported
 /// rather than discarded.
-pub(crate) async fn install_retrieval_anchor_schema(
+pub async fn install_retrieval_anchor_schema(
     conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {

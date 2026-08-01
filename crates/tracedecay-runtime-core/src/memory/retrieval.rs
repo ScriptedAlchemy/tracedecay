@@ -27,7 +27,7 @@ pub struct FactRetriever<'a> {
 }
 
 impl<'a> FactRetriever<'a> {
-    pub(crate) const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
+    pub const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
         Self {
             store: MemoryStore::new_runtime(conn),
             encoder: HolographicEncoder::new(),

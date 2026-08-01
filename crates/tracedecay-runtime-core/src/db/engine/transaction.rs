@@ -13,13 +13,13 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TransactionBehavior {
+pub enum TransactionBehavior {
     #[cfg(test)]
     Deferred,
     Immediate,
 }
 
-pub(crate) struct Transaction {
+pub struct Transaction {
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
     #[cfg(test)]
     connection_runtime: Arc<dyn Runtime>,
@@ -39,7 +39,7 @@ impl Transaction {
         }
     }
 
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
@@ -57,7 +57,7 @@ impl Transaction {
         .map(|result| result.changed_rows as u64)
     }
 
-    pub(crate) async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
+    pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let filename = path.to_str().ok_or_else(|| {
             super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
@@ -75,7 +75,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
@@ -101,7 +101,7 @@ impl Transaction {
         ))
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -118,7 +118,7 @@ impl Transaction {
 
     /// Executes one separately authorized schema batch without the ordinary
     /// statement deadline.
-    pub(crate) async fn execute_schema_batch_step(&self, sql: &str) -> Result<()> {
+    pub async fn execute_schema_batch_step(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -133,7 +133,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    pub(crate) async fn validate(&self, sql: &str) -> Result<()> {
+    pub async fn validate(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
         tokio::task::spawn_blocking(move || {
@@ -148,11 +148,11 @@ impl Transaction {
     }
 
     #[cfg(test)]
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
+    pub fn last_insert_rowid(&self) -> i64 {
         self.connection_runtime.last_insert_rowid()
     }
 
-    pub(crate) async fn commit(self) -> Result<()> {
+    pub async fn commit(self) -> Result<()> {
         let runtime = self.take_runtime()?;
         tokio::task::spawn_blocking(move || {
             runtime.commit().map(|_| ()).map_err(super::Error::from)
@@ -161,7 +161,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    pub(crate) async fn rollback(self) -> Result<()> {
+    pub async fn rollback(self) -> Result<()> {
         let runtime = self.take_runtime()?;
         tokio::task::spawn_blocking(move || {
             runtime.rollback().map(|_| ()).map_err(super::Error::from)

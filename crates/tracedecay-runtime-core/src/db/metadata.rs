@@ -34,7 +34,7 @@ impl Database {
     /// Reads a metadata value through an already-open canonical write
     /// transaction. Compound durable operations use this to keep their
     /// compare-and-set and metadata update on one writer lane.
-    pub(crate) async fn get_metadata_unguarded(
+    pub async fn get_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         key: &str,
@@ -70,7 +70,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn set_metadata_unguarded(
+    pub async fn set_metadata_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         key: &str,

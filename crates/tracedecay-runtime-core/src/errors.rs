@@ -106,7 +106,7 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl TraceDecayError {
-    pub(crate) fn project_route(
+    pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,
         detail: impl Into<String>,
@@ -118,7 +118,7 @@ impl TraceDecayError {
         }
     }
 
-    pub(crate) fn project_route_context(&self) -> Option<(&str, bool, &str)> {
+    pub fn project_route_context(&self) -> Option<(&str, bool, &str)> {
         let Self::ProjectRoute {
             reason_code,
             retryable,
@@ -130,7 +130,7 @@ impl TraceDecayError {
         Some((reason_code, *retryable, detail))
     }
 
-    pub(crate) fn database_operation(
+    pub fn database_operation(
         operation: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
@@ -141,11 +141,11 @@ impl TraceDecayError {
     }
 
     #[allow(deprecated)]
-    pub(crate) fn is_database_error(&self) -> bool {
+    pub fn is_database_error(&self) -> bool {
         matches!(self, Self::Database { .. } | Self::DatabaseOperation { .. })
     }
 
-    pub(crate) fn hook_runtime(
+    pub fn hook_runtime(
         reason_code: impl Into<String>,
         retryable: bool,
         detail: impl Into<String>,
@@ -157,7 +157,7 @@ impl TraceDecayError {
         }))
     }
 
-    pub(crate) fn hook_runtime_context(&self) -> Option<(&str, bool, &str)> {
+    pub fn hook_runtime_context(&self) -> Option<(&str, bool, &str)> {
         let Self::Io(error) = self else {
             return None;
         };

@@ -27,7 +27,7 @@ const COMPATIBILITY_BANKS: [&str; 7] = [
 ];
 
 #[derive(Clone, Copy)]
-pub(crate) enum MemoryV2ArchiveDatabase {
+pub enum MemoryV2ArchiveDatabase {
     Main,
     Source,
 }
@@ -71,7 +71,7 @@ struct PhysicalForeignKey {
     columns: Vec<(String, String)>,
 }
 
-pub(crate) async fn list_memory_v2_archive_owners(
+pub async fn list_memory_v2_archive_owners(
     conn: &(impl Executor + Sync),
     database: MemoryV2ArchiveDatabase,
 ) -> Result<Vec<FactOwnerV1>> {
@@ -148,7 +148,7 @@ pub(crate) async fn list_memory_v2_archive_owners(
     Ok(owners)
 }
 
-pub(crate) async fn export_memory_v2_owner_archive(
+pub async fn export_memory_v2_owner_archive(
     conn: &(impl Executor + Sync),
     database: MemoryV2ArchiveDatabase,
     owner: &FactOwnerV1,
@@ -174,7 +174,7 @@ pub(crate) async fn export_memory_v2_owner_archive(
     .map_err(|error| db_message(OPERATION, format!("{error}: {error:?}")))
 }
 
-pub(crate) async fn plan_memory_v2_owner_archive_import(
+pub async fn plan_memory_v2_owner_archive_import(
     conn: &(impl Executor + Sync),
     archive: &MemoryV2OwnerArchiveV1,
 ) -> Result<MemoryV2OwnerMergePlanV1> {
@@ -185,7 +185,7 @@ pub(crate) async fn plan_memory_v2_owner_archive_import(
         .map_err(|error| db_message(OPERATION, error.to_string()))
 }
 
-pub(crate) async fn import_memory_v2_owner_archive(
+pub async fn import_memory_v2_owner_archive(
     conn: &(impl Executor + Sync),
     archive: &MemoryV2OwnerArchiveV1,
     plan: &MemoryV2OwnerMergePlanV1,

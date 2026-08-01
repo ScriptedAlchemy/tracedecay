@@ -109,7 +109,7 @@ fn probe_dir(dir: &Path, name: &str) -> Option<PathBuf> {
 /// the command [`Output`] on a zero exit status, or `None` on spawn failure or a
 /// non-zero exit. Use this when the raw, untrimmed stdout matters (multi-line
 /// output such as `git reflog` or `git log`).
-pub(crate) fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
+pub fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
     let output = Command::new(git_program())
         .args(args)
         .current_dir(repo_root)
@@ -122,7 +122,7 @@ pub(crate) fn git_output(repo_root: &Path, args: &[&str]) -> Option<Output> {
 /// `String`, or `None` on spawn failure, non-zero exit, non-UTF-8 output, or
 /// empty (after trimming) output. Convenience wrapper over [`git_output`] for
 /// the common single-value reads (`rev-parse`, `config --get`, ...).
-pub(crate) fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
+pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
     let output = git_output(repo_root, args)?;
     let text = String::from_utf8(output.stdout).ok()?;
     let trimmed = text.trim();

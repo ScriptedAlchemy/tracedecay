@@ -4,7 +4,7 @@ enum Target<'a> {
     Connection(&'a Connection),
 }
 
-pub(crate) struct Statement<'a> {
+pub struct Statement<'a> {
     target: Target<'a>,
     sql: String,
 }
@@ -18,7 +18,7 @@ impl<'a> Statement<'a> {
         })
     }
 
-    pub(crate) async fn execute<P>(&self, params: P) -> Result<u64>
+    pub async fn execute<P>(&self, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
@@ -30,7 +30,7 @@ impl<'a> Statement<'a> {
     /// Execution owns no `SQLite` cursor or bound parameter state: every call is
     /// submitted as a fresh runtime request. Reset therefore preserves the
     /// statement-reuse contract without touching the writer or reader pool.
-    pub(crate) fn reset(&self) {}
+    pub fn reset(&self) {}
 }
 
 fn validate_sql(sql: &str) -> Result<()> {

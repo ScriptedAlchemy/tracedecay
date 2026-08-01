@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 /// Why a `SQLite` source could not yield a stable physical identity.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub(crate) enum SqliteFileIdentityError {
+pub enum SqliteFileIdentityError {
     Open,
     Inspect,
     Identify,
@@ -18,7 +18,7 @@ pub(crate) enum SqliteFileIdentityError {
 /// file's inode (Unix) or volume/file-index handle identity (Windows). Callers
 /// layer their own generation/resume fingerprints on top; the hashed inputs must
 /// stay byte-identical across authorities that persist this identity.
-pub(crate) fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentityError> {
+pub fn sqlite_generation_identity(path: &Path) -> Result<u64, SqliteFileIdentityError> {
     #[cfg(unix)]
     {
         let metadata = std::fs::metadata(path).map_err(|_| SqliteFileIdentityError::Inspect)?;

@@ -186,7 +186,7 @@ const EVIDENCE_ASSEMBLY_IMMUTABILITY: &str = r"
     END;
 ";
 
-pub(crate) async fn install_evidence_assembly_schema(
+pub async fn install_evidence_assembly_schema(
     conn: &(impl Executor + Sync),
     operation: &str,
 ) -> Result<()> {

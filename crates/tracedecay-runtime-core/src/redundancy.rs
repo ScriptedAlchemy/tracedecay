@@ -1079,7 +1079,7 @@ mod tests {
     #[test]
     fn redundancy_eval_fixture_scores_real_cases() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/redundancy_eval_labeled.json"
+            "../../../tests/fixtures/redundancy_eval_labeled.json"
         ))
         .expect("valid redundancy eval fixture");
         let threshold = fixture["threshold"].as_f64().expect("threshold");

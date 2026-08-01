@@ -22,7 +22,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn insert_node_unguarded(
+    pub async fn insert_node_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         node: &Node,
@@ -270,7 +270,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn insert_nodes_unguarded(
+    pub async fn insert_nodes_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         nodes: &[Node],
@@ -533,7 +533,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn delete_nodes_by_file_unguarded(
+    pub async fn delete_nodes_by_file_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         file_path: &str,

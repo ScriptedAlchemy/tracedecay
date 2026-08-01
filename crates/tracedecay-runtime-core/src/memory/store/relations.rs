@@ -40,7 +40,7 @@ impl MemoryStore<'_> {
         .await
     }
 
-    pub(crate) async fn upsert_fact_relation_inner(
+    pub async fn upsert_fact_relation_inner(
         &self,
         source_fact_id: i64,
         target_fact_id: i64,

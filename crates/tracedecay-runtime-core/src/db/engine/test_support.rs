@@ -17,22 +17,22 @@ use tracedecay_store::{
 
 use super::Connection;
 
-pub(crate) struct TestConnection {
+pub struct TestConnection {
     connection: Connection,
     _readers: ReaderPool<NoReads>,
     _writer: PersistentWriter,
 }
 
 impl TestConnection {
-    pub(crate) fn open(path: &Path) -> Self {
+    pub fn open(path: &Path) -> Self {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
-    pub(crate) fn open_without_write_authority(path: &Path) -> Self {
+    pub fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
 
-    pub(crate) fn open_with_write_authority(
+    pub fn open_with_write_authority(
         path: &Path,
         authority: Arc<dyn MigrationSqlWriteAuthority>,
     ) -> Self {

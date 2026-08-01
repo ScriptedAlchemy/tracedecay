@@ -14,11 +14,11 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-pub(crate) const LATEST_VERSION: u32 = 25;
+pub const LATEST_VERSION: u32 = 25;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
-pub(crate) const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
+pub const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
 
 /// Migration versions whose resulting graph cannot be trusted without
 /// re-extracting source files.
@@ -28,9 +28,9 @@ pub(crate) const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_ve
 /// V1 is the initial graph generation. Other migrations either preserve and
 /// transform graph rows in place (V5/V9), add indexes, or add auxiliary
 /// memory/evidence tables.
-pub(crate) const GRAPH_INVALIDATING_VERSIONS: &[u32] = &[1, 3, 4, 7, 17];
+pub const GRAPH_INVALIDATING_VERSIONS: &[u32] = &[1, 3, 4, 7, 17];
 
-pub(crate) fn graph_reindex_required(from: u32, to: u32) -> bool {
+pub fn graph_reindex_required(from: u32, to: u32) -> bool {
     GRAPH_INVALIDATING_VERSIONS
         .iter()
         .any(|version| from < *version && *version <= to)
@@ -127,7 +127,7 @@ async fn repair_incremental_auto_vacuum(
 
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
-pub(crate) async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
+pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
     conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
         .await
         .map_err(|e| TraceDecayError::Database {
@@ -144,7 +144,7 @@ pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
     create_schema_connection(writer.engine_connection()).await
 }
 
-pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
+pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
     // Fresh databases only need the pragma before tables are created.
     configure_fresh_auto_vacuum(conn, "create_schema").await?;
 
@@ -357,7 +357,7 @@ pub async fn migrate(database: &crate::db::Database) -> Result<Option<u32>> {
 /// authority-bound [`crate::db::Database`] facade instead of naming the
 /// private engine connection.
 #[cfg(test)]
-pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
+pub async fn migrate_connection(conn: &Connection) -> Result<bool> {
     Ok(migrate_inner(conn, false).await?.is_some())
 }
 
@@ -368,7 +368,7 @@ pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
 /// maintenance runtime is consumed because a whole-file rebuild invalidates
 /// reader connections opened against the previous file image.
 #[cfg(test)]
-pub(crate) async fn migrate_with_exclusive_maintenance(
+pub async fn migrate_with_exclusive_maintenance(
     database: crate::db::Database,
 ) -> Result<bool> {
     let result = {
@@ -525,7 +525,7 @@ async fn run_migrations_through(conn: &Transaction, current: u32, target: u32) -
 }
 
 #[cfg(test)]
-pub(crate) async fn migrate_test_connection_to_version(
+pub async fn migrate_test_connection_to_version(
     conn: &Connection,
     target: u32,
 ) -> Result<()> {

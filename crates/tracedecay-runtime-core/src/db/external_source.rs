@@ -3,7 +3,7 @@
 use crate::db::engine::Executor;
 use crate::errors::{Result, TraceDecayError};
 
-pub(crate) async fn install_external_source_schema(
+pub async fn install_external_source_schema(
     connection: &impl Executor,
     operation: &str,
 ) -> Result<()> {

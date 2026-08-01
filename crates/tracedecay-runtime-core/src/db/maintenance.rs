@@ -3,7 +3,7 @@ use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
 impl Database {
-    pub(crate) fn storage_telemetry_handle(
+    pub fn storage_telemetry_handle(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
         self.retained_runtime()
@@ -14,7 +14,7 @@ impl Database {
             })
     }
 
-    pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
+    pub async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.retained_runtime()
             .storage_page_counts(std::time::Duration::from_secs(5))
             .map_err(|error| TraceDecayError::Database {
@@ -24,7 +24,7 @@ impl Database {
     }
 
     /// Runs a bounded incremental vacuum through the canonical writer lane.
-    pub(crate) async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
+    pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
         let authority = self.write_authority()?;
         self.retained_runtime()
             .run_bounded_incremental_compaction(pages, authority)
@@ -42,7 +42,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn clear_unguarded(
+    pub async fn clear_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
