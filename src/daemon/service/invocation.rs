@@ -7884,26 +7884,127 @@ impl DaemonInvocationService {
     pub(crate) async fn authorize_lsp_workspace(
         &self,
         mut roots: Vec<(PathBuf, String, ResolvedScope)>,
-        _observed_at: UtcMicros,
+        observed_at: UtcMicros,
     ) -> Option<AuthorizedLspWorkspace> {
-        if roots.len() != 1 {
+        if roots.is_empty() || roots.len() > MAX_LSP_WORKSPACE_ROOTS {
             return None;
         }
         if !canonicalize_lsp_roots(&mut roots) {
             return None;
         }
-        let [(project_root, uri, scope)] = roots.as_slice() else {
-            return None;
-        };
-        let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
-        if grant.scope != *scope {
-            return None;
+        if let [(project_root, uri, scope)] = roots.as_slice() {
+            let owner = self.lsp_owner(Some(project_root)).await?;
+            let grant = owner.scope_grant?;
+            if grant.scope != *scope {
+                return None;
+            }
+            return Some(AuthorizedLspWorkspace::single(AdmittedRoot::authorized(
+                uri.clone(),
+                scope.scope_digest.clone(),
+            )));
         }
-        Some(AuthorizedLspWorkspace::single(AdmittedRoot::authorized(
-            uri.clone(),
-            scope.scope_digest.clone(),
-        )))
+        self.authorize_federated_lsp_workspace(&roots, observed_at)
+            .await
+    }
+
+    /// Admit a workspace spanning several registered roots. Every root must
+    /// carry its own capability grant, and the resulting `AuthorizedScopeSet`
+    /// is compare-and-swapped into every participating store: that CAS, not
+    /// the caller's folder list, is the authorization boundary.
+    async fn authorize_federated_lsp_workspace(
+        &self,
+        roots: &[(PathBuf, String, ResolvedScope)],
+        observed_at: UtcMicros,
+    ) -> Option<AuthorizedLspWorkspace> {
+        let selector_digest = canonical_sha256(&(
+            "tracedecay.daemon.lsp-workspace-selector.v1",
+            roots
+                .iter()
+                .map(|(_, _, scope)| &scope.scope_digest)
+                .collect::<Vec<_>>(),
+        ))
+        .ok()?;
+        let scope_set_id = ScopeSetId::new(format!(
+            "scope-set.lsp.{}",
+            selector_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .ok()?;
+        let capability =
+            CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
+                .ok()?;
+        let use_case =
+            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1).ok()?;
+        let mut contexts = Vec::with_capacity(roots.len());
+        let mut factories = Vec::with_capacity(roots.len());
+        let mut admitted = Vec::with_capacity(roots.len());
+        let mut storages = Vec::with_capacity(roots.len());
+        for (ordinal, (project_root, uri, scope)) in roots.iter().enumerate() {
+            let owner = self.lsp_owner(Some(project_root)).await?;
+            let grant = owner.scope_grant?;
+            if grant.scope != *scope {
+                return None;
+            }
+            let storage = owner.scope_set_storage?;
+            contexts.push(
+                RequestContext::new(
+                    grant.issuer.clone(),
+                    scope.clone(),
+                    grant,
+                    RequestId::new(format!("request.lsp-workspace.admit.{ordinal}")).ok()?,
+                    Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000)))
+                        .ok()?,
+                    CancellationContext::active(format!("cancel.lsp-workspace.admit.{ordinal}"))
+                        .ok()?,
+                )
+                .ok()?,
+            );
+            let root = AdmittedRoot::authorized(uri.clone(), scope.scope_digest.clone());
+            factories.push((root.clone(), owner.factory.clone()));
+            admitted.push(root);
+            storages.push(storage);
+        }
+        let expected_revision = storages
+            .first()?
+            .read(&scope_set_id)
+            .ok()?
+            .map(|current| current.revision());
+        let next_revision = match expected_revision {
+            Some(current) => ScopeSetRevision::new(current.get().checked_add(1)?).ok()?,
+            None => ScopeSetRevision::new(1).ok()?,
+        };
+        let scope_set = AuthorizedScopeSetAuthority::authorize(
+            scope_set_id,
+            next_revision,
+            contexts,
+            &capability,
+            &use_case,
+            observed_at,
+        )
+        .ok()?;
+        for storage in &storages {
+            match storage
+                .compare_and_swap(expected_revision, &scope_set)
+                .ok()?
+            {
+                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
+                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
+                    let stored = storage.read(scope_set.scope_set_id()).ok()?;
+                    if stored.as_ref() != Some(&scope_set) {
+                        return None;
+                    }
+                }
+            }
+        }
+        let digest = scope_set.digest().clone();
+        let workspace = AuthorizedLspWorkspace::new(Some(digest.clone()), admitted).ok()?;
+        self.authorized_lsp_workspaces
+            .lock()
+            .await
+            .insert(digest, AuthorizedDaemonLspWorkspace {
+                scope_set,
+                factories,
+            });
+        Some(workspace)
     }
 
     pub(crate) async fn compare_and_swap_scope_set(
@@ -8180,28 +8281,6 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
-        let multi_root_payload = matches!(
-            &request.payload,
-            DaemonInvocationPayload::MultiRootScopeSetRead { .. }
-                | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-                | DaemonInvocationPayload::MultiRootExecute { .. }
-        );
-        let multi_root_lsp = matches!(
-            &request.payload,
-            DaemonInvocationPayload::LspOpen {
-                workspace_folders,
-                ..
-            } if workspace_folders.len() > 1
-        );
-        if multi_root_payload || multi_root_lsp {
-            return match request.validate() {
-                Ok(()) => DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::Unavailable,
-                ),
-                Err(problem) => DaemonInvocationResponse::problem(request_id, problem),
-            };
-        }
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project.
         let runtimes = self
@@ -8629,10 +8708,16 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            // Multi-root payloads never reach this dispatch: `invoke_for_project`
+            // routes all three to the multi-root executor before the per-project
+            // service is consulted.
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
             | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | DaemonInvocationPayload::MultiRootExecute { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+                DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                )
             }
             DaemonInvocationPayload::WorkApplication {
                 request,
