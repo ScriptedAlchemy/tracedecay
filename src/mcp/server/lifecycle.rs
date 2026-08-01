@@ -90,27 +90,18 @@ fn log_startup_transcript_ingest_failure(
 }
 
 pub(super) async fn run_startup_session_catch_up(
-    session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    sessions: Option<Arc<RegisteredGlobalDb>>,
+    user_sessions: Option<Arc<RegisteredGlobalDb>>,
     registry_db: Option<Arc<RegisteredGlobalDb>>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: &Path,
     project_id: Option<&str>,
     cancellation: &crate::application::observation::ObservationCancellation,
 ) -> Option<Arc<RegisteredGlobalDb>> {
-    let Some(db) = session_db else {
+    let Some(sessions) = sessions else {
         tracing::warn!(
             project_root = %project_root.display(),
             "startup project transcript ingest skipped because authoritative session storage is unavailable"
-        );
-        return None;
-    };
-    let Some(registered) = registered_session_db else {
-        tracing::warn!(
-            project_root = %project_root.display(),
-            "startup project transcript ingest skipped because registered session authority is unavailable"
         );
         return None;
     };
@@ -125,7 +116,7 @@ pub(super) async fn run_startup_session_catch_up(
     let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
-        registered.as_ref(),
+        sessions.as_ref(),
         project_root,
         project_id,
         None,
@@ -139,14 +130,12 @@ pub(super) async fn run_startup_session_catch_up(
     if cancellation.is_cancelled() {
         return None;
     }
-    if let (Some(user_db), Some(user_registered), Some(registry_db)) =
-        (user_session_db, registered_user_session_db, registry_db)
-    {
-        if let Some(profile_root) = user_db.db_path().parent() {
+    if let (Some(user_sessions), Some(registry_db)) = (user_sessions, registry_db) {
+        if let Some(profile_root) = user_sessions.db_path().parent() {
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
                 profile_identity.brain_id(),
                 profile_identity.profile_id(),
-                user_registered.as_ref(),
+                user_sessions.as_ref(),
                 registry_db.as_ref(),
                 profile_root,
                 cancellation,
@@ -165,15 +154,13 @@ pub(super) async fn run_startup_session_catch_up(
             "startup user transcript ingest skipped because session or registry storage is unavailable"
         );
     }
-    project_outcome.is_success().then_some(db)
+    project_outcome.is_success().then_some(sessions)
 }
 
 async fn run_startup_session_catch_up_with_home(
     transcript_source_home: Option<PathBuf>,
-    session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    sessions: Option<Arc<RegisteredGlobalDb>>,
+    user_sessions: Option<Arc<RegisteredGlobalDb>>,
     registry_db: Option<Arc<RegisteredGlobalDb>>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: PathBuf,
@@ -187,10 +174,8 @@ async fn run_startup_session_catch_up_with_home(
     // (E0477 notes on `&Path` / `&RegisteredGlobalDb`).
     let catch_up = async move {
         run_startup_session_catch_up(
-            session_db,
-            registered_session_db,
-            user_session_db,
-            registered_user_session_db,
+            sessions,
+            user_sessions,
             registry_db,
             profile_identity,
             project_root.as_path(),
@@ -410,16 +395,15 @@ impl McpServer {
         {
             let project_root = cg.project_root().to_path_buf();
             let project_id = cg.store_layout().identity.project_id.clone();
-            let session_db = self.session_db.clone();
-            let registered_session_db = self.registered_session_db.clone();
-            let user_session_db = self.user_session_db.clone();
-            let registered_user_session_db = self.registered_user_session_db.clone();
+            // `session_db`/`registered_session_db` (and the user pair) are set
+            // from the same `Arc` by every construction site, so startup
+            // catch-up takes one authority per scope rather than two.
+            let sessions = self.session_db.clone();
+            let user_sessions = self.user_session_db.clone();
             let registry_db = self.registry_db.clone();
             let profile_identity = self.profile_identity.clone();
-            let user_ingest_requested = user_session_db.is_some()
-                && registered_user_session_db.is_some()
-                && registry_db.is_some()
-                && profile_identity.is_some();
+            let user_ingest_requested =
+                user_sessions.is_some() && registry_db.is_some() && profile_identity.is_some();
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
@@ -429,10 +413,8 @@ impl McpServer {
             let task = tokio::spawn(async move {
                 if let Some(db) = run_startup_session_catch_up_with_home(
                     transcript_source_home,
-                    session_db,
-                    registered_session_db,
-                    user_session_db,
-                    registered_user_session_db,
+                    sessions,
+                    user_sessions,
                     registry_db,
                     profile_identity,
                     project_root.clone(),

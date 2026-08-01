@@ -65,8 +65,6 @@ pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-#[cfg(test)]
-use lifecycle::run_startup_session_catch_up;
 pub(crate) use lifecycle::{ProjectServerResponseLifecycle, VersionCheckState};
 pub(crate) use protocol::*;
 use read_coalescing::*;
