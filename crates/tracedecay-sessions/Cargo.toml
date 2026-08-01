@@ -6,6 +6,11 @@ license = "MIT"
 description = "TraceDecay session contracts, provider-neutral ports, and the session runtime"
 include = ["/src/**", "/tests/**"]
 
+[features]
+# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
+# surfaces to dependent crates' test builds only. Never gates production code.
+test-helpers = []
+
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
@@ -32,3 +37,11 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 url = "2"
+
+[dev-dependencies]
+# `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
+filetime = "0.2"
+# This crate's own test target needs the kernel's `db::engine::TestConnection`.
+# Declaring the same path dependency with the feature keeps it out of the lib
+# build while feature unification supplies it to every test target here.
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }

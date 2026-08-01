@@ -54,7 +54,7 @@ pub use capture::{
     capture_cursor_composer_observation,
 };
 pub use ingest::{CursorComposerSource, CursorComposerSweepOutcome, DEFAULT_COMPOSER_ENVELOPE_CAP};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,

@@ -70,3 +70,9 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+# Test-only helper surfaces reached across crate boundaries by this crate's
+# test targets. Feature unification supplies them to the test build only.
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
