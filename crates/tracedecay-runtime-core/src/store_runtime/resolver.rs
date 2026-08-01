@@ -144,6 +144,18 @@ pub enum LocalStoreRuntimeResolverConfigurationErrorV1 {
     CodeAuthorityRetirementMismatch { shard_id: Box<StoreShardIdV1> },
 }
 
+/// Whether an exact code-store authority was added by this registration.
+///
+/// Callers use this to roll back only their own newly added authority when a
+/// subsequent runtime open fails. An identical authority may already be owned
+/// by a retained or concurrently opening runtime and must not be retired by an
+/// idempotent registrant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalCodeStoreAuthorityRegistrationOutcomeV1 {
+    Registered,
+    AlreadyRegistered,
+}
+
 /// Infrastructure-only resolver for the local profile-sharded layout.
 ///
 /// The resolver supports only physical mappings that the current storage layout
@@ -206,14 +218,17 @@ impl LocalStoreRuntimeResolverV1 {
     pub fn register_code_authority(
         &self,
         authority: LocalCodeStoreAuthorityV1,
-    ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
+    ) -> Result<
+        LocalCodeStoreAuthorityRegistrationOutcomeV1,
+        LocalStoreRuntimeResolverConfigurationErrorV1,
+    > {
         let shard_id = authority.shard_id.clone();
         let mut code_authorities = self.code_authorities_write();
         if code_authorities
             .get(&shard_id)
             .is_some_and(|existing| existing == &authority)
         {
-            return Ok(());
+            return Ok(LocalCodeStoreAuthorityRegistrationOutcomeV1::AlreadyRegistered);
         }
         if code_authorities.contains_key(&shard_id) {
             return Err(
@@ -223,7 +238,7 @@ impl LocalStoreRuntimeResolverV1 {
             );
         }
         code_authorities.insert(shard_id, authority);
-        Ok(())
+        Ok(LocalCodeStoreAuthorityRegistrationOutcomeV1::Registered)
     }
 
     pub fn retire_code_authority(
@@ -1964,12 +1979,18 @@ mod tests {
         let first = LocalCodeStoreAuthorityV1::new(code_shard.clone(), first_path.clone())
             .expect("first authority");
 
-        resolver
-            .register_code_authority(first.clone())
-            .expect("first registration");
-        resolver
-            .register_code_authority(first)
-            .expect("identical registration is idempotent");
+        assert_eq!(
+            resolver
+                .register_code_authority(first.clone())
+                .expect("first registration"),
+            LocalCodeStoreAuthorityRegistrationOutcomeV1::Registered
+        );
+        assert_eq!(
+            resolver
+                .register_code_authority(first)
+                .expect("identical registration is idempotent"),
+            LocalCodeStoreAuthorityRegistrationOutcomeV1::AlreadyRegistered
+        );
         assert!(matches!(
             resolver.register_code_authority(
                 LocalCodeStoreAuthorityV1::new(code_shard.clone(), second_path.clone())
