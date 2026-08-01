@@ -87,6 +87,13 @@ const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
 const OPERATION: &str = "observation evidence retention";
 
+/// Row count per batched retention `UPDATE`/`DELETE ... WHERE id IN (...)`
+/// statement. Keeps bound-parameter counts safely under SQLite's default
+/// `SQLITE_LIMIT_VARIABLE_NUMBER` (999) regardless of the configured
+/// `max_batch_size`, mirroring `project_registry::delete_code_projects`'s
+/// chunking pattern.
+const RETENTION_DML_CHUNK: usize = 500;
+
 /// Compact tombstone written over a released `retrieval_anchors.anchor_json`.
 const ANCHOR_RELEASED_MARKER: &str = "{\"__retention_released\":\"anchor\"}";
 /// Compact tombstone written over a released `observations.observation_json`.
@@ -628,22 +635,29 @@ async fn run_anchor_pass(
         DROP_ANCHOR_UPDATE_TRIGGER,
     )
     .await?;
-    for target in &targets {
+    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         authorize("release anchor retention payload")?;
-        match txn
-            .execute(
-                "UPDATE retrieval_anchors SET anchor_json = ?2 WHERE anchor_id = ?1",
-                params![target.anchor_id.as_str(), ANCHOR_RELEASED_MARKER],
-            )
-            .await
-        {
-            Ok(_) => {
-                report.acted += 1;
-                report.bytes_reclaimed = report
-                    .bytes_reclaimed
-                    .saturating_add(reclaimed_bytes(target.original_len, ANCHOR_RELEASED_MARKER));
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE retrieval_anchors SET anchor_json = ? WHERE anchor_id IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(chunk.len() + 1);
+        values.push(Value::Text(ANCHOR_RELEASED_MARKER.to_string()));
+        values.extend(chunk.iter().map(|target| Value::Text(target.anchor_id.clone())));
+        match txn.execute(&sql, values).await {
+            Ok(count) => {
+                report.acted = report.acted.saturating_add(count);
+                let reclaimed: u64 = chunk
+                    .iter()
+                    .map(|target| reclaimed_bytes(target.original_len, ANCHOR_RELEASED_MARKER))
+                    .sum();
+                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
             }
-            Err(err) => errors.push(format!("release anchor {}: {err}", target.anchor_id)),
+            Err(err) => errors.push(format!(
+                "release anchor batch ({} ids starting {}): {err}",
+                chunk.len(),
+                chunk[0].anchor_id
+            )),
         }
     }
     execute_authorized_required(
@@ -783,25 +797,34 @@ async fn run_observation_pass(
         DROP_OBSERVATION_UPDATE_TRIGGER,
     )
     .await?;
-    for target in &targets {
+    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         authorize("release observation retention payload")?;
-        match txn
-            .execute(
-                "UPDATE observations SET observation_json = ?2 WHERE observation_id = ?1",
-                params![target.observation_id.as_str(), OBSERVATION_RELEASED_MARKER],
-            )
-            .await
-        {
-            Ok(_) => {
-                report.acted += 1;
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed_bytes(
-                    target.original_len,
-                    OBSERVATION_RELEASED_MARKER,
-                ));
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "UPDATE observations SET observation_json = ? WHERE observation_id IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(chunk.len() + 1);
+        values.push(Value::Text(OBSERVATION_RELEASED_MARKER.to_string()));
+        values.extend(
+            chunk
+                .iter()
+                .map(|target| Value::Text(target.observation_id.clone())),
+        );
+        match txn.execute(&sql, values).await {
+            Ok(count) => {
+                report.acted = report.acted.saturating_add(count);
+                let reclaimed: u64 = chunk
+                    .iter()
+                    .map(|target| {
+                        reclaimed_bytes(target.original_len, OBSERVATION_RELEASED_MARKER)
+                    })
+                    .sum();
+                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
             }
             Err(err) => errors.push(format!(
-                "release observation {}: {err}",
-                target.observation_id
+                "release observation batch ({} ids starting {}): {err}",
+                chunk.len(),
+                chunk[0].observation_id
             )),
         }
     }
@@ -913,27 +936,41 @@ async fn run_provenance_pass(
         DROP_PROVENANCE_UPDATE_TRIGGER,
     )
     .await?;
-    for target in &targets {
+    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         authorize("release provenance retention payload")?;
-        match txn
-            .execute(
-                "UPDATE observation_repository_provenance
-                 SET availability_json = ?2, capture_json = ?2
-                 WHERE observation_id = ?1",
-                params![target.observation_id.as_str(), PROVENANCE_RELEASED_MARKER],
-            )
-            .await
-        {
-            Ok(_) => {
-                report.acted += 1;
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed_bytes(
-                    target.original_len,
-                    PROVENANCE_RELEASED_MARKER,
-                ));
+        // ?1 is the shared marker (bound once, reused for both fat columns);
+        // the `IN` list starts at ?2 so the marker index isn't reused for ids.
+        let placeholders = (0..chunk.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE observation_repository_provenance
+             SET availability_json = ?1, capture_json = ?1
+             WHERE observation_id IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(chunk.len() + 1);
+        values.push(Value::Text(PROVENANCE_RELEASED_MARKER.to_string()));
+        values.extend(
+            chunk
+                .iter()
+                .map(|target| Value::Text(target.observation_id.clone())),
+        );
+        match txn.execute(&sql, values).await {
+            Ok(count) => {
+                report.acted = report.acted.saturating_add(count);
+                let reclaimed: u64 = chunk
+                    .iter()
+                    .map(|target| {
+                        reclaimed_bytes(target.original_len, PROVENANCE_RELEASED_MARKER)
+                    })
+                    .sum();
+                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
             }
             Err(err) => errors.push(format!(
-                "release provenance {}: {err}",
-                target.observation_id
+                "release provenance batch ({} ids starting {}): {err}",
+                chunk.len(),
+                chunk[0].observation_id
             )),
         }
     }
@@ -1035,23 +1072,32 @@ async fn run_cursor_advance_pass(
         DROP_CURSOR_ADVANCE_DELETE_TRIGGER,
     )
     .await?;
-    for target in &targets {
+    for chunk in targets.chunks(RETENTION_DML_CHUNK) {
         authorize("reclaim superseded source cursor advance")?;
-        match txn
-            .execute(
-                "DELETE FROM source_cursor_advances WHERE rowid = ?1",
-                params![target.rowid],
-            )
-            .await
-        {
-            Ok(1) => report.acted += 1,
-            Ok(_) => errors.push(format!(
-                "reclaim source cursor advance rowid {}: row disappeared",
-                target.rowid
-            )),
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!("DELETE FROM source_cursor_advances WHERE rowid IN ({placeholders})");
+        let values = chunk
+            .iter()
+            .map(|target| Value::Integer(target.rowid))
+            .collect::<Vec<_>>();
+        match txn.execute(&sql, values).await {
+            Ok(count) if count as usize == chunk.len() => {
+                report.acted = report.acted.saturating_add(count);
+            }
+            Ok(count) => {
+                report.acted = report.acted.saturating_add(count);
+                errors.push(format!(
+                    "reclaim source cursor advance batch ({} ids starting rowid {}): {} of {} rows disappeared",
+                    chunk.len(),
+                    chunk[0].rowid,
+                    chunk.len() as u64 - count,
+                    chunk.len()
+                ));
+            }
             Err(error) => errors.push(format!(
-                "reclaim source cursor advance rowid {}: {error}",
-                target.rowid
+                "reclaim source cursor advance batch ({} ids starting rowid {}): {error}",
+                chunk.len(),
+                chunk[0].rowid
             )),
         }
     }
