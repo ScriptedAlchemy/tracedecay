@@ -178,3 +178,36 @@ pub async fn seed_latest_graph_db(dest: &Path) {
     }
     fs::copy(&template, dest).expect("failed to seed database from template");
 }
+
+/// A function node with reasonable defaults, shared by the suite modules that
+/// need graph rows to query against. `db_test`, `db_query_test`, and
+/// `corruption_test` each carried a byte-identical copy of this struct
+/// literal, so the fixtures could drift apart silently; one definition keeps
+/// every module asserting against the same shape.
+pub fn sample_node(id: &str, name: &str, file_path: &str) -> tracedecay::types::Node {
+    tracedecay::types::Node {
+        id: id.to_string(),
+        kind: tracedecay::types::NodeKind::Function,
+        name: name.to_string(),
+        qualified_name: format!("crate::{name}"),
+        file_path: file_path.to_string(),
+        start_line: 1,
+        attrs_start_line: 1,
+        end_line: 10,
+        start_column: 0,
+        end_column: 1,
+        signature: Some(format!("fn {name}()")),
+        docstring: Some(format!("Documentation for {name}")),
+        visibility: tracedecay::types::Visibility::Pub,
+        is_async: false,
+        branches: 0,
+        loops: 0,
+        returns: 0,
+        max_nesting: 0,
+        unsafe_blocks: 0,
+        unchecked_calls: 0,
+        assertions: 0,
+        updated_at: 1000,
+        parent_id: None,
+    }
+}

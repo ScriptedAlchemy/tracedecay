@@ -5,6 +5,7 @@ use tracedecay::db::Database;
 use tracedecay::types::*;
 
 use crate::support;
+use crate::support::sample_node;
 
 /// Helper: create an empty latest-schema temp database and return
 /// (Database, TempDir). Seeded from the cached template rather than running
@@ -19,35 +20,6 @@ async fn setup_db() -> (Database, TempDir) {
         .expect("failed to open template database");
     assert!(!migrated, "template database should not require migration");
     (db, dir)
-}
-
-/// Helper: create a sample node with reasonable defaults.
-fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
-    Node {
-        id: id.to_string(),
-        kind: NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("crate::{name}"),
-        file_path: file_path.to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 10,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: Some(format!("Documentation for {name}")),
-        visibility: Visibility::Pub,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1000,
-        parent_id: None,
-    }
 }
 
 #[tokio::test]
