@@ -8,7 +8,6 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::canonical_text::validate_canonical_identity;
 use crate::{DomainError, ManifestDigest, canonical_sha256};
 
 const ROOT_GENERATION_DIGEST_DOMAIN_V1: &str = "tracedecay.multi-root.generation.v1";
@@ -19,7 +18,16 @@ const ROOT_GENERATION_DIGEST_DOMAIN_V1: &str = "tracedecay.multi-root.generation
 pub struct ScopeSetId(String);
 
 fn validate_scope_set_id(value: &str) -> Result<(), DomainError> {
-    validate_canonical_identity(value, "scope set id")
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(DomainError::NonCanonical {
+            field: "scope set id",
+        });
+    }
+    Ok(())
 }
 
 impl ScopeSetId {

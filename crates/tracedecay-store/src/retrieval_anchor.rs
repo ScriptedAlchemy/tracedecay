@@ -8,7 +8,6 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::{
     AnchorOwnerBindingV1, FactOwnerV1, ProjectionGenerationId, RetrievalAnchorId,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV3, UtcMicros,
@@ -496,7 +495,11 @@ pub trait RetrievalAnchorDispositionStore: Send + Sync {
 }
 
 fn validate_label(value: &str, field: &'static str) -> RetrievalAnchorStoreResult<()> {
-    if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
         return Err(invalid(format!("{field} is not canonical")));
     }
     Ok(())

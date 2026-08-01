@@ -54,7 +54,9 @@ impl TryFrom<String> for WorktreePlacementRootId {
 }
 
 fn validate_ref_fragment(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if !crate::canonical_text::is_canonical_text(value)
+    if value.is_empty()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
         || value.contains("..")
         || value.contains("//")
         || value.contains("@{")

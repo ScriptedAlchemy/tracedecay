@@ -7,9 +7,67 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::DomainError;
 
-pub(crate) use crate::canonical_text::validate_canonical_string;
+pub(crate) fn validate_canonical_string(
+    value: &str,
+    field: &'static str,
+) -> Result<(), DomainError> {
+    if value.is_empty() {
+        return Err(DomainError::Empty { field });
+    }
+    if value.trim() != value || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(DomainError::NonCanonical { field });
+    }
+    Ok(())
+}
 
-use crate::canonical_text::validated_string_newtype;
+macro_rules! string_id {
+    ($($name:ident),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+                let value = value.into();
+                validate_canonical_string(&value, stringify!($name))?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), DomainError> {
+                validate_canonical_string(&self.0, stringify!($name))
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = DomainError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    )+};
+}
 
 /// Reject values that are not an algorithm-tagged, lowercase-hex integrity
 /// digest: `sha256:`/`blake3:` over 64 hex characters, `sha512:` over 128.
@@ -32,10 +90,12 @@ pub(crate) fn validate_integrity_digest(
                 "sha512" => 128,
                 _ => return None,
             };
-            Some(crate::canonical_text::is_lowercase_hex(
-                encoded,
-                expected_len,
-            ))
+            Some(
+                encoded.len() == expected_len
+                    && encoded
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            )
         })
         .unwrap_or(false);
 
@@ -121,10 +181,7 @@ macro_rules! digest_id {
 pub(crate) use digest_id;
 pub(crate) use digest_id_body;
 
-validated_string_newtype!(
-    schema,
-    DomainError,
-    validate_canonical_string;
+string_id!(
     EntityId,
     EntityVersionId,
     ProviderId,
