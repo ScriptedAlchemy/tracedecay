@@ -2,12 +2,49 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    MigrateAction, PostUpdateMode, SessionsAction, SessionsRefreshAction,
+    MigrateAction, PackageHookAction, PostUpdateMode, ScoopPackageHookAction, SessionsAction,
+    SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
+}
+
+#[test]
+fn hidden_scoop_package_hook_contract_parses_both_operations() {
+    for operation in ["prepare", "restore"] {
+        let cli = Cli::try_parse_from([
+            "tracedecay",
+            "package-hook",
+            "scoop",
+            operation,
+            "--package-id",
+            "tracedecay-beta",
+            "--state-file",
+            r"C:\state\scoop.json",
+        ])
+        .expect("hidden Scoop package hook should parse");
+        let Some(Commands::PackageHook {
+            action:
+                PackageHookAction::Scoop {
+                    action:
+                        ScoopPackageHookAction::Prepare {
+                            package_id,
+                            state_file,
+                        }
+                        | ScoopPackageHookAction::Restore {
+                            package_id,
+                            state_file,
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("unexpected hidden Scoop package hook command");
+        };
+        assert_eq!(package_id, "tracedecay-beta");
+        assert_eq!(state_file, std::path::Path::new(r"C:\state\scoop.json"));
+    }
 }
 
 fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {

@@ -227,6 +227,15 @@ impl QuiescedDaemonLifecycle {
     }
 
     fn downgrade_to_shared(&mut self) -> Result<()> {
+        self.downgrade_to_shared_with(|| {
+            crate::lifecycle_lease::acquire_shared_blocking("daemon state restore")
+        })
+    }
+
+    fn downgrade_to_shared_with(
+        &mut self,
+        acquire_shared: impl FnOnce() -> Result<crate::lifecycle_lease::LifecycleLease>,
+    ) -> Result<()> {
         if self
             .lifecycle_lease
             .as_ref()
@@ -234,13 +243,18 @@ impl QuiescedDaemonLifecycle {
         {
             return Ok(());
         }
-        let lease = self
-            .lifecycle_lease
-            .as_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "quiesced daemon lifecycle lease is missing".to_string(),
-            })?;
-        lease.downgrade_to_shared()
+        if self.lifecycle_lease.is_none() {
+            self.lifecycle_lease = Some(acquire_shared()?);
+            return Ok(());
+        }
+        self.lifecycle_lease.as_mut().map_or_else(
+            || {
+                Err(TraceDecayError::Config {
+                    message: "could not reacquire daemon lifecycle lease".to_string(),
+                })
+            },
+            crate::lifecycle_lease::LifecycleLease::downgrade_to_shared,
+        )
     }
 }
 
@@ -538,11 +552,6 @@ pub fn service_spec(
     socket: Option<String>,
 ) -> Result<DaemonServiceSpec> {
     let tracedecay_bin = tracedecay_bin.into();
-    let tracedecay_bin = if cfg!(windows) {
-        windows_task::preferred_service_executable(&tracedecay_bin)
-    } else {
-        tracedecay_bin
-    };
     Ok(DaemonServiceSpec {
         tracedecay_bin,
         socket_path: socket_path_or_default(socket)?,
@@ -550,6 +559,16 @@ pub fn service_spec(
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
     })
+}
+
+#[doc(hidden)]
+pub fn prepare_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+    windows_task::prepare_scoop_package_service(package_id, state_file)
+}
+
+#[doc(hidden)]
+pub fn restore_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+    windows_task::restore_scoop_package_service(package_id, state_file)
 }
 
 pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
@@ -570,8 +589,13 @@ fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<
     #[cfg(not(windows))]
     let new_windows_task = false;
     let operation_result = (|| {
-        let service_path = write_service_unit(spec)?;
-        runner.install(&service_path, start, &spec.socket_path)?;
+        let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
+            windows_task::materialize_service_spec_after_quiescence(spec)?
+        } else {
+            spec.clone()
+        };
+        let service_path = write_service_unit(&materialized_spec)?;
+        runner.install(&service_path, start, &materialized_spec.socket_path)?;
         Ok(service_path)
     })();
     if operation_result.is_err() && new_windows_task {
@@ -618,8 +642,17 @@ fn refresh_service_with_runner(
             });
         }
     }
-    let service_path = write_service_unit(spec)?;
-    runner.refresh(&service_path, &spec.socket_path, previous_state)?;
+    let materialized_spec = if matches!(runner, ServiceRunner::WindowsTask) {
+        windows_task::materialize_service_spec_after_quiescence(spec)?
+    } else {
+        spec.clone()
+    };
+    let service_path = write_service_unit(&materialized_spec)?;
+    runner.refresh(
+        &service_path,
+        &materialized_spec.socket_path,
+        previous_state,
+    )?;
     Ok(service_path)
 }
 
@@ -844,6 +877,14 @@ fn prepare_forward_only_service_before_lease(
     }
     let recovered_spec = forward_only_service_spec(spec, &service_path)?;
     let runner = ServiceRunner::current()?;
+    if matches!(runner, ServiceRunner::WindowsTask) {
+        let previous_state = quiesce_installed_service_before_lease()?;
+        let recovered_spec =
+            windows_task::materialize_service_spec_after_quiescence(&recovered_spec)?;
+        write_service_unit(&recovered_spec)?;
+        runner.reload_forward_recovery_unit(&service_path)?;
+        return Ok(previous_state);
+    }
     commit_forward_only_definition_with(
         || write_service_unit(&recovered_spec),
         |path| runner.reload_forward_recovery_unit(path),
@@ -876,8 +917,12 @@ pub fn enforce_forward_only_service_recovery(spec: &DaemonServiceSpec) -> Result
         });
     }
 
-    let recovered_spec = forward_only_service_spec(spec, &service_path)?;
+    let mut recovered_spec = forward_only_service_spec(spec, &service_path)?;
     let runner = ServiceRunner::current()?;
+    if matches!(runner, ServiceRunner::WindowsTask) {
+        quiesce_installed_service_before_lease()?;
+        recovered_spec = windows_task::materialize_service_spec_after_quiescence(&recovered_spec)?;
+    }
     let (service_path, deactivate_error) = recover_forward_only_definition_with(
         || write_service_unit(&recovered_spec),
         |path| runner.reload_forward_recovery_unit(path),

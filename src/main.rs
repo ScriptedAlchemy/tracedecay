@@ -535,6 +535,7 @@ impl CommandFamily {
             | Commands::Update { .. }
             | Commands::Dogfood
             | Commands::PostUpdate { .. }
+            | Commands::PackageHook { .. }
             | Commands::Channel { .. } => Self::Update,
             Commands::CurrentCounter { .. }
             | Commands::ResetCounter { .. }
@@ -1112,6 +1113,22 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
             )
             .await?;
         }
+        Commands::PackageHook {
+            action: PackageHookAction::Scoop { action },
+        } => match action {
+            ScoopPackageHookAction::Prepare {
+                package_id,
+                state_file,
+            } => {
+                tracedecay::daemon::prepare_scoop_package_service(&package_id, &state_file)?;
+            }
+            ScoopPackageHookAction::Restore {
+                package_id,
+                state_file,
+            } => {
+                tracedecay::daemon::restore_scoop_package_service(&package_id, &state_file)?;
+            }
+        },
         Commands::Channel { channel } => match channel {
             Some(target) => {
                 tracedecay::upgrade::switch_channel(&target)?;
@@ -1267,6 +1284,7 @@ impl CommandStartupPolicy {
             | Commands::Update { .. }
             | Commands::Dogfood
             | Commands::PostUpdate { .. }
+            | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }

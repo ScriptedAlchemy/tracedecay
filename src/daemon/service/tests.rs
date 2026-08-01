@@ -69,6 +69,34 @@ impl Drop for CurrentDirGuard {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
+    let profile = TempDir::new().expect("profile");
+    let mut guard = super::QuiescedDaemonLifecycle {
+        previous_state: DaemonServiceState::RunningEnabled,
+        lifecycle_lease: None,
+        restored: false,
+    };
+
+    guard
+        .downgrade_to_shared_with(|| {
+            crate::lifecycle_lease::acquire_shared_for_profile(
+                profile.path(),
+                "replacement restore regression",
+            )
+        })
+        .expect("reacquire shared restore lease");
+
+    assert!(
+        guard
+            .lifecycle_lease
+            .as_ref()
+            .is_some_and(|lease| !lease.is_exclusive())
+    );
+    guard.restored = true;
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn service_status_includes_journalctl_debug_command() {

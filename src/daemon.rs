@@ -290,11 +290,12 @@ pub(crate) use service::invocation::{
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
     default_socket_path, enforce_forward_only_service_recovery, install_service,
-    installed_service_socket_path, quiesce_installed_service_before_lease,
-    refresh_installed_service, refresh_installed_service_under_lease,
-    refresh_installed_service_under_lease_with_state, refresh_service,
-    restore_installed_service_after_update, service_spec, service_status, socket_path_or_default,
-    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
+    installed_service_socket_path, prepare_scoop_package_service,
+    quiesce_installed_service_before_lease, refresh_installed_service,
+    refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
+    refresh_service, restore_installed_service_after_update, restore_scoop_package_service,
+    service_spec, service_status, socket_path_or_default, start_service, stop_service,
+    uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };
