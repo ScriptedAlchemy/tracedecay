@@ -72,7 +72,16 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
 ) -> Result<CompactContext, ContextError> {
     validate_frozen_bounds(available, unavailable, &frames, budget.max_bytes)?;
     canonicalize_frames(&mut frames)?;
-    validate_privacy_and_anchor_overlap(available, unavailable, &frames)?;
+    // Build the sorted anchor-id index exactly once: both the privacy/overlap
+    // validation and the later omission-clearing pass key off the same sorted
+    // slice, so constructing and sorting it twice per call was pure waste.
+    let mut available_ids = Vec::new();
+    try_reserve(&mut available_ids, available.len())?;
+    for payload in available {
+        available_ids.push(payload.anchor_id().clone());
+    }
+    available_ids.sort();
+    validate_privacy_and_anchor_overlap(&available_ids, unavailable, &frames)?;
 
     let summary_omissions = frames.summary_omissions;
     let mut bundle = CompactContextBundleV1 {
@@ -101,11 +110,6 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
         });
     }
     preserve_rejected_summary_details(&mut bundle, &summary_omissions, control)?;
-    let mut available_ids = available
-        .iter()
-        .map(|payload| payload.anchor_id().clone())
-        .collect::<Vec<_>>();
-    available_ids.sort();
     for omission in &mut bundle.omissions {
         if !omission.reason.is_terminal_privacy()
             && omission
@@ -370,17 +374,11 @@ fn summary_rejection_value(rejection: &SummaryLineageRejection) -> &str {
     }
 }
 
-fn validate_privacy_and_anchor_overlap<P: ContextPayload, U: ContextUnavailable>(
-    available: &[P],
+fn validate_privacy_and_anchor_overlap<U: ContextUnavailable>(
+    available_ids: &[RetrievalAnchorId],
     unavailable: &[U],
     frames: &TemporalContextFrames,
 ) -> Result<(), ContextError> {
-    let mut available_ids = Vec::new();
-    try_reserve(&mut available_ids, available.len())?;
-    for payload in available {
-        available_ids.push(payload.anchor_id().clone());
-    }
-    available_ids.sort();
     if available_ids.windows(2).any(|pair| pair[0] == pair[1]) {
         return Err(ContextError::InvalidBundle(
             "duplicate available compact context anchor".to_string(),

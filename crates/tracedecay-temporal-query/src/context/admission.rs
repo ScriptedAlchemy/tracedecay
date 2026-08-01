@@ -17,7 +17,7 @@ use super::{
     MAX_CONTEXT_OUTPUT_BYTES, TokenPolicy,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum BudgetLimit {
     Byte,
     Token,
@@ -42,6 +42,50 @@ struct StaticWireMeasures {
     summary_omissions: WireMeasure,
 }
 
+/// Token/byte measures for the constant JSON structural literals that frame
+/// every admission candidate. They depend only on the literal text and the
+/// token policy, so measuring them once per `prepare_admission` and reusing the
+/// clones avoids re-scanning ~12 fixed strings on every `measure_candidate`
+/// iteration of the admission search loop.
+#[derive(Clone)]
+struct WireSeparators {
+    open_format: WireMeasure,
+    estimator_version_key: WireMeasure,
+    bundle_records: WireMeasure,
+    omissions_key: WireMeasure,
+    continuation_anchors_key: WireMeasure,
+    coverage_key: WireMeasure,
+    conflicts_key: WireMeasure,
+    lineage_key: WireMeasure,
+    encoded_bytes_key: WireMeasure,
+    summary_omissions_key: WireMeasure,
+    payloads_key: WireMeasure,
+    close: WireMeasure,
+}
+
+impl WireSeparators {
+    fn measure(policy: TokenPolicy, control: &ExecutionControl) -> Result<Self, ContextError> {
+        Ok(Self {
+            open_format: measure_raw("{\"format\":", policy, control)?,
+            estimator_version_key: measure_raw(",\"estimator_version\":", policy, control)?,
+            bundle_records: measure_raw(",\"bundle\":{\"records\":[", policy, control)?,
+            omissions_key: measure_raw("],\"omissions\":", policy, control)?,
+            continuation_anchors_key: measure_raw(
+                ",\"continuation_anchors\":[",
+                policy,
+                control,
+            )?,
+            coverage_key: measure_raw("],\"coverage\":", policy, control)?,
+            conflicts_key: measure_raw(",\"conflicts\":", policy, control)?,
+            lineage_key: measure_raw(",\"lineage\":", policy, control)?,
+            encoded_bytes_key: measure_raw(",\"encoded_bytes\":", policy, control)?,
+            summary_omissions_key: measure_raw("},\"summary_omissions\":", policy, control)?,
+            payloads_key: measure_raw(",\"payloads\":[", policy, control)?,
+            close: measure_raw("]}", policy, control)?,
+        })
+    }
+}
+
 pub(super) struct PreparedAdmission {
     records: Vec<CompactContextRecordV1>,
     record_prefix: Vec<WireMeasure>,
@@ -49,6 +93,7 @@ pub(super) struct PreparedAdmission {
     payload_prefix: Vec<WireMeasure>,
     encoded_prefix: Vec<u64>,
     static_wire: StaticWireMeasures,
+    separators: WireSeparators,
 }
 
 #[derive(Clone, Copy)]
@@ -162,6 +207,7 @@ pub fn prepare_admission<P: ContextPayload>(
             lineage: measure_serializable(&bundle.lineage, policy, control)?,
             summary_omissions: measure_serializable(summary_omissions, policy, control)?,
         },
+        separators: WireSeparators::measure(policy, control)?,
     })
 }
 
@@ -299,31 +345,32 @@ fn measure_candidate(
         Some(BudgetLimit::Token) => &prepared.static_wire.omissions[2],
     };
     let encoded = measure_serializable(&prepared.encoded_prefix[admitted], policy, control)?;
+    let separators = &prepared.separators;
     let mut measure = WireMeasure::empty(policy)?;
     for part in [
-        measure_raw("{\"format\":", policy, control)?,
+        separators.open_format.clone(),
         prepared.static_wire.format.clone(),
-        measure_raw(",\"estimator_version\":", policy, control)?,
+        separators.estimator_version_key.clone(),
         prepared.static_wire.estimator_version.clone(),
-        measure_raw(",\"bundle\":{\"records\":[", policy, control)?,
+        separators.bundle_records.clone(),
         prepared.record_prefix[admitted].clone(),
-        measure_raw("],\"omissions\":", policy, control)?,
+        separators.omissions_key.clone(),
         omissions.clone(),
-        measure_raw(",\"continuation_anchors\":[", policy, control)?,
+        separators.continuation_anchors_key.clone(),
         prepared.continuation_suffix[admitted].clone(),
-        measure_raw("],\"coverage\":", policy, control)?,
+        separators.coverage_key.clone(),
         prepared.static_wire.coverage.clone(),
-        measure_raw(",\"conflicts\":", policy, control)?,
+        separators.conflicts_key.clone(),
         prepared.static_wire.conflicts.clone(),
-        measure_raw(",\"lineage\":", policy, control)?,
+        separators.lineage_key.clone(),
         prepared.static_wire.lineage.clone(),
-        measure_raw(",\"encoded_bytes\":", policy, control)?,
+        separators.encoded_bytes_key.clone(),
         encoded,
-        measure_raw("},\"summary_omissions\":", policy, control)?,
+        separators.summary_omissions_key.clone(),
         prepared.static_wire.summary_omissions.clone(),
-        measure_raw(",\"payloads\":[", policy, control)?,
+        separators.payloads_key.clone(),
         prepared.payload_prefix[admitted].clone(),
-        measure_raw("]}", policy, control)?,
+        separators.close.clone(),
     ] {
         measure = measure.concatenate(&part)?;
     }
@@ -428,4 +475,174 @@ fn measure_raw(
         .write_all(value.as_bytes())
         .map_err(serde_json::Error::io);
     writer.finish(result).map(|(measure, _)| measure)
+}
+
+#[cfg(test)]
+mod separator_equivalence_tests {
+    //! Finding 8 equivalence: precomputing the constant JSON structural literals
+    //! once in `prepare_admission` must produce byte-identical `WireMeasure`s to
+    //! the previous implementation, which recomputed every literal inside
+    //! `measure_candidate` on every admission-search iteration.
+    use tracedecay_domain::RetrievalAnchorId;
+
+    use super::*;
+
+    struct TestPayload {
+        anchor_id: RetrievalAnchorId,
+        bytes: Vec<u8>,
+    }
+
+    impl ContextPayload for TestPayload {
+        fn anchor_id(&self) -> &RetrievalAnchorId {
+            &self.anchor_id
+        }
+
+        fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    fn anchor(value: &str) -> RetrievalAnchorId {
+        serde_json::from_str(&format!("\"{value}\"")).expect("valid anchor")
+    }
+
+    /// Reference `measure_candidate`: recomputes every structural literal inline
+    /// via `measure_raw`, exactly as the pre-optimization code did.
+    fn measure_candidate_reference(
+        prepared: &PreparedAdmission,
+        admitted: usize,
+        limit: Option<BudgetLimit>,
+        policy: TokenPolicy,
+        control: &ExecutionControl,
+    ) -> Result<WireMeasure, ContextError> {
+        let omissions = match limit {
+            None => &prepared.static_wire.omissions[0],
+            Some(BudgetLimit::Byte) => &prepared.static_wire.omissions[1],
+            Some(BudgetLimit::Token) => &prepared.static_wire.omissions[2],
+        };
+        let encoded = measure_serializable(&prepared.encoded_prefix[admitted], policy, control)?;
+        let mut measure = WireMeasure::empty(policy)?;
+        for part in [
+            measure_raw("{\"format\":", policy, control)?,
+            prepared.static_wire.format.clone(),
+            measure_raw(",\"estimator_version\":", policy, control)?,
+            prepared.static_wire.estimator_version.clone(),
+            measure_raw(",\"bundle\":{\"records\":[", policy, control)?,
+            prepared.record_prefix[admitted].clone(),
+            measure_raw("],\"omissions\":", policy, control)?,
+            omissions.clone(),
+            measure_raw(",\"continuation_anchors\":[", policy, control)?,
+            prepared.continuation_suffix[admitted].clone(),
+            measure_raw("],\"coverage\":", policy, control)?,
+            prepared.static_wire.coverage.clone(),
+            measure_raw(",\"conflicts\":", policy, control)?,
+            prepared.static_wire.conflicts.clone(),
+            measure_raw(",\"lineage\":", policy, control)?,
+            prepared.static_wire.lineage.clone(),
+            measure_raw(",\"encoded_bytes\":", policy, control)?,
+            encoded,
+            measure_raw("},\"summary_omissions\":", policy, control)?,
+            prepared.static_wire.summary_omissions.clone(),
+            measure_raw(",\"payloads\":[", policy, control)?,
+            prepared.payload_prefix[admitted].clone(),
+            measure_raw("]}", policy, control)?,
+        ] {
+            measure = measure.concatenate(&part)?;
+        }
+        Ok(measure)
+    }
+
+    fn sample_bundle() -> CompactContextBundleV1 {
+        CompactContextBundleV1 {
+            omissions: vec![
+                CompactContextOmissionV1 {
+                    anchor_id: Some(anchor("dropped-1")),
+                    reason: ContextOmissionReasonV1::ByteBudget,
+                },
+                CompactContextOmissionV1 {
+                    anchor_id: None,
+                    reason: ContextOmissionReasonV1::TokenBudget,
+                },
+            ],
+            ..CompactContextBundleV1::default()
+        }
+    }
+
+    #[test]
+    fn precomputed_separators_equal_inline_measures() {
+        for value in [
+            "{\"format\":",
+            ",\"estimator_version\":",
+            ",\"bundle\":{\"records\":[",
+            "],\"omissions\":",
+            ",\"continuation_anchors\":[",
+            "],\"coverage\":",
+            ",\"conflicts\":",
+            ",\"lineage\":",
+            ",\"encoded_bytes\":",
+            "},\"summary_omissions\":",
+            ",\"payloads\":[",
+            "]}",
+        ] {
+            for policy in [TokenPolicy::Whitespace, TokenPolicy::Characters] {
+                let control = ExecutionControl::default();
+                let separators = WireSeparators::measure(policy, &control).expect("separators");
+                let inline = measure_raw(value, policy, &control).expect("inline measure");
+                let precomputed = match value {
+                    "{\"format\":" => &separators.open_format,
+                    ",\"estimator_version\":" => &separators.estimator_version_key,
+                    ",\"bundle\":{\"records\":[" => &separators.bundle_records,
+                    "],\"omissions\":" => &separators.omissions_key,
+                    ",\"continuation_anchors\":[" => &separators.continuation_anchors_key,
+                    "],\"coverage\":" => &separators.coverage_key,
+                    ",\"conflicts\":" => &separators.conflicts_key,
+                    ",\"lineage\":" => &separators.lineage_key,
+                    ",\"encoded_bytes\":" => &separators.encoded_bytes_key,
+                    "},\"summary_omissions\":" => &separators.summary_omissions_key,
+                    ",\"payloads\":[" => &separators.payloads_key,
+                    "]}" => &separators.close,
+                    other => panic!("unexpected literal {other}"),
+                };
+                assert_eq!(precomputed, &inline, "literal {value:?} policy {policy:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn measure_candidate_matches_reference_across_admissions() {
+        let available = (0..5)
+            .map(|index| TestPayload {
+                anchor_id: anchor(&format!("anchor-{index}")),
+                bytes: format!("payload body {index} with words").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+        let bundle = sample_bundle();
+        for policy in [TokenPolicy::Whitespace, TokenPolicy::Characters] {
+            let control = ExecutionControl::default();
+            let prepared = prepare_admission(
+                &available,
+                RetrievalGrainV1::LogicalMessage,
+                &bundle,
+                &[],
+                "estimator-v1",
+                policy,
+                &control,
+            )
+            .expect("prepare admission");
+            for admitted in 0..=available.len() {
+                for limit in [None, Some(BudgetLimit::Byte), Some(BudgetLimit::Token)] {
+                    let optimized =
+                        measure_candidate(&prepared, &bundle, &[], admitted, limit, policy, &control)
+                            .expect("optimized measure");
+                    let reference =
+                        measure_candidate_reference(&prepared, admitted, limit, policy, &control)
+                            .expect("reference measure");
+                    assert_eq!(
+                        optimized, reference,
+                        "admitted {admitted} limit {limit:?} policy {policy:?}"
+                    );
+                }
+            }
+        }
+    }
 }
