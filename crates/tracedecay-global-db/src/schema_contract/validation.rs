@@ -173,7 +173,7 @@ fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
             })
 }
 
-pub(crate) async fn validate_observation_migration_source(
+pub async fn validate_observation_migration_source(
     conn: &impl QueryExecutor,
     has_legacy_idempotency: bool,
 ) -> crate::errors::Result<()> {
@@ -409,7 +409,7 @@ async fn validate_named_tables_and_indexes(
     Ok(())
 }
 
-pub(crate) async fn validate_registry_schema_contract(
+pub async fn validate_registry_schema_contract(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
@@ -419,7 +419,7 @@ pub(crate) async fn validate_registry_schema_contract(
 ///
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
 /// schema modules; this validator intentionally neither claims nor validates those domains.
-pub(crate) async fn validate_authority_schema_contract(
+pub async fn validate_authority_schema_contract(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;

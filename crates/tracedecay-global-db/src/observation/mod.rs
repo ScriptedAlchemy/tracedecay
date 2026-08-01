@@ -4,11 +4,11 @@ mod persist;
 pub mod retention;
 mod schema;
 
-pub(crate) use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
+pub use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
 pub(super) use backfill::{
     converge_observation_repository_provenance, converge_observation_retrieval_anchors,
 };
-pub(crate) use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
+pub use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
 pub(super) use schema::ensure_observation_schema;
 
 use tracedecay_domain::{
@@ -176,7 +176,7 @@ fn observed_anchor_watermark(frozen: &VectorWatermark, observed_sequence: u64) -
 }
 
 impl super::RegisteredGlobalDb {
-    pub(crate) async fn resolve_observation_evidence_anchor(
+    pub async fn resolve_observation_evidence_anchor(
         &self,
         owner: &ObservationScopeV1,
         anchor_id: &RetrievalAnchorId,
@@ -188,7 +188,7 @@ impl super::RegisteredGlobalDb {
         resolve_owner_bound_anchor_record(&snapshot, owner, anchor_id).await
     }
 
-    pub(crate) async fn resolve_observation_evidence_anchor_report(
+    pub async fn resolve_observation_evidence_anchor_report(
         &self,
         owner: &ObservationScopeV1,
         anchor_id: &RetrievalAnchorId,

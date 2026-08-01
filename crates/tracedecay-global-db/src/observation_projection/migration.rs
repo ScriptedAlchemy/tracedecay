@@ -37,7 +37,7 @@ struct MigrationProgress {
 /// binding. This function never resolves or opens a database path; transaction
 /// begin, every write, and commit remain subject to the runtime's actor-time
 /// write-authority checks.
-pub(crate) async fn prepare_projection_version_migration_with_engine(
+pub async fn prepare_projection_version_migration_with_engine(
     conn: &Connection,
 ) -> ProjectionStoreResult<()> {
     if !migration_target_is_registered()? {
@@ -58,7 +58,7 @@ pub(crate) async fn prepare_projection_version_migration_with_engine(
     }
 }
 
-pub(crate) async fn advance_projection_version_migration_until_cancelled_with_engine(
+pub async fn advance_projection_version_migration_until_cancelled_with_engine(
     conn: &Connection,
     cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<bool> {
@@ -73,7 +73,7 @@ pub(crate) async fn advance_projection_version_migration_until_cancelled_with_en
     projection_version_migration_complete_with_engine(conn).await
 }
 
-pub(crate) async fn projection_version_migration_complete_with_engine(
+pub async fn projection_version_migration_complete_with_engine(
     conn: &Connection,
 ) -> ProjectionStoreResult<bool> {
     if !migration_target_is_registered()? {

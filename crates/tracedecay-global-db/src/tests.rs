@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
-pub(crate) mod harness;
+pub mod harness;
 
 use harness::RegisteredGlobalDbHarness;
 

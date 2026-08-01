@@ -8,7 +8,7 @@ use super::{
 };
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn append_analytics_event(
+    pub async fn append_analytics_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
@@ -29,7 +29,7 @@ impl RegisteredGlobalDb {
     /// The registered writer serializes the lookup and insert; the partial
     /// unique index remains the cross-process backstop. Reusing a key with
     /// changed canonical input is an explicit conflict.
-    pub(crate) async fn append_observability_event(
+    pub async fn append_observability_event(
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
@@ -88,7 +88,7 @@ impl RegisteredGlobalDb {
         Ok(id)
     }
 
-    pub(crate) async fn append_analytics_events(
+    pub async fn append_analytics_events(
         &self,
         events: &[AnalyticsEventInsert],
     ) -> Result<Vec<i64>, String> {
@@ -114,7 +114,7 @@ impl RegisteredGlobalDb {
     ///
     /// Keeping the cursor in the same transaction prevents a committed event
     /// batch from being replayed when cursor persistence fails.
-    pub(crate) async fn append_analytics_events_with_cursor(
+    pub async fn append_analytics_events_with_cursor(
         &self,
         events: &[AnalyticsEventInsert],
         cursor_path: &str,
@@ -138,7 +138,7 @@ impl RegisteredGlobalDb {
         Ok(ids)
     }
 
-    pub(crate) async fn query_analytics_events(
+    pub async fn query_analytics_events(
         &self,
         query: &AnalyticsEventQuery,
     ) -> Result<Vec<AnalyticsEventRecord>, String> {
@@ -213,7 +213,7 @@ impl RegisteredGlobalDb {
         Ok(events)
     }
 
-    pub(crate) async fn count_analytics_events(
+    pub async fn count_analytics_events(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -243,7 +243,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| format!("failed to decode analytics event count: {error}"))
     }
 
-    pub(crate) async fn query_analytics_tool_counts(
+    pub async fn query_analytics_tool_counts(
         &self,
         project_id: Option<&str>,
         since: i64,
@@ -291,7 +291,7 @@ impl RegisteredGlobalDb {
         Ok(counts)
     }
 
-    pub(crate) async fn query_analytics_hint_counts(
+    pub async fn query_analytics_hint_counts(
         &self,
         project_id: Option<&str>,
         since: i64,

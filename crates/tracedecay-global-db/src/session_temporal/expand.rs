@@ -25,7 +25,7 @@ const EXPAND_OPERATION: &str = "retrieve session temporal page";
 const FREEZE_OPERATION: &str = "freeze session temporal snapshot";
 
 impl RegisteredGlobalDb {
-    pub(crate) async fn freeze_session_temporal_snapshot_result(
+    pub async fn freeze_session_temporal_snapshot_result(
         &self,
         request: SessionTemporalSnapshotRequestV1,
     ) -> SessionStoreResult<SessionTemporalSnapshotV1> {
@@ -97,7 +97,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) async fn retrieve_session_temporal_page_result(
+    pub async fn retrieve_session_temporal_page_result(
         &self,
         request: SessionTemporalRetrievalRequestV1,
     ) -> SessionStoreResult<SessionRetrievalPageV1> {

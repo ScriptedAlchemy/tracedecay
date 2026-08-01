@@ -21,7 +21,7 @@ use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
 /// The adapter borrows the already-mounted registered session database; it never
 /// opens a database or derives a path. Every mutation owns one `IMMEDIATE`
 /// transaction from that runtime through commit or rollback.
-pub(crate) struct GlobalDbGitIndexTransactionStore<'db> {
+pub struct GlobalDbGitIndexTransactionStore<'db> {
     db: GitIndexDatabase<'db>,
 }
 
@@ -91,20 +91,20 @@ impl GitIndexWriteTransaction<'_> {
 }
 
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
-    pub(crate) const fn new(db: &'db RegisteredGlobalDb) -> Self {
+    pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
             db: GitIndexDatabase::Registered(db),
         }
     }
 
     #[cfg(test)]
-    pub(crate) const fn for_engine_test(db: &'db Connection) -> Self {
+    pub const fn for_engine_test(db: &'db Connection) -> Self {
         Self {
             db: GitIndexDatabase::Engine(db),
         }
     }
 
-    pub(crate) async fn save_preview(
+    pub async fn save_preview(
         &self,
         preview: GitIndexPreviewV1,
     ) -> GitIndexTransactionStoreResult<()> {
@@ -114,7 +114,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    pub(crate) async fn read_preview(
+    pub async fn read_preview(
         &self,
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
@@ -127,7 +127,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// key without opening a writer. This is the read-only projection of the
     /// same record `begin_or_replay` reconstructs before it decides to start,
     /// replay, or require recovery.
-    pub(crate) async fn read_record(
+    pub async fn read_record(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>> {
@@ -138,7 +138,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
 
     /// Atomically binds a client input and its prepared journal to an immutable
     /// preview before native Git is permitted to run.
-    pub(crate) async fn begin_or_replay(
+    pub async fn begin_or_replay(
         &self,
         request: GitIndexTransactionBeginRequestV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionBeginResultV1> {
@@ -205,7 +205,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    pub(crate) async fn compare_and_swap_journal(
+    pub async fn compare_and_swap_journal(
         &self,
         idempotency_key: &GitIndexIdempotencyKey,
         expected_phase_epoch: u64,
@@ -257,7 +257,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     /// database transaction. A failed receipt insert rolls back the journal
     /// phase and any newly required quarantine, so restart recovery never
     /// observes a terminal phase without its immutable receipt or fence.
-    pub(crate) async fn write_terminal(
+    pub async fn write_terminal(
         &self,
         write: GitIndexTransactionTerminalWriteV1,
     ) -> GitIndexTransactionStoreResult<GitIndexTransactionReceiptV1> {
@@ -347,7 +347,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    pub(crate) async fn recovery_candidates(
+    pub async fn recovery_candidates(
         &self,
         repository_id: &RepositoryId,
     ) -> GitIndexTransactionStoreResult<Vec<GitIndexTransactionRecordV1>> {
@@ -365,7 +365,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             .collect())
     }
 
-    pub(crate) async fn recovery_repositories(
+    pub async fn recovery_repositories(
         &self,
     ) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
         let snapshot = self.read_snapshot().await?;
@@ -402,7 +402,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         Ok(repositories)
     }
 
-    pub(crate) async fn quarantine_repository(
+    pub async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &GitIndexTransactionId,
@@ -429,7 +429,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    pub(crate) async fn clear_repository_quarantine(
+    pub async fn clear_repository_quarantine(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &GitIndexTransactionId,

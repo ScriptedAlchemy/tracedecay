@@ -21,7 +21,7 @@ use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
 
-pub(crate) async fn session_temporal_projection_record_count(
+pub async fn session_temporal_projection_record_count(
     conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
@@ -57,7 +57,7 @@ pub(crate) async fn session_temporal_projection_record_count(
     u64::try_from(count).map_err(|error| storage(MATERIALIZE_REFRESH, error))
 }
 
-pub(crate) async fn persist_session_temporal_projection_batch_in_transaction(
+pub async fn persist_session_temporal_projection_batch_in_transaction(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<SessionTemporalProjectionBatchReceiptV1> {
@@ -125,7 +125,7 @@ pub(crate) async fn persist_session_temporal_projection_batch_in_transaction(
     )
 }
 
-pub(crate) async fn seed_active_projection_in_transaction(
+pub async fn seed_active_projection_in_transaction(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
 ) -> SessionStoreResult<()> {

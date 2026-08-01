@@ -1439,7 +1439,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Lists registered code-project roots from one frozen runtime snapshot.
-    pub(crate) async fn try_list_code_project_paths(
+    pub async fn try_list_code_project_paths(
         &self,
         limit: usize,
     ) -> crate::errors::Result<Vec<PathBuf>> {
@@ -1447,7 +1447,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns legacy project paths with native path bytes preserved.
-    pub(crate) async fn try_list_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT path FROM projects ORDER BY path",
@@ -1457,7 +1457,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns modern registry aliases with native path bytes preserved.
-    pub(crate) async fn try_list_project_alias_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_alias_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT alias_path FROM project_aliases ORDER BY alias_path",
@@ -1466,7 +1466,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub(crate) async fn list_project_paths_compat(&self) -> Vec<String> {
+    pub async fn list_project_paths_compat(&self) -> Vec<String> {
         list_registered_project_paths_compat(self).await
     }
 

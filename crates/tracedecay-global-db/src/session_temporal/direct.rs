@@ -7,12 +7,12 @@ use crate::application::session::lcm::contracts::{LcmDescribeTarget, LcmExpandTa
 use super::sql::TemporalSqlRead;
 
 #[derive(Clone, Debug)]
-pub(crate) struct ResolvedDirectAnchor {
-    pub(crate) anchor_id: RetrievalAnchorId,
-    pub(crate) owner_session_id: SessionId,
+pub struct ResolvedDirectAnchor {
+    pub anchor_id: RetrievalAnchorId,
+    pub owner_session_id: SessionId,
 }
 
-pub(crate) async fn resolve_describe_target(
+pub async fn resolve_describe_target(
     read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,
@@ -33,7 +33,7 @@ pub(crate) async fn resolve_describe_target(
     }
 }
 
-pub(crate) async fn resolve_expand_target(
+pub async fn resolve_expand_target(
     read: &TemporalSqlRead<'_>,
     provider: &str,
     session_id: &SessionId,

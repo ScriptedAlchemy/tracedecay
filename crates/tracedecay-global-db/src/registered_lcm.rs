@@ -176,7 +176,7 @@ impl RegisteredGlobalDb {
             .ok_or_else(|| LcmError::Db("registered session database has no parent".to_string()))
     }
 
-    pub(crate) async fn lcm_status(
+    pub async fn lcm_status(
         &self,
         provider: &str,
         session_id: Option<&str>,
@@ -185,7 +185,7 @@ impl RegisteredGlobalDb {
             .await
     }
 
-    pub(crate) async fn lcm_describe(
+    pub async fn lcm_describe(
         &self,
         request: LcmDescribeRequest,
     ) -> Result<LcmDescribeResponse, LcmError> {
@@ -193,7 +193,7 @@ impl RegisteredGlobalDb {
         query::describe(&snapshot, request).await
     }
 
-    pub(crate) async fn lcm_expand(
+    pub async fn lcm_expand(
         &self,
         request: LcmExpandRequest,
     ) -> Result<LcmExpandResponse, LcmError> {
@@ -201,7 +201,7 @@ impl RegisteredGlobalDb {
         query::expand(&snapshot, self.lcm_storage_root()?, request).await
     }
 
-    pub(crate) async fn lcm_expand_summary_node(
+    pub async fn lcm_expand_summary_node(
         &self,
         provider: &str,
         session_id: &str,
@@ -211,7 +211,7 @@ impl RegisteredGlobalDb {
         dag::expand_summary_node(&snapshot, provider, session_id, node_id).await
     }
 
-    pub(crate) async fn lcm_expand_query(
+    pub async fn lcm_expand_query(
         &self,
         request: LcmExpandQueryRequest,
     ) -> Result<LcmExpandQueryResponse, LcmError> {
@@ -219,7 +219,7 @@ impl RegisteredGlobalDb {
         query::expand_query(&snapshot, request).await
     }
 
-    pub(crate) async fn lcm_grep(
+    pub async fn lcm_grep(
         &self,
         request: LcmGrepRequest,
     ) -> Result<LcmGrepOutcome, LcmError> {
@@ -227,7 +227,7 @@ impl RegisteredGlobalDb {
         query::grep(&snapshot, request, LcmGrepFilters::default()).await
     }
 
-    pub(crate) async fn lcm_load_session(
+    pub async fn lcm_load_session(
         &self,
         request: LcmLoadSessionRequest,
     ) -> Result<LcmLoadSessionPage, LcmError> {
@@ -235,7 +235,7 @@ impl RegisteredGlobalDb {
         query::load_session(&snapshot, request).await
     }
 
-    pub(crate) async fn lcm_recent_sessions(
+    pub async fn lcm_recent_sessions(
         &self,
         provider: Option<&str>,
         limit: usize,
@@ -244,7 +244,7 @@ impl RegisteredGlobalDb {
         query::recent_sessions(&snapshot, provider, limit).await
     }
 
-    pub(crate) async fn lcm_session_providers(
+    pub async fn lcm_session_providers(
         &self,
         session_id: &str,
     ) -> Result<Vec<String>, LcmError> {
@@ -252,7 +252,7 @@ impl RegisteredGlobalDb {
         query::session_providers(&snapshot, session_id).await
     }
 
-    pub(crate) async fn lcm_session_replay_slice(
+    pub async fn lcm_session_replay_slice(
         &self,
         request: &LcmSessionReplayRequest,
     ) -> Result<LcmSessionReplaySlice, LcmError> {
@@ -260,7 +260,7 @@ impl RegisteredGlobalDb {
         query::session_replay_slice(&snapshot, request).await
     }
 
-    pub(crate) async fn lcm_load_raw_message(
+    pub async fn lcm_load_raw_message(
         &self,
         provider: &str,
         message_id: &str,
@@ -269,7 +269,7 @@ impl RegisteredGlobalDb {
         schema::load_raw_message(&snapshot, provider, message_id).await
     }
 
-    pub(crate) async fn lcm_status_with_options(
+    pub async fn lcm_status_with_options(
         &self,
         provider: &str,
         session_id: Option<&str>,
@@ -290,7 +290,7 @@ impl RegisteredGlobalDb {
 
     /// Returns Codex compaction summary nodes that still need an auxiliary
     /// Codex app-server summary.
-    pub(crate) async fn pending_codex_compaction_summary_requests(
+    pub async fn pending_codex_compaction_summary_requests(
         &self,
         session_id: Option<&str>,
         limit: usize,
@@ -365,7 +365,7 @@ impl RegisteredGlobalDb {
 
     /// Publishes a deterministic Codex auxiliary summary as an immutable
     /// successor of the placeholder while preserving exact source lineage.
-    pub(crate) async fn publish_codex_compaction_summary_successor(
+    pub async fn publish_codex_compaction_summary_successor(
         &self,
         node_id: &str,
         summary_text: &str,
@@ -437,7 +437,7 @@ impl RegisteredGlobalDb {
         Ok(receipt.summary)
     }
 
-    pub(crate) async fn lcm_doctor(
+    pub async fn lcm_doctor(
         &self,
         provider: &str,
         session_id: Option<&str>,
@@ -506,7 +506,7 @@ impl RegisteredGlobalDb {
         Ok(result)
     }
 
-    pub(crate) async fn lcm_session_boundary(
+    pub async fn lcm_session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,
     ) -> Result<LcmSessionBoundaryResponse, LcmError> {
@@ -519,7 +519,7 @@ impl RegisteredGlobalDb {
         Ok(response)
     }
 
-    pub(crate) async fn lcm_preflight(
+    pub async fn lcm_preflight(
         &self,
         request: LcmPreflightRequest,
     ) -> Result<LcmPreflightResponse, LcmError> {
@@ -538,7 +538,7 @@ impl RegisteredGlobalDb {
         Ok(response)
     }
 
-    pub(crate) async fn lcm_compress(
+    pub async fn lcm_compress(
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
@@ -564,7 +564,7 @@ impl RegisteredGlobalDb {
         Ok(response)
     }
 
-    pub(crate) async fn lcm_payload_health_detail(
+    pub async fn lcm_payload_health_detail(
         &self,
         storage_root: &Path,
         provider: &str,
@@ -586,7 +586,7 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub(crate) async fn lcm_preview_payload_gc(
+    pub async fn lcm_preview_payload_gc(
         &self,
         storage_root: &Path,
         provider: &str,
@@ -598,7 +598,7 @@ impl RegisteredGlobalDb {
         gc::run_payload_gc(&snapshot, storage_root, provider, session_id, cfg, now).await
     }
 
-    pub(crate) async fn lcm_run_payload_gc_apply(
+    pub async fn lcm_run_payload_gc_apply(
         &self,
         storage_root: &Path,
         provider: &str,
@@ -642,7 +642,7 @@ impl RegisteredGlobalDb {
         Ok(report)
     }
 
-    pub(crate) async fn lcm_ingest_raw_message(
+    pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,
         message: &SessionMessageRecord,

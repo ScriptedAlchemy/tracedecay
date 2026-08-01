@@ -19,11 +19,11 @@ pub(super) use invariants::{
     validate_session_temporal_receipt_authority_page_with_limit,
     validate_session_temporal_repair_authority_audit,
 };
-pub(crate) use invariants::{
+pub use invariants::{
     ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
     ensure_authority_invariants, require_foreign_key_audit,
 };
-pub(crate) use validation::validate_registry_schema_contract;
+pub use validation::validate_registry_schema_contract;
 pub(super) use validation::{
     validate_authority_schema_contract, validate_observation_migration_source,
 };

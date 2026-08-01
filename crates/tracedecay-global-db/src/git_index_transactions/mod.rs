@@ -8,9 +8,9 @@ mod read;
 mod schema;
 mod store;
 
-pub(crate) use read::GitIndexReadExecutor;
-pub(crate) use schema::ensure_git_index_transaction_schema;
-pub(crate) use store::GlobalDbGitIndexTransactionStore;
+pub use read::GitIndexReadExecutor;
+pub use schema::ensure_git_index_transaction_schema;
+pub use store::GlobalDbGitIndexTransactionStore;
 
 #[cfg(test)]
 mod tests;

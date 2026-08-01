@@ -6,7 +6,7 @@ use super::super::{global_db_operation_error, global_db_operation_message};
 
 const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrement";
 
-pub(crate) const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
+pub const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
 
 pub(super) const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str =
     "projection.legacy-observation-import.v1";
@@ -105,7 +105,7 @@ async fn migrate_observation_schema(
 
     // This full-table rewrite is exactly the operation that interrupted a
     // real dogfood upgrade on a 15GB `sessions.db` and, before the
-    // `crate::migrate::durability` model existed, failed the whole strict
+    // `tracedecay_migrate::durability` model existed, failed the whole strict
     // post-update because of it (see `crate::doctor::heal`'s module doc).
     // `observations` must stay classified `Recoverable` -- re-derivable by
     // re-running sanitization/projection over recoverable transcript
@@ -114,8 +114,8 @@ async fn migrate_observation_schema(
     // documents.
     debug_assert!(
         matches!(
-            crate::migrate::durability::session_authority_table_class("observations"),
-            crate::migrate::durability::StoreDurabilityClass::Recoverable
+            tracedecay_migrate::durability::session_authority_table_class("observations"),
+            tracedecay_migrate::durability::StoreDurabilityClass::Recoverable
         ),
         "the observations full-table rewrite must only ever run against a table \
          proven Recoverable by the upgrade durability model"
@@ -234,7 +234,7 @@ async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> crate::e
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-pub(crate) async fn ensure_observation_schema(
+pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
 ) -> crate::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;

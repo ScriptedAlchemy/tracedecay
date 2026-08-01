@@ -637,7 +637,7 @@ const CHECKS: &[HealthCheck] = &[
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionTemporalHealthStatus {
+pub enum SessionTemporalHealthStatus {
     Complete,
     Partial,
     Unavailable,
@@ -646,7 +646,7 @@ pub(crate) enum SessionTemporalHealthStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionTemporalHealthFindingKind {
+pub enum SessionTemporalHealthFindingKind {
     TriggerAuditDrift,
     OccurrenceFtsCorruption,
     SummaryFtsCorruption,
@@ -668,23 +668,23 @@ pub(crate) enum SessionTemporalHealthFindingKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SessionTemporalHealthFinding {
+pub struct SessionTemporalHealthFinding {
     kind: SessionTemporalHealthFindingKind,
     count: u64,
 }
 
 impl SessionTemporalHealthFinding {
-    pub(crate) const fn kind(&self) -> SessionTemporalHealthFindingKind {
+    pub const fn kind(&self) -> SessionTemporalHealthFindingKind {
         self.kind
     }
 
-    pub(crate) const fn count(&self) -> u64 {
+    pub const fn count(&self) -> u64 {
         self.count
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct SessionTemporalHealthReport {
+pub struct SessionTemporalHealthReport {
     status: SessionTemporalHealthStatus,
     findings: Vec<SessionTemporalHealthFinding>,
     /// Fixed machine reason for path-API unavailability (for example
@@ -695,25 +695,25 @@ pub(crate) struct SessionTemporalHealthReport {
 }
 
 impl SessionTemporalHealthReport {
-    pub(crate) const fn status(&self) -> SessionTemporalHealthStatus {
+    pub const fn status(&self) -> SessionTemporalHealthStatus {
         self.status
     }
 
-    pub(crate) fn findings(&self) -> &[SessionTemporalHealthFinding] {
+    pub fn findings(&self) -> &[SessionTemporalHealthFinding] {
         &self.findings
     }
 
-    pub(crate) fn reason(&self) -> Option<&str> {
+    pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
 
     #[cfg(test)]
-    pub(crate) const fn is_fts_virtual_table_error_code_for_test(code: i32) -> bool {
+    pub const fn is_fts_virtual_table_error_code_for_test(code: i32) -> bool {
         code == SQLITE_CORRUPT_VTAB
     }
 
     #[cfg(test)]
-    pub(crate) fn is_allowed_fts_quick_check_for_test(
+    pub fn is_allowed_fts_quick_check_for_test(
         message: &str,
         repair_occurrences: bool,
         repair_summaries: bool,
@@ -742,7 +742,7 @@ struct HealthCheck {
 /// `uncheckpointed_wal` instead of opening `mode=ro` (which creates `-shm`)
 /// or copying the family. Empty / non-SQLite placeholders return
 /// `session_store_uninitialized`.
-pub(crate) async fn session_temporal_doctor_health_at(
+pub async fn session_temporal_doctor_health_at(
     db_path: &Path,
 ) -> SessionTemporalHealthReport {
     if !db_path.is_file() {
@@ -783,7 +783,7 @@ impl RegisteredGlobalDb {
     /// retained registered reader pool. Identical requests coalesce behind one
     /// per-store lane and reuse a very short-lived result only while the exact
     /// database/WAL fingerprint remains unchanged.
-    pub(crate) async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
+    pub async fn session_temporal_doctor_health(&self) -> SessionTemporalHealthReport {
         let database_path = self.db_path();
         if !permits_synchronous_session_temporal_health(database_path) {
             return unavailable_report_with_reason(
@@ -825,7 +825,7 @@ impl RegisteredGlobalDb {
     /// path: it refuses ambiguous database, schema, trigger, or authority
     /// failures and verifies both source preservation and FTS integrity before
     /// committing the single writer-lane transaction.
-    pub(crate) async fn repair_session_temporal_fts(
+    pub async fn repair_session_temporal_fts(
         &self,
         apply: bool,
     ) -> crate::db::engine::Result<(usize, usize)> {

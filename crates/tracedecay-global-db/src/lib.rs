@@ -11,9 +11,8 @@ pub use tracedecay_store::ParseOffset;
 
 use crate::db::engine::{Value as EngineValue, WalCheckpointExecutor};
 use crate::errors::TraceDecayError;
-use crate::sessions::{
-    SessionMessageRecord, SessionMessageSearchResult, SessionRecord, lcm::LcmSummaryRequest,
-};
+use crate::sessions::{SessionMessageSearchResult, lcm::LcmSummaryRequest};
+use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 pub mod configuration;
 mod git_index_transactions;

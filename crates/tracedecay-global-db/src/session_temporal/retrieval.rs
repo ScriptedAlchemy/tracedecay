@@ -30,11 +30,11 @@ use cursors::*;
 use records::*;
 use rows::*;
 
-pub(crate) const CANDIDATE_OPERATION: &str = "read temporal candidates";
-pub(crate) const RECORD_OPERATION: &str = "read temporal records";
-pub(crate) const SNAPSHOT_OPERATION: &str = "validate temporal read snapshot";
-pub(crate) const MIN_CURSOR_CAPACITY: usize = 96;
-pub(crate) const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
+pub const CANDIDATE_OPERATION: &str = "read temporal candidates";
+pub const RECORD_OPERATION: &str = "read temporal records";
+pub const SNAPSHOT_OPERATION: &str = "validate temporal read snapshot";
+pub const MIN_CURSOR_CAPACITY: usize = 96;
+pub const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
 
 fn observation_matches_filter(
@@ -125,7 +125,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
-    pub(crate) const fn new_registered(read: &'a engine::ReadSnapshot) -> Self {
+    pub const fn new_registered(read: &'a engine::ReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
         }

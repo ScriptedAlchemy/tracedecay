@@ -28,7 +28,7 @@ use rows::{
 };
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
-pub(crate) use triggers::{
+pub use triggers::{
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     suspend_session_invariants_for_schema_upgrade,
 };
@@ -63,15 +63,15 @@ const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
     "session temporal generation state is invalid",
     "session temporal authority ownership is invalid",
 ];
-pub(crate) const SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS: i64 = 256;
+pub const SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS: i64 = 256;
 
-pub(crate) async fn authority_invariant_triggers_intact(
+pub async fn authority_invariant_triggers_intact(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<bool> {
     trigger_contracts_intact(conn).await
 }
 
-pub(crate) async fn require_foreign_key_audit(conn: &impl Executor) -> crate::errors::Result<()> {
+pub async fn require_foreign_key_audit(conn: &impl Executor) -> crate::errors::Result<()> {
     conn.execute(
         "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
          VALUES (?1, '')
@@ -117,7 +117,7 @@ async fn projection_checkpoint(conn: &impl QueryExecutor) -> crate::errors::Resu
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(crate) async fn ensure_authority_invariant_schema(
+pub async fn ensure_authority_invariant_schema(
     conn: &impl Executor,
 ) -> crate::errors::Result<bool> {
     ensure_audit_checkpoint_schema(conn).await?;
@@ -130,13 +130,13 @@ pub(crate) async fn ensure_authority_invariant_schema(
     Ok(trigger_contracts_were_intact)
 }
 
-pub(crate) async fn ensure_authority_audit_checkpoint_schema(
+pub async fn ensure_authority_audit_checkpoint_schema(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     ensure_audit_checkpoint_schema(conn).await
 }
 
-pub(crate) async fn ensure_authority_invariants(
+pub async fn ensure_authority_invariants(
     conn: &impl Executor,
     force_exhaustive: bool,
     is_fresh: bool,
@@ -504,7 +504,7 @@ async fn foreign_key_violation_exists_read_only(
     Ok(false)
 }
 
-pub(crate) async fn validate_authority_rows_exhaustive(
+pub async fn validate_authority_rows_exhaustive(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     validate_receipt_authority_rows(conn, 0).await?;
@@ -521,7 +521,7 @@ pub(crate) async fn validate_authority_rows_exhaustive(
     validate_invariant_rows(conn).await
 }
 
-pub(crate) async fn validate_session_temporal_repair_authority_audit(
+pub async fn validate_session_temporal_repair_authority_audit(
     conn: &impl QueryExecutor,
     audit_index: usize,
 ) -> crate::errors::Result<()> {
@@ -544,7 +544,7 @@ pub(crate) async fn validate_session_temporal_repair_authority_audit(
 }
 
 #[cfg(test)]
-pub(crate) async fn validate_session_temporal_effect_authority_page(
+pub async fn validate_session_temporal_effect_authority_page(
     conn: &impl QueryExecutor,
     after_rowid: i64,
 ) -> crate::errors::Result<(i64, bool)> {
@@ -556,7 +556,7 @@ pub(crate) async fn validate_session_temporal_effect_authority_page(
     .await
 }
 
-pub(crate) async fn validate_session_temporal_effect_authority_page_with_limit(
+pub async fn validate_session_temporal_effect_authority_page_with_limit(
     conn: &impl QueryExecutor,
     after_rowid: i64,
     page_rows: i64,
@@ -602,7 +602,7 @@ pub(crate) async fn validate_session_temporal_effect_authority_page_with_limit(
     Ok((last_rowid, count < page_rows))
 }
 
-pub(crate) async fn validate_session_temporal_receipt_authority_page_with_limit(
+pub async fn validate_session_temporal_receipt_authority_page_with_limit(
     conn: &impl QueryExecutor,
     after_rowid: i64,
     page_rows: i64,

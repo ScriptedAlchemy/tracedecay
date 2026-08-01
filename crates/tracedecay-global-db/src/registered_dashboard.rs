@@ -42,20 +42,20 @@ fn profile_store_path_is_contained(
 }
 
 impl RegisteredGlobalDb {
-    pub(crate) fn canonical_project_key(project_path: &Path) -> String {
+    pub fn canonical_project_key(project_path: &Path) -> String {
         super::project_registry::canonical_project_path(project_path)
             .to_string_lossy()
             .into_owned()
     }
 
-    pub(crate) fn project_path_alias_key(project_path: &Path) -> String {
+    pub fn project_path_alias_key(project_path: &Path) -> String {
         super::project_registry::project_path_alias_key(project_path)
     }
 
     /// Reads the dashboard project registry through the retained registered
     /// runtime. Query failures stay typed so callers never mistake an
     /// unavailable registry for an empty one.
-    pub(crate) async fn list_code_projects(&self, limit: usize) -> Result<Vec<CodeProjectRecord>> {
+    pub async fn list_code_projects(&self, limit: usize) -> Result<Vec<CodeProjectRecord>> {
         let snapshot = self.dashboard_snapshot("list code projects").await?;
         let mut rows = snapshot
             .query(
@@ -82,7 +82,7 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
-    pub(crate) async fn list_code_projects_after(
+    pub async fn list_code_projects_after(
         &self,
         after_project_id: Option<&str>,
         limit: usize,
@@ -131,7 +131,7 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
-    pub(crate) async fn code_project_exists(&self, project_id: &str) -> Result<bool> {
+    pub async fn code_project_exists(&self, project_id: &str) -> Result<bool> {
         let snapshot = self
             .dashboard_snapshot("check code project registration")
             .await?;
@@ -148,7 +148,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| dashboard_error("read code project registration", error))
     }
 
-    pub(crate) async fn project_registry_context_by_id(
+    pub async fn project_registry_context_by_id(
         &self,
         project_id: &str,
     ) -> Result<Option<ProjectRegistryContext>> {
@@ -178,7 +178,7 @@ impl RegisteredGlobalDb {
         Ok(contexts.pop())
     }
 
-    pub(crate) async fn project_registry_contexts_for_projects(
+    pub async fn project_registry_contexts_for_projects(
         &self,
         projects: &[CodeProjectRecord],
     ) -> Result<Vec<ProjectRegistryContext>> {
@@ -188,7 +188,7 @@ impl RegisteredGlobalDb {
         contexts_for_projects(&snapshot, projects).await
     }
 
-    pub(crate) async fn try_list_store_instances_for_project(
+    pub async fn try_list_store_instances_for_project(
         &self,
         project_id: &str,
     ) -> Result<Vec<StoreInstanceRecord>> {
@@ -224,7 +224,7 @@ impl RegisteredGlobalDb {
     /// `live_root`. The database move is one transaction; the manifest is
     /// written before commit and restored if commit fails, so retries can
     /// safely resume either side of an interrupted filesystem/database pair.
-    pub(crate) async fn relink_orphan_store_instance(
+    pub async fn relink_orphan_store_instance(
         &self,
         source_project_id: &str,
         store_id: &str,

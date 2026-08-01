@@ -3,7 +3,7 @@ use std::cmp;
 use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
 use crate::db::engine::Value as SqlValue;
-use crate::timeutil::parse_rfc3339_timestamp;
+use tracedecay_capture::parse_rfc3339_timestamp;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
 use tracedecay_temporal_query::ports::{
     CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,

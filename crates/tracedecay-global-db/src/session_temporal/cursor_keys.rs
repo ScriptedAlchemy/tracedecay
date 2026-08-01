@@ -24,7 +24,7 @@ const CURSOR_KEY_MATERIAL_BYTES: usize = 32;
 const CURSOR_KEY_RETENTION_MICROS: i64 = CURSOR_LIFETIME_MICROS + CURSOR_CLOCK_SKEW_MICROS;
 
 #[derive(Debug, Error)]
-pub(crate) enum GlobalDbCursorKeyProviderError {
+pub enum GlobalDbCursorKeyProviderError {
     #[error("frozen snapshot does not select a cursor authentication key")]
     SnapshotKeyUnavailable,
     #[error("cursor authentication key is unavailable for frozen key {expected:?}")]
@@ -52,7 +52,7 @@ pub(crate) enum GlobalDbCursorKeyProviderError {
     },
 }
 
-pub(crate) struct GlobalDbCursorKeyProvider {
+pub struct GlobalDbCursorKeyProvider {
     active_key: SignedCursorKeyRefV1,
     authenticators: Vec<(SignedCursorKeyRefV1, InMemoryCursorAuthenticator)>,
 }
@@ -193,14 +193,14 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl GlobalDbCursorKeyProvider {
-    pub(crate) async fn from_registered_key_ref(
+    pub async fn from_registered_key_ref(
         read: &ReadSnapshot,
         expected: SignedCursorKeyRefV1,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
         Self::from_registered_key_ref_at(read, expected, now_micros().0).await
     }
 
-    pub(crate) async fn from_registered_snapshot(
+    pub async fn from_registered_snapshot(
         read: &ReadSnapshot,
         snapshot: &TemporalExecutionSnapshot,
     ) -> Result<Self, GlobalDbCursorKeyProviderError> {
@@ -266,7 +266,7 @@ impl GlobalDbCursorKeyProvider {
             authenticators,
         })
     }
-    pub(crate) fn retrieval_keyring(
+    pub fn retrieval_keyring(
         &self,
         privacy_domain: PrivacyDomainId,
     ) -> Result<RetrievalCursorKeyringV1, GlobalDbCursorKeyProviderError> {
