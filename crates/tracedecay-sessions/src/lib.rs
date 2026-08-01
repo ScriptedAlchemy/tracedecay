@@ -9,6 +9,7 @@ mod ingest;
 pub mod lcm;
 mod orchestration;
 mod provider;
+pub mod runtime;
 mod workflow;
 
 pub use authorization::{
