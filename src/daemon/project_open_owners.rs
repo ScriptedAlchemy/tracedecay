@@ -91,8 +91,8 @@ use crate::application::feedback::{
 use crate::application::lsp_runtime::DaemonLspSessionFactory;
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
-    admitted_root_uri_for_project, locator_digest_for_project,
-    open_pr12_production_primitive_runtime,
+    Pr12ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project,
+    locator_digest_for_project, open_pr12_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -1094,23 +1094,20 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
         })?;
-    let primitive_runtime = open_pr12_production_primitive_runtime(
-        database.clone(),
-        graph.clone(),
-        Arc::clone(&session_db),
-        project_root.to_path_buf(),
-        Arc::new(invocation.code_index_schedulers.clone()),
-        Arc::new(invocation.code_index_schedulers.clone()),
-        scope.clone(),
-        access.clone(),
-        admitted_root_uri.clone(),
-        daemon_operation_event_authority(),
-        configuration_digest.clone(),
-    )
-    .await
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open primitive runtime open failed: {error}"),
-    })?;
+    let primitive_runtime =
+        open_pr12_production_primitive_runtime(Pr12ProductionPrimitiveOpenRequestV1::new(
+            graph.clone(),
+            Arc::clone(&session_db),
+            Arc::new(invocation.code_index_schedulers.clone()),
+            Arc::new(invocation.code_index_schedulers.clone()),
+            access.clone(),
+            admitted_root_uri.clone(),
+            daemon_operation_event_authority(),
+        ))
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open primitive runtime open failed: {error}"),
+        })?;
     match invocation
         .primitive_runtime_registrar()
         .register(project_root.to_path_buf(), primitive_runtime)
