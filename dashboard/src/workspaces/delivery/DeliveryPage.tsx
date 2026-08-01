@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';

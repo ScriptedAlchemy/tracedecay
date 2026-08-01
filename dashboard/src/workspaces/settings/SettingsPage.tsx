@@ -13,7 +13,7 @@ import {
   useScope,
   type ScopeWritability,
 } from '../../data/scope/store.ts';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
   SettingsEditorPanel,
