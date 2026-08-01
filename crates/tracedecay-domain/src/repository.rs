@@ -476,17 +476,7 @@ fn derive_capture_id(
     RepositoryCaptureId::new(format!("{CAPTURE_ID_NAMESPACE}.{encoded}"))
 }
 
-fn validate_git_object_id(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(())
-    } else {
-        Err(DomainError::NonCanonical { field })
-    }
-}
+use crate::canonical_text::validate_git_object_id;
 
 #[cfg(test)]
 mod tests {
