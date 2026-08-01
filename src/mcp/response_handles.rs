@@ -17,6 +17,13 @@ use sha2::{Digest, Sha256};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::resolve_response_handle_root;
 
+// The transport-neutral handle record/lookup types and the handle validator
+// live in `tracedecay-usecases`. The root module keeps the MCP-facing extras:
+// telemetry-instrumented store/retrieve, cleanup, stats, and truncation
+// observation.
+pub use tracedecay_usecases::response_handles::{ResponseHandleLookup, ResponseHandleRecord};
+pub(crate) use tracedecay_usecases::response_handles::is_valid_response_handle;
+
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";
 
@@ -214,28 +221,6 @@ pub fn response_handle_stats_json(project_root: Option<&Path>) -> Value {
         );
     }
     stats
-}
-
-#[derive(Debug, Clone)]
-pub struct ResponseHandleRecord {
-    pub handle: String,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub content: String,
-    pub response_handle_root: PathBuf,
-}
-
-impl ResponseHandleRecord {
-    pub fn original_chars(&self) -> usize {
-        self.content.len()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ResponseHandleLookup {
-    Found(ResponseHandleRecord),
-    Missing,
-    Expired { created_at: i64, expires_at: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,13 +498,6 @@ fn validate_handle(handle: &str) -> Result<()> {
             "invalid response handle: expected `{HANDLE_PREFIX}` followed by {HANDLE_HEX_CHARS} hex characters copied from a truncated MCP response envelope"
         ),
     })
-}
-
-pub(crate) fn is_valid_response_handle(handle: &str) -> bool {
-    let Some(hex) = handle.strip_prefix(HANDLE_PREFIX) else {
-        return false;
-    };
-    hex.len() == HANDLE_HEX_CHARS && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 #[track_caller]
