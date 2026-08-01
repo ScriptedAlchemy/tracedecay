@@ -878,7 +878,7 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let redirect = temp.path().join("redirect");
         let output = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
+            .args(["/D", "/C", "mklink", "/J"])
             .arg(&redirect)
             .arg(&target)
             .output()
