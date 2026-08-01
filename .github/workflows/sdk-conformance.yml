@@ -58,10 +58,6 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
       - run: cargo test --manifest-path sdks/codegen/Cargo.toml
       - run: scripts/check-sdk-codegen.sh
       - run: cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
@@ -71,33 +67,6 @@ jobs:
         working-directory: sdks/typescript
       - run: npm test
         working-directory: sdks/typescript
-      - run: npx --yes pyright@latest
-        working-directory: sdks/python
-      - run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
-        working-directory: sdks/python
-      - run: python -c "from pathlib import Path; wheels=list(Path('/tmp/tracedecay-sdk-wheel').glob('tracedecay_sdk-*.whl')); assert len(wheels) == 1 and wheels[0].stat().st_size > 0"
-      - run: python -m pip install /tmp/tracedecay-sdk-wheel/tracedecay_sdk-*.whl
-      - run: python -m unittest discover -s tests -p "test_client.py"
-        working-directory: sdks/python
-
-  python-package:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-      - run: python -m pip wheel --no-deps --wheel-dir /tmp/tracedecay-sdk-wheel .
-        working-directory: sdks/python
-      - run: python -c "from pathlib import Path; wheels=list(Path('/tmp/tracedecay-sdk-wheel').glob('tracedecay_sdk-*.whl')); assert len(wheels) == 1 and wheels[0].stat().st_size > 0"
-      - run: python -m pip install /tmp/tracedecay-sdk-wheel/tracedecay_sdk-*.whl
-      - run: python -m unittest discover -s tests -p "test_client.py"
-        working-directory: sdks/python
 
   production-router:
     runs-on: ubuntu-latest
@@ -111,9 +80,6 @@ jobs:
           cache-dependency-path: |
             dashboard/package-lock.json
             sdks/typescript/package-lock.json
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - run: npm ci
         working-directory: dashboard
       - run: npm run build
@@ -132,5 +98,3 @@ jobs:
         working-directory: sdks/typescript
       - run: npm run test:installed
         working-directory: sdks/typescript
-      - run: python -m unittest tests/test_installed_package.py
-        working-directory: sdks/python

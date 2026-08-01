@@ -386,7 +386,7 @@ acceptance gate per declaration.
 
 ## Not in PR17
 
-- PR18 publishes and freezes Rust, TypeScript, and Python SDK names/schemas for
+- PR18 publishes and freezes Rust and TypeScript SDK names/schemas for
   these already callable operations and preserves their lifecycle semantics.
 - PR20 optimizes measured graph, evidence, proposal, projection, and runtime
   latency after this production loop emits real evidence.
