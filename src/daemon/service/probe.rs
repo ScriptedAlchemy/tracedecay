@@ -116,7 +116,7 @@ fn query_daemon_identity(
     // on the daemon side; a sub-second read deadline misclassifies a busy,
     // healthy daemon as unresponsive.
     let connection = super::super::client_connection(socket_path)?;
-    let mut stream = StdUnixStream::connect(socket_path)?;
+    let stream = StdUnixStream::connect(socket_path)?;
     stream.set_read_timeout(Some(probe_timeout))?;
     stream.set_write_timeout(Some(probe_timeout))?;
     query_daemon_identity_stream(stream, connection.auth_token.as_deref(), probe_timeout)
