@@ -181,9 +181,10 @@ async fn resolve_target_layout(
 ) -> tracedecay_runtime_core::errors::Result<ResolvedTargetLayout> {
     if target_project.user_scope {
         return Ok(ResolvedTargetLayout {
-            sessions_db_path: tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
-                tracedecay_profile_root,
-            ),
+            sessions_db_path:
+                tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                    tracedecay_profile_root,
+                ),
             graph_db_path: None,
             project_id: "user".to_string(),
         });
@@ -214,19 +215,10 @@ async fn resolve_target_layout(
         )?);
     }
 
-    let production_profile = tracedecay_runtime_core::storage::default_profile_root()
-        .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
-    let layout = if production_profile {
-        tracedecay_runtime_core::tracedecay::TraceDecay::resolve_store_layout_for_identity(
-            &target_project.root,
-        )
-        .await
-    } else {
-        tracedecay_runtime_core::storage::resolve_layout(
-            &target_project.root,
-            tracedecay_profile_root,
-        )
-    }?;
+    let layout = tracedecay_runtime_core::storage::resolve_layout(
+        &target_project.root,
+        tracedecay_profile_root,
+    )?;
     project_layout(layout)
 }
 
@@ -480,7 +472,7 @@ async fn migrate_candidate_snapshot(
                         .to_string(),
                 ));
             }
-            merge_memory_snapshot(source_memory, memory_db.as_ref())
+            merge_memory_snapshot(source_memory, &memory_db)
                 .await
                 .map_err(CandidateError::Failed)?
         }
@@ -515,7 +507,7 @@ async fn migrate_candidate_snapshot(
     })
 }
 
-pub async fn migrate_legacy_state_store(
+pub(super) async fn migrate_legacy_state_store(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     profile_dir: &Path,
@@ -584,7 +576,7 @@ pub async fn migrate_legacy_state_store(
     })
 }
 
-pub async fn migrate_candidate(
+pub(super) async fn migrate_candidate(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     candidate: &LegacyStoreCandidate,
