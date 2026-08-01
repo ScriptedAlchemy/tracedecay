@@ -5,11 +5,15 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+#[cfg(unix)]
+use tokio::time::Duration;
+use tokio::time::timeout;
 
 use crate::errors::{Result, TraceDecayError};
 

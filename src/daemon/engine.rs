@@ -10,6 +10,7 @@
 
 use super::*;
 
+#[cfg(unix)]
 #[derive(Clone, Default)]
 pub(super) struct DaemonEngine {
     pub(super) lifecycle: DaemonLifecycle,

@@ -9,6 +9,8 @@
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
+#[cfg(any(not(unix), test))]
+use crate::daemon_contract::DaemonInvocationProblem;
 
 /// Multi-root payloads are routed by `invoke_for_project`, which reaches the
 /// executor without passing through `DaemonInvocationService::invoke`'s own
