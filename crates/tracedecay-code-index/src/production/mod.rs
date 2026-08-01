@@ -8,7 +8,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use rayon::prelude::*;
@@ -451,17 +451,31 @@ pub struct CodeIndexPublishedGenerationV1 {
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
     projection: ProjectionPublicationHandoffV1,
-    /// Set only after a complete fail-closed integrity sweep. All generation
-    /// evidence is private and immutable after construction, so successful
-    /// validation remains authoritative for every clone and serving read.
-    integrity_validated: bool,
+    /// Amortized integrity gate. A generation is immutable once constructed, so
+    /// the canonical manifest/chunk/graph/capability checks are a pure function
+    /// of the fields above and only need to run once per in-memory generation.
+    ///
+    /// Fail-closed by construction: only a *successful* validation is recorded,
+    /// every generation starts unvalidated, and a failing generation re-runs the
+    /// full check on every call. Clones inherit the mark because a clone is
+    /// deep-equal to an already-verified value.
+    validated: OnceLock<()>,
+    /// Amortized parser-backed exact admission. `admit_all` re-canonicalizes and
+    /// re-hashes every chunk, which is pure waste on the serving path once the
+    /// immutable chunk set has been admitted. Only success is cached.
+    admitted: OnceLock<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
+    /// Amortized test-attribution join. Query admission rebuilds this authority
+    /// per call even when the generation is unchanged; the traversal and its
+    /// evidence digest are a pure function of the immutable generation. Only
+    /// success is cached.
+    attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
 }
 
 /// Immutable test-attribution reader derived from one sealed production code
 /// generation. The reader owns no second graph or test store: it projects
 /// conservative candidates from the generation's canonical relation graph and
 /// retains the exact generation/test watermark produced at construction.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PublishedGenerationTestAttributionAuthorityV1 {
     generation_id: CodeGenerationId,
     read: GenerationProviderReadV1<GenerationTestJoinV1>,
@@ -526,6 +540,17 @@ impl CodeIndexPublishedGenerationV1 {
         &self.projection
     }
 
+    /// Whether this in-memory generation has already passed its canonical
+    /// integrity validation.
+    ///
+    /// A generation only reports `true` after a full successful check, so this
+    /// distinguishes an amortized O(1) admission from a first verification. It
+    /// never short-circuits the gate: an unvalidated generation still refuses
+    /// to seal or serve until the complete check passes.
+    pub fn is_validated(&self) -> bool {
+        self.validated.get().is_some()
+    }
+
     /// Build the production generation-bound affected-test authority.
     ///
     /// Test candidates are deliberately conservative: each callable symbol in
@@ -533,6 +558,17 @@ impl CodeIndexPublishedGenerationV1 {
     /// reachable from it. Missing graph edges remain partial coverage rather
     /// than being upgraded into complete evidence.
     pub fn test_attribution_authority(
+        &self,
+    ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
+        if let Some(attribution) = self.attribution.get() {
+            return Ok(attribution.clone());
+        }
+        let authority = self.build_test_attribution_authority()?;
+        let _ = self.attribution.set(authority.clone());
+        Ok(authority)
+    }
+
+    fn build_test_attribution_authority(
         &self,
     ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
         let mut file_by_occurrence = BTreeMap::new();
@@ -727,6 +763,9 @@ impl CodeIndexPublishedGenerationV1 {
     pub fn admitted_chunks(
         &self,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
+        if let Some(admitted) = self.admitted.get() {
+            return Ok(admitted.clone());
+        }
         let mut chunks = Vec::new();
         for file in &self.files {
             chunks.extend(
@@ -735,6 +774,7 @@ impl CodeIndexPublishedGenerationV1 {
             );
         }
         chunks.sort_by(|left, right| left.chunk().id.cmp(&right.chunk().id));
+        let _ = self.admitted.set(chunks.clone());
         Ok(chunks)
     }
 
@@ -843,9 +883,13 @@ impl CodeIndexPublishedGenerationV1 {
             coverage: envelope.generation.coverage,
             capability: envelope.generation.capability,
             projection,
-            integrity_validated: false,
+            validated: OnceLock::new(),
+            admitted: OnceLock::new(),
+            attribution: OnceLock::new(),
         };
-        let generation = generation.validate_new()?;
+        // Bytes were just re-read from the sealed store, so this restore must
+        // repeat every canonical check rather than trust a memoized verdict.
+        generation.validate_fresh()?;
         Ok(generation)
     }
 
@@ -859,23 +903,33 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(probe.generation.format_revision == SEALED_GENERATION_FORMAT_REVISION_V1)
     }
 
+    /// Amortized integrity gate for an already-constructed generation.
+    ///
+    /// The first call runs every canonical check; later calls are O(1). This is
+    /// sound because a published generation is immutable: no field can change
+    /// after construction, so re-validating identical bytes cannot change the
+    /// answer. It is fail-closed because only success is memoized — a
+    /// generation that has never validated still runs the full check, and a
+    /// generation that fails keeps failing on every subsequent call.
     fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
-        if self.integrity_validated {
-            Ok(())
-        } else {
-            Err(CodeIndexProductionErrorV1::Contract(
-                "published generation has not passed integrity validation".to_owned(),
-            ))
+        if self.validated.get().is_some() {
+            return Ok(());
         }
+        self.validate_fresh()
     }
 
-    fn validate_new(mut self) -> Result<Self, CodeIndexProductionErrorV1> {
-        self.validate_fresh()?;
-        self.integrity_validated = true;
-        Ok(self)
+    /// Run every canonical check against the current in-memory state, ignoring
+    /// any memoized verdict, then record success.
+    ///
+    /// Use this wherever bytes were genuinely re-read (sealed-generation
+    /// restore) so the memoized fast path can never mask a real re-read.
+    pub(crate) fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        self.validate_uncached()?;
+        let _ = self.validated.set(());
+        Ok(())
     }
 
-    fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
+    fn validate_uncached(&self) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1271,9 +1325,11 @@ where
             coverage,
             capability,
             projection,
-            integrity_validated: false,
+            validated: OnceLock::new(),
+            admitted: OnceLock::new(),
+            attribution: OnceLock::new(),
         };
-        let candidate = candidate.validate_new()?;
+        candidate.validate()?;
 
         let expected = active
             .as_ref()
