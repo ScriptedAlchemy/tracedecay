@@ -226,7 +226,7 @@ Examples:
   tracedecay host-bundle recover --dry-run
   tracedecay host-bundle recover --agent opencode --yes
   tracedecay host-bundle recover --agent opencode --quarantine --yes
-  tracedecay host-bundle artifact-backup --agent opencode --component agent --yes
+  tracedecay host-bundle artifact-backup --agent opencode --component agent
   tracedecay host-bundle artifact-restore --agent opencode --component agent --backup-id <32-hex-id> --yes
 
 Quarantine moves the journal aside into the lifecycle control directory and
