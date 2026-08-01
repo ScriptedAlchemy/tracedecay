@@ -2207,11 +2207,9 @@ fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
 
 /// Serializes test and benchmark code that mutates process-wide storage env
 /// vars (`TRACEDECAY_DATA_DIR` and related HOME/profile pins).
-#[cfg(test)]
 static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquires [`USER_DATA_DIR_TEST_LOCK`], recovering even when poisoned.
-#[cfg(test)]
 pub(crate) fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
     USER_DATA_DIR_TEST_LOCK
         .lock()

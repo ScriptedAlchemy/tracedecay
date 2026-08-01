@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
 use tracedecay_sessions::runtime::transcript_backfill::{
     TranscriptFactsBackfillOutcome, advance_transcript_facts_backfill_with_limit_for_test,
