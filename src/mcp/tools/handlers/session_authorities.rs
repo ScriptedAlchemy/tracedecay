@@ -16,8 +16,8 @@ pub struct SessionAuthorities<'a> {
     pub(crate) profile_registered: Option<&'a crate::global_db::RegisteredGlobalDb>,
     project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
-    project_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-    profile_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(super) project_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(super) profile_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -78,7 +78,7 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
-    const fn refresh_services(self) -> session::SessionRefreshServices<'a> {
+    pub(super) const fn refresh_services(self) -> session::SessionRefreshServices<'a> {
         session::SessionRefreshServices::new(self.project_refresh, self.profile_refresh)
     }
 }
