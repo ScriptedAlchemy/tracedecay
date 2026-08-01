@@ -290,7 +290,11 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
-            LocalProfileStoreAuthorityV1::from_profile_identity(&identity),
+            LocalProfileStoreAuthorityV1::new(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+                identity.profile_root().to_path_buf(),
+            ),
         ));
         let registry_resolver: Arc<dyn super::registry::StoreRuntimeResolver> = resolver.clone();
         let registry =

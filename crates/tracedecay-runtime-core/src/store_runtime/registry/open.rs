@@ -19,7 +19,7 @@ use super::{
 
 static PROCESS_AUTHORITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) enum StoreRuntimeOpenBegin {
+pub enum StoreRuntimeOpenBegin {
     Ready(StoreRuntimeHandle),
     Started(StoreRuntimeOpenJoin),
     Joined(StoreRuntimeOpenJoin),
@@ -36,7 +36,7 @@ type BuiltShardRuntimePublication = (
 );
 
 impl StoreRuntimeOpenBegin {
-    pub(crate) async fn wait(self) -> StoreRuntimeOpenResult {
+    pub async fn wait(self) -> StoreRuntimeOpenResult {
         match self {
             Self::Ready(handle) => StoreRuntimeOpenResult::Published(handle),
             Self::Started(join) | Self::Joined(join) => join.wait().await,
@@ -56,7 +56,7 @@ impl fmt::Debug for StoreRuntimeOpenBegin {
     }
 }
 
-pub(crate) struct StoreRuntimeOpenJoin {
+pub struct StoreRuntimeOpenJoin {
     key: Box<StoreRuntimeKey>,
     updates: watch::Receiver<OpenState>,
 }
@@ -92,7 +92,7 @@ impl fmt::Debug for StoreRuntimeOpenJoin {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum StoreRuntimeOpenResult {
+pub enum StoreRuntimeOpenResult {
     Published(StoreRuntimeHandle),
     Failed(StoreRuntimeRegistryFailure),
 }
@@ -112,7 +112,7 @@ pub(super) struct OpeningRuntime {
 }
 
 impl StoreRuntimeRegistry {
-    pub(crate) fn begin_or_join_open(
+    pub fn begin_or_join_open(
         &self,
         request: &StoreRuntimeOpenRequest,
     ) -> StoreRuntimeOpenBegin {
@@ -225,7 +225,7 @@ impl StoreRuntimeRegistry {
         StoreRuntimeOpenBegin::Started(join)
     }
 
-    pub(crate) async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
+    pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
         self.begin_or_join_open(&request).wait().await
     }
 

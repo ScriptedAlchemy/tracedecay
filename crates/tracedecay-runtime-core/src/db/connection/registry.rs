@@ -4,9 +4,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::errors::TraceDecayError;
-// The daemon registry owns the physical runtime and sits above this
-// kernel; the facade retains it through the `StoreRuntimeSource` port.
-use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
+// The store-runtime registry moved into this kernel, so the facade retains the
+// concrete handle rather than an erased port.
+use crate::store_runtime::registry::StoreRuntimeHandle;
 
 pub(super) struct DatabaseInner {
     /// Reader-only channel exposed through the retained database facade.

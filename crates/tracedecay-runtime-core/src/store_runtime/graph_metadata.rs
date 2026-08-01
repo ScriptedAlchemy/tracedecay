@@ -5,13 +5,13 @@ use tracedecay_store::StoreShardScopeV1;
 use super::registry::{StoreRuntimeHandle, StoreRuntimeRegistryFailure};
 use crate::db::engine::{Connection, TransactionBehavior};
 
-pub(crate) struct GraphRuntimeMetadata<'runtime> {
+pub struct GraphRuntimeMetadata<'runtime> {
     _runtime: &'runtime StoreRuntimeHandle,
     connection: Connection,
 }
 
 impl StoreRuntimeHandle {
-    pub(crate) fn graph_metadata(
+    pub fn graph_metadata(
         &self,
     ) -> Result<GraphRuntimeMetadata<'_>, StoreRuntimeRegistryFailure> {
         if !matches!(
@@ -32,7 +32,7 @@ impl StoreRuntimeHandle {
 }
 
 impl GraphRuntimeMetadata<'_> {
-    pub(crate) async fn get(
+    pub async fn get(
         &self,
         key: &str,
     ) -> Result<Option<String>, StoreRuntimeRegistryFailure> {
@@ -49,7 +49,7 @@ impl GraphRuntimeMetadata<'_> {
         row.get(0).map(Some).map_err(graph_metadata_failure)
     }
 
-    pub(crate) async fn set(
+    pub async fn set(
         &self,
         key: &str,
         value: &str,

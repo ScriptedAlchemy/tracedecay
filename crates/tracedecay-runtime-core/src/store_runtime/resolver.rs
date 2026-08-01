@@ -42,14 +42,14 @@ const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1
 /// is not an identity source: resolution rejects it unless both typed IDs match
 /// the requested shard before looking at the filesystem.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalProfileStoreAuthorityV1 {
+pub struct LocalProfileStoreAuthorityV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
     profile_root: PathBuf,
 }
 
 impl LocalProfileStoreAuthorityV1 {
-    pub(crate) fn new(brain_id: BrainId, profile_id: UserProfileId, profile_root: PathBuf) -> Self {
+    pub fn new(brain_id: BrainId, profile_id: UserProfileId, profile_root: PathBuf) -> Self {
         Self {
             brain_id,
             profile_id,
@@ -57,25 +57,15 @@ impl LocalProfileStoreAuthorityV1 {
         }
     }
 
-    pub(crate) fn from_profile_identity(
-        identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-    ) -> Self {
-        Self::new(
-            identity.brain_id().clone(),
-            identity.profile_id().clone(),
-            identity.profile_root().to_path_buf(),
-        )
-    }
-
-    pub(crate) fn brain_id(&self) -> &BrainId {
+    pub fn brain_id(&self) -> &BrainId {
         &self.brain_id
     }
 
-    pub(crate) fn profile_id(&self) -> &UserProfileId {
+    pub fn profile_id(&self) -> &UserProfileId {
         &self.profile_id
     }
 
-    pub(crate) fn profile_root(&self) -> &Path {
+    pub fn profile_root(&self) -> &Path {
         &self.profile_root
     }
 }
@@ -86,13 +76,13 @@ impl LocalProfileStoreAuthorityV1 {
 /// enrollment marker. The typed `project_id` selects this record first; an
 /// alias never selects a record or changes the requested shard identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalProjectEnrollmentAuthorityV1 {
+pub struct LocalProjectEnrollmentAuthorityV1 {
     project_id: ProjectId,
     enrollment_roots: Vec<PathBuf>,
 }
 
 impl LocalProjectEnrollmentAuthorityV1 {
-    pub(crate) fn new(
+    pub fn new(
         project_id: ProjectId,
         enrollment_roots: impl IntoIterator<Item = PathBuf>,
     ) -> Self {
@@ -105,7 +95,7 @@ impl LocalProjectEnrollmentAuthorityV1 {
         }
     }
 
-    pub(crate) fn enrollment_roots(&self) -> &[PathBuf] {
+    pub fn enrollment_roots(&self) -> &[PathBuf] {
         &self.enrollment_roots
     }
 }
@@ -116,13 +106,13 @@ impl LocalProjectEnrollmentAuthorityV1 {
 /// only and can never select or manufacture a project, repository, worktree,
 /// or snapshot identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalCodeStoreAuthorityV1 {
+pub struct LocalCodeStoreAuthorityV1 {
     shard_id: StoreShardIdV1,
     database_path: PathBuf,
 }
 
 impl LocalCodeStoreAuthorityV1 {
-    pub(crate) fn new(
+    pub fn new(
         shard_id: StoreShardIdV1,
         database_path: PathBuf,
     ) -> Result<Self, LocalStoreRuntimeResolverConfigurationErrorV1> {
@@ -150,7 +140,7 @@ impl LocalCodeStoreAuthorityV1 {
 /// `result_large_err` threshold; the boxed value remains the exact typed
 /// authority identity used for fail-closed equality.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
+pub enum LocalStoreRuntimeResolverConfigurationErrorV1 {
     DuplicateProjectAuthority { project_id: ProjectId },
     DuplicateCodeAuthority { shard_id: Box<StoreShardIdV1> },
     CodeAuthorityIsNotCodeShard { shard_id: Box<StoreShardIdV1> },
@@ -165,14 +155,14 @@ pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
 /// typed graph-scope authority and are returned as unavailable rather than
 /// guessed from a branch name or path.
 #[derive(Clone, Debug)]
-pub(crate) struct LocalStoreRuntimeResolverV1 {
+pub struct LocalStoreRuntimeResolverV1 {
     profile_authority: LocalProfileStoreAuthorityV1,
     project_authorities: Arc<RwLock<BTreeMap<ProjectId, LocalProjectEnrollmentAuthorityV1>>>,
     code_authorities: Arc<RwLock<BTreeMap<StoreShardIdV1, LocalCodeStoreAuthorityV1>>>,
 }
 
 impl LocalStoreRuntimeResolverV1 {
-    pub(crate) fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
+    pub fn new(profile_authority: LocalProfileStoreAuthorityV1) -> Self {
         Self {
             profile_authority,
             project_authorities: Arc::new(RwLock::new(BTreeMap::new())),
@@ -185,7 +175,7 @@ impl LocalStoreRuntimeResolverV1 {
     /// A project can carry many aliases in its one
     /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
     /// authorities for the same typed project are refused rather than merged.
-    pub(crate) fn with_project_authority(
+    pub fn with_project_authority(
         self,
         authority: LocalProjectEnrollmentAuthorityV1,
     ) -> Result<Self, LocalStoreRuntimeResolverConfigurationErrorV1> {
@@ -193,7 +183,7 @@ impl LocalStoreRuntimeResolverV1 {
         Ok(self)
     }
 
-    pub(crate) fn register_project_authority(
+    pub fn register_project_authority(
         &self,
         authority: LocalProjectEnrollmentAuthorityV1,
     ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
@@ -216,7 +206,7 @@ impl LocalStoreRuntimeResolverV1 {
         Ok(())
     }
 
-    pub(crate) fn register_code_authority(
+    pub fn register_code_authority(
         &self,
         authority: LocalCodeStoreAuthorityV1,
     ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
@@ -239,7 +229,7 @@ impl LocalStoreRuntimeResolverV1 {
         Ok(())
     }
 
-    pub(crate) fn retire_code_authority(
+    pub fn retire_code_authority(
         &self,
         shard_id: &StoreShardIdV1,
         database_path: &Path,
@@ -298,7 +288,7 @@ impl LocalStoreRuntimeResolverV1 {
     /// Callers that need the typed unavailable result should use this method.
     /// [`StoreRuntimeResolver`] adapts it to the registry's current generic
     /// infrastructure-failure channel without ever falling back to a locator.
-    pub(crate) fn resolve_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+    pub fn resolve_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
         self.resolve_key_with_filesystem_safety(key, &local_filesystem_safety)
     }
 
@@ -368,7 +358,7 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileSessions => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root.join(crate::sessions::USER_SESSIONS_DB_FILENAME),
+                    &canonical_profile_root.join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -615,7 +605,7 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
 
 /// The exactly mapped database family selected by this resolver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LocalStoreLocatorKindV1 {
+pub enum LocalStoreLocatorKindV1 {
     ProfileAuthority,
     ProfileMemory,
     ProfileSessions,
@@ -626,11 +616,11 @@ pub(crate) enum LocalStoreLocatorKindV1 {
 
 /// Locality facts captured while resolving a physical locator.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalStoreLocatorMetadataV1 {
-    pub(crate) kind: LocalStoreLocatorKindV1,
-    pub(crate) canonical_profile_root: PathBuf,
-    pub(crate) canonical_store_root: PathBuf,
-    pub(crate) filesystem_type: String,
+pub struct LocalStoreLocatorMetadataV1 {
+    pub kind: LocalStoreLocatorKindV1,
+    pub canonical_profile_root: PathBuf,
+    pub canonical_store_root: PathBuf,
+    pub filesystem_type: String,
 }
 
 /// A pre-open verified local locator plus metadata for runtime construction.
@@ -639,17 +629,17 @@ pub(crate) struct LocalStoreLocatorMetadataV1 {
 /// a path-only [`LocatorDigest`]. The digest is deliberately not database
 /// content evidence: this resolver never reads database bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedLocalStoreLocatorV1 {
+pub struct VerifiedLocalStoreLocatorV1 {
     locator: ResolvedStoreLocator,
     metadata: LocalStoreLocatorMetadataV1,
 }
 
 impl VerifiedLocalStoreLocatorV1 {
-    pub(crate) fn locator(&self) -> &ResolvedStoreLocator {
+    pub fn locator(&self) -> &ResolvedStoreLocator {
         &self.locator
     }
 
-    pub(crate) fn metadata(&self) -> &LocalStoreLocatorMetadataV1 {
+    pub fn metadata(&self) -> &LocalStoreLocatorMetadataV1 {
         &self.metadata
     }
 
@@ -660,16 +650,16 @@ impl VerifiedLocalStoreLocatorV1 {
 
 /// A resolution result that preserves typed unavailability for local callers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LocalStoreLocatorResolutionV1 {
+pub enum LocalStoreLocatorResolutionV1 {
     Resolved(VerifiedLocalStoreLocatorV1),
     Unavailable(LocalStoreLocatorUnavailableV1),
 }
 
 /// Typed unavailability returned instead of choosing a fallback locator.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalStoreLocatorUnavailableV1 {
-    pub(crate) shard_id: StoreShardIdV1,
-    pub(crate) reason: LocalStoreLocatorUnavailableReasonV1,
+pub struct LocalStoreLocatorUnavailableV1 {
+    pub shard_id: StoreShardIdV1,
+    pub reason: LocalStoreLocatorUnavailableReasonV1,
 }
 
 impl LocalStoreLocatorUnavailableV1 {
@@ -693,7 +683,7 @@ impl LocalStoreLocatorUnavailableV1 {
 
 /// Reasons a local path cannot be used for a typed shard.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LocalStoreLocatorUnavailableReasonV1 {
+pub enum LocalStoreLocatorUnavailableReasonV1 {
     ProfileAuthorityMismatch,
     UnsupportedShardScope,
     MissingProjectEnrollmentAuthority,
@@ -946,7 +936,7 @@ fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDiges
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
 }
 
-pub(crate) fn canonical_store_locator_digest(path: &Path) -> Result<LocatorDigest, String> {
+pub fn canonical_store_locator_digest(path: &Path) -> Result<LocatorDigest, String> {
     canonical_locator_digest(path).map_err(|reason| format!("{reason:?}"))
 }
 
@@ -1524,7 +1514,7 @@ mod tests {
             profile_sessions.locator().path(),
             fixture
                 .profile_root
-                .join(crate::sessions::USER_SESSIONS_DB_FILENAME)
+                .join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME)
         );
         assert_eq!(
             profile_sessions.metadata().kind,

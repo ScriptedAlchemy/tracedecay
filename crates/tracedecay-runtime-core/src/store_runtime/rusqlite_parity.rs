@@ -28,7 +28,7 @@ use tracedecay_sqlite_parity_protocol::{
 };
 use tracedecay_store::StoreRuntimeBindingV1;
 
-use crate::application::context::{CancellationToken, MonotonicDeadline};
+use crate::cancellation::{CancellationToken, MonotonicDeadline};
 
 const MAX_STDOUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
@@ -43,47 +43,47 @@ static NEXT_INVOCATION: AtomicU64 = AtomicU64::new(0);
 ///
 /// The wire command itself is owned by `tracedecay-sqlite-parity-protocol`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RusqliteParityRequestV1 {
+pub struct RusqliteParityRequestV1 {
     store_identity: StoreRuntimeBindingV1,
     command: CommandV1,
 }
 
 impl RusqliteParityRequestV1 {
-    pub(crate) fn new(store_identity: StoreRuntimeBindingV1, command: CommandV1) -> Self {
+    pub fn new(store_identity: StoreRuntimeBindingV1, command: CommandV1) -> Self {
         Self {
             store_identity,
             command,
         }
     }
 
-    pub(crate) fn store_identity(&self) -> &StoreRuntimeBindingV1 {
+    pub fn store_identity(&self) -> &StoreRuntimeBindingV1 {
         &self.store_identity
     }
 
-    pub(crate) fn command(&self) -> &CommandV1 {
+    pub fn command(&self) -> &CommandV1 {
         &self.command
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RusqliteParityResultV1 {
+pub struct RusqliteParityResultV1 {
     store_identity: StoreRuntimeBindingV1,
     output: OutputV1,
 }
 
 impl RusqliteParityResultV1 {
-    pub(crate) fn store_identity(&self) -> &StoreRuntimeBindingV1 {
+    pub fn store_identity(&self) -> &StoreRuntimeBindingV1 {
         &self.store_identity
     }
 
-    pub(crate) fn output(&self) -> &OutputV1 {
+    pub fn output(&self) -> &OutputV1 {
         &self.output
     }
 }
 
 /// Infrastructure-only failures from snapshotting, transport, or protocol validation.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RusqliteParityInfrastructureErrorV1 {
+pub enum RusqliteParityInfrastructureErrorV1 {
     #[error("invalid rusqlite parity {field}: {message}")]
     InvalidPath {
         field: &'static str,
@@ -156,7 +156,7 @@ pub(crate) enum RusqliteParityInfrastructureErrorV1 {
 /// under one of those roots is rejected before a copy can be created.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(unix), allow(unreachable_code))] // early UnsupportedPlatform return
-pub(crate) async fn run_rusqlite_parity_v1(
+pub async fn run_rusqlite_parity_v1(
     helper_executable: &Path,
     authority_store_path: &Path,
     staging_root: &Path,

@@ -228,87 +228,12 @@ macro_rules! digest {
 
 digest!(CapabilityDigest, PolicyDigest, ConfigurationDigest);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MonotonicDeadline(Instant);
-
-impl MonotonicDeadline {
-    pub const fn at(deadline: Instant) -> Self {
-        Self(deadline)
-    }
-
-    pub const fn instant(self) -> Instant {
-        self.0
-    }
-
-    pub fn is_elapsed_at(self, now: Instant) -> bool {
-        now >= self.0
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CancellationToken {
-    token_id: Option<Arc<str>>,
-    cancelled: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self {
-            token_id: None,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-}
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates the live cancellation authority for an application request.
-    pub fn for_application_request(request_id: &tracedecay_application::RequestId) -> Self {
-        static NEXT_TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-        let sequence = NEXT_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        Self {
-            token_id: Some(Arc::from(format!(
-                "cancellation.{}.{sequence}",
-                request_id.as_str()
-            ))),
-            ..Self::default()
-        }
-    }
-
-    pub fn application_token_id(&self) -> Option<&str> {
-        self.token_id.as_deref()
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn is_same_token(&self, other: &Self) -> bool {
-        self.token_id == other.token_id
-            && Arc::ptr_eq(&self.cancelled, &other.cancelled)
-            && Arc::ptr_eq(&self.notify, &other.notify)
-    }
-
-    pub async fn cancelled(&self) {
-        loop {
-            let notified = self.notify.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
+/// The monotonic deadline and cooperative cancellation token moved into
+/// `tracedecay_runtime_core::cancellation`: the kernel's
+/// `store_runtime::rusqlite_parity` bounds every parity probe with them.
+/// Re-exported so every historical `application::context::<item>` path keeps
+/// resolving.
+pub use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestBudgets {
