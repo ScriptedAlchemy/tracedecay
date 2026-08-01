@@ -2,21 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::Database;
-use crate::errors::Result;
-
 pub const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
 
 pub fn user_memory_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_MEMORY_DB_FILENAME)
 }
 
-pub(crate) async fn open_user_memory_db(
-    registry: &DaemonSessionRuntimeRegistryV1,
-) -> Result<Database> {
-    registry
-        .profile_memory()
-        .await
-        .map(|database| database.as_ref().clone())
-}
+// `open_user_memory_db` stayed in the root crate: it borrows the daemon
+// session registry (`daemon::store_runtime::session_registry`), which sits
+// above this kernel. The root `memory::user` shim re-declares it so
+// `crate::memory::user::open_user_memory_db` keeps resolving.
