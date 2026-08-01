@@ -142,12 +142,20 @@ where
 /// `Database::initialize` would produce — without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
     let template = ensure_template_db("graph-empty", &[], |path| async move {
-        let (db, _) = crate::common::initialize_test_database(&path)
+        // Initialise on a throwaway path, then snapshot the committed schema to
+        // `path`. The registered runtime's `checkpoint` follows a bounded WAL
+        // policy that no-ops below its soft threshold, so a freshly-created
+        // schema can still live entirely in the WAL — copying the bare `.db`
+        // file would then capture an empty (v0) database. `snapshot_to` writes a
+        // transactionally consistent standalone copy, matching how the global-db
+        // and session template helpers stage their fixtures.
+        let init_path = path.with_file_name("template-init.db");
+        let (db, _) = crate::common::initialize_test_database(&init_path)
             .await
             .expect("failed to initialize template database");
-        db.checkpoint()
+        db.snapshot_to(&path)
             .await
-            .expect("failed to checkpoint template database");
+            .expect("failed to snapshot template database");
         db.close();
     })
     .await;
