@@ -293,6 +293,61 @@ async fn memory_status_does_not_claim_unstarted_legacy_backfill_is_complete() {
     assert!(!status.legacy_backfill_complete());
 }
 
+/// A store that never held V1 legacy memory has nothing to migrate. Running
+/// the capture → drain → finalize ladder over it anyway would leave behind an
+/// all-zero backfill row and a receipt for a migration that never happened.
+#[tokio::test]
+async fn fresh_store_cutover_completes_without_manufacturing_backfill_rows() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("compatibility-cutover-fresh.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "compatibility cutover fresh test").unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let store = DatabaseFactStore::new(&db);
+    let request = CompatibilityLegacyMemoryCutoverCommandV1::new(
+        owner.clone(),
+        ProvenanceId::new("compatibility-cutover-fresh-test".to_owned()).unwrap(),
+    )
+    .unwrap();
+
+    for _ in 0..3 {
+        assert_eq!(
+            store
+                .advance_compatibility_legacy_memory_cutover(request.clone())
+                .await
+                .unwrap(),
+            CompatibilityLegacyMemoryCutoverProgressV1::Complete
+        );
+        assert_eq!(backfill_progress_row_count(&db).await, 0);
+    }
+
+    assert!(
+        store
+            .compatibility_memory_status(owner)
+            .await
+            .unwrap()
+            .legacy_backfill_complete()
+    );
+}
+
+async fn backfill_progress_row_count(db: &Database) -> i64 {
+    let writer = db
+        .writer_connection("count manufactured backfill progress rows")
+        .await
+        .unwrap();
+    let mut rows = writer
+        .query_engine("SELECT COUNT(*) FROM memory_v2_backfill_progress", ())
+        .await
+        .unwrap();
+    let count = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    drop(rows);
+    count
+}
+
 async fn compatibility_mapping_count(
     db: &Database,
     owner: &FactOwnerV1,
