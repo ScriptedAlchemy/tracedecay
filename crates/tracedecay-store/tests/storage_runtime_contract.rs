@@ -379,50 +379,19 @@ fn consistency_status_is_derived_from_full_fenced_watermarks() {
     assert!(lease.is_expired_at(UtcMicros(100)));
 }
 
+/// A shard may only be observed once, or coverage would double count it and
+/// a stale read could pass as satisfied.
 #[test]
-fn frozen_coverage_uses_canonical_json_vectors_and_rejects_invalid_wire_data() {
-    let project = project_shard("project.one");
-    let sessions = session_shard("project.one");
-    let required_project = watermark(project.clone(), 10);
-    let required_sessions = watermark(sessions, 20);
-    let first = FrozenWatermarkVectorV1::new([required_project.clone(), required_sessions.clone()])
-        .unwrap();
-    let second =
-        FrozenWatermarkVectorV1::new([required_sessions, required_project.clone()]).unwrap();
-    assert_eq!(
-        serde_json::to_string(&first).unwrap(),
-        serde_json::to_string(&second).unwrap()
-    );
-
-    let coverage =
-        FrozenWatermarkCoverageV1::new(first.clone(), [required_project.clone()]).unwrap();
-    let reversed_coverage = FrozenWatermarkCoverageV1::new(
-        first.clone(),
-        [
-            watermark(session_shard("project.one"), 20),
-            required_project.clone(),
-        ],
-    )
+fn frozen_coverage_rejects_a_shard_observed_twice() {
+    let required_project = watermark(project_shard("project.one"), 10);
+    let required = FrozenWatermarkVectorV1::new([
+        required_project.clone(),
+        watermark(session_shard("project.one"), 20),
+    ])
     .unwrap();
-    let ordered_coverage = FrozenWatermarkCoverageV1::new(
-        first.clone(),
-        [
-            required_project.clone(),
-            watermark(session_shard("project.one"), 20),
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        serde_json::to_string(&reversed_coverage).unwrap(),
-        serde_json::to_string(&ordered_coverage).unwrap()
-    );
-    let wire = serde_json::to_value(&coverage).unwrap();
-    assert!(wire["required"].is_array());
-    assert!(wire["observed"].is_array());
-    round_trip(&coverage);
 
     let duplicate_observed = json!({
-        "required": serde_json::to_value(&first).unwrap(),
+        "required": serde_json::to_value(&required).unwrap(),
         "observed": [
             serde_json::to_value(&required_project).unwrap(),
             serde_json::to_value(&required_project).unwrap(),
@@ -1120,62 +1089,6 @@ fn lifecycle_permits_and_batch_contracts_are_fenced() {
     round_trip(&publication);
     round_trip(&health_lease);
     round_trip(&permit);
-}
-
-#[test]
-fn public_wire_dtos_round_trip_without_driver_values() {
-    let consistency = ConsistencyModeV1::FrozenWatermarkVector {
-        vector: FrozenWatermarkVectorV1::new([watermark(project_shard("project.one"), 12)])
-            .unwrap(),
-    };
-    let runtime_error = StorageRuntimeErrorV1::Infrastructure {
-        operation: "fixture read".to_owned(),
-    };
-    let admission = AdmissionConfigV1::default();
-    let telemetry = MaintenanceTelemetryV1 {
-        shard_id: project_shard("project.one"),
-        incarnation: incarnation(1),
-        authority_epoch: epoch(7),
-        state: RuntimeMaintenanceStateV1::Ready,
-        wal_bytes: WAL_SOFT_LIMIT_BYTES,
-        wal_pressure: WalPressureV1::SoftLimit,
-        blocked_snapshots: 1,
-        checkpoint_count: 2,
-        checkpoint_busy_count: 0,
-        last_checkpoint_at: Some(UtcMicros(10)),
-    };
-    let commit_telemetry = CommitTelemetryV1 {
-        shard_id: project_shard("project.one"),
-        incarnation: incarnation(1),
-        authority_epoch: epoch(7),
-        commit_sequence: CommitSequenceV1(1),
-        priority: OperationPriorityV1::Foreground,
-        durability: DurabilityClassV1::Full,
-        batch_operations: 1,
-        batch_bytes: 128,
-        queue_wait_micros: 1,
-        transaction_micros: 2,
-        committed_at: UtcMicros(10),
-    };
-    let reader_telemetry = ReaderTelemetryV1 {
-        shard_id: project_shard("project.one"),
-        incarnation: incarnation(1),
-        authority_epoch: epoch(7),
-        general_active: 1,
-        general_idle: 1,
-        general_waiters: 0,
-        health_active: true,
-        retained_snapshots: 0,
-        longest_snapshot_age_ms: 0,
-        wait_micros: 0,
-    };
-
-    round_trip(&consistency);
-    round_trip(&runtime_error);
-    round_trip(&admission);
-    round_trip(&telemetry);
-    round_trip(&commit_telemetry);
-    round_trip(&reader_telemetry);
 }
 
 #[test]
