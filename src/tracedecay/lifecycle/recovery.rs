@@ -7,17 +7,421 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::DatabaseAuthority;
+use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StoreLayout;
 use crate::tracedecay::ActiveGraphLayout;
-use crate::tracedecay::locking::try_acquire_graph_sync_locks;
+use crate::tracedecay::locking::{
+    adopt_dirty_marker_at, dirty_marker_owner_is_live, has_dirty_sentinel_at,
+    try_acquire_graph_sync_locks,
+};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
+/// Outcome of the post-crash / post-open health preflight a registered open
+/// runs before it can trust the mounted database.
+///
+/// `Ready` carries the mounted database and migration result onward so the
+/// caller can finish constructing `Self`. `Recovered` means the preflight
+/// already resolved the open completely — either by recursing into a repaired
+/// branch open or by failing closed — and the caller must return it as-is.
+pub(super) enum OpenHealthOutcome {
+    Ready { db: Database, migrated: Option<u32> },
+    Recovered(Result<TraceDecay>),
+}
+
 impl TraceDecay {
-    pub(super) async fn recover_corrupt_branch_or_fail(
+    /// Runs the crash/health preflight for a registered open: detects an
+    /// abandoned dirty marker, preserves and repairs an obviously corrupt
+    /// derived branch database, repairs FTS-only damage, and validates the
+    /// mounted database's integrity before the caller finishes the open.
+    pub(super) async fn run_open_health_recovery(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        store_layout: &StoreLayout,
+        db_path: &Path,
+        mounted_graph_scope: Option<&str>,
+        active_graph_layout: &ActiveGraphLayout,
+        repair_corrupt_branch: bool,
+        defer_post_open_health: bool,
+        configuration_database: Arc<RegisteredGlobalDb>,
+        profile_database: Arc<RegisteredGlobalDb>,
+        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    ) -> Result<OpenHealthOutcome> {
+        let marker_is_abandoned =
+            |path: &Path| has_dirty_sentinel_at(path) && !dirty_marker_owner_is_live(path);
+        let crashed = marker_is_abandoned(&active_graph_layout.dirty_path)
+            || marker_is_abandoned(&store_layout.dirty_path);
+        let mut crash_preflight_healthy = false;
+        if crashed {
+            eprintln!(
+                "[tracedecay] previous operation was interrupted — checking database integrity…"
+            );
+        }
+
+        // A dirty marker can also describe a sync that is still active in a
+        // peer process. Recovery must own both graph-local and legacy locks so
+        // it cannot race that writer or clear its sentinel. Preflight through
+        // the read-only connection before Database::open applies writable
+        // pragmas or migrations to a potentially damaged recovery set.
+        let recovery_lock = if crashed {
+            Some(try_acquire_graph_sync_locks(
+                &active_graph_layout.sync_lock_path,
+                &store_layout.sync_lock_path,
+            )?)
+        } else {
+            None
+        };
+        // Recovery owns exactly the markers it observed once the lease was
+        // held. A marker republished after this point describes a newer
+        // writer's work and must survive this recovery, so the clear below is
+        // scoped to these adopted epochs rather than to whatever the paths
+        // happen to hold at commit time.
+        let mut adopted_dirty_markers = Vec::new();
+        if crashed {
+            adopted_dirty_markers.extend(adopt_dirty_marker_at(&active_graph_layout.dirty_path));
+            if active_graph_layout.dirty_path != store_layout.dirty_path {
+                adopted_dirty_markers.extend(adopt_dirty_marker_at(&store_layout.dirty_path));
+            }
+        }
+        // SQLite may rewrite a WAL-index sidecar while opening a recovery set,
+        // even when the subsequent integrity check rejects the main database.
+        // Preserve an obviously invalid derived store before any SQLite handle
+        // can alter the forensic copy.
+        if repair_corrupt_branch
+            && matches!(
+                crate::storage::has_sqlite_database_header(db_path),
+                Ok(false)
+            )
+        {
+            drop(recovery_lock);
+            return Ok(OpenHealthOutcome::Recovered(
+                Self::recover_corrupt_branch_or_fail(
+                    project_root,
+                    open_options,
+                    store_layout,
+                    db_path,
+                    "invalid SQLite database header",
+                    repair_corrupt_branch,
+                    configuration_database,
+                    profile_database,
+                    runtime_registry,
+                )
+                .await,
+            ));
+        }
+        if crashed {
+            // FTS-only damage is repairable from the content table on the
+            // writable open below; do not force offline recovery for it. The
+            // read-only open runs its own integrity validation, so the damage
+            // can surface either as its open error or as a problem row here.
+            match Self::mount_worktree_graph(
+                runtime_registry.as_ref(),
+                project_root,
+                store_layout,
+                db_path,
+                mounted_graph_scope.as_deref(),
+                "crash verification",
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await
+            {
+                Ok(verification) => {
+                    let integrity = verification.quick_check_report().await;
+                    verification.close();
+                    match integrity {
+                        Ok(None) => crash_preflight_healthy = true,
+                        Ok(Some(problem)) if is_fts_only_corruption(&problem) => {}
+                        Ok(Some(problem)) => {
+                            drop(recovery_lock);
+                            return Ok(OpenHealthOutcome::Recovered(
+                                Self::recover_corrupt_branch_or_fail(
+                                    project_root,
+                                    open_options,
+                                    store_layout,
+                                    db_path,
+                                    format!("read-only SQLite quick_check reported: {problem}"),
+                                    repair_corrupt_branch,
+                                    configuration_database,
+                                    profile_database,
+                                    runtime_registry,
+                                )
+                                .await,
+                            ));
+                        }
+                        Err(error) => {
+                            drop(recovery_lock);
+                            return Ok(OpenHealthOutcome::Recovered(
+                                Self::recover_corrupt_branch_or_fail(
+                                    project_root,
+                                    open_options,
+                                    store_layout,
+                                    db_path,
+                                    error,
+                                    repair_corrupt_branch,
+                                    configuration_database,
+                                    profile_database,
+                                    runtime_registry,
+                                )
+                                .await,
+                            ));
+                        }
+                    }
+                }
+                Err(error) if is_fts_only_corruption(&error.to_string()) => {}
+                // A hot rollback journal from an interrupted writer needs
+                // write access to recover, so the read-only preflight cannot
+                // open it at all. That is normal crash recovery, not damage:
+                // defer to the writable open below, which rolls the journal
+                // back and still runs the post-open quick_check.
+                Err(error) if is_readonly_recovery_block(&error.to_string()) => {}
+                Err(error) => {
+                    drop(recovery_lock);
+                    return Ok(OpenHealthOutcome::Recovered(
+                        Self::recover_corrupt_branch_or_fail(
+                            project_root,
+                            open_options,
+                            store_layout,
+                            db_path,
+                            error,
+                            repair_corrupt_branch,
+                            configuration_database,
+                            profile_database,
+                            runtime_registry,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        }
+
+        // Ordinary opens never replace database files. A daemon or another MCP
+        // process may still hold the current DB/WAL/SHM inodes, and deleting
+        // them here would split readers and writers across different stores.
+        let mut open_result = Self::mount_worktree_graph(
+            runtime_registry.as_ref(),
+            project_root,
+            store_layout,
+            db_path,
+            mounted_graph_scope.as_deref(),
+            "open project store",
+            DatabaseAccessMode::ReadWrite,
+        )
+        .await;
+        // Open-time validation fails closed on any corruption, including
+        // FTS-only damage that is fully derivable from the content table.
+        // Rebuild that index under the open's writer authority and retry
+        // once; stores corrupted by a live writer carry no dirty sentinel,
+        // so this repair cannot be gated on the crash path.
+        if let Err(error) = &open_result
+            && is_fts_only_corruption(&error.to_string())
+        {
+            eprintln!("[tracedecay] repairing FTS index after interrupted operation ({error})…");
+            match Self::mount_worktree_graph(
+                runtime_registry.as_ref(),
+                project_root,
+                store_layout,
+                db_path,
+                mounted_graph_scope.as_deref(),
+                "remount project store for FTS repair",
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            {
+                Ok(database) => match database.repair_fts_after_open().await {
+                    Ok(_) => open_result = Ok(database),
+                    Err(repair_error) => {
+                        database.close();
+                        drop(recovery_lock);
+                        return Ok(OpenHealthOutcome::Recovered(
+                            Self::recover_corrupt_branch_or_fail(
+                                project_root,
+                                open_options,
+                                store_layout,
+                                db_path,
+                                repair_error,
+                                repair_corrupt_branch,
+                                configuration_database,
+                                profile_database,
+                                runtime_registry,
+                            )
+                            .await,
+                        ));
+                    }
+                },
+                Err(repair_error) => {
+                    drop(recovery_lock);
+                    return Ok(OpenHealthOutcome::Recovered(
+                        Self::recover_corrupt_branch_or_fail(
+                            project_root,
+                            open_options,
+                            store_layout,
+                            db_path,
+                            repair_error,
+                            repair_corrupt_branch,
+                            configuration_database,
+                            profile_database,
+                            runtime_registry,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        }
+        let db = match open_result {
+            Ok(database) => database,
+            Err(e) if Database::is_corruption_error(&e) || crashed => {
+                drop(recovery_lock);
+                return Ok(OpenHealthOutcome::Recovered(
+                    Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        store_layout,
+                        db_path,
+                        e,
+                        repair_corrupt_branch,
+                        configuration_database,
+                        profile_database,
+                        runtime_registry,
+                    )
+                    .await,
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+        let migrated = crate::db::migrations::migrate(&db).await?;
+
+        // Validation before Database::open cannot observe FTS damage on a
+        // retained shared handle because the open reuses that connection.
+        // Classify its complete quick-check report after open and schedule the
+        // existing rebuild through the canonical writer lane. Non-FTS damage
+        // fails closed without entering either repair path.
+        // The crash preflight already ran the same complete quick-check while
+        // holding both recovery locks. Repeating it after the writable mount
+        // doubles peak SQLite scratch memory without adding evidence. Ordinary
+        // opens still run this retained-handle check so live-writer FTS damage
+        // without a dirty marker remains detectable.
+        if !crash_preflight_healthy && !defer_post_open_health {
+            match db.repair_fts_after_open().await {
+                Ok(Some(problem)) => {
+                    eprintln!(
+                        "[tracedecay] repaired FTS index after post-open health check ({problem})"
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    db.close();
+                    drop(recovery_lock);
+                    return Ok(OpenHealthOutcome::Recovered(
+                        Self::recover_corrupt_branch_or_fail(
+                            project_root,
+                            open_options,
+                            store_layout,
+                            db_path,
+                            error,
+                            repair_corrupt_branch,
+                            configuration_database,
+                            profile_database,
+                            runtime_registry,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        }
+
+        if crashed && crash_preflight_healthy {
+            for marker in &adopted_dirty_markers {
+                marker.clear();
+            }
+        }
+
+        // If the sentinel was set but the read-only preflight could not prove
+        // the database healthy, validate the writable recovery before clearing
+        // either marker.
+        if crashed && !crash_preflight_healthy {
+            let mut integrity = db.quick_check_report().await;
+            // An interrupted bulk load can desync the FTS5 inverted index from
+            // its content table. That damage is fully derivable: rebuild it in
+            // place under the held recovery locks instead of failing closed.
+            if let Ok(Some(problem)) = &integrity
+                && is_fts_only_corruption(problem)
+            {
+                eprintln!(
+                    "[tracedecay] repairing FTS index after interrupted operation ({problem})…"
+                );
+                match db.rebuild_fts().await {
+                    Ok(()) => integrity = db.quick_check_report().await,
+                    Err(error) => {
+                        db.close();
+                        drop(recovery_lock);
+                        return Ok(OpenHealthOutcome::Recovered(
+                            Self::recover_corrupt_branch_or_fail(
+                                project_root,
+                                open_options,
+                                store_layout,
+                                db_path,
+                                error,
+                                repair_corrupt_branch,
+                                configuration_database,
+                                profile_database,
+                                runtime_registry,
+                            )
+                            .await,
+                        ));
+                    }
+                }
+            }
+            match integrity {
+                Ok(None) => {
+                    for marker in &adopted_dirty_markers {
+                        marker.clear();
+                    }
+                }
+                Ok(Some(problem)) => {
+                    db.close();
+                    drop(recovery_lock);
+                    return Ok(OpenHealthOutcome::Recovered(
+                        Self::recover_corrupt_branch_or_fail(
+                            project_root,
+                            open_options,
+                            store_layout,
+                            db_path,
+                            format!("SQLite quick_check reported: {problem}"),
+                            repair_corrupt_branch,
+                            configuration_database,
+                            profile_database,
+                            runtime_registry,
+                        )
+                        .await,
+                    ));
+                }
+                Err(e) => {
+                    db.close();
+                    drop(recovery_lock);
+                    return Ok(OpenHealthOutcome::Recovered(
+                        Self::recover_corrupt_branch_or_fail(
+                            project_root,
+                            open_options,
+                            store_layout,
+                            db_path,
+                            e,
+                            repair_corrupt_branch,
+                            configuration_database,
+                            profile_database,
+                            runtime_registry,
+                        )
+                        .await,
+                    ));
+                }
+            }
+        }
+
+        Ok(OpenHealthOutcome::Ready { db, migrated })
+    }
+
+    async fn recover_corrupt_branch_or_fail(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
         store_layout: &StoreLayout,
@@ -234,7 +638,7 @@ pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
 /// Whether a read-only preflight failure means the store needs ordinary
 /// writable crash recovery (e.g. a hot rollback journal), which a read-only
 /// connection can never perform, rather than actual damage.
-pub(super) fn is_readonly_recovery_block(problem: &str) -> bool {
+fn is_readonly_recovery_block(problem: &str) -> bool {
     problem.contains("attempt to write a readonly database")
 }
 
