@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use tracedecay_usecases::remote_json_cache;
+
 /// `LiteLLM` pricing data URL. Public, no authentication required.
 /// See: <https://github.com/BerriAI/litellm>
 const LITELLM_PRICING_URL: &str =
@@ -249,39 +251,26 @@ pub fn cost_of_turn(
 ///
 /// Returns `true` if the cache was updated, `false` on any failure.
 /// Best-effort: never blocks longer than `FETCH_TIMEOUT`, failures
-/// are silently ignored.
+/// are silently ignored. The fetch/validate/write mechanism is shared with
+/// the dashboard's `OpenRouter` table — see `remote_json_cache`; only the
+/// source, timeout, parser and cache path are ours.
 pub fn refresh_pricing() -> bool {
-    let agent = crate::cloud::agent_with_timeout(FETCH_TIMEOUT);
-    let Ok(mut resp) = agent.get(LITELLM_PRICING_URL).call() else {
-        return false;
-    };
-    let Ok(body) = resp.body_mut().read_to_string() else {
-        return false;
-    };
-
-    // Validate that it parses before writing
-    if parse_litellm_json(&body).is_none() {
-        return false;
-    }
-
-    // Write to cache
     let Some(path) = cache_path() else {
         return false;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(path, body).is_ok()
+    let agent = crate::cloud::agent_with_timeout(FETCH_TIMEOUT);
+    remote_json_cache::refresh_cached_json(&agent, LITELLM_PRICING_URL, &path, |body| {
+        parse_litellm_json(body).is_some()
+    })
 }
 
 /// Refresh pricing if the cache is stale (older than 24 hours).
-/// Uses `last_pricing_fetch_at` in `UserConfig` for TTL tracking.
+/// Uses `last_pricing_fetch_at` in `UserConfig` for TTL tracking -- unlike
+/// the dashboard table, staleness here is not read from the cache file's
+/// mtime.
 pub fn refresh_if_stale() {
     let mut config = crate::user_config::UserConfig::load();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = remote_json_cache::unix_now();
 
     if now - config.last_pricing_fetch_at < CACHE_TTL_SECS {
         return;
