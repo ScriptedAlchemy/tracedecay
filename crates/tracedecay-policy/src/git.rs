@@ -158,7 +158,6 @@ pub trait GitEffectClassifier {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitEffectClassifierV1 {
     evaluator_id: PolicyIdentifierV1,
-    evaluator_revision: u64,
 }
 
 impl Default for GitEffectClassifierV1 {
@@ -166,12 +165,16 @@ impl Default for GitEffectClassifierV1 {
         Self {
             evaluator_id: PolicyIdentifierV1::new("git_effect_classification.v1")
                 .expect("static evaluator identifier is valid"),
-            evaluator_revision: 1,
         }
     }
 }
 
 impl GitEffectClassifierV1 {
+    /// Revision of this reviewed implementation, recorded with every decision
+    /// so replay can refuse a substituted evaluator. It is a property of the
+    /// code, not of an instance.
+    const EVALUATOR_REVISION: u64 = 1;
+
     fn decision(
         &self,
         input: &GitEffectClassificationInputV1,
@@ -180,7 +183,7 @@ impl GitEffectClassifierV1 {
     ) -> GitEffectDecisionV1 {
         GitEffectDecisionV1 {
             evaluator_id: self.evaluator_id.clone(),
-            evaluator_revision: self.evaluator_revision,
+            evaluator_revision: Self::EVALUATOR_REVISION,
             input_digest: policy_digest("tracedecay.policy.git-effect-input.v1", input),
             policy_revision: input.policy_revision,
             policy_digest: input.policy_digest.clone(),
