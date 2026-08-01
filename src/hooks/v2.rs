@@ -471,7 +471,7 @@ fn prepare_bound_hook(
         serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let native_session_id = native_fields.session_id().map(str::to_owned);
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
-    let material = native_material(event_json, decoded.family(), now)?;
+    let material = native_material(&native_fields, decoded.family(), now)?;
     let envelope = decoded.into_envelope(binding, material).ok()?;
     Some(PreparedBoundHook {
         host,
@@ -678,12 +678,15 @@ fn append_for_replay(
     }
 }
 
+/// Builds the envelope material from the identity fields the caller already
+/// decoded. `prepare_bound_hook` decodes them once for the native session id and
+/// the context-scout lifecycle; re-decoding the same payload here was a second
+/// full deserialization of every hook event.
 fn native_material(
-    event_json: &str,
+    fields: &NativeIdentityFields,
     family: tracedecay_hooks::HookEventFamily,
     observed_at: UtcMicros,
 ) -> Option<NativeEnvelopeMaterialV1> {
-    let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let session = fields.session_id()?;
     let event_id = fields.event_key().map_or_else(
         || typed_native_event_fallback(session, family, observed_at),

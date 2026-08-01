@@ -69,31 +69,31 @@ pub(crate) const CODEX_POST_TOOL_USE_SPEC: PostToolUseSpec = PostToolUseSpec {
 ///
 /// Shell completion is forwarded without command text. It remains an
 /// observation and cannot authorize branch, worktree, or sync planning.
-pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &str) {
-    notify_post_tool_use_inner(spec, event_json, None).await;
+pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, parsed: &Value) {
+    notify_post_tool_use_inner(spec, parsed, None).await;
 }
 
 pub(crate) async fn notify_post_tool_use_with_telemetry(
     spec: &PostToolUseSpec,
-    event_json: &str,
+    parsed: &Value,
     telemetry: &super::analytics::HookTimingSpan,
 ) {
-    notify_post_tool_use_inner(spec, event_json, Some(telemetry)).await;
+    notify_post_tool_use_inner(spec, parsed, Some(telemetry)).await;
 }
 
+/// Takes the event already parsed: the calling handler parsed it to decide the
+/// failure shape, resolve the root, and record analytics, and a `PostToolUse`
+/// fires on every tool call.
 async fn notify_post_tool_use_inner(
     spec: &PostToolUseSpec,
-    event_json: &str,
+    parsed: &Value,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
-    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-        return;
-    };
     let tool_name = parsed
         .get("tool_name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(cwd) = event_cwd_from_parsed(&parsed) else {
+    let Some(cwd) = event_cwd_from_parsed(parsed) else {
         return;
     };
     let Some(root) = crate::config::discover_project_root_with_identity(&cwd).await else {
@@ -104,14 +104,14 @@ async fn notify_post_tool_use_inner(
     }
 
     if (spec.is_edit_tool)(tool_name) {
-        let rels = (spec.edit_rel_paths)(&parsed, &cwd, &root);
+        let rels = (spec.edit_rel_paths)(parsed, &cwd, &root);
         if rels.is_empty() {
             return;
         }
         super::notify_hook_event_with_optional_telemetry(
             &root,
             DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
-                .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
+                .with_route(Some(hook_route_metadata_from_parsed(parsed, &root))),
             telemetry,
         )
         .await;
@@ -119,7 +119,7 @@ async fn notify_post_tool_use_inner(
         super::notify_hook_event_with_optional_telemetry(
             &root,
             DaemonHookEvent::post_tool_use_shell(spec.agent, cwd)
-                .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
+                .with_route(Some(hook_route_metadata_from_parsed(parsed, &root))),
             telemetry,
         )
         .await;
