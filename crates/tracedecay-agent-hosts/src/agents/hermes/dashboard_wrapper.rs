@@ -10,7 +10,10 @@
 //! Everything is embedded at compile time so installs need no source
 //! checkout. The adapter starts the standalone `tracedecay dashboard` server
 //! and mounts its root in Hermes; all UI assets come from the one
-//! `dashboard/app-dist` build embedded by `crate::dashboard::assets`.
+//! `dashboard/app-dist` build, which the root crate's `dashboard::assets`
+//! embeds. Nothing here reaches for those bytes — the wrapper only proxies to
+//! the running server — so this is a note about where the assets originate,
+//! not a dependency.
 //!
 //! On hosts whose Hermes predates dashboard-plugin discovery the deployed
 //! directory is inert: the agent-plugin loader only reads `plugin.yaml` and
