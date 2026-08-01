@@ -8,10 +8,11 @@ use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
     http_agent, pick_free_port, wait_for_dashboard,
 };
+use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
@@ -29,7 +30,7 @@ struct Fixture {
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
-    host_runtime: Arc<HostAdmissionTestRuntimeV1>,
+    host_runtime: Arc<DashboardTestRuntimeV1>,
 }
 
 impl Drop for Fixture {
@@ -103,7 +104,7 @@ fn message(
         .build()
 }
 
-async fn seed_session_store(runtime: &HostAdmissionTestRuntimeV1, project: &Path) {
+async fn seed_session_store(runtime: &DashboardTestRuntimeV1, project: &Path) {
     assert!(
         runtime
             .upsert_session_for_test(HostAdmissionScope::Project, &session(project))
@@ -289,8 +290,8 @@ fn observability_event(
     }
 }
 
-async fn seed_durable_analytics(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
+    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -359,8 +360,8 @@ fn seed_hook_analytics(project_root: &Path) {
     .expect("write hook analytics");
 }
 
-async fn seed_durable_recent_window(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_durable_recent_window(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
+    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
     let mut events: Vec<_> = (0..10_000)
         .map(|offset| analytics_event(&project_id, 1_760_000_000 + offset, "older_noise"))
         .collect();
@@ -375,8 +376,8 @@ async fn seed_durable_recent_window(runtime: &HostAdmissionTestRuntimeV1, projec
         .expect("append durable analytics events");
 }
 
-async fn seed_fallback_analytics(runtime: &HostAdmissionTestRuntimeV1, project_root: &Path) {
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(project_root);
+async fn seed_fallback_analytics(runtime: &DashboardTestRuntimeV1, project_root: &Path) {
+    let project_id = DashboardTestRuntimeV1::canonical_project_key(project_root);
     let rows = [
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
@@ -421,7 +422,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let project_id =
         tracedecay_domain::ProjectId::new("dashboard_analytics_fixture").expect("project identity");
     let host_runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
             .expect("analytics host-admission runtime"),
     );
@@ -445,12 +446,16 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
+        let authority = server_runtime
+            .dashboard_test_authority()
+            .expect("dashboard analytics authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
-            server_runtime,
+            authority,
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
+            dashboard::spa_router(),
             std::future::pending(),
         )
         .await;
@@ -787,7 +792,7 @@ fn observatory_counts_canonical_failed_outcomes() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
-        let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
         fixture
             .host_runtime
             .append_analytics_event_for_test(

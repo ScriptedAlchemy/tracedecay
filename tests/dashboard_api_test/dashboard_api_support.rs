@@ -11,11 +11,10 @@ pub(crate) use crate::common::{
     fake_codex_bin, get_json, http_agent, http_agent_with_timeout, install_fake_codex_launcher,
     pick_free_port, response_to_json, tempdir_or_panic, wait_for_dashboard,
 };
+pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
-pub(crate) use tracedecay::application::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
+pub(crate) use tracedecay::application::host_admission::HostAdmissionScope;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
 pub(crate) use tracedecay::errors::TraceDecayError;
@@ -69,7 +68,7 @@ pub(crate) struct DashboardFixture {
     pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
-    pub(crate) host_runtime: Arc<HostAdmissionTestRuntimeV1>,
+    pub(crate) host_runtime: Arc<DashboardTestRuntimeV1>,
     pub(crate) project_graphs: dashboard::DashboardTestProjectGraphsV1,
     pub(crate) server: DashboardServer,
 }
@@ -112,7 +111,7 @@ pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> D
 
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
     cg: TraceDecay,
-    host_runtime: Arc<HostAdmissionTestRuntimeV1>,
+    host_runtime: Arc<DashboardTestRuntimeV1>,
     project_graphs: dashboard::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
@@ -122,7 +121,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
 fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
     host_authority: Option<(
-        Arc<HostAdmissionTestRuntimeV1>,
+        Arc<DashboardTestRuntimeV1>,
         dashboard::DashboardTestProjectGraphsV1,
     )>,
     port: u16,
@@ -139,12 +138,16 @@ fn spawn_dashboard_server_with_runner(
                     dashboard::DashboardTestProjectGraphsV1::default(),
                 ),
             };
+            let authority = host_runtime
+                .dashboard_test_authority()
+                .expect("dashboard test authority");
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
-                Arc::clone(&cg),
-                host_runtime,
+                cg.clone(),
+                authority,
                 project_graphs,
                 "127.0.0.1",
                 port,
+                dashboard::spa_router(),
                 async move {
                     let _ = shutdown_rx.await;
                 },
@@ -173,7 +176,7 @@ pub(crate) fn write_file(path: &Path, content: &str) {
 
 pub(crate) async fn setup_project(
     project_root: &Path,
-) -> (TraceDecay, Arc<HostAdmissionTestRuntimeV1>) {
+) -> (TraceDecay, Arc<DashboardTestRuntimeV1>) {
     write_file(
         &project_root.join("src/lib.rs"),
         "pub fn seed_fixture() -> &'static str { \"dashboard\" }\n",
@@ -197,7 +200,7 @@ pub(crate) async fn setup_project(
         global_db_path: None,
     };
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(&profile_root, project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile_root, project_root, project_id)
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
     );
@@ -208,9 +211,7 @@ pub(crate) async fn setup_project(
     (graph, runtime)
 }
 
-pub(crate) async fn open_dashboard_host_runtime(
-    cg: &TraceDecay,
-) -> Arc<HostAdmissionTestRuntimeV1> {
+pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<DashboardTestRuntimeV1> {
     let project_id = cg
         .store_layout()
         .identity
@@ -220,7 +221,7 @@ pub(crate) async fn open_dashboard_host_runtime(
         .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project id"));
     let project_id_text = project_id.as_str().to_owned();
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(
+        DashboardTestRuntimeV1::project(
             tracedecay::storage::default_profile_root()
                 .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
             cg.project_root(),
@@ -473,7 +474,7 @@ pub(crate) fn fixture_fact_id(
         .unwrap_or_else(|| panic!("seeded dashboard fact not found for prefix: {content_prefix}"))
 }
 
-pub(crate) async fn seed_lcm_fixture(runtime: &HostAdmissionTestRuntimeV1, project_path: &Path) {
+pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_path: &Path) {
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
@@ -730,11 +731,8 @@ async fn start_dashboard_fixture_with_options(
         panic!("failed to enroll dashboard fixture in profile storage: {err}");
     }
 
-    // `setup_project` pre-creates the global and session stores from the
-    // cached empty template, so the init-time registry write, LCM seeding,
-    // and the dashboard server's startup LCM resolve + catch-up ingest all
-    // open existing DBs instead of each paying a full schema creation (slow
-    // on Windows).
+    // Root composition retains the exact graph and registered database
+    // authorities for the server lifetime.
     let (cg, host_runtime) = setup_project(&project_root).await;
     if seed_memory {
         seed_memory_fixture(&cg).await;
@@ -834,19 +832,14 @@ pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str)
     }
 }
 
-/// Opens (creating if needed) the resolved project session store — profile
-/// sharded by default, project-local only for explicit or legacy projects.
-/// A missing store is written from the cached empty-schema template so the
-/// open skips full schema creation (a large fixed cost on Windows).
-pub(crate) async fn open_project_session_store(
-    project_root: &Path,
-) -> Arc<HostAdmissionTestRuntimeV1> {
+/// Opens the resolved registered project session authority.
+pub(crate) async fn open_project_session_store(project_root: &Path) -> Arc<DashboardTestRuntimeV1> {
     let project_id = tracedecay::storage::read_repository_identity_marker(project_root)
         .unwrap_or_else(|error| panic!("read dashboard project identity: {error}"))
         .and_then(|marker| ProjectId::new(marker.project_id).ok())
         .unwrap_or_else(|| panic!("dashboard fixture requires an authoritative project identity"));
     Arc::new(
-        HostAdmissionTestRuntimeV1::project(
+        DashboardTestRuntimeV1::project(
             tracedecay::storage::default_profile_root()
                 .unwrap_or_else(|error| panic!("resolve dashboard test profile root: {error}")),
             project_root,

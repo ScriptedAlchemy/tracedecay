@@ -17,7 +17,7 @@ async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<Trace
         .upsert_code_project(&target_project_id, &target_root, None, None, None)
         .await
         .expect("register retained target project");
-    fixture.project_graphs.register(Arc::clone(&target_cg));
+    fixture.project_graphs.register(target_cg.clone());
     (target_root, target_cg)
 }
 
