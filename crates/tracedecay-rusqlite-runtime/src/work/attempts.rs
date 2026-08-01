@@ -480,7 +480,7 @@ pub(crate) fn persist_registered_attempt_artifacts(
                 MigrationSqlValue::Integer(to_sql_u64(revision)?),
             ])
             .collect();
-        transaction
+        let outcome = transaction
             .execute(
                 migration_statement(
                     "INSERT INTO work_attempt_artifacts_v1 (
@@ -496,6 +496,13 @@ pub(crate) fn persist_registered_attempt_artifacts(
                 .map_err(|_| AttemptStoreError::Unavailable)?,
             )
             .map_err(|_| AttemptStoreError::Unavailable)?;
+        // A fresh insert stored this exact `(artifact_id, digest, byte_length)`
+        // row, so the verify below would count it and pass; only a swallowed
+        // conflict — a prior row under the same key — needs the round trip to
+        // confirm its digest and length still match this replay.
+        if outcome.changed_rows == 1 {
+            continue;
+        }
         let rows = registered_work_query(
             transaction,
             "SELECT COUNT(*)

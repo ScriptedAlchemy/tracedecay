@@ -5,11 +5,17 @@
 //! [`writes`] the fact/anchor/projection rows around them, and [`reads`] the
 //! two read operations.
 
-use rusqlite::{Savepoint, Transaction, params};
-use tracedecay_domain::FactOwnerV1;
+use std::collections::HashSet;
+
+use rusqlite::{Savepoint, Transaction, params, params_from_iter};
+use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId};
 use tracedecay_store::{FactReadOperationV1, FactReadResultV1, FactWriteBatch};
 
 use super::support::{encode, invalid};
+
+/// The largest `anchor_id IN (...)` batch one referenced-anchor availability
+/// probe binds, kept clear of SQLite's default variable ceiling.
+const REFERENCED_ANCHOR_BATCH: usize = 500;
 
 mod assertion;
 mod reads;
@@ -35,19 +41,7 @@ impl FactExecutor {
         }
 
         ensure_fact(savepoint, &owner, batch)?;
-        for anchor_id in batch.referenced_anchor_ids() {
-            let exists = savepoint.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM retrieval_anchors
-                    WHERE anchor_id = ?1 AND owner_json = ?2
-                 )",
-                params![anchor_id.as_str(), owner.json],
-                |row| row.get::<_, bool>(0),
-            )?;
-            if !exists {
-                return Err(invalid("fact references an unavailable retrieval anchor"));
-            }
-        }
+        require_referenced_anchors_available(savepoint, &owner, batch.referenced_anchor_ids())?;
         for anchor in batch.new_anchors() {
             insert_anchor(savepoint, &owner, anchor)?;
         }
@@ -105,6 +99,47 @@ impl FactExecutor {
             }
         }
     }
+}
+
+/// Confirms every anchor a fact references is present under the fact's owner.
+///
+/// This replaces a `SELECT EXISTS` per referenced anchor with one batched
+/// `anchor_id IN (...)` load per chunk: the referenced set is proven available
+/// exactly when every id comes back present, which is the same "all must exist"
+/// contract the per-anchor loop enforced, down to the error it raises.
+fn require_referenced_anchors_available(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    anchor_ids: &[RetrievalAnchorId],
+) -> rusqlite::Result<()> {
+    if anchor_ids.is_empty() {
+        return Ok(());
+    }
+    let mut present: HashSet<String> = HashSet::new();
+    for chunk in anchor_ids.chunks(REFERENCED_ANCHOR_BATCH) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("?{}", index + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!(
+            "SELECT anchor_id FROM retrieval_anchors
+             WHERE owner_json = ?1 AND anchor_id IN ({placeholders})",
+        ))?;
+        let mut bindings: Vec<&str> = Vec::with_capacity(chunk.len() + 1);
+        bindings.push(owner.json.as_str());
+        bindings.extend(chunk.iter().map(RetrievalAnchorId::as_str));
+        let rows =
+            statement.query_map(params_from_iter(bindings), |row| row.get::<_, String>(0))?;
+        for row in rows {
+            present.insert(row?);
+        }
+    }
+    for anchor_id in anchor_ids {
+        if !present.contains(anchor_id.as_str()) {
+            return Err(invalid("fact references an unavailable retrieval anchor"));
+        }
+    }
+    Ok(())
 }
 
 /// The three columns every fact row is filed under, derived once per operation.
