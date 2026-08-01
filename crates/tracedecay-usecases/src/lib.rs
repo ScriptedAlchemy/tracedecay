@@ -10,6 +10,14 @@ pub mod config;
 pub mod configuration;
 pub mod context;
 pub mod dashboard_diagnostics;
+// Moved down from the root binary (`src/diagnose.rs`,
+// `src/diagnostics_store.rs`, `src/diagnostics_publication.rs`,
+// `src/diagnostics_query.rs`): their whole closure is the runtime kernel plus
+// `tracedecay-domain`/`tracedecay-store`. See SEAMS.md.
+pub mod diagnose;
+pub mod diagnostics_publication;
+pub mod diagnostics_query;
+pub mod diagnostics_store;
 pub mod doctor_remediation;
 pub mod edit;
 // Widened from `pub(crate)`: the root shim re-exports this crate, and root
