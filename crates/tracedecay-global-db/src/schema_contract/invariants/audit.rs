@@ -616,11 +616,14 @@ fn validate_provenance_row(
 ) -> tracedecay_runtime_core::errors::Result<()> {
     let provenance = projection.provenance();
     let message = projection.message();
+    let output_digest = projection.output_digest().map_err(|_| {
+        authority_violation("projection output digest is not canonically derivable")
+    })?;
     if actual.retrieval_anchor_id != provenance.retrieval_anchor_id().as_str()
         || actual.receipt_id != provenance.receipt_id()
         || actual.output_provider != message.provider
         || actual.output_message_id != message.message_id
-        || actual.output_digest != projection.output_digest().as_str()
+        || actual.output_digest != output_digest.as_str()
         || !matches!(actual.message_created, 0 | 1)
     {
         return Err(authority_violation(

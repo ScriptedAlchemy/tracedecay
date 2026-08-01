@@ -296,7 +296,8 @@ pub(super) async fn persist_occurrence(
                 ),
             )
         })?;
-    let expected = canonical_occurrence(conn, &observation, output.output_ordinal()).await?;
+    let expected =
+        canonical_occurrence(conn, &observation, &projection, output.output_ordinal()).await?;
     if occurrence != &expected {
         return Err(storage_message(
             PERSIST_OPERATION,
@@ -457,16 +458,21 @@ pub(super) async fn persist_occurrence(
     Ok(inserted)
 }
 
+/// Derives the canonical occurrence for one already-derived projection output.
+///
+/// The projection is threaded in by the caller rather than re-derived here: a
+/// single observation can produce many outputs, and re-deriving its projection
+/// per ordinal repeated the whole canonical-JSON plus SHA-256 sweep for a value
+/// the caller already holds.
 pub(super) async fn canonical_occurrence(
     conn: &impl QueryExecutor,
     observation: &tracedecay_domain::DurableObservationV1,
+    projection: &tracedecay_store::ObservationProjection,
     output_ordinal: u32,
 ) -> SessionStoreResult<MessageOccurrenceRecordV1> {
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(observation.payload().clone())
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let projection =
-        derive_projection(observation).map_err(|error| storage(PERSIST_OPERATION, error))?;
     let output = projection
         .messages()
         .find(|candidate| candidate.output_ordinal() == output_ordinal)

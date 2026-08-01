@@ -243,11 +243,15 @@ pub(super) async fn materialize_effect_occurrences(
     let mut occurrences = Vec::with_capacity(item_count);
     for (observation_id, _, output_count) in effects {
         let (_, observation) = read_observation(conn, observation_id).await?;
+        // One derivation per observation, reused across all of its outputs.
+        let projection =
+            derive_projection(&observation).map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
         for output_ordinal in 0..*output_count {
             occurrences.push(
                 canonical_occurrence(
                     conn,
                     &observation,
+                    &projection,
                     u32::try_from(output_ordinal)
                         .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
                 )
