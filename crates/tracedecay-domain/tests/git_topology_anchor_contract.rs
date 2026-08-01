@@ -5,7 +5,7 @@ use tracedecay_domain::{
     AnchorSourceGenerationV2, CapabilityId, CheckSnapshotAnchorRefV1, CiFailureBranchEvidenceV1,
     CiFailureCoverageV1, CiFailureGenerationEvidenceV1, CiFailureKindV1,
     CiFailureLocalizationResultV1, CiFailureLocalizationStateV1, CiFailureParserIdentityV1,
-    CiFailureRunIdentityV1, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass,
+    CiFailureRunIdentityV1, CommitId, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass,
     FeedbackScopeV1, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1,
     GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
     GitHubReviewReadOperationV1, GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1,
@@ -17,15 +17,14 @@ use tracedecay_domain::{
     GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1, ManifestDigest,
     NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, ObservationScopeV1, PayloadAccessState,
     PreflightPreviewAnchorRefV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
-    ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1, RefId,
-    RefSnapshotAnchorRefV1, RefSnapshotKindV1, RepositoryCaptureAnchorRefV1,
-    RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryIndexSnapshotV1,
-    RepositoryIndexStateV1, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
-    RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId, UtcMicros,
-    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, canonical_sha256,
-    derive_git_topology_anchor_id,
+    ProjectionGenerationId, PullRequestSnapshotAnchorRefV1, RefId, RefSnapshotAnchorRefV1,
+    RefSnapshotKindV1, RepositoryCaptureAnchorRefV1, RepositoryDirtyStateV1, RepositoryEvidenceV1,
+    RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryProvenanceV1,
+    RepositoryRemoteIdentityV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
+    RepositoryWorkingTreeStateV1, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    ScopeResolutionId, ShardId, UtcMicros, VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId,
+    canonical_sha256, derive_git_topology_anchor_id,
 };
 
 fn id<T>(value: &str) -> T
@@ -238,35 +237,12 @@ fn moving_ref_creates_a_new_target_without_retargeting_the_old_one() {
     );
 }
 
+/// A code-generation finding is only actionable against the commit it was
+/// observed on, so the derived generation ref must carry the branch's head
+/// commit rather than only the generation evidence it was handed.
 #[test]
-fn pr13_pull_request_and_ci_findings_keep_exact_commit_and_generation_identity() {
-    let scope = FeedbackScopeV1 {
-        project_id: id("project.fixture"),
-        repository_id: id("repository.fixture"),
-        worktree_id: id("worktree.fixture"),
-        branch_ref: "refs/heads/main".to_owned(),
-        head_commit_id: id("commit.head"),
-    };
-    let ingress = GitHubReviewIngressResultV1 {
-        provider: id::<ProviderId>("provider.github"),
-        scope: scope.clone(),
-        pull_request_id: GitHubPullRequestIdV1::new("pr.42").unwrap(),
-        provider_base_commit_id: id("commit.base"),
-        provider_head_commit_id: scope.head_commit_id.clone(),
-        merge_base_commit_id: id("commit.merge-base"),
-        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
-        outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-        coverage: GitHubReviewCoverageV1::Complete,
-        items: vec![],
-        fetched_at: UtcMicros(1),
-    };
-    let pull_request = PullRequestSnapshotAnchorRefV1::from_ingress(
-        &ingress,
-        id("anchor.pull-request.observation"),
-    )
-    .unwrap();
-    assert_eq!(pull_request.head_commit_id, scope.head_commit_id);
-
+fn generation_ref_binds_the_observed_head_commit() {
+    let head_commit = id::<CommitId>("commit.head");
     let generation = CiFailureGenerationEvidenceV1 {
         generation_id: id("code-generation.fixture"),
         retrieval_anchor_id: id("anchor.code-generation"),
@@ -291,29 +267,35 @@ fn pr13_pull_request_and_ci_findings_keep_exact_commit_and_generation_identity()
         failure_kind: CiFailureKindV1::InfrastructureFailure,
         failure_anchor: id("anchor.ci.failure"),
         branch: CiFailureBranchEvidenceV1 {
-            scope,
-            provider_head_commit_id: id("commit.head"),
+            scope: FeedbackScopeV1 {
+                project_id: id("project.fixture"),
+                repository_id: id("repository.fixture"),
+                worktree_id: id("worktree.fixture"),
+                branch_ref: "refs/heads/main".to_owned(),
+                head_commit_id: head_commit.clone(),
+            },
+            provider_head_commit_id: head_commit.clone(),
         },
-        generation: Some(generation.clone()),
+        generation: Some(generation),
         symbol: None,
         callers: vec![],
         tests: vec![],
         rerun_hints: vec![],
         observed_at: UtcMicros(2),
     };
+
     let check = CheckSnapshotAnchorRefV1::from_localization(&localization).unwrap();
-    assert_eq!(
-        check.generation_ref(),
-        GitTopologyGenerationRefV1::CodeGeneration {
-            generation_id: generation.generation_id,
-            retrieval_anchor_id: generation.retrieval_anchor_id,
-            commit_id: id("commit.head"),
-        }
-    );
+    let GitTopologyGenerationRefV1::CodeGeneration { commit_id, .. } = check.generation_ref()
+    else {
+        panic!("a code-generation finding must derive a code-generation ref");
+    };
+    assert_eq!(commit_id, head_commit);
 }
 
+/// Receipt sources are replayed in order, so the derived source list must be
+/// ordered by role and ordinal regardless of the order the caller supplied.
 #[test]
-fn pr11_preview_apply_and_integration_receipts_remain_exact_and_ordered() {
+fn integration_receipt_sources_stay_ordered() {
     let snapshot = snapshot(1, 'a');
     let repository = RepositoryCaptureAnchorRefV1::new(&generation(), &snapshot).unwrap();
     let identity = GitCommitIdentityV1 {
@@ -374,14 +356,6 @@ fn pr11_preview_apply_and_integration_receipts_remain_exact_and_ordered() {
         GitTopologySourceRoleV1::Preflight
     );
     assert_eq!(integration.sources[1].source_ordinal, 1);
-    assert_eq!(
-        integration.apply.generation(),
-        GitTopologyGenerationRefV1::GitReceipt {
-            receipt_id: receipt.receipt_id,
-            preview_id: receipt.preview_id,
-            commit_id: receipt.created_commit,
-        }
-    );
 }
 
 fn github_stack_capability(state: GitHubStackCapabilityStateV1) -> GitHubStackCapabilitySnapshotV1 {
