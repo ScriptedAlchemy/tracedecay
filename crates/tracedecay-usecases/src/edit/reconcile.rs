@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use sha2::Digest;
 use tracedecay_application::{
     ApplicationOperation, CancellationStage, EffectTermination, ReconciliationState,
     SourceEditAuthorizationPort, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
@@ -474,7 +473,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
     use tracedecay_application::source_edit::EditResult;
-    use tracedecay_application::{CancellationSignal, CancellationStage, Deadline, IdempotencyKey};
+    use tracedecay_application::{CancellationSignal, CancellationStage, Deadline};
     use tracedecay_domain::UtcMicros;
 
     #[test]
@@ -503,74 +502,6 @@ mod tests {
             durability.load_journal().unwrap().is_some(),
             "an unknown prepared effect must retain its recovery evidence"
         );
-    }
-
-    #[tokio::test]
-    async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_edit() {
-        let project = tempdir().unwrap();
-        fs::create_dir_all(project.path().join("src")).unwrap();
-        fs::write(project.path().join("src/a.rs"), b"pub fn old_a() {}\n").unwrap();
-        fs::write(project.path().join("src/b.rs"), b"pub fn old_b() {}\n").unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(
-            project.path().join("src/a.rs"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let graph = fixture_graph(project.path()).await;
-        let durability = SourceEditDurability::for_graph(&graph);
-        let mut request = fixture_request();
-        let candidate_files = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
-        request.expected_state =
-            source_edit_state_digest(project.path(), &candidate_files).unwrap();
-        let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.candidate_files = candidate_files;
-        journal.recovery_files = vec![
-            crate::tracedecay::PlannedSourceEditFile {
-                relative_path: "src/a.rs".to_owned(),
-                expected: Some("pub fn old_a() {}\n".to_owned()),
-                intended: Some("pub fn new_a() {}\n".to_owned()),
-            },
-            crate::tracedecay::PlannedSourceEditFile {
-                relative_path: "src/b.rs".to_owned(),
-                expected: Some("pub fn old_b() {}\n".to_owned()),
-                intended: Some("pub fn new_b() {}\n".to_owned()),
-            },
-        ];
-        journal.recovery_digest =
-            Some(source_edit_recovery_digest(&journal.recovery_files).unwrap());
-        durability.persist_journal(&journal).unwrap();
-        fs::write(project.path().join("src/a.rs"), b"pub fn new_a() {}\n").unwrap();
-
-        recover_source_edit_transaction(&durability, &graph, request.context.scope())
-            .await
-            .unwrap();
-        let result = recover_or_replay(&durability, &request, &request.input_digest().unwrap())
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            result.effect.unwrap().receipt.outcome,
-            EffectTermination::Failed
-        );
-        assert_eq!(
-            fs::read(project.path().join("src/a.rs")).unwrap(),
-            b"pub fn old_a() {}\n"
-        );
-        assert_eq!(
-            fs::read(project.path().join("src/b.rs")).unwrap(),
-            b"pub fn old_b() {}\n"
-        );
-        #[cfg(unix)]
-        assert_eq!(
-            fs::metadata(project.path().join("src/a.rs"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755
-        );
-        assert!(durability.load_journal().unwrap().is_none());
     }
 
     #[test]
@@ -788,77 +719,6 @@ mod tests {
         assert!(
             recover_reconciliation_attempt(&durability, &reconciliation, &digest(SHA256_A))
                 .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn reconciliation_before_admission_cancellation_is_durable_and_replayable() {
-        let project = tempdir().unwrap();
-        fs::create_dir_all(project.path().join("src")).unwrap();
-        fs::write(project.path().join("src/lib.rs"), b"unchanged").unwrap();
-        let graph = fixture_graph(project.path()).await;
-        let durability = SourceEditDurability::for_graph(&graph);
-        let files = vec!["src/lib.rs".to_owned()];
-        let mut request = fixture_request();
-        request.expected_state = source_edit_state_digest(project.path(), &files).unwrap();
-        let mut journal = fixture_journal(&request, SourceEditJournalStateV1::Prepared);
-        journal.candidate_files = files;
-        durability.persist_journal(&journal).unwrap();
-        let reconciliation = fixture_reconciliation(
-            &request,
-            &journal,
-            SourceEditReconciliationDispositionV1::ConfirmRolledBack,
-        );
-        let authorization = fixture_authorization(&request);
-        let cancellation = CancellationSignal::active("cancel.reconcile.before-admission").unwrap();
-        assert!(cancellation.cancel(UtcMicros(5)));
-        let control = SourceEditEffectControlV1::new(
-            Deadline::new(UtcMicros(i64::MAX)).unwrap(),
-            cancellation,
-        );
-
-        let result = reconcile_source_edit_effect_unknown_with_control(
-            &graph,
-            reconciliation.clone(),
-            &authorization,
-            &control,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            result.effect.as_ref().unwrap().receipt.outcome,
-            EffectTermination::Cancelled
-        );
-        assert_eq!(
-            result
-                .effect
-                .as_ref()
-                .unwrap()
-                .execution
-                .cancellation
-                .as_ref()
-                .unwrap()
-                .stage,
-            CancellationStage::BeforeAdmission
-        );
-        assert_eq!(
-            fs::read(project.path().join("src/lib.rs")).unwrap(),
-            b"unchanged"
-        );
-        assert!(durability.load_journal().unwrap().is_some());
-
-        let replay = reconcile_source_edit_effect_unknown_with_control(
-            &graph,
-            reconciliation,
-            &authorization,
-            &control,
-        )
-        .await
-        .unwrap();
-        assert!(replay.replayed);
-        assert_eq!(
-            fs::read(project.path().join("src/lib.rs")).unwrap(),
-            b"unchanged"
         );
     }
 

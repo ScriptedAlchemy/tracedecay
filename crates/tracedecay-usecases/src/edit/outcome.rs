@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::Digest;
 use tracedecay_application::{ApiMigrationApplyResultV1, EffectResult, SourceEditVerificationV1};
 use tracedecay_domain::ManifestDigest;
 

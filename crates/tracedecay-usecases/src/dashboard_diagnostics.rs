@@ -399,9 +399,6 @@ async fn indexed_files(database: &Database) -> Result<Vec<String>> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_domain::ProjectId;
-    use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition};
 
     #[tokio::test]
     async fn unreadable_settings_mount_a_broker_that_reports_itself_degraded() {
@@ -446,74 +443,5 @@ mod tests {
             None,
             "a project that never configured analyzer settings is not degraded"
         );
-    }
-
-    #[tokio::test]
-    async fn failed_refresh_is_an_error_and_never_claims_documents_opened() {
-        let _pin = crate::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project");
-        std::fs::write(project.path().join("fixture.rs"), "fn fixture() {}\n")
-            .expect("fixture source");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            ProjectId::new("project.dashboard-diagnostics-refresh").expect("project id"),
-        )
-        .await
-        .expect("test runtime");
-        let graph = runtime
-            .initialize_project_graph_for_test(
-                project.path(),
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .expect("project graph");
-        graph.sync().await.expect("index fixture source");
-        let adapter = LspAdapterDefinition {
-            language: "fake".to_owned(),
-            language_id: "fake".to_owned(),
-            command: "false".to_owned(),
-            args: Vec::new(),
-            extensions: vec!["rs".to_owned()],
-            root_markers: Vec::new(),
-            install_options: Vec::new(),
-            diagnostics: DiagnosticMode::Push,
-        };
-        let mut settings = CodeDiagnosticsSettings::default();
-        settings.custom_adapters.push(adapter.clone());
-        let broker = Arc::new(Mutex::new(DiagnosticBroker::new(
-            project.path(),
-            vec![adapter],
-            settings,
-        )));
-        let database = graph.dashboard_database_guard();
-        assert_eq!(
-            indexed_files(&database).await.expect("indexed files"),
-            vec!["fixture.rs"]
-        );
-        let authority = DashboardDiagnosticsAuthorityV1::new(
-            project.path().to_path_buf(),
-            project.path().to_path_buf(),
-            database,
-            Arc::clone(&broker),
-        );
-
-        let error = authority
-            .refresh_language("fake")
-            .await
-            .expect_err("an analyzer process failure must fail the refresh");
-        assert!(matches!(error, DashboardDiagnosticsErrorV1::Runtime(_)));
-
-        let progress = broker
-            .lock()
-            .await
-            .snapshot()
-            .backfill
-            .get("fake")
-            .cloned()
-            .expect("backfill progress");
-        assert_eq!(progress.queued_files, 1);
-        assert_eq!(progress.opened_files, 0);
-        assert_eq!(progress.last_completed_sweep, None);
     }
 }

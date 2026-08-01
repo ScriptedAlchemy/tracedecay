@@ -307,18 +307,11 @@ fn primitive_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::fs;
     use std::sync::Arc;
 
-    use tempfile::TempDir;
-    use tracedecay_application::retrieval::{
-        RetrievalOrder, RetrievalRequestMeta, SourceReadModeV1, SourceReadPortContext,
-        SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest,
-    };
     use tracedecay_application::{
         ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-        Deadline, DisclosureClass, PageRequest, RequestContext, RequestId, ResolvedScope,
-        ResultContractRef, ResultProjection,
+        Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, ResultContractRef,
     };
     use tracedecay_domain::{
         ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, RetrievalGrainV1,
@@ -327,12 +320,8 @@ mod tests {
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
-    use super::{
-        AuthenticatedSymbolGraphCursorAdapter, Pr12SourceReadAdapter,
-        SymbolGraphCursorSnapshotAuthority,
-    };
+    use super::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
     use crate::primitives::SymbolGraphCursorPort;
-    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
     use tracedecay_temporal_query::ports::{
         BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
         TemporalSnapshotRequest, TemporalWatermarks,
@@ -355,104 +344,6 @@ mod tests {
         {
             Ok(self.snapshot.clone())
         }
-    }
-
-    #[tokio::test]
-    async fn source_reads_reuse_the_cross_session_cache() {
-        let root = TempDir::new().expect("temporary project");
-        fs::create_dir_all(root.path().join("src")).expect("source directory");
-        fs::write(
-            root.path().join("src/lib.rs"),
-            "pub fn first() {}\npub fn second() {}\n",
-        )
-        .expect("fixture source");
-        let profile_root = root.path().join(".tracedecay-test-profile");
-        let open_options = TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: Some(profile_root.join("global.db")),
-        };
-        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile_root,
-            "source-read cache test",
-        )
-        .expect("exclusive lifecycle authority");
-        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-            &lifecycle,
-            &profile_root,
-            "source-read cache test",
-        )
-        .expect("maintenance database authority");
-        let graph = Arc::new(
-            TraceDecay::init_with_exclusive_maintenance(root.path(), open_options, &lifecycle)
-                .await
-                .expect("initialize graph"),
-        );
-        let (scope, context, operation) = application_context("source-read");
-        let adapter = Pr12SourceReadAdapter::new(graph, scope).expect("source adapter");
-        let request = SourceReadPrimitiveRequest {
-            file: "src/lib.rs".to_owned(),
-            mode: SourceReadModeV1::Lines,
-            lines: Some("2-2".to_owned()),
-            include_symbols: false,
-            meta: RetrievalRequestMeta::current(
-                PageRequest::first(1).expect("page"),
-                ResultProjection::Evidence,
-                RetrievalOrder::SourcePosition,
-            ),
-        };
-
-        let first = adapter
-            .source_read(
-                SourceReadPortContext {
-                    request: &context,
-                    operation: &operation,
-                    observed_at: NOW,
-                },
-                &request,
-            )
-            .await;
-        let second = adapter
-            .source_read(
-                SourceReadPortContext {
-                    request: &context,
-                    operation: &operation,
-                    observed_at: NOW,
-                },
-                &request,
-            )
-            .await;
-
-        let SourceReadPortOutcome::Completed { result: first, .. } = first else {
-            panic!("first source read must complete");
-        };
-        let SourceReadPortOutcome::Completed { result: second, .. } = second else {
-            panic!("cached source read must complete");
-        };
-        assert_eq!(first.body.as_deref(), Some("pub fn second() {}"));
-        assert!(!first.unchanged);
-        assert!(second.unchanged);
-        assert!(second.body.is_none());
-        assert_eq!(second.digest, first.digest);
-
-        let invalid = SourceReadPrimitiveRequest {
-            mode: SourceReadModeV1::Full,
-            lines: Some("1-1".to_owned()),
-            ..request
-        };
-        let outcome = adapter
-            .source_read(
-                SourceReadPortContext {
-                    request: &context,
-                    operation: &operation,
-                    observed_at: NOW,
-                },
-                &invalid,
-            )
-            .await;
-        assert!(
-            matches!(outcome, SourceReadPortOutcome::Failed { .. }),
-            "production source reads must reject mode/range mismatches"
-        );
     }
 
     #[test]

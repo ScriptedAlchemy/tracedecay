@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Digest;
 use tracedecay_application::{
     CancellationObservation, DirectorySyncPolicy, EffectId, EffectResult,
     SourceEditVerificationStateV1, SourceEditVerificationV1, sync_parent_directory,
