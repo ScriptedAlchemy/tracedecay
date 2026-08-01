@@ -364,8 +364,12 @@ where
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
         for candidate in &batch.candidates {
-            let evidence =
-                lane_bound_evidence(batch, candidate, RetrieverKind::Lexical, &LEXICAL_REJECTIONS)?;
+            let evidence = lane_bound_evidence(
+                batch,
+                candidate,
+                RetrieverKind::Lexical,
+                &LEXICAL_REJECTIONS,
+            )?;
             evidence.validate_against_validated_request(request)?;
             let mut filtered = evidence.clone();
             filtered
