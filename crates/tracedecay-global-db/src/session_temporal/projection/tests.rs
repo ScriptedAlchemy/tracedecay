@@ -21,10 +21,10 @@ use tracedecay_store::{
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
-use crate::application::host_admission::{
+use crate::session_temporal::GlobalDbSessionTemporalStore;
+use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
-use crate::store::session::GlobalDbSessionTemporalStore;
 use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
 
 fn fixture_session(value: &str) -> SessionId {

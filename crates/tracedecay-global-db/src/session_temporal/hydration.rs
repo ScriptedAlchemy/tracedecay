@@ -1207,7 +1207,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use tracedecay_query::temporal::ports::{
         BindingDigest, ExecutionLimits, KernelVersions, TemporalAuthorizedRoot, TemporalPortError,
         TemporalSnapshotRequest, TemporalWatermarks,
