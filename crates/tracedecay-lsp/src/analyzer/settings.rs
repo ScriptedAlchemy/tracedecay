@@ -228,15 +228,15 @@ fn replace_settings_file(staged: &Path, destination: &Path) -> AnalyzerResult<()
     Ok(())
 }
 
-fn sync_settings_directory(path: &Path) -> AnalyzerResult<()> {
-    let parent = path.parent().ok_or_else(|| {
-        AnalyzerRuntimeError::new(format!(
-            "code diagnostics settings path '{}' has no parent directory",
-            path.display()
-        ))
-    })?;
+fn sync_settings_directory(_path: &Path) -> AnalyzerResult<()> {
     #[cfg(unix)]
     {
+        let parent = _path.parent().ok_or_else(|| {
+            AnalyzerRuntimeError::new(format!(
+                "code diagnostics settings path '{}' has no parent directory",
+                _path.display()
+            ))
+        })?;
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| {
