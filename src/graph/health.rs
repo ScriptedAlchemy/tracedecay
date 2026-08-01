@@ -13,6 +13,14 @@ use std::hash::BuildHasher;
 
 use super::scc::tarjan_scc;
 
+// The four structural-health value types are the shared authority in
+// `tracedecay-usecases`; re-export them so root callers keep a single type
+// identity. The `delta`, `snapshot`, and `test_risk` submodules and the
+// algorithm functions below have no usecases counterpart and remain root-owned.
+pub use tracedecay_usecases::graph::health::{
+    DepthChain, DepthResult, DsmCluster, HealthDimensions,
+};
+
 // ---------------------------------------------------------------------------
 // Task 2: Gini Coefficient
 // ---------------------------------------------------------------------------
@@ -108,24 +116,6 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
 // ---------------------------------------------------------------------------
 // Task 4: Dependency Depth
 // ---------------------------------------------------------------------------
-
-/// A chain entry representing a file and the longest dependency chain reaching it.
-pub struct DepthChain {
-    pub file: String,
-    /// Every file in this chain entry's strongly connected component. Files in
-    /// one SCC share the same collapsed-DAG depth.
-    pub scc_files: Vec<String>,
-    pub depth: usize,
-    pub chain: Vec<String>,
-}
-
-/// Result of the dependency depth analysis.
-pub struct DepthResult {
-    pub max_depth: usize,
-    /// `ceil(log2(file_count))`
-    pub ideal_depth: usize,
-    pub chains: Vec<DepthChain>,
-}
 
 /// Computes longest dependency chains. Breaks cycles via Tarjan's SCC
 /// (collapses each SCC to a single node), then runs topo sort + DP.
@@ -260,23 +250,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         max_depth,
         ideal_depth,
         chains: results,
-    }
-}
-
-/// One directory cluster in the Design Structure Matrix ordering.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DsmCluster {
-    pub directory: String,
-    pub file_count: usize,
-    pub internal_edges: usize,
-    pub outgoing_edges: usize,
-    pub incoming_edges: usize,
-}
-
-impl DsmCluster {
-    #[must_use]
-    pub const fn boundary_edges(&self) -> usize {
-        self.outgoing_edges + self.incoming_edges
     }
 }
 
@@ -469,19 +442,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
 // ---------------------------------------------------------------------------
 // Task 6: Composite Health Score
 // ---------------------------------------------------------------------------
-
-/// All five health dimensions, each in \[0.0, 1.0\].
-#[derive(Debug, Clone)]
-pub struct HealthDimensions {
-    pub acyclicity: f64,
-    pub depth: f64,
-    pub equality: f64,
-    pub redundancy: f64,
-    pub modularity: f64,
-    /// Penalty for overuse of `/// skip-test-coverage` annotations.
-    /// 1.0 = no skips, decays towards 0.0 as skip ratio increases.
-    pub coverage_discipline: f64,
-}
 
 /// Computes quality signal (0–10000) from geometric mean of all five dimensions.
 /// Formula: `(product of all 5).powf(1.0/5.0) * 10000.0`, rounded.
