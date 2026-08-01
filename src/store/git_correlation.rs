@@ -35,7 +35,7 @@ pub struct GlobalDbGitCorrelationStore<D> {
 
 impl<D> GlobalDbGitCorrelationStore<D>
 where
-    D: Borrow<RegisteredGlobalDb> + Sync,
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     pub(crate) const fn new(db: D) -> Self {
         Self { db }
@@ -106,18 +106,22 @@ where
         Ok(attributed)
     }
 
-    pub(crate) async fn run_backfill<E: AnalyticsSessionTimestampSource>(
+    pub(crate) async fn run_backfill<E, G>(
         &self,
         analytics_events: &[E],
-        git: &dyn GitReflogSource,
+        git: &G,
         opts: &BackfillOptions,
-    ) -> Result<BackfillStats, GitCorrelationError> {
+    ) -> Result<BackfillStats, GitCorrelationError>
+    where
+        E: AnalyticsSessionTimestampSource,
+        G: GitReflogSource + ?Sized,
+    {
         run_backfill(self, analytics_events, git, opts).await
     }
 
-    pub(crate) async fn run_incremental_backfill(
+    pub(crate) async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
         &self,
-        git: &dyn GitReflogSource,
+        git: &G,
         limit_sessions: usize,
     ) -> Result<BackfillStats, GitCorrelationError> {
         run_incremental_backfill(self, git, limit_sessions).await
@@ -142,7 +146,7 @@ where
 
 impl<D> GitCorrelationSessionStore for GlobalDbGitCorrelationStore<D>
 where
-    D: Borrow<RegisteredGlobalDb> + Sync,
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     type WriteTxn<'txn>
         = RegisteredGlobalDbWriteTransaction<'txn>

@@ -42,7 +42,7 @@ where
 
 impl<D> SessionIngestAuthority for GlobalDbSessionIngestAuthority<D>
 where
-    D: Borrow<RegisteredGlobalDb> + Sync,
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     type GitStore<'store>
         = GlobalDbGitCorrelationStore<&'store RegisteredGlobalDb>
@@ -50,12 +50,12 @@ where
         Self: 'store;
 
     type WorkflowSink<'store>
-        = GlobalDbWorkflowStore<'store>
+        = GlobalDbWorkflowStore<&'store RegisteredGlobalDb>
     where
         Self: 'store;
 
     type TranscriptStore<'store>
-        = GlobalDbTranscriptStore<'store>
+        = GlobalDbTranscriptStore<&'store RegisteredGlobalDb>
     where
         Self: 'store;
 
