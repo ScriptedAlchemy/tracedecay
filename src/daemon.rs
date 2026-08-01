@@ -168,6 +168,9 @@ use lsp_sessions::{
     update_connection_lsp_sessions,
 };
 mod maintenance;
+mod maintenance_tasks;
+pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
+use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 #[path = "daemon/git_watch/store_maintenance.rs"]
 mod store_maintenance;
 pub(crate) use lsp_gateway::{
@@ -249,47 +252,6 @@ pub(crate) mod workflow_runtime;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
-
-/// Enables background maintenance only for long-lived daemon/MCP processes.
-///
-/// Session-store mounts retain the registered database authority for the
-/// lifetime of each maintenance task. One-shot commands never enable it.
-pub fn mark_process_long_lived_for_session_maintenance() {
-    store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
-}
-
-const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_hours(24);
-
-struct SemanticArtifactGcMaintenanceTask(JoinHandle<()>);
-
-impl Drop for SemanticArtifactGcMaintenanceTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
-    SemanticArtifactGcMaintenanceTask(tokio::spawn(async {
-        let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
-        loop {
-            interval.tick().await;
-            let Some(owner) = crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
-            else {
-                continue;
-            };
-            let now_unix = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if owner.run_daemon_artifact_gc(now_unix).is_err() {
-                log_daemon_event(
-                    "semantic_artifact_gc",
-                    &[("outcome", "retry_next_interval".to_owned())],
-                );
-            }
-        }
-    }))
-}
 
 pub(crate) mod transport;
 #[cfg(test)]
