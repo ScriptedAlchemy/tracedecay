@@ -1,7 +1,6 @@
 //! Exact Context Scout lifecycle lookup from canonical durable observations.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::{
     AgentInstanceId, CanonicalObservationEnvelopeV1, DurableObservationV1, MessageId,
@@ -11,23 +10,27 @@ use tracedecay_store::StoreShardScopeV1;
 
 use crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1;
 use crate::global_db::RegisteredGlobalDb;
+use crate::support::weak_registry::WeakRegistry;
 
 const MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1: usize = 64;
 
 type ContextScoutLifecycleKeyV1 = ([u8; 16], [u8; 16]);
-type ContextScoutLifecycleAuthoritiesV1 =
-    Mutex<BTreeMap<ContextScoutLifecycleKeyV1, ContextScoutLifecycleLookupAuthorityV1>>;
+type ContextScoutLifecycleAuthoritiesV1 = WeakRegistry<
+    ContextScoutLifecycleKeyV1,
+    RegisteredGlobalDb,
+    ContextScoutLifecycleLookupAuthorityMetaV1,
+>;
 
-struct ContextScoutLifecycleLookupAuthorityV1 {
+#[derive(Clone)]
+struct ContextScoutLifecycleLookupAuthorityMetaV1 {
     profile_id: UserProfileId,
     project_id: ProjectId,
     worktree_id: WorktreeId,
-    sessions: Weak<RegisteredGlobalDb>,
 }
 
 fn registered_context_scout_lifecycle_authorities() -> &'static ContextScoutLifecycleAuthoritiesV1 {
     static AUTHORITIES: OnceLock<ContextScoutLifecycleAuthoritiesV1> = OnceLock::new();
-    AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
+    AUTHORITIES.get_or_init(WeakRegistry::new)
 }
 
 pub(crate) fn register_context_scout_lifecycle_authority(
@@ -54,27 +57,23 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     if authority_project_id != &project_id {
         return false;
     }
-    let mut authorities = registered_context_scout_lifecycle_authorities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let authorities = registered_context_scout_lifecycle_authorities();
     let key = (hook_project_id, hook_worktree_id);
-    if let Some(existing) = authorities.get(&key)
-        && let Some(existing_sessions) = existing.sessions.upgrade()
-    {
-        return existing.profile_id == profile_id
-            && existing.project_id == project_id
-            && existing.worktree_id == worktree_id
+    if let Some((existing_meta, existing_sessions)) = authorities.get_live_with_meta(&key) {
+        return existing_meta.profile_id == profile_id
+            && existing_meta.project_id == project_id
+            && existing_meta.worktree_id == worktree_id
             && Arc::ptr_eq(&existing_sessions, sessions);
     }
-    authorities.retain(|_, authority| authority.sessions.strong_count() > 0);
-    authorities.insert(
+    authorities.retain_live();
+    authorities.insert_with_meta(
         key,
-        ContextScoutLifecycleLookupAuthorityV1 {
+        ContextScoutLifecycleLookupAuthorityMetaV1 {
             profile_id,
             project_id,
             worktree_id,
-            sessions: Arc::downgrade(sessions),
         },
+        sessions,
     );
     true
 }
@@ -90,8 +89,6 @@ fn context_scout_lifecycle_authority_is_registered(
     hook_worktree_id: [u8; 16],
 ) -> bool {
     registered_context_scout_lifecycle_authorities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains_key(&(hook_project_id, hook_worktree_id))
 }
 
@@ -111,16 +108,9 @@ fn resolve_authority(
     WorktreeId,
     Arc<RegisteredGlobalDb>,
 )> {
-    let authorities = registered_context_scout_lifecycle_authorities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
-    Some((
-        authority.profile_id.clone(),
-        authority.project_id.clone(),
-        authority.worktree_id.clone(),
-        authority.sessions.upgrade()?,
-    ))
+    let (meta, sessions) = registered_context_scout_lifecycle_authorities()
+        .get_live_with_meta(&(hook_project_id, hook_worktree_id))?;
+    Some((meta.profile_id, meta.project_id, meta.worktree_id, sessions))
 }
 
 pub(crate) async fn lookup_registered_context_scout_lifecycle(

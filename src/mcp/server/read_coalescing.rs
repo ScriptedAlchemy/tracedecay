@@ -4,7 +4,7 @@
 //! arguments. Completed results are removed immediately, so this never becomes
 //! a cross-generation response cache or widens a project's privacy boundary.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -12,13 +12,14 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::mcp::tools::{ToolResult, get_tool_definitions};
+use crate::support::weak_registry::WeakRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ReadFlightKey([u8; 32]);
 
 #[derive(Default)]
 struct ReadCoalescingInner {
-    flights: Mutex<HashMap<ReadFlightKey, Weak<ReadFlight>>>,
+    flights: WeakRegistry<ReadFlightKey, ReadFlight>,
     leaders: AtomicU64,
     followers: AtomicU64,
 }
@@ -67,22 +68,17 @@ impl IdenticalReadCoalescer {
         scope_prefix: Option<&str>,
     ) -> ReadFlightClaim {
         let key = read_flight_key(engine_identity, tool_name, arguments, scope_prefix);
-        let mut flights = self
-            .inner
-            .flights
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        flights.retain(|_, flight| flight.strong_count() > 0);
-        if let Some(flight) = flights.get(&key).and_then(Weak::upgrade) {
+        let (flight, hit) = self.inner.flights.get_or_insert_with(key, || {
+            Arc::new(ReadFlight {
+                state: Mutex::new(ReadFlightState::Pending),
+                completed: tokio::sync::Notify::new(),
+            })
+        });
+        if hit {
             self.inner.followers.fetch_add(1, Ordering::Relaxed);
             return ReadFlightClaim::Follower(flight);
         }
 
-        let flight = Arc::new(ReadFlight {
-            state: Mutex::new(ReadFlightState::Pending),
-            completed: tokio::sync::Notify::new(),
-        });
-        flights.insert(key, Arc::downgrade(&flight));
         self.inner.leaders.fetch_add(1, Ordering::Relaxed);
         ReadFlightClaim::Leader(ReadFlightLeader {
             key,
@@ -94,13 +90,8 @@ impl IdenticalReadCoalescer {
 
     pub(super) fn snapshot(&self) -> ReadCoalescingSnapshot {
         let active_flights = {
-            let mut flights = self
-                .inner
-                .flights
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            flights.retain(|_, flight| flight.strong_count() > 0);
-            flights.len()
+            self.inner.flights.retain_live();
+            self.inner.flights.len()
         };
         ReadCoalescingSnapshot {
             leaders: self.inner.leaders.load(Ordering::Relaxed),
@@ -147,17 +138,7 @@ impl ReadFlightLeader {
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
-        let mut flights = owner
-            .flights
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let registered_here = flights
-            .get(&self.key)
-            .and_then(Weak::upgrade)
-            .is_some_and(|flight| Arc::ptr_eq(&flight, &self.flight));
-        if registered_here {
-            flights.remove(&self.key);
-        }
+        owner.flights.remove_if_same(&self.key, &self.flight);
     }
 }
 
