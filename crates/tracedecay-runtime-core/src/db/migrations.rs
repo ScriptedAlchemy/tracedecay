@@ -368,9 +368,7 @@ pub async fn migrate_connection(conn: &Connection) -> Result<bool> {
 /// maintenance runtime is consumed because a whole-file rebuild invalidates
 /// reader connections opened against the previous file image.
 #[cfg(test)]
-pub async fn migrate_with_exclusive_maintenance(
-    database: crate::db::Database,
-) -> Result<bool> {
+pub async fn migrate_with_exclusive_maintenance(database: crate::db::Database) -> Result<bool> {
     let result = {
         let writer = database
             .writer_connection("migrate schema under exclusive maintenance")
@@ -525,10 +523,7 @@ async fn run_migrations_through(conn: &Transaction, current: u32, target: u32) -
 }
 
 #[cfg(test)]
-pub async fn migrate_test_connection_to_version(
-    conn: &Connection,
-    target: u32,
-) -> Result<()> {
+pub async fn migrate_test_connection_to_version(conn: &Connection, target: u32) -> Result<()> {
     if target > LATEST_VERSION {
         return Err(TraceDecayError::Database {
             message: format!(

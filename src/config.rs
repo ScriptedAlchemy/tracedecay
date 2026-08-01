@@ -246,49 +246,12 @@ impl SemanticConfig {
     }
 }
 
-/// Directory-name segments treated as generated or vendored content:
-/// build output, package-manager caches, and vendored dependencies.
-///
-/// This is the single source of truth for "what counts as generated" and is
-/// shared by four call sites that used to hand-maintain independent lists
-/// which had drifted out of sync with each other:
-///
-/// - [`is_excluded`] / [`default_exclude_patterns`] below (config-driven,
-///   glob-pattern based — this list seeds the *default* patterns, but a
-///   project's `config.exclude` can still be overridden by the user).
-/// - `tracedecay::scan::TraceDecay::is_skipped_dir_hint` (an informational
-///   hint only; the authoritative gate there is still [`is_excluded_dir`]).
-/// - `migrate::inventory::should_prune_dir` (authoritative directory prune
-///   during migration inventory scans).
-/// - `mcp::tools::handlers::redundancy::is_generated_path` (candidate
-///   filtering for the duplicate-code scanner).
-///
-/// Each call site may still layer its own local additions on top where
-/// something is specific to that tool's purpose (see call-site comments);
-/// this list only covers the shared "generated/vendored" core.
-pub const GENERATED_DIR_SEGMENTS: &[&str] = &[
-    ".cache",
-    ".gradle",
-    ".next",
-    ".turbo",
-    ".venv",
-    ".worktrees",
-    "__pycache__",
-    "build",
-    "coverage",
-    "dist",
-    "node_modules",
-    "out",
-    "target",
-    "vendor",
-    "venv",
-];
-
-/// Returns `true` if `segment` (a single path component, e.g. a directory
-/// name) is one of the shared [`GENERATED_DIR_SEGMENTS`].
-pub fn is_generated_dir_segment(segment: &str) -> bool {
-    GENERATED_DIR_SEGMENTS.contains(&segment)
-}
+/// The shared generated/vendored segment list and its membership test moved
+/// into `tracedecay_runtime_core::config`: the extracted migration inventory
+/// scanner consults them and cannot reach back into the root crate.
+/// Re-exported so every historical `crate::config::<item>` path keeps
+/// resolving.
+pub use tracedecay_runtime_core::config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
 
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix

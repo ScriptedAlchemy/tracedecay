@@ -13,9 +13,7 @@ mod value;
 
 pub use connection::{Connection, ReadConnection};
 pub use error::{Error, Result};
-pub use executor::{
-    DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor,
-};
+pub use executor::{DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor};
 pub use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub use row::{Row, Rows};
 pub use snapshot::ReadSnapshot;

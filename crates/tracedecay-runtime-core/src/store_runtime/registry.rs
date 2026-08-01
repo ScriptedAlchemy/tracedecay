@@ -36,43 +36,41 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 
 #[cfg(test)]
-pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
-pub(crate) use attachment::{
-    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime,
-};
-pub(crate) use capacity::{
+pub use attachment::EmptyPhysicalRuntimeAttachment;
+pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime};
+pub use capacity::{
     DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES, StoreRuntimeRegistryConfig,
 };
-pub(crate) use close::ClosedStoreRuntime;
-pub(crate) use leases::{
+pub use close::ClosedStoreRuntime;
+pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
     StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
-pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin, StoreRuntimeOpenResult};
-pub(crate) use ports::{
+pub use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin, StoreRuntimeOpenResult};
+pub use ports::{
     LifecycleShardRuntimePublisher, ResolvedStoreLocator, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct StoreRuntimeKey {
+pub struct StoreRuntimeKey {
     shard_id: StoreShardIdV1,
     incarnation: StoreIncarnationV1,
 }
 
 impl StoreRuntimeKey {
-    pub(crate) fn new(shard_id: StoreShardIdV1, incarnation: StoreIncarnationV1) -> Self {
+    pub fn new(shard_id: StoreShardIdV1, incarnation: StoreIncarnationV1) -> Self {
         Self {
             shard_id,
             incarnation,
         }
     }
 
-    pub(crate) fn shard_id(&self) -> &StoreShardIdV1 {
+    pub fn shard_id(&self) -> &StoreShardIdV1 {
         &self.shard_id
     }
 
-    pub(crate) const fn incarnation(&self) -> StoreIncarnationV1 {
+    pub const fn incarnation(&self) -> StoreIncarnationV1 {
         self.incarnation
     }
 
@@ -90,7 +88,7 @@ impl StoreRuntimeKey {
 }
 
 #[derive(Clone)]
-pub(crate) struct StoreRuntimeHandle {
+pub struct StoreRuntimeHandle {
     inner: Arc<StoreRuntimeHandleInner>,
 }
 
@@ -189,31 +187,52 @@ impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
 }
 
 impl StoreRuntimeHandle {
-    pub(crate) fn publication(&self) -> &StoreRuntimeRegistryPublicationV1 {
+    pub fn publication(&self) -> &StoreRuntimeRegistryPublicationV1 {
         &self.inner.publication
     }
 
-    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.inner.publication.binding
     }
 
-    pub(crate) fn runtime(&self) -> &Arc<ShardRuntime> {
+    pub fn runtime(&self) -> &Arc<ShardRuntime> {
         &self.inner.runtime
     }
 
-    pub(crate) fn locator(&self) -> &RuntimeLocatorRecord {
+    pub fn locator(&self) -> &RuntimeLocatorRecord {
         &self.inner.locator
     }
 
-    pub(crate) fn opened_file_identity(&self) -> Option<u64> {
+    /// Canonical path of the attached database.
+    pub fn canonical_path(&self) -> &std::path::Path {
+        self.locator().path()
+    }
+
+    /// Verified locator this attachment was published against.
+    pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.locator().verified()
+    }
+
+    /// Whether the physical attachment currently holds a writer.
+    pub fn writer_present(&self) -> bool {
+        self.physical_snapshot().writer_present
+    }
+
+    /// Stable identity of the underlying physical runtime, so two facades can
+    /// be compared for attachment sharing.
+    pub fn runtime_identity(&self) -> usize {
+        Arc::as_ptr(self.runtime()).cast::<()>() as usize
+    }
+
+    pub fn opened_file_identity(&self) -> Option<u64> {
         Some(self.inner.opened_file_identity)
     }
 
-    pub(crate) fn schema_migrated(&self) -> bool {
+    pub fn schema_migrated(&self) -> bool {
         self.inner.schema_migrated
     }
 
-    pub(crate) fn database_authority(
+    pub fn database_authority(
         &self,
         operation: &'static str,
     ) -> Result<crate::db::DatabaseAuthority, StoreRuntimeRegistryFailure> {
@@ -227,18 +246,18 @@ impl StoreRuntimeHandle {
         Ok(authority)
     }
 
-    pub(crate) fn validate_registered_read(
+    pub fn validate_registered_read(
         &self,
         operation: &'static str,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
         self.validate_opened_file_identity(operation).map(|_| ())
     }
 
-    pub(crate) fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
+    pub fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
         self.inner.attachment.snapshot()
     }
 
-    pub(crate) fn storage_page_counts(
+    pub fn storage_page_counts(
         &self,
         reader_wait: Duration,
     ) -> Result<(u64, u64, u64), StoreRuntimeRegistryFailure> {
@@ -257,7 +276,7 @@ impl StoreRuntimeHandle {
         Ok(counts)
     }
 
-    pub(crate) fn storage_table_bytes(
+    pub fn storage_table_bytes(
         &self,
         reader_wait: Duration,
     ) -> Result<Vec<(String, u64)>, StoreRuntimeRegistryFailure> {
@@ -276,7 +295,7 @@ impl StoreRuntimeHandle {
         Ok(tables)
     }
 
-    pub(crate) async fn run_bounded_incremental_compaction(
+    pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
         authority: crate::db::DatabaseAuthority,
@@ -310,7 +329,7 @@ impl StoreRuntimeHandle {
         Ok(())
     }
 
-    pub(crate) async fn run_checkpoint(
+    pub async fn run_checkpoint(
         &self,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
         authority: crate::db::DatabaseAuthority,
@@ -331,7 +350,7 @@ impl StoreRuntimeHandle {
         Ok(outcome)
     }
 
-    pub(crate) async fn snapshot_to(
+    pub async fn snapshot_to(
         &self,
         destination: PathBuf,
         authority: crate::db::DatabaseAuthority,
@@ -373,7 +392,7 @@ impl StoreRuntimeHandle {
     ///
     /// This capability does not accept `DatabaseAuthority` and cannot recover
     /// the attachment's writer sender through `with_write_authority`.
-    pub(crate) fn telemetry_read_handle(
+    pub fn telemetry_read_handle(
         &self,
     ) -> Result<
         tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
@@ -396,7 +415,7 @@ impl StoreRuntimeHandle {
         Ok(handle.read_only_clone())
     }
 
-    pub(crate) fn authorized_migration_sql_handle(
+    pub fn authorized_migration_sql_handle(
         &self,
         authority: crate::db::DatabaseAuthority,
     ) -> Result<
@@ -452,7 +471,7 @@ impl StoreRuntimeHandle {
             })
     }
 
-    pub(crate) async fn dispatch_submit_authorized(
+    pub async fn dispatch_submit_authorized(
         &self,
         request: tracedecay_store::RuntimeSubmitRequestV1,
         probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
@@ -524,7 +543,7 @@ impl StoreRuntimeHandle {
         Ok(opened_file_identity)
     }
 
-    pub(crate) fn dispatch_read(
+    pub fn dispatch_read(
         &self,
         request: tracedecay_store::RuntimeReadRequestV1,
         probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
@@ -562,141 +581,6 @@ impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeHandle {
     }
 }
 
-/// Kernel-facing view of a registered runtime.
-///
-/// `tracedecay_runtime_core` retains runtimes as `Arc<dyn StoreRuntimeSource>`
-/// because this registry depends on `db::DatabaseAuthority`, a kernel type, and
-/// therefore cannot live below it. Registry failures cross as strings: every
-/// kernel call site only `Debug`-formats them.
-impl tracedecay_runtime_core::ports::StoreRuntimeSource for StoreRuntimeHandle {
-    fn opened_file_identity(&self) -> Option<u64> {
-        StoreRuntimeHandle::opened_file_identity(self)
-    }
-
-    fn canonical_path(&self) -> &std::path::Path {
-        self.locator().path()
-    }
-
-    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
-        self.locator().verified()
-    }
-
-    fn binding(&self) -> &StoreRuntimeBindingV1 {
-        StoreRuntimeHandle::binding(self)
-    }
-
-    fn schema_migrated(&self) -> bool {
-        StoreRuntimeHandle::schema_migrated(self)
-    }
-
-    fn writer_present(&self) -> bool {
-        self.physical_snapshot().writer_present
-    }
-
-    fn validate_registered_read(&self, operation: &'static str) -> Result<(), String> {
-        StoreRuntimeHandle::validate_registered_read(self, operation)
-            .map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn telemetry_read_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
-        StoreRuntimeHandle::telemetry_read_handle(self).map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn authorized_migration_sql_handle(
-        &self,
-        authority: crate::db::DatabaseAuthority,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
-        StoreRuntimeHandle::authorized_migration_sql_handle(self, authority)
-            .map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn database_authority(
-        &self,
-        operation: &'static str,
-    ) -> Result<crate::db::DatabaseAuthority, String> {
-        StoreRuntimeHandle::database_authority(self, operation)
-            .map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
-        StoreRuntimeHandle::storage_page_counts(self, reader_wait)
-            .map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn run_bounded_incremental_compaction<'a>(
-        &'a self,
-        max_pages: u64,
-        authority: crate::db::DatabaseAuthority,
-    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<'a, Result<(), String>> {
-        Box::pin(async move {
-            StoreRuntimeHandle::run_bounded_incremental_compaction(self, max_pages, authority)
-                .await
-                .map_err(|failure| format!("{failure:?}"))
-        })
-    }
-
-    fn run_checkpoint<'a>(
-        &'a self,
-        request: tracedecay_rusqlite_runtime::CheckpointRequest,
-        authority: crate::db::DatabaseAuthority,
-    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
-        'a,
-        Result<tracedecay_rusqlite_runtime::CheckpointOutcome, String>,
-    > {
-        Box::pin(async move {
-            StoreRuntimeHandle::run_checkpoint(self, request, authority)
-                .await
-                .map_err(|failure| format!("{failure:?}"))
-        })
-    }
-
-    fn snapshot_to<'a>(
-        &'a self,
-        destination: PathBuf,
-        authority: crate::db::DatabaseAuthority,
-    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
-        'a,
-        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, String>,
-    > {
-        Box::pin(async move {
-            StoreRuntimeHandle::snapshot_to(self, destination, authority)
-                .await
-                .map_err(|failure| format!("{failure:?}"))
-        })
-    }
-
-    fn dispatch_submit_authorized<'a>(
-        &'a self,
-        request: tracedecay_store::RuntimeSubmitRequestV1,
-        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-        authority: crate::db::DatabaseAuthority,
-    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
-        'a,
-        Result<tracedecay_store::RuntimeSubmitOutcomeV1, String>,
-    > {
-        Box::pin(async move {
-            StoreRuntimeHandle::dispatch_submit_authorized(self, request, probe, authority)
-                .await
-                .map_err(|failure| format!("{failure:?}"))
-        })
-    }
-
-    fn dispatch_read(
-        &self,
-        request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
-    ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, String> {
-        StoreRuntimeHandle::dispatch_read(self, request, probe)
-            .map_err(|failure| format!("{failure:?}"))
-    }
-
-    fn runtime_identity(&self) -> usize {
-        Arc::as_ptr(self.runtime()).cast::<()>() as usize
-    }
-}
-
 impl fmt::Debug for StoreRuntimeHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -708,7 +592,7 @@ impl fmt::Debug for StoreRuntimeHandle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StoreRuntimeRegistryFailure {
+pub enum StoreRuntimeRegistryFailure {
     InvalidProjectCodeBudget {
         requested: usize,
         maximum: usize,
@@ -800,7 +684,7 @@ pub(crate) enum StoreRuntimeRegistryFailure {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum StoreRuntimeLookup {
+pub enum StoreRuntimeLookup {
     Ready(StoreRuntimeHandle),
     Opening {
         key: Box<StoreRuntimeKey>,
@@ -853,12 +737,12 @@ struct StoreRuntimeRegistryInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct StoreRuntimeRegistry {
+pub struct StoreRuntimeRegistry {
     inner: Arc<StoreRuntimeRegistryInner>,
 }
 
 impl StoreRuntimeRegistry {
-    pub(crate) fn new(
+    pub fn new(
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
     ) -> Self {
@@ -872,7 +756,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    pub(crate) fn with_config(
+    pub fn with_config(
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
         config: StoreRuntimeRegistryConfig,
@@ -880,7 +764,7 @@ impl StoreRuntimeRegistry {
         Self::with_config_and_authority_epoch_floor(resolver, publisher, config, None)
     }
 
-    pub(crate) fn with_config_and_authority_epoch_floor(
+    pub fn with_config_and_authority_epoch_floor(
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
         config: StoreRuntimeRegistryConfig,
@@ -900,7 +784,7 @@ impl StoreRuntimeRegistry {
         })
     }
 
-    pub(crate) fn lookup(&self, expected: &StoreRuntimeBindingV1) -> StoreRuntimeLookup {
+    pub fn lookup(&self, expected: &StoreRuntimeBindingV1) -> StoreRuntimeLookup {
         let key = StoreRuntimeKey::from_binding(expected);
         let state = self.lock_state();
         match state.entries.get(&key) {
@@ -948,10 +832,7 @@ impl StoreRuntimeRegistry {
     ///
     /// This does not revalidate or expose its retained writer authority. Any
     /// later write still enters the ordinary actor-time authority gates.
-    pub(crate) fn retained_runtime_for_read(
-        &self,
-        key: &StoreRuntimeKey,
-    ) -> Option<StoreRuntimeHandle> {
+    pub fn retained_runtime_for_read(&self, key: &StoreRuntimeKey) -> Option<StoreRuntimeHandle> {
         let state = self.lock_state();
         match state.entries.get(key) {
             Some(RegistryEntry::Ready(ready)) => Some(ready.handle.clone()),
@@ -959,7 +840,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    pub(crate) fn inventory(
+    pub fn inventory(
         &self,
         admission: AdmissionConfigV1,
         global_queued_bytes: u64,

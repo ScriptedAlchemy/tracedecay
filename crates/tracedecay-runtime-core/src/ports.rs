@@ -1,10 +1,15 @@
 //! Injection points for subsystems that stay above the kernel.
 //!
-//! The one-shot crate split moved the runtime kernel down but left four
-//! collaborators above it: the daemon store-runtime registry, the registered
-//! global database, the daemon session registry, and branch-admin recovery.
-//! Each is expressed here as a port the root crate registers into, so the
-//! kernel never names an upward module path.
+//! The one-shot crate split moved the runtime kernel down but left some
+//! collaborators above it: the registered global database, the daemon session
+//! registry, and branch-admin recovery. Each is expressed here as a port the
+//! root crate registers into, so the kernel never names an upward module path.
+//!
+//! The store-runtime registry is no longer one of them. `StoreRuntimeSource`
+//! existed only because `daemon::store_runtime` had stayed in the root; that
+//! tree now lives in `crate::store_runtime`, so `db::connection` retains the
+//! concrete `store_runtime::registry::StoreRuntimeHandle` directly and the port
+//! was deleted.
 //!
 //! Every port fails closed (or degrades to a documented no-op) when the root
 //! never registers, which keeps unit tests of the kernel alone runnable.
@@ -46,115 +51,62 @@ pub mod branch_admin_recovery {
     }
 }
 
-/// Source of daemon-owned physical store runtimes.
+/// Installer for the registered global/session schema.
 ///
-/// `db::connection` publishes a `Database` facade over a runtime the daemon
-/// registry already opened; the registry itself (`daemon::store_runtime`) sits
-/// above the kernel because it depends on `db::DatabaseAuthority`, which is a
-/// kernel type. The concrete handle is therefore retained opaquely: the kernel
-/// keeps it alive for as long as the facade lives and asks it only the
-/// questions below.
+/// `store_runtime::registry` initialises a freshly created profile- or
+/// session-scoped shard by running the registered global-database schema
+/// against the attachment it just opened. That schema lives in
+/// `tracedecay-global-db`, which already depends on `tracedecay-migrate`, which
+/// depends on this crate — so the kernel cannot name it without a Cargo cycle.
 ///
-/// The root crate implements this for
-/// `daemon::store_runtime::registry::StoreRuntimeHandle`. Registry-side
-/// failures are surfaced as strings because every kernel call site only
-/// `Debug`-formats them into a `TraceDecayError::Database`.
-pub trait StoreRuntimeSource: std::fmt::Debug + Send + Sync + 'static {
-    /// Descriptor-derived identity of the file this runtime attached to.
-    fn opened_file_identity(&self) -> Option<u64>;
+/// Unlike [`branch_admin_recovery`], this port **fails closed**: an
+/// uninitialised profile or session store is not safe to publish, so an
+/// unregistered installer refuses the open instead of pretending it converged.
+pub mod registered_schema {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::OnceLock;
 
-    /// Canonical path of the attached database (`locator().path()`).
-    fn canonical_path(&self) -> &std::path::Path;
+    use crate::db::engine::Connection;
+    use crate::errors::{Result, TraceDecayError};
 
-    /// Verified locator this attachment was published against
-    /// (`locator().verified()`).
-    fn verified_locator(&self) -> &tracedecay_store::VerifiedStoreLocatorV1;
+    /// Signature of the schema installer, boxed because it is stored as a
+    /// plain function pointer rather than a generic.
+    pub type Installer =
+        for<'a> fn(&'a Connection) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
-    /// Typed shard binding this attachment serves.
-    fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1;
+    static INSTALLER: OnceLock<Installer> = OnceLock::new();
 
-    /// Whether schema migrations already ran for this attachment.
-    fn schema_migrated(&self) -> bool;
-
-    /// Whether the physical attachment currently holds a writer
-    /// (`physical_snapshot().writer_present`).
-    fn writer_present(&self) -> bool;
-
-    /// Re-verifies that the attachment still refers to the file it opened.
+    /// Registers the root crate's registered-schema installer.
     ///
-    /// `operation` names the caller's intent for the error message.
-    fn validate_registered_read(&self, operation: &'static str) -> Result<(), String>;
+    /// Idempotent: the first registration wins, so concurrent daemon and CLI
+    /// initialisation cannot fight over it.
+    pub fn register(installer: Installer) {
+        let _ = INSTALLER.set(installer);
+    }
 
-    /// Read-only SQL handle for the retained attachment.
-    fn telemetry_read_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String>;
+    /// Whether an installer has been registered yet.
+    #[must_use]
+    pub fn is_registered() -> bool {
+        INSTALLER.get().is_some()
+    }
 
-    /// Write-authorized SQL handle for the retained attachment.
-    fn authorized_migration_sql_handle(
-        &self,
-        authority: crate::db::DatabaseAuthority,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String>;
-
-    /// Originating database authority retained when this runtime was
-    /// published writable.
-    fn database_authority(
-        &self,
-        operation: &'static str,
-    ) -> Result<crate::db::DatabaseAuthority, String>;
-
-    /// Samples `(page_count, freelist_count, page_size)` for store-size
-    /// telemetry, waiting at most `reader_wait` for a reader slot.
-    fn storage_page_counts(
-        &self,
-        reader_wait: std::time::Duration,
-    ) -> Result<(u64, u64, u64), String>;
-
-    /// Runs a bounded incremental vacuum through the canonical writer lane.
-    fn run_bounded_incremental_compaction<'a>(
-        &'a self,
-        max_pages: u64,
-        authority: crate::db::DatabaseAuthority,
-    ) -> StoreRuntimeFuture<'a, Result<(), String>>;
-
-    /// Runs a WAL checkpoint through the canonical writer lane.
-    fn run_checkpoint<'a>(
-        &'a self,
-        request: tracedecay_rusqlite_runtime::CheckpointRequest,
-        authority: crate::db::DatabaseAuthority,
-    ) -> StoreRuntimeFuture<'a, Result<tracedecay_rusqlite_runtime::CheckpointOutcome, String>>;
-
-    /// Copies one transactionally consistent snapshot to `destination`.
-    fn snapshot_to<'a>(
-        &'a self,
-        destination: std::path::PathBuf,
-        authority: crate::db::DatabaseAuthority,
-    ) -> StoreRuntimeFuture<'a, Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, String>>;
-
-    /// Submits an authorized typed runtime write.
-    fn dispatch_submit_authorized<'a>(
-        &'a self,
-        request: tracedecay_store::RuntimeSubmitRequestV1,
-        probe: std::sync::Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
-        authority: crate::db::DatabaseAuthority,
-    ) -> StoreRuntimeFuture<'a, Result<tracedecay_store::RuntimeSubmitOutcomeV1, String>>;
-
-    /// Dispatches a typed runtime read.
-    fn dispatch_read(
-        &self,
-        request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
-    ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, String>;
-
-    /// Stable identity of the underlying physical runtime, so two facades can
-    /// be compared for attachment sharing without exposing the runtime type.
-    fn runtime_identity(&self) -> usize;
+    /// Installs the registered global/session schema through `connection`.
+    ///
+    /// # Errors
+    /// Returns [`TraceDecayError::Database`] when no installer is registered,
+    /// or whatever the registered installer reports.
+    pub async fn ensure_registered_schema(connection: &Connection) -> Result<()> {
+        match INSTALLER.get() {
+            Some(installer) => installer(connection).await,
+            None => Err(TraceDecayError::Database {
+                message: "no registered global/session schema installer is registered; \
+                          the root crate must call \
+                          tracedecay_runtime_core::ports::registered_schema::register \
+                          before opening a profile or session shard"
+                    .to_owned(),
+                operation: "create initialized global/session schema".to_owned(),
+            }),
+        }
+    }
 }
-
-/// Boxed future returned by the asynchronous [`StoreRuntimeSource`] methods.
-/// The port is a trait object, so it cannot use `async fn` directly.
-pub type StoreRuntimeFuture<'a, T> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-
-/// Shared handle to a daemon-owned store runtime.
-pub type StoreRuntimeSourceHandle = std::sync::Arc<dyn StoreRuntimeSource>;

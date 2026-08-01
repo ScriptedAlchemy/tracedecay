@@ -27,9 +27,7 @@ pub use lease::enter_maintenance_database_scope;
 #[cfg(not(any(test, feature = "test-transport")))]
 pub use lease::enter_owned_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
-pub use lease::{
-    database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner,
-};
+pub use lease::{database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner};
 pub use owner_io::is_lock_contended;
 use owner_io::{
     authority_token, epoch_ms, open_lock_file, publish_record_atomically, read_owner,
@@ -142,11 +140,7 @@ pub struct OwnedMaintenanceDatabaseScope {
 impl MaintenanceDatabaseScope<'_> {
     /// Issues database authority for one exact artifact beneath this retained
     /// exclusive-maintenance profile scope.
-    pub fn database_authority(
-        &self,
-        db_path: &Path,
-        intent: &str,
-    ) -> Result<DatabaseAuthority> {
+    pub fn database_authority(&self, db_path: &Path, intent: &str) -> Result<DatabaseAuthority> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if identity.profile_root != self.profile_root {
             return Err(access_error(
@@ -646,7 +640,10 @@ fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
 /// trait belongs to `tracedecay_rusqlite_runtime` and the orphan rule allows
 /// it only in the crate that owns the type.
 impl MigrationSqlWriteAuthority for DatabaseAuthority {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> std::result::Result<(), MigrationSqlError> {
+    fn verify(
+        &self,
+        intent: MigrationSqlWriteIntent,
+    ) -> std::result::Result<(), MigrationSqlError> {
         let intent = match intent {
             MigrationSqlWriteIntent::Validate => "validate registered global database statement",
             MigrationSqlWriteIntent::Execute => "execute registered global database statement",

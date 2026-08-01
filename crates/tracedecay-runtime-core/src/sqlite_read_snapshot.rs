@@ -18,10 +18,7 @@ use crate::db::engine::{
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
-pub async fn backup_live_sqlite_database(
-    source: &Path,
-    destination: &Path,
-) -> io::Result<()> {
+pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> io::Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
     tokio::task::spawn_blocking(move || {

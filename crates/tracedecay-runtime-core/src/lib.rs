@@ -61,6 +61,7 @@
 
 pub mod branch;
 pub mod branch_meta;
+pub mod cancellation;
 pub mod config;
 pub mod db;
 pub mod errors;
@@ -78,6 +79,7 @@ pub mod serde_util;
 pub mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;
+pub mod store_runtime;
 pub mod sync;
 pub mod text;
 pub mod timeutil;
