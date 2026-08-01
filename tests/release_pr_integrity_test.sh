@@ -1,76 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-guard="$repo_root/scripts/check-release-pr-integrity.sh"
-fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT
+# shellcheck source=../scripts/lib/gate-test.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib/gate-test.sh"
 
-fail() {
-  echo "$1" >&2
-  exit 1
-}
+guard="$GATE_REPO_ROOT/scripts/check-release-pr-integrity.sh"
+repo="$GATE_SCRATCH/repo"
 
 new_repo() {
-  rm -rf "$fixture/repo"
-  mkdir -p "$fixture/repo"
-  git -C "$fixture/repo" init -q -b master
-  git -C "$fixture/repo" config user.name "Release Guard Test"
-  git -C "$fixture/repo" config user.email "release-guard@example.com"
-  printf '[package]\nname = "fixture"\nversion = "0.1.0"\n' >"$fixture/repo/Cargo.toml"
-  printf 'version = 3\n' >"$fixture/repo/Cargo.lock"
-  printf '# Changelog\n' >"$fixture/repo/CHANGELOG.md"
-  git -C "$fixture/repo" add Cargo.toml Cargo.lock CHANGELOG.md
-  git -C "$fixture/repo" commit -qm "initial"
+  rm -rf "$repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b master
+  git -C "$repo" config user.name "Release Guard Test"
+  git -C "$repo" config user.email "release-guard@example.com"
+  printf '[package]\nname = "fixture"\nversion = "0.1.0"\n' >"$repo/Cargo.toml"
+  printf 'version = 3\n' >"$repo/Cargo.lock"
+  printf '# Changelog\n' >"$repo/CHANGELOG.md"
+  git -C "$repo" add Cargo.toml Cargo.lock CHANGELOG.md
+  git -C "$repo" commit -qm "initial"
 }
 
 commit_all() {
-  git -C "$fixture/repo" add -A
-  git -C "$fixture/repo" commit -qm "$1"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm "$1"
+}
+
+head_sha() {
+  git -C "$repo" rev-parse HEAD
 }
 
 run_guard() {
-  (cd "$fixture/repo" && "$guard" "$@")
+  gate_run bash -c 'cd "$1" && shift && "$@"' _ "$repo" "$guard" "$@"
 }
 
 new_repo
-base=$(git -C "$fixture/repo" rev-parse HEAD)
-printf '\n## 0.2.0\n' >>"$fixture/repo/CHANGELOG.md"
-printf '[package]\nname = "fixture"\nversion = "0.2.0"\n' >"$fixture/repo/Cargo.toml"
+base=$(head_sha)
+printf '\n## 0.2.0\n' >>"$repo/CHANGELOG.md"
+printf '[package]\nname = "fixture"\nversion = "0.2.0"\n' >"$repo/Cargo.toml"
 commit_all "release"
-head=$(git -C "$fixture/repo" rev-parse HEAD)
-run_guard "$base" "$head"
+run_guard "$base" "$(head_sha)"
+gate_expect_success "release-only change"
 
 new_repo
-base=$(git -C "$fixture/repo" rev-parse HEAD)
-mkdir -p "$fixture/repo/src"
-printf 'pub fn unexpected() {}\n' >"$fixture/repo/src/lib.rs"
+base=$(head_sha)
+mkdir -p "$repo/src"
+printf 'pub fn unexpected() {}\n' >"$repo/src/lib.rs"
 commit_all "unexpected source change"
-head=$(git -C "$fixture/repo" rev-parse HEAD)
-if output=$(run_guard "$base" "$head" 2>&1); then
-  fail "unexpected source changes must fail without explicit approval"
-fi
-[[ "$output" == *"src/lib.rs"* ]] || fail "failure must name the unexpected path"
-run_guard "$base" "$head" --allow-extra-files >/dev/null 2>&1
+head=$(head_sha)
+run_guard "$base" "$head"
+gate_expect_failure "unexpected source changes must fail without explicit approval"
+gate_output_contains "unexpected source change" "src/lib.rs"
+run_guard "$base" "$head" --allow-extra-files
+gate_expect_success "explicit approval accepts extra files"
 
 new_repo
-base=$(git -C "$fixture/repo" rev-parse HEAD)
-rm "$fixture/repo/Cargo.toml"
+base=$(head_sha)
+rm "$repo/Cargo.toml"
 commit_all "delete manifest"
-head=$(git -C "$fixture/repo" rev-parse HEAD)
-if output=$(run_guard "$base" "$head" --allow-extra-files 2>&1); then
-  fail "approval must not permit deletion of release metadata"
-fi
-[[ "$output" == *"Cargo.toml"* ]] || fail "destructive metadata failure must name Cargo.toml"
+run_guard "$base" "$(head_sha)" --allow-extra-files
+gate_expect_failure "approval must not permit deletion of release metadata"
+gate_output_contains "delete manifest" "Cargo.toml"
 
 new_repo
-printf 'tracked.tmp\n' >"$fixture/repo/.gitignore"
-printf 'must remain visible to release tooling\n' >"$fixture/repo/tracked.tmp"
-git -C "$fixture/repo" add .gitignore
-git -C "$fixture/repo" add -f tracked.tmp
-git -C "$fixture/repo" commit -qm "track ignored file"
-head=$(git -C "$fixture/repo" rev-parse HEAD)
-if output=$(run_guard "$head" "$head" --allow-extra-files 2>&1); then
-  fail "tracked ignored files must fail even with extra-file approval"
-fi
-[[ "$output" == *"tracked.tmp"* ]] || fail "tracked ignored failure must name the path"
+printf 'tracked.tmp\n' >"$repo/.gitignore"
+printf 'must remain visible to release tooling\n' >"$repo/tracked.tmp"
+git -C "$repo" add .gitignore
+git -C "$repo" add -f tracked.tmp
+git -C "$repo" commit -qm "track ignored file"
+head=$(head_sha)
+run_guard "$head" "$head" --allow-extra-files
+gate_expect_failure "tracked ignored files must fail even with extra-file approval"
+gate_output_contains "tracked ignored file" "tracked.tmp"
