@@ -176,6 +176,22 @@ impl Default for UserConfig {
     }
 }
 
+impl tracedecay_agent_hosts::agents::InstalledAgentsConfig for UserConfig {
+    fn installed_agents(&self) -> &[String] {
+        &self.installed_agents
+    }
+
+    fn extend_installed_agents(&mut self, additions: Vec<String>) {
+        self.installed_agents.extend(additions);
+    }
+
+    fn save(&self) -> crate::errors::Result<()> {
+        UserConfig::save(self).map_err(|error| crate::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })
+    }
+}
+
 /// Returns the path to the user-level config file.
 pub fn config_path() -> Option<PathBuf> {
     crate::config::user_data_dir().map(|dir| dir.join("config.toml"))

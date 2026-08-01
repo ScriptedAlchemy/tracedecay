@@ -9,6 +9,9 @@ use tokio::sync::Mutex;
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
+use tracedecay_agent_hosts::ports::project_runtime::{
+    MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
+};
 use tracedecay_domain::RefId;
 use tracedecay_store::{
     CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -939,6 +942,42 @@ impl DaemonSessionRuntimeRegistryV1 {
             .code_graph(shard_id, database_path, database_authority)
             .await?;
         Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
+    }
+}
+
+impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
+    fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
+        Box::pin(DaemonSessionRuntimeRegistryV1::profile_sessions(self))
+    }
+
+    fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
+        Box::pin(crate::memory::user::open_user_memory_db(self))
+    }
+
+    fn curate_user_memory<'a>(
+        &'a self,
+        profile_root: &'a Path,
+        automation_root: &'a Path,
+        options: &'a AgentMemoryCurateOptions,
+    ) -> RuntimeFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            let memory_db = crate::memory::user::open_user_memory_db(self).await?;
+            let options = crate::dashboard::memory_curate::MemoryCurateOptions {
+                apply: options.apply,
+                llm: options.llm,
+                llm_ops: options.llm_ops.clone(),
+                max_clusters: options.max_clusters,
+                min_confidence: options.min_confidence,
+            };
+            crate::dashboard::memory_curate::run_user_memory_curate(
+                &memory_db,
+                memory_db.database_path(),
+                profile_root,
+                automation_root,
+                &options,
+            )
+            .await
+        })
     }
 }
 

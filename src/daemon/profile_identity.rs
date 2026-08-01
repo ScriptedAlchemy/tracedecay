@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_agent_hosts::ports::project_runtime::ProfileIdentity;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use crate::errors::{Result, TraceDecayError};
@@ -40,6 +41,16 @@ impl LocalProfileIdentityAuthorityV1 {
 
     pub(crate) fn profile_id(&self) -> &UserProfileId {
         &self.record.profile_id
+    }
+}
+
+impl ProfileIdentity for LocalProfileIdentityAuthorityV1 {
+    fn brain_id(&self) -> &BrainId {
+        LocalProfileIdentityAuthorityV1::brain_id(self)
+    }
+
+    fn profile_id(&self) -> &UserProfileId {
+        LocalProfileIdentityAuthorityV1::profile_id(self)
     }
 }
 
