@@ -981,7 +981,7 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
+async fn scheduler_notifications_remain_nonblocking_while_reconcile_is_busy() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -1015,13 +1015,16 @@ async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
 
     let notification_registry = registry.clone();
     let project_root = fixture.path().to_path_buf();
-    let edited_path = fixture.path().join("src/lib.rs");
     let notification = tokio::spawn(async move {
         notification_registry
-            .notify_path(&project_root, edited_path)
+            .notify_hook_paths(&project_root, &["src/lib.rs".to_owned()])
             .await
     });
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let notified = tokio::time::timeout(Duration::from_millis(100), notification)
+        .await
+        .expect("scheduler notification must not wait for the reconcile lock")
+        .expect("notification task");
+    assert!(notified);
 
     let registry_read = tokio::time::timeout(
         Duration::from_millis(100),
@@ -1034,7 +1037,6 @@ async fn scheduler_notifications_release_registry_while_reconcile_is_busy() {
     );
 
     release_tx.send(()).expect("release scheduler");
-    assert!(notification.await.expect("notification task"));
     blocker.join().expect("scheduler blocker");
     registry.shutdown().await;
 }
