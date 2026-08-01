@@ -1,12 +1,11 @@
 //! The dashboard's public Work contract.
 //!
-//! The routes themselves are built by
-//! [`crate::application_surface::dashboard_work_application_router_with_executor`]
-//! from the canonical [`WorkOperation`] descriptor — this module only restates
-//! that descriptor as the route document the dashboard contract schema
-//! publishes. There is no second route table and no forwarding hop: a dashboard
-//! Work request enters the same handler, owner, and dispatch as an application
-//! Work request, one segment of path apart.
+//! The routes themselves are built by [`tracedecay_api::work_core_router`] from
+//! the canonical [`WorkOperation`] descriptor — this module only restates that
+//! descriptor as the route document the dashboard contract schema publishes.
+//! There is no second route table and no forwarding hop: a dashboard Work
+//! request enters the same handler, owner, and dispatch as an application Work
+//! request, one segment of path apart.
 
 use std::borrow::Cow;
 
@@ -69,70 +68,27 @@ pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContr
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
+    use axum::response::IntoResponse;
     use tower::ServiceExt;
-    use tracedecay_api::WorkOperation;
-    use tracedecay_application::{
-        ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
-        ApplicationResponse, InvocationError,
-    };
-    use tracedecay_domain::{ManifestDigest, UtcMicros};
-
-    use crate::daemon_client::{
-        DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
-        InvocationCancellationPolicy,
-    };
-
-    struct UnavailableExecutor;
-
-    impl ApplicationInvocationExecutor for UnavailableExecutor {
-        fn invoke(
-            &self,
-            _invocation: ApplicationInvocation,
-        ) -> ApplicationInvocationFuture<'_, Result<ApplicationResponse, InvocationError>> {
-            Box::pin(async { Err(InvocationError::Unavailable) })
-        }
-    }
-
-    impl DaemonInvocationExecutor for UnavailableExecutor {
-        fn invoke_controlled(
-            &self,
-            _request: crate::daemon::DaemonInvocationRequest,
-            _deadline: tracedecay_application::Deadline,
-            _cancellation: tracedecay_application::CancellationSignal,
-            _policy: InvocationCancellationPolicy,
-        ) -> DaemonInvocationExecutorFuture<
-            '_,
-            Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError>,
-        > {
-            Box::pin(async { Err(DaemonInvocationError::Unavailable) })
-        }
-
-        fn observe_plan26_feedback(
-            &self,
-            _subject_digest: ManifestDigest,
-            _observed_at: UtcMicros,
-            _event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
-        ) -> DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>>
-        {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    use tracedecay_api::{WorkHttpRequest, WorkOperation};
+    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_domain::UtcMicros;
 
     fn dashboard_router() -> Router {
-        let executor: Arc<dyn DaemonInvocationExecutor> = Arc::new(UnavailableExecutor);
         Router::new().nest(
             "/api/work",
-            crate::application_surface::dashboard_work_application_router_with_executor(executor)
-                .expect("production dashboard Work router"),
+            tracedecay_api::work_core_router(|_request: WorkHttpRequest| async {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }),
         )
     }
 
     async fn post(router: &Router, uri: &str) -> StatusCode {
+        let cancellation =
+            CancellationSignal::active("cancellation.dashboard-work-test").expect("cancellation");
         router
             .clone()
             .oneshot(
@@ -140,6 +96,13 @@ mod tests {
                     .method(Method::POST)
                     .uri(uri)
                     .header("content-type", "application/json")
+                    .extension(
+                        RequestId::new("request.dashboard-work-test").expect("request identity"),
+                    )
+                    .extension(tracedecay_api::HttpApplicationControls {
+                        deadline: Deadline::new(UtcMicros(9_999_999)).expect("deadline"),
+                        cancellation,
+                    })
                     .body(Body::from("{}"))
                     .expect("dashboard Work request"),
             )

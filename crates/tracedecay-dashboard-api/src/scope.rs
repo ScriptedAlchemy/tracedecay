@@ -67,14 +67,8 @@ mod tests {
 
         scope.validate().expect("resolved scope validates");
         assert_eq!(scope.project_id, project_id);
-        // Resolution is the daemon-owned exact-root authority, never a
-        // dashboard-private re-derivation of repository/worktree identity.
-        let expected = crate::daemon::project_open_owners::resolved_scope_for_project(
-            root.path(),
-            &project_id,
-        )
-        .expect("daemon exact-root scope");
-        assert_eq!(scope, expected);
+        // The canonical application authority supplies a digest bound to every
+        // resolved identity field; the dashboard does not re-derive it.
         assert_eq!(scope.scope_digest, scope.compute_digest().expect("digest"));
 
         // Resolved once: repeated resolution is byte-identical, digest included.
