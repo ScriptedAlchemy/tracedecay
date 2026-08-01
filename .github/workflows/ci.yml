@@ -271,10 +271,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        run: |
-          set -euo pipefail
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -367,24 +366,7 @@ jobs:
           path: dashboard/app-dist
 
       - name: Tune Windows runner for build I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the compiler's many short-lived
-          # object/incremental files; hosted runners are elevated, so turn it
-          # off and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
+        uses: ./.github/actions/tune-windows-runner
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -435,31 +417,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for test I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
-          # files these tests create; hosted runners are elevated, so turn it off
-          # and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
-          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
-          # the nextest test processes follows.
-          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
-          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
-          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: ./.github/actions/tune-windows-runner
+        with:
+          redirect-temp: "true"
 
       - uses: actions/setup-node@v5
         with:
@@ -470,10 +430,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        shell: pwsh
-        run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -501,33 +460,7 @@ jobs:
 
       - name: Clean abandoned Windows test children
         if: always()
-        shell: pwsh
-        run: |
-          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $all = Get-CimInstance Win32_Process
-          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
-          foreach ($process in $all) {
-            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
-          }
-          $stale = foreach ($process in $all) {
-            if ($process.Name -ne "tracedecay.exe") {
-              continue
-            }
-            if (-not $process.CommandLine) {
-              continue
-            }
-            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace) {
-              continue
-            }
-            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
-              $process
-            }
-          }
-          foreach ($process in $stale) {
-            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
+        uses: ./.github/actions/clean-windows-test-children
 
       - name: Upload Windows nextest report
         if: always()
@@ -548,31 +481,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Tune Windows runner for test I/O
-        shell: pwsh
-        run: |
-          # Defender real-time scanning taxes the many short-lived SQLite/tempdir
-          # files these tests create; hosted runners are elevated, so turn it off
-          # and exclude the hot paths as a fallback.
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          $exclusions = @(
-            $env:GITHUB_WORKSPACE,
-            $env:RUNNER_TEMP,
-            [System.IO.Path]::GetTempPath(),
-            $env:CARGO_HOME,
-            $env:RUSTUP_HOME,
-            "$env:USERPROFILE\.cargo",
-            "$env:USERPROFILE\.rustup"
-          ) | Where-Object { $_ } | Select-Object -Unique
-          foreach ($path in $exclusions) {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-          }
-          # Default user TEMP is on the slow C: drive; RUNNER_TEMP shares the
-          # faster workspace drive. Point TMP/TEMP there so tempfile::TempDir in
-          # the nextest test processes follows.
-          $fastTemp = Join-Path $env:RUNNER_TEMP "tmp"
-          New-Item -ItemType Directory -Path $fastTemp -Force | Out-Null
-          "TMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TEMP=$fastTemp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        uses: ./.github/actions/tune-windows-runner
+        with:
+          redirect-temp: "true"
 
       - uses: actions/setup-node@v5
         with:
@@ -583,10 +494,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ast-grep
-        shell: pwsh
-        run: |
-          npm install --global "@ast-grep/cli@$env:AST_GREP_VERSION"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -613,33 +523,7 @@ jobs:
 
       - name: Clean abandoned Windows test children
         if: always()
-        shell: pwsh
-        run: |
-          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $all = Get-CimInstance Win32_Process
-          $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
-          foreach ($process in $all) {
-            [void]$liveProcessIds.Add([uint32]$process.ProcessId)
-          }
-          $stale = foreach ($process in $all) {
-            if ($process.Name -ne "tracedecay.exe") {
-              continue
-            }
-            if (-not $process.CommandLine) {
-              continue
-            }
-            $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
-            if (-not $inCurrentWorkspace) {
-              continue
-            }
-            if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
-              $process
-            }
-          }
-          foreach ($process in $stale) {
-            Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-          }
+        uses: ./.github/actions/clean-windows-test-children
 
       - name: Upload Windows PR8 temporal durable nextest report
         if: always()
@@ -953,10 +837,9 @@ jobs:
       - uses: ./.github/actions/setup-linux-mold
 
       - name: Install ast-grep
-        run: |
-          set -euo pipefail
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
