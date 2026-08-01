@@ -8,7 +8,10 @@ use tracedecay_tool_catalog::{
     TemporalMode,
 };
 
-use common::{capability_id, handler_for, profile, profile_id, read_manifest, schema, use_case_id};
+use common::{
+    ample_budget, capability_id, handler_for, profile, profile_id, read_manifest, schema,
+    use_case_id,
+};
 
 fn source_retrieval(
     capability_id: tracedecay_tool_catalog::CapabilityId,
@@ -85,7 +88,7 @@ fn retrieval_primitives_canonicalize_temporal_and_cancellation_metadata() {
         .add_profile(profile(
             profile_id,
             vec![capability_id.clone()],
-            tracedecay_tool_catalog::ProfileBudget::DEFAULT,
+            ample_budget(),
         ));
     let snapshot = builder.build().unwrap();
     assert!(snapshot.retrieval_primitive(&capability_id).is_some());

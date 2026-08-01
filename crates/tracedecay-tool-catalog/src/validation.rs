@@ -148,11 +148,6 @@ pub enum CatalogValidationError {
         profile_id: ProfileId,
         capability_id: CapabilityId,
     },
-    #[error("profile {profile_id} lacks required {fixture} routing fixture")]
-    MissingRoutingFixture {
-        profile_id: ProfileId,
-        fixture: &'static str,
-    },
 }
 
 pub(crate) fn validate_catalog(
@@ -624,84 +619,51 @@ fn validate_paired_profile(
     Ok(())
 }
 
+/// Check that every routing fixture names capabilities that exist and sit on
+/// the side of the profile boundary its expectation claims.
+///
+/// Fixture *completeness* is deliberately not checked. A fixture carries an
+/// utterance and an expectation tag but nothing in the catalog evaluates an
+/// utterance, so demanding one fixture per capability only forced composers to
+/// mint a placeholder per capability and made every profile that omitted a
+/// capability invalid the moment a capability was added anywhere.
 fn validate_routing_fixtures(
     profile: &ProfileDefinition,
     capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
 ) -> Result<(), CatalogValidationError> {
-    if profile.capability_ids().is_empty() {
-        return Ok(());
-    }
-
-    let profile_capabilities: BTreeSet<_> = profile.capability_ids().iter().cloned().collect();
-    let all_capabilities: BTreeSet<_> = capabilities.keys().cloned().collect();
-    let mut has_select = BTreeSet::new();
-    let mut has_reject = false;
-    let mut has_ambiguous = false;
-    let mut has_insufficient = false;
+    let invalid =
+        |capability_id: &CapabilityId| CatalogValidationError::InvalidRoutingFixtureCapability {
+            profile_id: profile.profile_id().clone(),
+            capability_id: capability_id.clone(),
+        };
 
     for fixture in profile.routing_fixtures() {
         match fixture.expectation() {
+            // A selectable or ambiguous outcome must name capabilities the
+            // profile actually exposes.
             RoutingFixtureExpectation::Select { capability_id } => {
-                if !profile_capabilities.contains(capability_id) {
-                    return Err(CatalogValidationError::InvalidRoutingFixtureCapability {
-                        profile_id: profile.profile_id().clone(),
-                        capability_id: capability_id.clone(),
-                    });
+                if !profile.includes_capability(capability_id) {
+                    return Err(invalid(capability_id));
                 }
-                has_select.insert(capability_id.clone());
             }
-            RoutingFixtureExpectation::Reject => has_reject = true,
             RoutingFixtureExpectation::Ambiguous { capability_ids } => {
                 for capability_id in capability_ids {
-                    if !profile_capabilities.contains(capability_id) {
-                        return Err(CatalogValidationError::InvalidRoutingFixtureCapability {
-                            profile_id: profile.profile_id().clone(),
-                            capability_id: capability_id.clone(),
-                        });
+                    if !profile.includes_capability(capability_id) {
+                        return Err(invalid(capability_id));
                     }
                 }
-                has_ambiguous = true;
             }
+            // An insufficient-capability outcome is only meaningful for a
+            // known capability the profile withholds.
             RoutingFixtureExpectation::InsufficientCapability { capability_id } => {
-                if !all_capabilities.contains(capability_id)
-                    || profile_capabilities.contains(capability_id)
+                if !capabilities.contains_key(capability_id)
+                    || profile.includes_capability(capability_id)
                 {
-                    return Err(CatalogValidationError::InvalidRoutingFixtureCapability {
-                        profile_id: profile.profile_id().clone(),
-                        capability_id: capability_id.clone(),
-                    });
+                    return Err(invalid(capability_id));
                 }
-                has_insufficient = true;
             }
+            RoutingFixtureExpectation::Reject => {}
         }
-    }
-
-    if profile_capabilities
-        .iter()
-        .any(|capability_id| !has_select.contains(capability_id))
-    {
-        return Err(CatalogValidationError::MissingRoutingFixture {
-            profile_id: profile.profile_id().clone(),
-            fixture: "positive",
-        });
-    }
-    if !has_reject {
-        return Err(CatalogValidationError::MissingRoutingFixture {
-            profile_id: profile.profile_id().clone(),
-            fixture: "negative",
-        });
-    }
-    if profile.capability_ids().len() > 1 && !has_ambiguous {
-        return Err(CatalogValidationError::MissingRoutingFixture {
-            profile_id: profile.profile_id().clone(),
-            fixture: "ambiguous",
-        });
-    }
-    if all_capabilities.len() > profile_capabilities.len() && !has_insufficient {
-        return Err(CatalogValidationError::MissingRoutingFixture {
-            profile_id: profile.profile_id().clone(),
-            fixture: "insufficient-capability",
-        });
     }
     Ok(())
 }
