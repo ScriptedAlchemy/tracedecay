@@ -467,26 +467,14 @@ fn derive_capture_id(
             captured_at,
         },
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "repository capture identity digest",
-        })?;
+    let encoded = crate::canonical_text::sha256_hex_body(
+        digest.as_str(),
+        "repository capture identity digest",
+    )?;
     RepositoryCaptureId::new(format!("{CAPTURE_ID_NAMESPACE}.{encoded}"))
 }
 
-fn validate_git_object_id(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        Ok(())
-    } else {
-        Err(DomainError::NonCanonical { field })
-    }
-}
+use crate::canonical_text::validate_git_object_id;
 
 #[cfg(test)]
 mod tests {

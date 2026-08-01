@@ -50,6 +50,15 @@ pub fn is_tagged_lowercase_hex(value: &str, tag: &str, length: usize) -> bool {
         .is_some_and(|encoded| is_lowercase_hex(encoded, length))
 }
 
+/// A native Git object id: lowercase hex at SHA-1 (40) or SHA-256 (64) width.
+///
+/// Git object ids are the one identity in these contracts that is legitimately
+/// two widths, so the pair is stated once here rather than at each validator.
+#[must_use]
+pub fn is_git_object_id(value: &str) -> bool {
+    is_lowercase_hex(value, 40) || is_lowercase_hex(value, 64)
+}
+
 /// Lowercase hex encoding of `bytes`, the inverse of [`is_lowercase_hex`].
 #[must_use]
 pub fn encode_lowercase_hex(bytes: &[u8]) -> String {
@@ -86,6 +95,32 @@ pub(crate) fn validate_canonical_string(
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())
+}
+
+/// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
+///
+/// Identities that embed a digest under their own namespace all need the
+/// encoding alone, and all reject an untagged digest as non-canonical under
+/// their own field name — so only the stripping is shared, not the field.
+pub(crate) fn sha256_hex_body<'a>(
+    value: &'a str,
+    field: &'static str,
+) -> Result<&'a str, DomainError> {
+    value
+        .strip_prefix("sha256:")
+        .ok_or(DomainError::NonCanonical { field })
+}
+
+/// A native Git object id, rejected as non-canonical at any other shape.
+///
+/// This is the shared body behind the identically-specified per-module Git
+/// object-id validators (repository state, retrieval anchors).
+pub(crate) fn validate_git_object_id(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if is_git_object_id(value) {
+        Ok(())
+    } else {
+        Err(DomainError::NonCanonical { field })
+    }
 }
 
 /// Canonical bounded string that reports every rejection, empty included, as
@@ -261,6 +296,77 @@ mod tests {
                 is_lowercase_hex(value, 64),
                 inlined,
                 "hex predicate diverged for {value:?}"
+            );
+        }
+    }
+
+    /// The shared encoder is the exact loop the per-module copies spelled out,
+    /// over every byte value and over a full-width digest. The four call sites
+    /// this replaced fed it unchanged digest material, so byte-identical
+    /// encoding here is byte-identical derived identities there.
+    #[test]
+    fn encoder_matches_the_inlined_loop() {
+        fn inlined(tag: &str, bytes: &[u8]) -> String {
+            use std::fmt::Write as _;
+
+            let mut encoded = String::with_capacity(tag.len() + bytes.len() * 2);
+            encoded.push_str(tag);
+            for byte in bytes {
+                write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            encoded
+        }
+
+        let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+        for bytes in [&[][..], &[0][..], &[0xff][..], &every_byte[..]] {
+            for tag in ["", "sha256:", "blake3:"] {
+                assert_eq!(
+                    encode_tagged_lowercase_hex(tag, bytes),
+                    inlined(tag, bytes),
+                    "encoder diverged for tag {tag:?}"
+                );
+            }
+            assert_eq!(encode_lowercase_hex(bytes), inlined("", bytes));
+        }
+    }
+
+    /// Encoding and the acceptance predicate are inverses: every digest the
+    /// encoder produces is one the validators accept.
+    #[test]
+    fn encoded_digests_satisfy_the_predicate() {
+        let digest = [0xabu8; 32];
+        assert!(is_lowercase_hex(&encode_lowercase_hex(&digest), 64));
+        assert!(is_tagged_lowercase_hex(
+            &encode_tagged_lowercase_hex("sha256:", &digest),
+            "sha256:",
+            64
+        ));
+    }
+
+    /// The Git object-id predicate is the exact conjunction the per-module
+    /// copies spelled out, including both accepted widths.
+    #[test]
+    fn git_object_id_matches_the_inlined_conjunction() {
+        for value in [
+            "",
+            &"a".repeat(39),
+            &"a".repeat(40),
+            &"a".repeat(41),
+            &"a".repeat(63),
+            &"a".repeat(64),
+            &"a".repeat(65),
+            &"A".repeat(40),
+            &"g".repeat(40),
+            &"0".repeat(64),
+        ] {
+            let inlined = matches!(value.len(), 40 | 64)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            assert_eq!(
+                is_git_object_id(value),
+                inlined,
+                "git object id predicate diverged for {value:?}"
             );
         }
     }

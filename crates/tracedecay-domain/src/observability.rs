@@ -193,10 +193,7 @@ impl ObservabilityEnvelopeV1 {
                         "hook" | "session_ingest" | "code_index" | "tool_call" | "task"
                     )
                     || activity.detail.as_deref().is_some_and(|detail| {
-                        detail.is_empty()
-                            || detail.len() > 128
-                            || detail.trim() != detail
-                            || detail.chars().any(char::is_control)
+                        !crate::canonical_text::is_canonical_text_within(detail, 128)
                     })
                 {
                     return Err("activity");

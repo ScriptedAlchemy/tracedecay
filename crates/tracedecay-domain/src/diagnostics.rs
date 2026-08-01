@@ -289,10 +289,7 @@ fn validate_diagnostic_code(code: &str) -> Result<(), DomainError> {
             field: "diagnostic code",
         });
     }
-    if code.trim() != code
-        || code.len() > MAX_DIAGNOSTIC_CODE_LEN
-        || code.chars().any(char::is_control)
-    {
+    if !crate::canonical_text::is_canonical_text_within(code, MAX_DIAGNOSTIC_CODE_LEN) {
         return Err(DomainError::NonCanonical {
             field: "diagnostic code",
         });

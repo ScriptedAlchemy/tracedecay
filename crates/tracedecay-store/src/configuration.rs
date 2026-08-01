@@ -56,10 +56,7 @@ impl ConfigurationRevisionRecordV1 {
             .map_or(Ok(()), ConfigurationRevisionId::validate)?;
         self.snapshot.validate()?;
         self.actor_id.validate()?;
-        if self.operation_kind.is_empty()
-            || self.operation_kind.trim() != self.operation_kind
-            || self.operation_kind.chars().any(char::is_control)
-        {
+        if !tracedecay_domain::canonical_text::is_canonical_text(&self.operation_kind) {
             return Err(DomainError::NonCanonical {
                 field: "configuration operation kind",
             });

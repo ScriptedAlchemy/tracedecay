@@ -332,10 +332,7 @@ impl WorkExecutionEnvelopeV1 {
         budget: WorkExecutionBudgetV1,
         effect_state: WorkEffectStateV1,
     ) -> Result<Self, WorkRuntimeContractError> {
-        if model.is_empty()
-            || model.trim() != model
-            || model.len() > 256
-            || model.chars().any(char::is_control)
+        if !crate::canonical_text::is_canonical_text_within(&model, 256)
             || worktree_root.len() > 4_096
             || !Path::new(&worktree_root).is_absolute()
             || worktree_root.contains('\0')
