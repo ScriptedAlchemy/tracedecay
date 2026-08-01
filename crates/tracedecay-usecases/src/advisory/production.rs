@@ -67,7 +67,7 @@ impl Pr13AdvisoryProductionAuthoritiesV1 {
 #[derive(Clone)]
 pub struct Pr13AdvisoryProductionOpenV1 {
     pub database: Database,
-    pub(crate) project_runtime_db: Arc<RegisteredGlobalDb>,
+    pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,

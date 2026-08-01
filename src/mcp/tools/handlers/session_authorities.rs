@@ -12,12 +12,14 @@ pub struct SessionAuthorities<'a> {
     pub(crate) user: Option<&'a Arc<RegisteredGlobalDb>>,
     pub(crate) profile_identity:
         Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    pub(crate) project_registered: Option<&'a crate::global_db::RegisteredGlobalDb>,
-    pub(crate) profile_registered: Option<&'a crate::global_db::RegisteredGlobalDb>,
+    pub(crate) project_registered: Option<&'a Arc<RegisteredGlobalDb>>,
+    pub(crate) profile_registered: Option<&'a Arc<RegisteredGlobalDb>>,
     project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
-    pub(super) project_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-    pub(super) profile_retrieval: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(super) project_retrieval:
+        Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(super) profile_retrieval:
+        Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -40,8 +42,8 @@ impl<'a> SessionAuthorities<'a> {
 
     pub(crate) const fn with_registered_databases(
         mut self,
-        project: Option<&'a crate::global_db::RegisteredGlobalDb>,
-        profile: Option<&'a crate::global_db::RegisteredGlobalDb>,
+        project: Option<&'a Arc<RegisteredGlobalDb>>,
+        profile: Option<&'a Arc<RegisteredGlobalDb>>,
     ) -> Self {
         self.project_registered = project;
         self.profile_registered = profile;

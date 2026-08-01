@@ -210,7 +210,7 @@ pub(super) async fn execute_profile_retained_application_tool(
                 request.arguments,
                 profile_root,
                 options.session_authorities.user,
-                options.global_db,
+                options.global_db.map(std::sync::Arc::as_ref),
                 options.session_authorities.profile_retrieval,
             )
             .await
