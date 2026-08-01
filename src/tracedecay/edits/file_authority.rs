@@ -15,6 +15,9 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
 
+pub(super) use tracedecay_runtime_core::path_safety::normalize_source_edit_relative_path;
+use tracedecay_runtime_core::path_safety::{source_edit_path_error, source_edit_unsafe_path};
+
 use crate::errors::{Result, TraceDecayError};
 
 static SOURCE_EDIT_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -298,37 +301,6 @@ pub(super) fn read_source_edit_candidate(
     relative: &Path,
 ) -> Result<Option<Vec<u8>>> {
     SourceEditFileAuthority::open(project_root, relative)?.read_optional()
-}
-
-pub(super) fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(source_edit_unsafe_path());
-    }
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(component) => normalized.push(component),
-            Component::CurDir => {}
-            _ => return Err(source_edit_unsafe_path()),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        return Err(source_edit_unsafe_path());
-    }
-    Ok(normalized)
-}
-
-fn source_edit_unsafe_path() -> TraceDecayError {
-    TraceDecayError::Config {
-        message: "source edit path is not a regular file beneath the authorized worktree"
-            .to_owned(),
-    }
-}
-
-fn source_edit_path_error(operation: &'static str, error: io::Error) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("{operation}: {error}"),
-    }
 }
 
 fn sync_source_edit_directory(directory: &Dir) -> Result<()> {

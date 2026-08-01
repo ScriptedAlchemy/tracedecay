@@ -23,6 +23,9 @@ use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_runtime_core::path_safety::{
+    normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
+};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_runtime_core::types::{Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph};
 
@@ -451,40 +454,6 @@ impl SourceEditCandidateAuthority {
             });
         }
         Ok(Some(bytes))
-    }
-}
-
-fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
-    if path.as_os_str().is_empty() || path.is_absolute() {
-        return Err(source_edit_unsafe_path());
-    }
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(component) => normalized.push(component),
-            Component::CurDir => {}
-            _ => return Err(source_edit_unsafe_path()),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        return Err(source_edit_unsafe_path());
-    }
-    Ok(normalized)
-}
-
-fn source_edit_unsafe_path() -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: "source edit path is not a regular file beneath the authorized worktree"
-            .to_owned(),
-    }
-}
-
-fn source_edit_path_error(
-    operation: &'static str,
-    error: std::io::Error,
-) -> tracedecay_runtime_core::errors::TraceDecayError {
-    tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!("{operation}: {error}"),
     }
 }
 

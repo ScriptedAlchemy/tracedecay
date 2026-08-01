@@ -41,13 +41,13 @@
 //! precisely because it preserves every row.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 use tracedecay_application::storage::compaction::CompactionTriggerPolicyV1;
 use tracedecay_application::storage::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1};
 use tracedecay_application::storage::telemetry::StoreSizeSampleV1;
 use tracedecay_domain::UtcMicros;
+use tracedecay_runtime_core::sqlite_read_snapshot::{BOUNDED_PROBE_BUSY_TIMEOUT, pragma_u64};
 
 use crate::config::CompactionThresholdConfig;
 
@@ -201,20 +201,16 @@ fn resolve_policy(config: &CompactionThresholdConfig) -> Option<CompactionTrigge
     Some(policy)
 }
 
+/// This one is read-*write* on purpose — `incremental_vacuum` has to write —
+/// so it cannot use the shared read-only probe, but it holds the same bounded
+/// busy timeout: a locked branch database is skipped, never waited on.
 fn open_bounded(path: &Path) -> Result<Connection, BranchCompactionSkipReason> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|_| BranchCompactionSkipReason::Busy)?;
     connection
-        .busy_timeout(Duration::from_millis(200))
+        .busy_timeout(BOUNDED_PROBE_BUSY_TIMEOUT)
         .map_err(|_| BranchCompactionSkipReason::Busy)?;
     Ok(connection)
-}
-
-fn pragma_u64(connection: &Connection, pragma: &str) -> Option<u64> {
-    connection
-        .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get::<_, i64>(0))
-        .ok()
-        .map(|value: i64| value.max(0) as u64)
 }
 
 fn compact_one(
