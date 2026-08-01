@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use std::fmt::Write as _;
+
+use serde::{Deserialize, Serialize};
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
-use crate::project_registry::{
-    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry,
-};
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
@@ -13,6 +13,153 @@ use super::{
     StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
     global_db_operation_message,
 };
+
+// ---------------------------------------------------------------------------
+// Registry reap contract
+// ---------------------------------------------------------------------------
+//
+// `plan_registry_reap` below is the only producer of these values, so the
+// contract lives beside its producer rather than in the composition root that
+// merely prints it. Moving it down is what keeps this crate from needing an
+// upward `crate::project_registry::…` edge; the root re-exports these names
+// through its `tracedecay_global_db::*` shim.
+
+/// Prefix marking a `project_aliases` row that keys a repository's git common
+/// directory rather than a checkout path.
+pub const GIT_COMMON_DIR_ALIAS_PREFIX: &str = "git-common-dir:";
+
+/// Which registry table a reap candidate belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReapEntryKind {
+    /// A `projects` row: the cross-project savings ledger, which despite the
+    /// table name is an accounting record and not a project registry.
+    SavingsLedgerPath,
+    /// A `project_aliases` row keyed by a filesystem path.
+    ProjectAlias,
+    /// A `code_projects` row: the V2 canonical identity authority.
+    CodeProject,
+}
+
+impl ReapEntryKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SavingsLedgerPath => "savings-ledger path",
+            Self::ProjectAlias => "project alias",
+            Self::CodeProject => "project authority",
+        }
+    }
+}
+
+/// One registry row whose referenced path is gone from disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryReapEntry {
+    pub kind: ReapEntryKind,
+    /// Primary key of the row: ledger path, alias key, or project id.
+    pub key: String,
+    /// The filesystem path that no longer exists.
+    pub missing_path: String,
+    pub project_id: Option<String>,
+}
+
+/// A dead-looking row that reaping deliberately leaves alone, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedRegistryEntry {
+    pub entry: RegistryReapEntry,
+    pub reason: String,
+}
+
+/// The outcome of classifying the registry: what may be removed and what is
+/// deliberately kept. Reaping only ever deletes rows; no store directory,
+/// database, or session artifact is touched by any part of this plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryReapPlan {
+    pub reapable: Vec<RegistryReapEntry>,
+    pub retained: Vec<RetainedRegistryEntry>,
+}
+
+impl RegistryReapPlan {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reapable.is_empty()
+    }
+
+    /// One line per row, for a dry-run report.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} reapable, {} retained\n",
+            self.reapable.len(),
+            self.retained.len()
+        );
+        for entry in &self.reapable {
+            let _ = writeln!(
+                out,
+                "  reap    {} {} (missing {})",
+                entry.kind.label(),
+                entry.key,
+                entry.missing_path
+            );
+        }
+        for retained in &self.retained {
+            let _ = writeln!(
+                out,
+                "  retain  {} {} — {}",
+                retained.entry.kind.label(),
+                retained.entry.key,
+                retained.reason
+            );
+        }
+        out
+    }
+}
+
+/// The path a `project_aliases` key refers to, or `None` when the key is not
+/// path-shaped (a `git-remote-name:` search alias, say) and therefore can
+/// never be judged dead by checking the filesystem.
+#[must_use]
+pub fn alias_key_path(alias: &str) -> Option<&Path> {
+    let candidate = alias
+        .strip_prefix(GIT_COMMON_DIR_ALIAS_PREFIX)
+        .unwrap_or(alias);
+    let path = Path::new(candidate);
+    path.is_absolute().then_some(path)
+}
+
+/// Whether `path` lives under the OS temporary directory.
+///
+/// Canonicalizes both sides where possible so a `/tmp` symlinked to
+/// `/private/tmp` (macOS) still matches.
+#[must_use]
+pub fn is_ephemeral_path(path: &Path) -> bool {
+    let temp_root = std::env::temp_dir();
+    let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(&temp_root)
+}
+
+/// Registry admission policy for a project root, returning the refusal reason
+/// when the root must not become a durable project authority.
+///
+/// A checkout under the OS temporary directory is throwaway by construction —
+/// `mktemp -d` fixtures, extracted archives, scratch clones — yet registering
+/// one writes a `code_projects` row and a shard that outlive it by years.
+/// The comparison is against the *profile*, not absolute: a hermetic profile
+/// that itself lives under the temp directory is equally throwaway, so test
+/// fixtures and sandboxed runs keep working. Only a durable profile refuses an
+/// ephemeral root.
+#[must_use]
+pub fn ephemeral_root_rejection(project_root: &Path, profile_root: &Path) -> Option<String> {
+    (is_ephemeral_path(project_root) && !is_ephemeral_path(profile_root)).then(|| {
+        format!(
+            "project root '{}' is under the OS temporary directory and cannot be \
+             registered as a durable authority in profile '{}'",
+            project_root.display(),
+            profile_root.display()
+        )
+    })
+}
 
 pub(super) const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
 
@@ -639,11 +786,11 @@ impl RegisteredGlobalDb {
                 || selector.contains('\\'))
     }
 
-    /// Applies [`crate::project_registry::ephemeral_root_rejection`] against
+    /// Applies [`self::ephemeral_root_rejection`] against
     /// the profile this database belongs to (`<profile>/global.db`).
     fn ephemeral_root_rejection(&self, project_root: &Path) -> Option<String> {
         let profile_root = self.db_path().parent()?;
-        crate::project_registry::ephemeral_root_rejection(project_root, profile_root)
+        self::ephemeral_root_rejection(project_root, profile_root)
     }
 
     pub async fn upsert_code_project(
@@ -1544,7 +1691,7 @@ impl RegisteredGlobalDb {
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             // A non-path alias (a remote-name search key) can never be judged
             // dead by consulting the filesystem, so it is never a candidate.
-            let missing_path = match crate::project_registry::alias_key_path(&alias) {
+            let missing_path = match self::alias_key_path(&alias) {
                 Some(path) if !path.exists() => path.to_string_lossy().into_owned(),
                 // Either a non-path alias, which the filesystem can never
                 // judge dead, or a path that is still there.

@@ -2,10 +2,12 @@ use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
-use crate::{
-    application::session::compatibility::projected_content_hash,
-    db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params},
-    sessions::{
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, Rows, Value, params,
+};
+use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::{
+    runtime::{
         SessionMessageRecord,
         lcm::{
             LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
@@ -387,7 +389,7 @@ impl RegisteredGlobalDb {
             return Err(LcmError::SummaryNodeNotFound);
         }
         draft.summary_text = summary_text.trim().to_string();
-        draft.summary_token_count = i64::from(crate::context::read_modes::estimate_tokens(
+        draft.summary_token_count = i64::from(crate::estimate_tokens(
             &draft.summary_text,
         ));
         metadata.insert(

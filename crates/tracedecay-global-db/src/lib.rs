@@ -41,6 +41,12 @@ pub use git_index_transactions::{
 };
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;
+/// Registry reap contract, moved down beside `plan_registry_reap` — its only
+/// producer — so this crate no longer reaches up into the composition root.
+pub use project_registry::{
+    GIT_COMMON_DIR_ALIAS_PREFIX, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
+    RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
+};
 pub use registered::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
@@ -829,6 +835,30 @@ pub fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| env_value_truthy(&value))
 }
 
+/// Reads the `TRACEDECAY_<suffix>` environment variable.
+///
+/// Byte-for-byte the root `config::brand_env`, kept local because the branded
+/// prefix is a naming rule with no dependencies — reaching up to root
+/// `src/config.rs` for one `std::env::var` call would be the only reason this
+/// crate needed the composition root. Collapse the two once the kernel owns
+/// the brand prefix.
+fn brand_env(suffix: &str) -> Option<String> {
+    std::env::var(format!("TRACEDECAY_{suffix}")).ok()
+}
+
+/// Rough token count for `text`, four characters to the token.
+///
+/// Mirrors the root `context::read_modes::estimate_tokens` heuristic. LCM
+/// summary drafts and transcript rows record this number, so it has to be the
+/// same arithmetic on both sides of the split; it is deliberately duplicated
+/// rather than reached for, since `context::read_modes` is an MCP read handler
+/// that pulls in the whole root graph database.
+#[must_use]
+pub fn estimate_tokens(text: &str) -> u32 {
+    let chars = text.chars().count();
+    chars.div_ceil(4).min(u32::MAX as usize) as u32
+}
+
 /// Whether user-level global accounting (the cross-project `savings_ledger`
 /// plus worldwide-counter flushes in the MCP server) is enabled.
 ///
@@ -841,14 +871,14 @@ pub fn env_flag(name: &str) -> bool {
 /// 2. `TRACEDECAY_DISABLE_GLOBAL_DB` truthy → disabled.
 /// 3. Otherwise → enabled.
 pub fn global_accounting_mode() -> AccountingMode {
-    if let Some(value) = crate::config::brand_env("ENABLE_GLOBAL_DB") {
+    if let Some(value) = brand_env("ENABLE_GLOBAL_DB") {
         return if env_value_truthy(&value) {
             AccountingMode::EnabledByEnv
         } else {
             AccountingMode::DisabledByEnv
         };
     }
-    if crate::config::brand_env("DISABLE_GLOBAL_DB").is_some_and(|value| env_value_truthy(&value)) {
+    if brand_env("DISABLE_GLOBAL_DB").is_some_and(|value| env_value_truthy(&value)) {
         return AccountingMode::DisabledByEnv;
     }
     AccountingMode::Default
@@ -1208,48 +1238,22 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub async fn prune_global_retention(
-        &self,
-        config: &crate::retention::RetentionConfig,
-        now_secs: i64,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<crate::retention::RetentionTableReport>> {
-        let transaction = self.begin_write_transaction().await?;
-        let report = crate::retention::prune_global_tables(
-            &transaction,
-            config,
-            crate::retention::RetentionMode::Apply,
-            now_secs,
-        )
-        .await?;
-        transaction.commit().await.map_err(|error| {
-            global_db_operation_error("commit registered global retention prune", error)
-        })?;
-        Ok(report)
-    }
-
-    pub async fn global_retention_report(
-        &self,
-        config: &crate::retention::RetentionConfig,
-        now_secs: i64,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<crate::retention::RetentionTableReport>> {
-        let transaction = self.begin_write_transaction().await?;
-        let report = crate::retention::prune_global_tables(
-            &transaction,
-            config,
-            crate::retention::RetentionMode::DryRun,
-            now_secs,
-        )
-        .await;
-        let rollback = transaction.rollback().await;
-        match (report, rollback) {
-            (Ok(report), Ok(())) => Ok(report),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(global_db_operation_error(
-                "rollback registered global retention report",
-                error,
-            )),
-        }
-    }
+    // Root-owned policy, deliberately not driven here: `prune_global_retention`
+    // and `global_retention_report` wrapped `crate::retention::
+    // prune_global_tables` (root `src/retention.rs`, keyed by the root
+    // `config::RetentionConfig`) in an apply/dry-run transaction. Neither the
+    // table window policy nor the config type has moved down yet, and reaching
+    // up for them would point this crate back at the composition root.
+    //
+    // Root wiring: the two wrappers are three lines each over the public
+    // transaction API —
+    //
+    //     let tx = registered.begin_write_transaction().await?;
+    //     let report = retention::prune_global_tables(&tx, config, mode, now).await?;
+    //     tx.commit().await?;   // or tx.rollback() for the dry run
+    //
+    // Restore them here once `retention` + `config::RetentionConfig` land below
+    // the composition root. See `SEAMS.md`.
 }
 
 #[cfg(all(test, not(windows)))]

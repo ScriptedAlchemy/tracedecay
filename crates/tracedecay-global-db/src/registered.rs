@@ -5,8 +5,7 @@ use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
 };
 
-use crate::{
-    daemon::store_runtime::registry::StoreRuntimeHandle,
+use tracedecay_runtime_core::{
     db::{
         DatabaseAuthority,
         engine::{
@@ -15,7 +14,7 @@ use crate::{
         },
     },
     errors::TraceDecayError,
-    store::observation::GlobalDbObservationStore,
+    store_runtime::registry::StoreRuntimeHandle,
 };
 
 pub struct RegisteredGlobalDb {
@@ -271,16 +270,23 @@ impl RegisteredGlobalDb {
         self.runtime.binding()
     }
 
-    pub fn evidence_assembly_store(
-        &self,
-    ) -> tracedecay_store::EvidenceAssemblyStoreResult<
-        crate::application::evidence_assembly::RuntimeEvidenceAssemblyStore,
-    > {
-        crate::application::evidence_assembly::RuntimeEvidenceAssemblyStore::new(
-            self.binding().shard_id.profile_id.clone(),
-            self.runtime.clone(),
-            self.authority.clone(),
-        )
+    /// The store runtime this registered database is mounted on.
+    ///
+    /// Exposed so the composition root can build the adapters it owns —
+    /// `RuntimeEvidenceAssemblyStore`, `RuntimeExternalSourceStore`,
+    /// `GlobalDbObservationStore`, `DaemonWorkRuntimeV1` — without this crate
+    /// naming a root type. See the "root-owned adapters" seam note in
+    /// `SEAMS.md`.
+    pub fn runtime(&self) -> &StoreRuntimeHandle {
+        &self.runtime
+    }
+
+    /// The write authority guarding every mutation against this database.
+    ///
+    /// Companion to [`RegisteredGlobalDb::runtime`]; the root adapters take
+    /// the `(runtime, authority)` pair by clone.
+    pub fn authority(&self) -> &DatabaseAuthority {
+        &self.authority
     }
 
     pub fn work_storage(
@@ -361,27 +367,10 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub fn work_runtime(
-        self: &Arc<Self>,
-        authority: tracedecay_domain::WorkAuthority,
-        config: tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig,
-        configuration_digest: tracedecay_domain::ManifestDigest,
-        project_root: std::path::PathBuf,
-    ) -> tracedecay_runtime_core::errors::Result<
-        crate::daemon::work_runtime::DaemonWorkRuntimeV1<
-            tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-        >,
-    > {
-        let storage = self.work_storage()?;
-        Ok(crate::daemon::work_runtime::DaemonWorkRuntimeV1::new(
-            authority,
-            storage,
-            config,
-            configuration_digest,
-            Arc::clone(self),
-            project_root,
-        ))
-    }
+    // Root-owned adapter, deliberately not built here: `work_runtime` returned
+    // `crate::daemon::work_runtime::DaemonWorkRuntimeV1<WorkSqliteStorage>`,
+    // which lives above this crate. The composition root builds it from
+    // `work_storage()` plus `Arc::clone(&registered)`; see `SEAMS.md`.
 
     pub fn storage_telemetry_handle(
         &self,
@@ -394,17 +383,10 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub fn external_source_store(
-        &self,
-    ) -> Result<
-        crate::application::external_source_store::RuntimeExternalSourceStore,
-        crate::application::external_source_store::RuntimeExternalSourceErrorV1,
-    > {
-        crate::application::external_source_store::RuntimeExternalSourceStore::new(
-            self.runtime.clone(),
-            self.authority.clone(),
-        )
-    }
+    // Root-owned adapter, deliberately not built here: `external_source_store`
+    // returned `crate::application::external_source_store::
+    // RuntimeExternalSourceStore`. The composition root builds it from
+    // `runtime().clone()` and `authority().clone()`; see `SEAMS.md`.
 
     pub fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         self.runtime
@@ -484,9 +466,11 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    pub fn observation_store(&self) -> GlobalDbObservationStore<'_> {
-        GlobalDbObservationStore::with_runtime(&self.runtime, &self.authority)
-    }
+    // Root-owned adapter, deliberately not built here: `observation_store`
+    // returned `crate::store::observation::GlobalDbObservationStore<'_>`, the
+    // root implementation of `tracedecay_store::ObservationStore`. The
+    // composition root builds it from `runtime()` and `authority()`; see
+    // `SEAMS.md`.
 
     pub fn db_path(&self) -> &Path {
         self.authority.canonical_database_path()
