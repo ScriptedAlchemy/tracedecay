@@ -174,7 +174,9 @@ fn publish_settings(staged: &Path, destination: &Path, bytes: &[u8]) -> Analyzer
                 ))
             })?;
         replace_settings_file(staged, destination)?;
-        sync_settings_directory(destination)
+        #[cfg(unix)]
+        sync_settings_directory(destination)?;
+        Ok(())
     })();
     if publish.is_err() && created {
         let _ = std::fs::remove_file(staged);
@@ -228,26 +230,22 @@ fn replace_settings_file(staged: &Path, destination: &Path) -> AnalyzerResult<()
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_settings_directory(path: &Path) -> AnalyzerResult<()> {
-    #[cfg(unix)]
-    {
-        let parent = path.parent().ok_or_else(|| {
+    let parent = path.parent().ok_or_else(|| {
+        AnalyzerRuntimeError::new(format!(
+            "code diagnostics settings path '{}' has no parent directory",
+            path.display()
+        ))
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
             AnalyzerRuntimeError::new(format!(
-                "code diagnostics settings path '{}' has no parent directory",
-                path.display()
+                "failed to sync code diagnostics settings directory '{}': {error}",
+                parent.display()
             ))
         })?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                AnalyzerRuntimeError::new(format!(
-                    "failed to sync code diagnostics settings directory '{}': {error}",
-                    parent.display()
-                ))
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
