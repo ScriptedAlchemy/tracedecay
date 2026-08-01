@@ -127,12 +127,26 @@ impl TraceDecay {
             return Ok(Vec::new());
         }
 
+        // Fetch the children of every impl block in one bulk round-trip
+        // instead of one `get_children_of` call per impl inside the loop,
+        // then bucket by parent so per-impl iteration order (and the
+        // `start_line` order within each impl) matches the old per-impl
+        // fetch exactly.
+        let bulk_children = self.db.get_children_of_bulk(&impl_ids).await?;
+        let mut children_by_parent: std::collections::HashMap<String, Vec<Node>> =
+            std::collections::HashMap::new();
+        for n in bulk_children {
+            if let Some(parent) = n.parent_id.clone() {
+                children_by_parent.entry(parent).or_default().push(n);
+            }
+        }
+
         // For each impl block, surface the method whose name matches the
         // trait method. Multiple impls may share names with unrelated nodes,
         // so we filter by both kind and name.
         let mut targets = Vec::new();
         for impl_id in impl_ids {
-            let candidates = self.db.get_children_of(&impl_id).await?;
+            let candidates = children_by_parent.remove(&impl_id).unwrap_or_default();
             for n in candidates {
                 if matches!(n.kind, NodeKind::Method | NodeKind::Function) && n.name == method.name
                 {
