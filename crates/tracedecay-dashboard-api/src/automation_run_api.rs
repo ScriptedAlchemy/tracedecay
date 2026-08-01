@@ -384,9 +384,51 @@ async fn run_dashboard_job<F, Fut>(
         }
     }
 
-    if let Err(err) = run_job(state.clone(), run_id.clone()).await {
-        append_failed_if_missing(&state, &run_id, task, err).await;
+    match run_job(state.clone(), run_id.clone()).await {
+        Ok(payload) => {
+            if let Err(err) = append_returned_terminal_if_missing(&state, &run_id, &payload).await {
+                append_failed_if_missing(&state, &run_id, task, err).await;
+            }
+        }
+        Err(err) => append_failed_if_missing(&state, &run_id, task, err).await,
     }
+}
+
+async fn append_returned_terminal_if_missing(
+    state: &DashboardState,
+    run_id: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    let record = payload
+        .get("ledger_record")
+        .cloned()
+        .ok_or_else(|| "automation run payload omitted ledger_record".to_string())
+        .and_then(|record| {
+            serde_json::from_value::<AutomationRunLedgerRecord>(record)
+                .map_err(|err| format!("invalid automation run ledger_record: {err}"))
+        })?;
+    if record.run_id != run_id {
+        return Err(format!(
+            "automation run payload returned run_id '{}' for expected run '{run_id}'",
+            record.run_id
+        ));
+    }
+    if !record.status.is_terminal() {
+        return Err(format!(
+            "automation run payload returned non-terminal status '{}'",
+            record.status.as_str()
+        ));
+    }
+    let terminal_exists = find_run_record(&state.dashboard_root, run_id)
+        .await
+        .map_err(|err| format!("failed to inspect automation run ledger: {err}"))?
+        .is_some_and(|record| record.status.is_terminal());
+    if terminal_exists {
+        return Ok(());
+    }
+    append_run_record(&state.dashboard_root, &record)
+        .await
+        .map_err(|err| format!("failed to record returned automation run: {err}"))
 }
 
 async fn dashboard_job_skip_reason(
