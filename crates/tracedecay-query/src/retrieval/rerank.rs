@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
-    AuthorizedRerankView, CandidateSetDigest, ExactClass, FreshnessCompatibilityV1,
+    AuthorizedRerankView, CandidateSetDigest, ExactClass, FreshnessCompatibilityV1, ManifestDigest,
     OptionalStagePublicStatus, PrivacyDomainId, RankedCandidate, RankingDecision,
     RankingDecisionKind, RerankPolicy, RetrievalAnchorId, RetrievalRequest, SanitizedBudgetUsage,
     SanitizedStageFailure,
@@ -100,6 +100,11 @@ pub trait DeterministicLocalRerankExecutorV1 {
         inputs: &[LocalRerankInputV1<'_>],
         permit: LocalRerankPermitV1,
     ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1>;
+}
+
+/// Deterministic local executor admitted from one verified artifact.
+pub trait AdmittedNativeRerankExecutorV1: DeterministicLocalRerankExecutorV1 {
+    fn artifact_manifest_digest(&self) -> &ManifestDigest;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

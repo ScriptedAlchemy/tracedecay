@@ -72,7 +72,10 @@ pub use tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY;
 pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
-pub const DEFAULT_FASTEMBED_MODEL_ID: &str = "JinaEmbeddingsV2BaseCode";
+///
+/// Defined by the semantic runtime crate so settings validation and model
+/// acquisition can never disagree about the default selection.
+pub use tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID;
 
 /// Cataloged `FastEmbed` model ids settings may select. Membership is validated
 /// here without depending on the `semantic_code` acquisition module.
@@ -136,57 +139,31 @@ impl SemanticProfileSelection {
 /// Process ceilings applied before an installed semantic profile is admitted.
 ///
 /// The selected artifact manifest may impose tighter limits. These local
-/// ceilings never authorize a profile to exceed its own declared bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticResourceCeilings {
-    pub max_model_bytes: u64,
-    pub max_tokenizer_bytes: u64,
-    pub max_resident_bytes: u64,
-    pub max_threads: u32,
-    pub max_concurrent_sessions: u32,
-    pub max_batch_size: u32,
-    pub max_sequence_length: u32,
-    pub load_deadline_ms: u64,
-}
+/// ceilings never authorize a profile to exceed its own declared bounds. The
+/// shape is owned by the semantic runtime crate; the supported ranges below
+/// remain configuration-private.
+pub use tracedecay_semantic::SemanticResourceCeilings;
 
-impl Default for SemanticResourceCeilings {
-    fn default() -> Self {
-        Self {
-            max_model_bytes: 700 * 1024 * 1024,
-            max_tokenizer_bytes: 64 * 1024 * 1024,
-            max_resident_bytes: 2 * 1024 * 1024 * 1024,
-            max_threads: 4,
-            max_concurrent_sessions: 1,
-            max_batch_size: 32,
-            max_sequence_length: 512,
-            load_deadline_ms: 30_000,
-        }
+fn validate_semantic_resource_ceilings(ceilings: SemanticResourceCeilings) -> Result<()> {
+    let valid = ceilings.max_model_bytes > 0
+        && ceilings.max_model_bytes <= MAX_SEMANTIC_MODEL_BYTES
+        && ceilings.max_tokenizer_bytes > 0
+        && ceilings.max_tokenizer_bytes <= MAX_SEMANTIC_TOKENIZER_BYTES
+        && ceilings.max_resident_bytes > 0
+        && ceilings.max_resident_bytes <= MAX_SEMANTIC_RESIDENT_BYTES
+        && ceilings.max_model_bytes <= ceilings.max_resident_bytes
+        && ceilings.max_tokenizer_bytes <= ceilings.max_resident_bytes
+        && (1..=MAX_SEMANTIC_THREADS).contains(&ceilings.max_threads)
+        && (1..=MAX_SEMANTIC_CONCURRENT_SESSIONS).contains(&ceilings.max_concurrent_sessions)
+        && (1..=MAX_SEMANTIC_BATCH_SIZE).contains(&ceilings.max_batch_size)
+        && (1..=MAX_SEMANTIC_SEQUENCE_LENGTH).contains(&ceilings.max_sequence_length)
+        && (1..=MAX_SEMANTIC_LOAD_DEADLINE_MS).contains(&ceilings.load_deadline_ms);
+    if !valid {
+        return Err(config_error(
+            "semantic resource ceilings are zero, incoherent, or exceed supported maxima",
+        ));
     }
-}
-
-impl SemanticResourceCeilings {
-    fn validate(self) -> Result<()> {
-        let valid = self.max_model_bytes > 0
-            && self.max_model_bytes <= MAX_SEMANTIC_MODEL_BYTES
-            && self.max_tokenizer_bytes > 0
-            && self.max_tokenizer_bytes <= MAX_SEMANTIC_TOKENIZER_BYTES
-            && self.max_resident_bytes > 0
-            && self.max_resident_bytes <= MAX_SEMANTIC_RESIDENT_BYTES
-            && self.max_model_bytes <= self.max_resident_bytes
-            && self.max_tokenizer_bytes <= self.max_resident_bytes
-            && (1..=MAX_SEMANTIC_THREADS).contains(&self.max_threads)
-            && (1..=MAX_SEMANTIC_CONCURRENT_SESSIONS).contains(&self.max_concurrent_sessions)
-            && (1..=MAX_SEMANTIC_BATCH_SIZE).contains(&self.max_batch_size)
-            && (1..=MAX_SEMANTIC_SEQUENCE_LENGTH).contains(&self.max_sequence_length)
-            && (1..=MAX_SEMANTIC_LOAD_DEADLINE_MS).contains(&self.load_deadline_ms);
-        if !valid {
-            return Err(config_error(
-                "semantic resource ceilings are zero, incoherent, or exceed supported maxima",
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Pinned semantic runtime selection.
@@ -235,7 +212,7 @@ impl Default for SemanticConfig {
 
 impl SemanticConfig {
     pub fn validate(&self) -> Result<()> {
-        self.resources.validate()?;
+        validate_semantic_resource_ceilings(self.resources)?;
         if let Some(model_id) = self.selected_model.as_ref() {
             if model_id.trim().is_empty() || model_id.len() > 128 {
                 return Err(config_error(

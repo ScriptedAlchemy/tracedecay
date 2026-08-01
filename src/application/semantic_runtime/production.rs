@@ -2832,7 +2832,7 @@ mod tests {
         // Derive the projection key from the same admitted authority the query
         // runtime binds against so `profile_digest` is the canonical digest the
         // embedding projection produces, rather than a non-canonical placeholder.
-        crate::semantic_code::session_pool::tests::authority()
+        crate::semantic_code::session_pool::test_support::authority()
             .projection()
             .projection_key()
             .clone()
@@ -3361,7 +3361,7 @@ mod tests {
         );
         handle
             .bind_query_runtime_for_current(std::sync::Arc::new(
-                crate::semantic_code::session_pool::tests::authority(),
+                crate::semantic_code::session_pool::test_support::authority(),
             ))
             .expect("bind query runtime for current generation");
 
@@ -3438,7 +3438,7 @@ mod tests {
         })
         .await
         .expect("current generation published");
-        let authority = crate::semantic_code::session_pool::tests::authority();
+        let authority = crate::semantic_code::session_pool::test_support::authority();
         handle
             .bind_query_runtime_for_current(Arc::new(authority.clone()))
             .expect("bind query runtime");
@@ -3610,7 +3610,7 @@ mod tests {
             }
         }
 
-        let authority = crate::semantic_code::session_pool::tests::authority();
+        let authority = crate::semantic_code::session_pool::test_support::authority();
         let source = source_generation('i');
         let vector = vector_generation('i');
         let query_view = EphemeralSanitizedQueryViewV1::sanitize(
