@@ -166,7 +166,7 @@ impl TraceDecay {
         };
 
         let mut attempts = 0;
-        loop {
+        let sync_error = loop {
             match branch_graph.sync_checkpointed().await {
                 Ok(_) => {
                     branch_graph
@@ -178,9 +178,16 @@ impl TraceDecay {
                     attempts += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => break error,
             }
-        }
+        };
+        drop(branch_graph);
+        Err(Self::retire_branch_runtime_after_failed_sync(
+            &self.store_runtime_registry,
+            database_path,
+            sync_error,
+        )
+        .await)
     }
 
     /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
@@ -347,14 +354,58 @@ impl TraceDecay {
                 false,
             )
             .await?;
-            match graph.sync().await {
+            let branch_database_path = graph.db_path();
+            let sync_result = graph.sync().await;
+            drop(graph);
+            match sync_result {
                 Ok(_) => return Ok(()),
                 Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
                     attempts += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(Self::retire_branch_runtime_after_failed_sync(
+                        &runtime_registry,
+                        &branch_database_path,
+                        error,
+                    )
+                    .await);
+                }
             }
+        }
+    }
+
+    /// Retires the registered runtime for a branch store whose sync failed, so
+    /// the caller can roll the published branch back in this same process.
+    ///
+    /// A branch sync mounts the new branch database through the process-wide
+    /// store runtime registry, and the registry keeps that mount — and the
+    /// database authority lease behind it — alive after the failed
+    /// [`TraceDecay`] handle is dropped. Rollback quarantines the same
+    /// `SQLite` family behind a deletion fence, and a deletion fence refuses
+    /// any database this process still holds an authority for. Without this
+    /// retirement the failure handler reported "this process already holds an
+    /// incompatible database authority or deletion fence" and left the failed
+    /// branch published until some other process cleaned it up.
+    ///
+    /// Retirement failures are folded into the returned error: the caller must
+    /// not attempt a rollback that is still fenced.
+    async fn retire_branch_runtime_after_failed_sync(
+        runtime_registry: &DaemonSessionRuntimeRegistryV1,
+        branch_database_path: &Path,
+        sync_error: TraceDecayError,
+    ) -> TraceDecayError {
+        match runtime_registry
+            .close_code_graph_paths([branch_database_path.to_path_buf()])
+            .await
+        {
+            Ok(()) => sync_error,
+            Err(close_error) => TraceDecayError::Config {
+                message: format!(
+                    "branch sync failed: {sync_error}; the published branch runtime could not be \
+                     retired before rollback: {close_error}"
+                ),
+            },
         }
     }
 
