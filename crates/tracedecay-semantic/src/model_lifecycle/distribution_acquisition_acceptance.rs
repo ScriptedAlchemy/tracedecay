@@ -12,7 +12,7 @@ const HF_HUB_CACHE_DIRECTORY_V1: &str = "hf-hub-cache";
 fn seed_product_cache(root: &Path, fixture: &Path, owner: &SemanticModelLifecycleOwnerV1) {
     let model = owner
         .catalog()
-        .get(crate::config::DEFAULT_FASTEMBED_MODEL_ID)
+        .get(crate::DEFAULT_FASTEMBED_MODEL_ID)
         .expect("packaged production catalog must contain the default Jina model");
     let repository = format!("models--{}", model.model_code.replace('/', "--"));
     let repository_root = root.join(HF_HUB_CACHE_DIRECTORY_V1).join(repository);
@@ -66,7 +66,7 @@ fn distribution_background_acquisition_installs_verified_jina_model() {
     }
 
     let initial = owner
-        .select_model(Some(crate::config::DEFAULT_FASTEMBED_MODEL_ID), true)
+        .select_model(Some(crate::DEFAULT_FASTEMBED_MODEL_ID), true)
         .expect("select default Jina model for background acquisition");
     assert!(matches!(
         initial.state,

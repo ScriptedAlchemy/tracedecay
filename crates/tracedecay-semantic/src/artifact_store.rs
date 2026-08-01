@@ -116,14 +116,14 @@ pub struct RuntimeEnvironmentV1 {
     pub available_threads: u32,
 }
 
-pub(super) const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
-pub(super) const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
+pub const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
+pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
 
 impl RuntimeEnvironmentV1 {
     /// Capture the runtime and host resources of this process. These values
     /// are independent of any candidate artifact manifest.
     #[cfg(feature = "semantic-fastembed")]
-    pub(super) fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
+    pub fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
         let available_threads = std::thread::available_parallelism()
             .ok()
             .and_then(|threads| u32::try_from(threads.get()).ok())
@@ -151,7 +151,7 @@ impl RuntimeEnvironmentV1 {
     }
 
     #[cfg(not(feature = "semantic-fastembed"))]
-    pub(super) fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
+    pub fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
         Err(SemanticCapabilityDisabledV1::IncompatibleRuntime)
     }
 }
@@ -310,7 +310,7 @@ impl From<io::Error> for SemanticCapabilityDisabledV1 {
 /// The capability never exposes a path or an I/O error to callers: a changed,
 /// missing, or unsafe member is indistinguishable from a corrupt artifact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AdmittedArtifactReadErrorV1 {
+pub enum AdmittedArtifactReadErrorV1 {
     Unavailable,
     Corrupt,
 }
@@ -362,7 +362,7 @@ impl AdmittedArtifactSourceV1 {
 /// store-private; later runtime wiring receives a store-owned handle instead
 /// of an ambient filesystem path.
 #[derive(Clone)]
-pub(super) struct AdmittedArtifactV1 {
+pub struct AdmittedArtifactV1 {
     artifact_digest: Sha256DigestHex,
     manifest_digest: Sha256DigestHex,
     manifest: ModelArtifactManifestV1,
@@ -391,21 +391,21 @@ impl PartialEq for AdmittedArtifactV1 {
 impl Eq for AdmittedArtifactV1 {}
 
 impl AdmittedArtifactV1 {
-    pub(super) fn artifact_digest(&self) -> &Sha256DigestHex {
+    pub fn artifact_digest(&self) -> &Sha256DigestHex {
         &self.artifact_digest
     }
 
-    pub(super) fn manifest_digest(&self) -> &Sha256DigestHex {
+    pub fn manifest_digest(&self) -> &Sha256DigestHex {
         &self.manifest_digest
     }
 
-    pub(super) fn manifest(&self) -> &ModelArtifactManifestV1 {
+    pub fn manifest(&self) -> &ModelArtifactManifestV1 {
         &self.manifest
     }
 
     /// Read one declared member through the digest-addressed store capability
     /// and re-check the exact signed length and SHA-256 pin.
-    pub(super) fn read_member_bytes(
+    pub fn read_member_bytes(
         &self,
         role: ArtifactMemberRoleV1,
     ) -> Result<Vec<u8>, AdmittedArtifactReadErrorV1> {
@@ -419,8 +419,8 @@ impl AdmittedArtifactV1 {
             .read_member_bytes(member)
     }
 
-    #[cfg(test)]
-    pub(super) fn test_fixture(manifest: ModelArtifactManifestV1) -> Self {
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_fixture(manifest: ModelArtifactManifestV1) -> Self {
         Self {
             artifact_digest: manifest.artifact_identity_digest(),
             manifest_digest: manifest.canonical_digest(),
@@ -430,7 +430,7 @@ impl AdmittedArtifactV1 {
     }
 
     #[cfg(test)]
-    pub(super) fn test_fixture_with_identities(
+    pub fn test_fixture_with_identities(
         manifest: ModelArtifactManifestV1,
         artifact_digest: Sha256DigestHex,
         manifest_digest: Sha256DigestHex,
@@ -635,7 +635,7 @@ impl ModelArtifactStore {
         self.artifacts_root().join(digest.as_str())
     }
 
-    pub(super) fn installed_directory(&self, digest: &Sha256DigestHex) -> PathBuf {
+    pub fn installed_directory(&self, digest: &Sha256DigestHex) -> PathBuf {
         self.artifact_dir(digest)
     }
 
@@ -1448,7 +1448,7 @@ impl ModelArtifactStore {
     /// Admit an installed artifact for runtime use against host evidence.
     /// Re-verifies the manifest and every on-disk member digest; any corrupt,
     /// revoked, quarantined, or incompatible artifact disables semantics.
-    pub(super) fn admit_for_runtime(
+    pub fn admit_for_runtime(
         &self,
         digest: &Sha256DigestHex,
         manifest: &ModelArtifactManifestV1,
@@ -1534,7 +1534,7 @@ impl ModelArtifactStore {
     /// caller-supplied process evidence. Legacy records without that manifest
     /// remain unavailable rather than reconstructing authority from filenames
     /// or member rows.
-    pub(super) fn admit_for_runtime_by_digest(
+    pub fn admit_for_runtime_by_digest(
         &self,
         digest: &Sha256DigestHex,
         env: &RuntimeEnvironmentV1,
@@ -1552,7 +1552,7 @@ impl ModelArtifactStore {
         self.admit_for_runtime(digest, &manifest, env, 0)
     }
 
-    pub(super) fn admit_leased_for_runtime_by_digest(
+    pub fn admit_leased_for_runtime_by_digest(
         &self,
         digest: &Sha256DigestHex,
         env: &RuntimeEnvironmentV1,

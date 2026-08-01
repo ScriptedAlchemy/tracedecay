@@ -427,7 +427,7 @@ fn validate_vector(
     Ok(())
 }
 
-pub(crate) fn vector_output_digest(
+pub fn vector_output_digest(
     projection_key: &ProjectionKeyV1,
     chunk_id: &CodeSearchChunkId,
     chunk_digest: &ContentDigest,

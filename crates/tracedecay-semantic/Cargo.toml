@@ -1,0 +1,50 @@
+[package]
+name = "tracedecay-semantic"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT"
+description = "TraceDecay semantic code runtime: artifact store, model lifecycle, and embedding projection"
+include = ["/src/**"]
+
+[dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
+fs2 = "0.4"
+getrandom = "0.2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+url = "2"
+# Library-first FastEmbed: disable hub/image defaults so the adapter can only
+# construct from local verified artifact bytes (no model-hub / cache discovery).
+# The `semantic-fastembed` feature adds the bundled ORT runtime and hf-hub
+# acquisition separately. Keep this exact runtime pin synchronized with
+# `FASTEMBED_RUNTIME_BUILD_REVISION_V1`; FastEmbed 5.17.3 itself pins ORT rc.12.
+fastembed = { version = "=5.17.3", optional = true, default-features = false }
+hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq", "rustls-tls"] }
+
+[features]
+# SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
+# image defaults disabled. Runtime inference still loads only from locally
+# verified artifact bytes; daemon-owned acquisition uses hf-hub against the
+# immutable catalog pins, never query-time ambient cache discovery.
+semantic-fastembed = [
+    "dep:fastembed",
+    "dep:hf-hub",
+    "fastembed/ort-download-binaries-rustls-tls",
+    "fastembed/hf-hub-rustls-tls",
+]
+# Explicit opt-in (same policy as the query kernel): exposes the pooled-session
+# and catalog test constructors to dependent crates' test builds only.
+test-helpers = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

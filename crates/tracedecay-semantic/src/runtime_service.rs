@@ -29,19 +29,18 @@ use super::session_pool::{
 ///
 /// The factory creates runtime adapters only. Artifact selection and
 /// admission remain explicit inputs to [`SemanticRuntimeService::reload`].
-pub(super) type SharedEmbeddingRuntimeFactory<R> =
+pub type SharedEmbeddingRuntimeFactory<R> =
     Arc<dyn Fn() -> Result<R, EmbedError> + Send + Sync + 'static>;
 
 /// Owned factory for the only production model implementation. Without the
 /// `semantic-fastembed` feature this yields the unavailable stand-in runtime,
 /// whose operations fail with a typed runtime failure.
-pub(super) fn fastembed_runtime_factory() -> SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime>
-{
+pub fn fastembed_runtime_factory() -> SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> {
     Arc::new(|| Ok(FastEmbedEmbeddingRuntime))
 }
 
 #[derive(Debug)]
-pub(super) enum SemanticRuntimeServiceError {
+pub enum SemanticRuntimeServiceError {
     Factory(EmbedError),
     PoolConfig(SessionPoolConfigError),
     WorkerTerminated,
@@ -60,7 +59,7 @@ impl fmt::Display for SemanticRuntimeServiceError {
 impl Error for SemanticRuntimeServiceError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct RuntimeReloadReportV1 {
+pub struct RuntimeReloadReportV1 {
     pub prior_generation: u64,
     pub current_generation: u64,
     pub closed_idle_sessions: usize,
@@ -83,15 +82,15 @@ type SemanticRuntimeCommitFutureV1 = Pin<
 >;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SemanticGenerationPointerV1 {
-    pub(crate) generation: VectorGenerationIdV1,
-    pub(crate) source_generation: CodeGenerationId,
-    pub(crate) projection_key: ProjectionKeyV1,
+pub struct SemanticGenerationPointerV1 {
+    pub generation: VectorGenerationIdV1,
+    pub source_generation: CodeGenerationId,
+    pub projection_key: ProjectionKeyV1,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SemanticRuntimeScheduleFailureV1 {
+pub enum SemanticRuntimeScheduleFailureV1 {
     Artifact,
     Runtime,
     Projection,
@@ -101,7 +100,7 @@ pub(crate) enum SemanticRuntimeScheduleFailureV1 {
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum SemanticRuntimeScheduleStatusV1 {
+pub enum SemanticRuntimeScheduleStatusV1 {
     Unavailable,
     Indexing {
         target_generation: CodeGenerationId,
@@ -119,14 +118,14 @@ pub(crate) enum SemanticRuntimeScheduleStatusV1 {
 }
 
 #[derive(Debug)]
-pub(crate) struct SemanticRuntimeScheduleCancellationV1 {
+pub struct SemanticRuntimeScheduleCancellationV1 {
     cancelled: AtomicBool,
     completed_units: AtomicU64,
     total_units: u64,
 }
 
 impl SemanticRuntimeScheduleCancellationV1 {
-    pub(super) fn new(total_units: u64) -> Self {
+    pub fn new(total_units: u64) -> Self {
         Self {
             cancelled: AtomicBool::new(false),
             completed_units: AtomicU64::new(0),
@@ -134,11 +133,11 @@ impl SemanticRuntimeScheduleCancellationV1 {
         }
     }
 
-    pub(crate) fn cancelled(&self) -> bool {
+    pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    pub(crate) fn set_completed_units(&self, completed_units: u64) {
+    pub fn set_completed_units(&self, completed_units: u64) {
         self.completed_units
             .fetch_max(completed_units.min(self.total_units), Ordering::AcqRel);
     }
@@ -158,12 +157,12 @@ impl CancellationSignal for SemanticRuntimeScheduleCancellationV1 {
     }
 }
 
-pub(crate) struct PreparedSemanticRuntimeCommitV1 {
+pub struct PreparedSemanticRuntimeCommitV1 {
     commit: Box<dyn FnOnce() -> SemanticRuntimeCommitFutureV1 + Send + 'static>,
 }
 
 impl PreparedSemanticRuntimeCommitV1 {
-    pub(crate) fn new<Commit, CommitFuture>(commit: Commit) -> Self
+    pub fn new<Commit, CommitFuture>(commit: Commit) -> Self
     where
         Commit: FnOnce() -> CommitFuture + Send + 'static,
         CommitFuture: Future<Output = Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1>>
@@ -179,7 +178,7 @@ impl PreparedSemanticRuntimeCommitV1 {
         (self.commit)().await
     }
 
-    pub(crate) fn on_success<Publish>(self, publish: Publish) -> Self
+    pub fn on_success<Publish>(self, publish: Publish) -> Self
     where
         Publish: FnOnce(&SemanticGenerationPointerV1) -> Result<(), SemanticRuntimeScheduleFailureV1>
             + Send
@@ -193,7 +192,7 @@ impl PreparedSemanticRuntimeCommitV1 {
     }
 }
 
-pub(crate) struct SemanticRuntimeWorkV1 {
+pub struct SemanticRuntimeWorkV1 {
     target_generation: CodeGenerationId,
     total_units: u64,
     prepare: Box<
@@ -204,7 +203,7 @@ pub(crate) struct SemanticRuntimeWorkV1 {
 }
 
 impl SemanticRuntimeWorkV1 {
-    pub(crate) fn new<Prepare, PrepareFuture>(
+    pub fn new<Prepare, PrepareFuture>(
         target_generation: CodeGenerationId,
         total_units: u64,
         prepare: Prepare,
@@ -224,7 +223,7 @@ impl SemanticRuntimeWorkV1 {
         }
     }
 
-    pub(super) fn total_units(&self) -> u64 {
+    pub fn total_units(&self) -> u64 {
         self.total_units
     }
 }
@@ -250,12 +249,12 @@ impl Default for SemanticRuntimeSchedulingStateV1 {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct SemanticRuntimeSchedulingHandleV1 {
+pub struct SemanticRuntimeSchedulingHandleV1 {
     state: Arc<Mutex<SemanticRuntimeSchedulingStateV1>>,
 }
 
 impl SemanticRuntimeSchedulingHandleV1 {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -264,7 +263,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
     ///
     /// A task already inside its serialized atomic commit is not displaced;
     /// callers receive `false` and may schedule the newer generation again.
-    pub(crate) fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
+    pub fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
         let (sequence, cancellation) = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.committing {
@@ -349,7 +348,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
         true
     }
 
-    pub(crate) fn status(&self) -> SemanticRuntimeScheduleStatusV1 {
+    pub fn status(&self) -> SemanticRuntimeScheduleStatusV1 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut status = state.status.clone();
         if let (
@@ -364,7 +363,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
         status
     }
 
-    pub(crate) fn current(&self) -> Option<SemanticGenerationPointerV1> {
+    pub fn current(&self) -> Option<SemanticGenerationPointerV1> {
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -372,7 +371,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
             .clone()
     }
 
-    pub(crate) fn restore_current(&self, pointer: SemanticGenerationPointerV1) {
+    pub fn restore_current(&self, pointer: SemanticGenerationPointerV1) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(cancellation) = state.cancellation.take() {
             cancellation.cancel();
@@ -385,7 +384,7 @@ impl SemanticRuntimeSchedulingHandleV1 {
         };
     }
 
-    pub(crate) fn cancel(&self) -> bool {
+    pub fn cancel(&self) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.committing {
             return false;
@@ -443,7 +442,7 @@ struct ActiveRuntime<R: EmbeddingRuntime> {
 }
 
 /// Atomically replaceable production session-pool owner.
-pub(super) struct SemanticRuntimeService<R: EmbeddingRuntime> {
+pub struct SemanticRuntimeService<R: EmbeddingRuntime> {
     config: SessionPoolConfigV1,
     lifecycle: Mutex<()>,
     active: RwLock<ActiveRuntime<R>>,
@@ -454,7 +453,7 @@ where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
     /// Build and publish generation one, returning an owned shared service.
-    pub(super) fn new_owned(
+    pub fn new_owned(
         authority: Arc<AdmittedProjectionArtifactV1>,
         factory: SharedEmbeddingRuntimeFactory<R>,
         config: SessionPoolConfigV1,
@@ -472,18 +471,16 @@ where
         }))
     }
 
-    pub(super) fn generation(&self) -> u64 {
+    pub fn generation(&self) -> u64 {
         self.read_active().generation
     }
 
-    pub(super) fn stats(&self) -> SessionPoolStats {
+    pub fn stats(&self) -> SessionPoolStats {
         self.read_active().pool.stats()
     }
 
     /// Acquire from one coherent authority/pool snapshot.
-    pub(super) fn acquire(
-        &self,
-    ) -> Result<PooledSession<R, SystemMonotonicClock>, SessionAcquireError> {
+    pub fn acquire(&self) -> Result<PooledSession<R, SystemMonotonicClock>, SessionAcquireError> {
         let (authority, pool) = {
             let active = self.read_active();
             (Arc::clone(&active.authority), Arc::clone(&active.pool))
@@ -495,14 +492,14 @@ where
     ///
     /// Callers use this before publishing a replacement runtime so request
     /// threads never pay model/session startup cost.
-    pub(super) fn warm_query_session(&self) -> Result<(), SessionAcquireError> {
+    pub fn warm_query_session(&self) -> Result<(), SessionAcquireError> {
         let session = self.acquire()?;
         drop(session);
         Ok(())
     }
 
     /// Recreate the active runtime from its current owned factory.
-    pub(super) fn restart(&self) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
+    pub fn restart(&self) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
         let _lifecycle = self
             .lifecycle
             .lock()
@@ -515,7 +512,7 @@ where
     }
 
     /// Recreate the runtime away from retrieval executor threads.
-    pub(super) async fn restart_async(
+    pub async fn restart_async(
         self: &Arc<Self>,
     ) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
         let service = Arc::clone(self);
@@ -528,7 +525,7 @@ where
     ///
     /// Construction completes before the write lock is taken. If construction
     /// fails, the current generation remains untouched and usable.
-    pub(super) fn reload(
+    pub fn reload(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
         factory: SharedEmbeddingRuntimeFactory<R>,
@@ -542,7 +539,7 @@ where
 
     /// Construct and verify a replacement away from retrieval executor
     /// threads, then publish it with the same atomic swap as [`Self::reload`].
-    pub(super) async fn reload_async(
+    pub async fn reload_async(
         self: &Arc<Self>,
         authority: Arc<AdmittedProjectionArtifactV1>,
         factory: SharedEmbeddingRuntimeFactory<R>,
@@ -553,7 +550,7 @@ where
             .map_err(|_| SemanticRuntimeServiceError::WorkerTerminated)?
     }
 
-    pub(super) fn active_snapshot(
+    pub fn active_snapshot(
         &self,
     ) -> (
         u64,
@@ -624,7 +621,7 @@ mod tests {
     use std::time::Duration;
 
     use super::super::fastembed_adapter::FakeEmbeddingRuntime;
-    use super::super::session_pool::tests::{authority, config};
+    use super::super::session_pool::test_support::{authority, config};
     use super::*;
     use tracedecay_domain::ManifestDigest;
 
