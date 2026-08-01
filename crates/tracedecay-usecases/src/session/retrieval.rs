@@ -157,22 +157,19 @@ impl SessionTemporalQuery {
     }
 
     #[must_use]
-    pub(crate) fn with_compatibility_filter_digest(mut self, digest: String) -> Self {
+    pub fn with_compatibility_filter_digest(mut self, digest: String) -> Self {
         self.compatibility_filter_digest = Some(digest);
         self
     }
 
     #[must_use]
-    pub(crate) fn with_semantic_filter(
-        mut self,
-        semantic_filter: TemporalCandidateFilterV1,
-    ) -> Self {
+    pub fn with_semantic_filter(mut self, semantic_filter: TemporalCandidateFilterV1) -> Self {
         self.semantic_filter = semantic_filter;
         self
     }
 
     #[must_use]
-    pub(crate) fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
+    pub fn with_direct_anchor(mut self, anchor_id: RetrievalAnchorId) -> Self {
         self.direct_anchor = Some(anchor_id);
         self
     }

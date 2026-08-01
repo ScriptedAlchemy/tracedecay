@@ -89,7 +89,7 @@ pub struct RegisteredObservabilityPortV1<'a> {
 }
 
 impl<'a> RegisteredObservabilityPortV1<'a> {
-    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
+    pub const fn new(db: &'a RegisteredGlobalDb) -> Self {
         Self { db }
     }
 }
