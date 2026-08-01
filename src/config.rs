@@ -916,9 +916,39 @@ impl RuntimeConfigurationCache {
     }
 }
 
-fn runtime_configuration_cache() -> &'static RuntimeConfigurationCache {
-    static CACHE: OnceLock<RuntimeConfigurationCache> = OnceLock::new();
-    CACHE.get_or_init(RuntimeConfigurationCache::default)
+impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
+    for RuntimeConfigurationCache
+{
+    fn cached_runtime_configuration(
+        &self,
+        project_root: &Path,
+    ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
+        let configuration = self.for_root(project_root)?;
+        tracedecay_dashboard_api::config::PinnedRuntimeConfiguration::new(
+            tracedecay_dashboard_api::config::RuntimeConfigurationTarget {
+                project_id: configuration.target.project_id,
+                project_root: configuration.target.project_root,
+            },
+            configuration.revision_id,
+            configuration.snapshot,
+        )
+    }
+
+    fn is_in_gitignore(&self, project_root: &Path) -> bool {
+        is_in_gitignore(project_root)
+    }
+}
+
+fn runtime_configuration_cache() -> &'static Arc<RuntimeConfigurationCache> {
+    static CACHE: OnceLock<Arc<RuntimeConfigurationCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(RuntimeConfigurationCache::default()))
+}
+
+/// Installs the root-owned configuration cache as the dashboard's read port.
+pub fn install_dashboard_configuration_read_port() -> Result<()> {
+    tracedecay_dashboard_api::config::install_dashboard_configuration_read_port(Arc::clone(
+        runtime_configuration_cache(),
+    ))
 }
 
 #[derive(Default)]
