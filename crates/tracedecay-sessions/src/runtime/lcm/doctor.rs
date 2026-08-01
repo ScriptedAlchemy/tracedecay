@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use tracedecay_runtime_core::db::build_qmark_placeholders;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
@@ -18,10 +19,6 @@ const MAX_SAMPLES: usize = 20;
 const RETENTION_OLD_DAYS: f64 = 30.0;
 const RETENTION_HEAVY_CHARS: i64 = 128 * 1024;
 const SQLITE_IN_BATCH_SIZE: usize = 500;
-
-fn sql_placeholders(len: usize) -> String {
-    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
-}
 
 pub struct DoctorRequest<'a> {
     pub storage_root: &'a Path,
@@ -1074,7 +1071,7 @@ async fn delete_clean_candidates_in_transaction(
         if session_chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(session_chunk.len());
+        let placeholders = build_qmark_placeholders(session_chunk.len());
 
         let mut summary_values = vec![SqlValue::Text(provider.to_string())];
         summary_values.extend(session_chunk.iter().cloned().map(SqlValue::Text));
@@ -1136,7 +1133,7 @@ async fn delete_clean_candidates_in_transaction(
         if message_id_chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(message_id_chunk.len());
+        let placeholders = build_qmark_placeholders(message_id_chunk.len());
         let mut values = vec![SqlValue::Text(provider.to_string())];
         values.extend(message_id_chunk.iter().cloned().map(SqlValue::Text));
         conn.execute(
@@ -1152,7 +1149,7 @@ async fn delete_clean_candidates_in_transaction(
         if store_id_chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(store_id_chunk.len());
+        let placeholders = build_qmark_placeholders(store_id_chunk.len());
         let changed = conn
             .execute(
                 &format!("DELETE FROM lcm_raw_messages WHERE store_id IN ({placeholders})"),
@@ -1228,7 +1225,7 @@ async fn message_ids_for_store_ids(
         if store_id_chunk.is_empty() {
             continue;
         }
-        let placeholders = sql_placeholders(store_id_chunk.len());
+        let placeholders = build_qmark_placeholders(store_id_chunk.len());
         let sql =
             format!("SELECT message_id FROM lcm_raw_messages WHERE store_id IN ({placeholders})");
         let mut rows = conn

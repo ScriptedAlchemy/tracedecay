@@ -1,10 +1,11 @@
 use serde_json::Value;
 
+use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{
     QueryExecutor, Value as DbValue, params, params_from_iter,
 };
 
-use super::util::{like_pattern, qmarks, query_i64_result, query_rows};
+use super::util::{like_pattern, query_i64_result, query_rows};
 
 pub type GraphReadResult<T> = std::result::Result<T, String>;
 
@@ -147,7 +148,7 @@ pub async fn node_rows_by_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(ids.len());
+    let placeholders = build_qmark_placeholders(ids.len());
     let sql = format!(
         "SELECT {NODE_COLUMNS}
          FROM nodes
@@ -165,7 +166,7 @@ pub async fn edge_rows_for_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(ids.len());
+    let placeholders = build_qmark_placeholders(ids.len());
     // One row per (source, target, kind): the edges table stores one row per
     // call site, and duplicates would only burn the edge cap (the canvas
     // dedups by that key anyway).
@@ -190,7 +191,7 @@ pub async fn degree_rows_for_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(ids.len());
+    let placeholders = build_qmark_placeholders(ids.len());
     let degree_union = filtered_degree_union_sql(&placeholders);
     let sql = format!(
         "SELECT node_id, COUNT(*) AS degree
@@ -376,7 +377,7 @@ pub async fn frontier_edge_rows(
     if frontier.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(frontier.len());
+    let placeholders = build_qmark_placeholders(frontier.len());
     let sql = format!(
         "SELECT source, target, kind, line FROM edges
          WHERE source IN ({placeholders}) OR target IN ({placeholders})"

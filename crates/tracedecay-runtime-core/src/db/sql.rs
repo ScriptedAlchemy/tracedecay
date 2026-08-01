@@ -9,7 +9,7 @@ use crate::errors::{Result, TraceDecayError};
 /// Returns a SQL placeholder string of `n` anonymous `?` markers separated by
 /// `, `. Used to construct `IN ($qmarks)` clauses without allocating one
 /// `String` per id (`format!("?{i}")` previously did that).
-pub(super) fn build_qmark_placeholders(n: usize) -> String {
+pub fn build_qmark_placeholders(n: usize) -> String {
     debug_assert!(n > 0, "build_qmark_placeholders called with n == 0");
     // Each "?, " occupies 3 bytes; the last one drops the trailing ", ".
     let mut s = String::with_capacity(n * 3);

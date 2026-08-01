@@ -93,11 +93,6 @@ pub fn coerce_limit(value: Option<i64>, default: i64, maximum: i64) -> i64 {
     value.unwrap_or(default).clamp(1, maximum)
 }
 
-/// `?,?,…` placeholder list for a SQL `IN (…)` clause with `count` entries.
-pub fn qmarks(count: usize) -> String {
-    vec!["?"; count].join(",")
-}
-
 /// Integer field of a `query_rows` JSON row; missing/non-integer → 0.
 pub fn i64_field(row: &Value, key: &str) -> i64 {
     row.get(key).and_then(Value::as_i64).unwrap_or(0)
