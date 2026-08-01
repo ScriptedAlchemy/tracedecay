@@ -36,7 +36,7 @@ impl CurrentCallableCodeAccessPort for ProductionCallableCodeAccessPort {
                 .current()
                 .await
                 .map_err(|_| concealed())?;
-            let configuration = crate::config::PinnedRuntimeConfiguration::new(
+            let configuration = tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
                 self.configuration.configuration_target().clone(),
                 current.revision_id,
                 current.snapshot,
