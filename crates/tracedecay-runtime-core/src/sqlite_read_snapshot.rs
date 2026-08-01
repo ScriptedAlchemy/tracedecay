@@ -215,7 +215,7 @@ pub struct SnapshotDatabase {
     identity_path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
     _authority: crate::db::DatabaseAuthority,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     copied_bytes: u64,
 }
 
@@ -284,7 +284,7 @@ impl SnapshotDatabase {
         .map_err(|error| io::Error::other(format!("snapshot backup task failed: {error}")))?
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
@@ -347,7 +347,7 @@ pub struct SnapshotSet {
 }
 
 impl SnapshotSet {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
@@ -405,7 +405,7 @@ impl SnapshotSet {
         self.copied_bytes
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn database_count(&self) -> usize {
         self.databases.len()
     }
@@ -460,7 +460,7 @@ struct FileState {
 /// Opens one source family without mutating it. Checkpointed DBs are read
 /// directly through `SQLite` immutable mode. WAL-backed DBs are reflinked when
 /// supported, then fall back to one full copy with WAL/SHM copied alongside.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
@@ -737,7 +737,7 @@ async fn finish_one(
         identity_path,
         _scratch: scratch,
         _authority: prepared.authority,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-helpers"))]
         copied_bytes: prepared.copy_bytes,
     };
     snapshot.validate_source()?;
@@ -820,7 +820,7 @@ fn create_scratch_directory(
     ))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))] // Preserve the fallible Unix contract.
 fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     #[cfg(unix)]

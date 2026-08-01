@@ -14,14 +14,14 @@ use super::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionBehavior {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     Deferred,
     Immediate,
 }
 
 pub struct Transaction {
     runtime: Arc<Mutex<Option<RuntimeTransaction>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     connection_runtime: Arc<dyn Runtime>,
 }
 
@@ -30,11 +30,11 @@ impl Transaction {
         runtime: RuntimeTransaction,
         connection_runtime: Arc<dyn Runtime>,
     ) -> Self {
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-helpers")))]
         let _ = connection_runtime;
         Self {
             runtime: Arc::new(Mutex::new(Some(runtime))),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-helpers"))]
             connection_runtime,
         }
     }
@@ -147,7 +147,7 @@ impl Transaction {
         .map_err(join_error)?
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn last_insert_rowid(&self) -> i64 {
         self.connection_runtime.last_insert_rowid()
     }

@@ -28,6 +28,9 @@ impl TestConnection {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
+    // Only the in-crate engine tests drive this constructor; under
+    // `feature = "test-helpers"` alone it is an unused crate-private item.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
