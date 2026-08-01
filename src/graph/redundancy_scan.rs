@@ -36,8 +36,8 @@ use crate::application::semantic_runtime::{
 };
 use crate::errors::Result;
 use crate::redundancy::{
-    Fingerprint, RedundantPair, compute_fingerprint, connected_node_groups, find_node_at_lines,
-    find_redundant_pairs, parse_file, round4,
+    Fingerprint, RedundancyPairScan, RedundantPair, compute_fingerprint, connected_node_groups,
+    find_node_at_lines, parse_file, round4,
 };
 use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
@@ -85,6 +85,16 @@ pub(crate) struct RedundancyScanV1 {
     pub(crate) groups: Vec<Vec<String>>,
 }
 
+/// Scored candidate pairs per uninterrupted slice of the pairwise scan.
+///
+/// The scan is the one place in this pipeline that runs unbounded CPU work
+/// with no natural await point, so it yields to the runtime every slice. Each
+/// comparison is a two-pointer merge over two shingle sets, so a few thousand
+/// of them stay well inside a sub-millisecond slice on a saturated daemon —
+/// small enough that a concurrent interactive query is never stuck behind the
+/// scan, large enough that the yield itself stays statistically free.
+const REDUNDANCY_PAIR_SLICE: usize = 2048;
+
 /// Run the full redundancy pipeline for `options`.
 pub(crate) async fn redundancy_scan(
     cg: &TraceDecay,
@@ -105,14 +115,23 @@ pub(crate) async fn redundancy_scan(
     let fingerprints = ensure_fingerprints(cg, &nodes).await?;
     let scanned = fingerprints.len();
 
-    // 3. Bucket by token count to keep pairwise comparison sub-quadratic.
+    // 3. Bucket by token count to keep pairwise comparison sub-quadratic, and
+    //    walk the buckets in bounded slices so this CPU-bound analysis cannot
+    //    pin a runtime worker for its whole duration while the daemon is
+    //    serving interactive queries. The slice cursor changes only *when* the
+    //    loop pauses, never which pairs it visits or how they rank, so a paced
+    //    scan returns exactly what a single-shot scan returns.
     let scoped = scoped_fingerprints(&nodes, &fingerprints);
-    let pairs = find_redundant_pairs(
+    let mut scan = RedundancyPairScan::new(
         scoped,
         options.threshold,
         options.include_naming,
         options.max_pairs,
     );
+    while scan.advance(REDUNDANCY_PAIR_SLICE) {
+        tokio::task::yield_now().await;
+    }
+    let pairs = scan.finish();
 
     // Persist the ranked pairs as a freshness-validated cache so other
     // surfaces (diagnose near-duplicate enrichment, the dashboard, future
@@ -948,8 +967,8 @@ mod tests {
     };
     use crate::db::StoredFingerprint;
     use crate::redundancy::{
-        Fingerprint, RedundancyMatchScore, RedundantPair, connected_node_groups,
-        find_redundant_pairs,
+        Fingerprint, RedundancyMatchScore, RedundancyPairScan, RedundantPair,
+        connected_node_groups, find_redundant_pairs,
     };
     use crate::types::{Node, NodeKind, Visibility};
 
@@ -1314,8 +1333,8 @@ mod tests {
                             .filter_map(move |right| semantic_cosine(left, right))
                     })
                     .max_by(f64::total_cmp);
-                if let Some((_, distance)) = cosine
-                    .and_then(|cosine| semantic.profile.accepts(cosine).map(|d| (cosine, d)))
+                if let Some((_, distance)) =
+                    cosine.and_then(|cosine| semantic.profile.accepts(cosine).map(|d| (cosine, d)))
                 {
                     let (a, b) = canonical_pair_ids(&node_a.id, &node_b.id);
                     found.push((a.to_owned(), b.to_owned(), distance));
@@ -1375,7 +1394,10 @@ mod tests {
         // ambiguous-name node.
         assert!(!ids.iter().any(|(a, b)| *a == "far-a" || *b == "far-a"));
         assert!(!ids.iter().any(|(a, b)| *a == "far-b" || *b == "far-b"));
-        assert!(!ids.iter().any(|(a, b)| a.starts_with("amb") || b.starts_with("amb")));
+        assert!(
+            !ids.iter()
+                .any(|(a, b)| a.starts_with("amb") || b.starts_with("amb"))
+        );
     }
 
     #[test]
@@ -1425,12 +1447,7 @@ mod tests {
             let name = format!("fn_{index}");
             let id = format!("id-{index}");
             nodes.push(candidate_node(&id, &name, &file, 8));
-            let values = vec![
-                next() as f32,
-                next() as f32,
-                next() as f32,
-                next() as f32,
-            ];
+            let values = vec![next() as f32, next() as f32, next() as f32, next() as f32];
             vectors.push(vec_row(&file, &name, values));
         }
         // A moderately permissive window so a non-trivial number of pairs accept.
@@ -1477,6 +1494,108 @@ mod tests {
             node_body_slice(src, &node),
             "fn value() {\n        work();\n    }"
         );
+    }
+
+    /// Synthetic candidates spread across overlapping `body_tokens` windows so
+    /// the pairwise scan visits partial windows, full windows, rejected pairs
+    /// and accepted pairs — the shapes a slice boundary could disturb.
+    fn paced_scan_candidates() -> (Vec<Node>, Vec<Fingerprint>) {
+        let mut nodes = Vec::new();
+        let mut fingerprints = Vec::new();
+        for index in 0..40u32 {
+            let mut node = test_node(&format!("node-{index:02}"), "candidate", index);
+            node.file_path = format!("src/file-{index:02}.rs");
+            nodes.push(node);
+            // Token counts drift slowly so each candidate's ±25 % window covers
+            // a different, overlapping run of neighbours.
+            let body_tokens = 40 + usize::try_from(index).unwrap();
+            // Every third candidate shares a shingle set (and hashes) with its
+            // neighbours, so the scan yields real accepted pairs, not an empty
+            // result that would make the comparison vacuous.
+            let family = index % 3;
+            let shingles: Vec<u32> = (0..24u32).map(|slot| family * 1_000 + slot).collect();
+            fingerprints.push(Fingerprint {
+                ast_hash: format!("ast-{family}"),
+                cfg_hash: format!("cfg-{family}"),
+                call_seq_hash: format!("call-{family}"),
+                shingles,
+                body_tokens,
+                source_hash: format!("source-{index:02}"),
+            });
+        }
+        (nodes, fingerprints)
+    }
+
+    fn paced_scan_scoped<'a>(
+        nodes: &'a [Node],
+        fingerprints: &'a [Fingerprint],
+    ) -> Vec<(&'a Node, &'a Fingerprint)> {
+        nodes.iter().zip(fingerprints.iter()).collect()
+    }
+
+    fn pair_identity(pairs: &[RedundantPair<'_>]) -> Vec<(String, String, u64, u64)> {
+        pairs
+            .iter()
+            .map(|pair| {
+                (
+                    pair.node_a.id.clone(),
+                    pair.node_b.id.clone(),
+                    pair.score.ranking_score.to_bits(),
+                    pair.score.similarity.to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    /// The slice cursor is a pacing device only: driving the scan one
+    /// comparison at a time must return the same pairs, in the same order,
+    /// with bit-identical scores as the single-shot scan.
+    #[test]
+    fn sliced_pair_scan_matches_the_single_shot_scan_exactly() {
+        let (nodes, fingerprints) = paced_scan_candidates();
+        let single_shot = find_redundant_pairs(
+            paced_scan_scoped(&nodes, &fingerprints),
+            0.6,
+            false,
+            usize::MAX,
+        );
+        assert!(
+            !single_shot.is_empty(),
+            "fixture must produce pairs or the comparison proves nothing"
+        );
+
+        for budget in [1usize, 2, 7, 64, 4096] {
+            let mut scan = RedundancyPairScan::new(
+                paced_scan_scoped(&nodes, &fingerprints),
+                0.6,
+                false,
+                usize::MAX,
+            );
+            let mut slices = 0usize;
+            while scan.advance(budget) {
+                slices += 1;
+                assert!(slices < 1_000_000, "slice cursor failed to make progress");
+            }
+            assert_eq!(
+                pair_identity(&scan.finish()),
+                pair_identity(&single_shot),
+                "slice budget {budget} changed the scan result"
+            );
+        }
+    }
+
+    /// `max_pairs` truncation happens after ranking, so it must survive pacing
+    /// identically too.
+    #[test]
+    fn sliced_pair_scan_truncates_like_the_single_shot_scan() {
+        let (nodes, fingerprints) = paced_scan_candidates();
+        let single_shot =
+            find_redundant_pairs(paced_scan_scoped(&nodes, &fingerprints), 0.6, false, 5);
+        let mut scan =
+            RedundancyPairScan::new(paced_scan_scoped(&nodes, &fingerprints), 0.6, false, 5);
+        while scan.advance(3) {}
+        assert_eq!(pair_identity(&scan.finish()), pair_identity(&single_shot));
+        assert_eq!(single_shot.len(), 5);
     }
 
     fn candidate_node(id: &str, name: &str, file_path: &str, end_line: u32) -> Node {

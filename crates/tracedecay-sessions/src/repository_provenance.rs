@@ -5,7 +5,9 @@
 //! repository/worktree/HEAD/ref/remote identity plus persisted index metadata
 //! through `gix`; query owns status, diff, history, blame, and hunk intelligence.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
@@ -615,7 +617,49 @@ fn head_tree_id(repo: &gix::Repository) -> Option<TreeId> {
     TreeId::new(tree.to_hex().to_string()).ok()
 }
 
+/// Distinct remote strings the normalization memo keeps.
+///
+/// One daemon serves a handful of checkouts, so a few entries cover every
+/// remote in flight; the memo is a short linear scan, never a growth surface.
+const REMOTE_NORMALIZATION_MEMO_CAPACITY: usize = 8;
+
+/// Recently normalized `(raw remote, normalization)` entries, most recent last.
+type RemoteNormalizationMemo = Mutex<VecDeque<(String, Option<String>)>>;
+
+fn remote_normalization_memo() -> &'static RemoteNormalizationMemo {
+    static MEMO: OnceLock<RemoteNormalizationMemo> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(VecDeque::with_capacity(REMOTE_NORMALIZATION_MEMO_CAPACITY)))
+}
+
+/// Credential-stripped remote identity, memoized on the raw remote string.
+///
+/// Provenance is captured once per ingested observation, so this normalization
+/// ran once per record — and for an `https://` remote `Url::parse` runs the
+/// host through idna/ICU domain mapping, which is disproportionately expensive
+/// next to the rest of a per-record capture. The remote is still read live from
+/// Git config on every capture; only the pure normalization of that string is
+/// reused. A changed remote is a different key and recomputes, so a memo hit is
+/// by construction the same value a fresh parse would produce.
 fn normalize_remote_without_credentials(remote: &str) -> Option<String> {
+    if let Ok(memo) = remote_normalization_memo().lock()
+        && let Some((_, normalized)) = memo.iter().find(|(key, _)| key == remote)
+    {
+        return normalized.clone();
+    }
+    let normalized = normalize_remote_uncached(remote);
+    if let Ok(mut memo) = remote_normalization_memo().lock() {
+        // Re-check: a concurrent capture may have inserted the same key.
+        if !memo.iter().any(|(key, _)| key == remote) {
+            if memo.len() == REMOTE_NORMALIZATION_MEMO_CAPACITY {
+                memo.pop_front();
+            }
+            memo.push_back((remote.to_owned(), normalized.clone()));
+        }
+    }
+    normalized
+}
+
+fn normalize_remote_uncached(remote: &str) -> Option<String> {
     let remote = remote.trim();
     if remote.is_empty() {
         return None;
@@ -688,4 +732,65 @@ fn opaque_admission_identifier(
 fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
+}
+
+#[cfg(test)]
+mod remote_normalization_tests {
+    use super::{normalize_remote_uncached, normalize_remote_without_credentials};
+
+    /// Remote strings covering every branch of the normalization: credentialed
+    /// and bare HTTPS (the shapes that reach idna), SCP-style SSH, local paths,
+    /// and the rejected forms.
+    const REMOTES: &[&str] = &[
+        "https://github.com/Owner/Repo.git",
+        "https://user:secret@github.com/Owner/Repo.git/",
+        "https://github.com/Owner/Repo?token=abc#frag",
+        "https://xn--nxasmm1c.example.com/Owner/Repo.git",
+        "git@github.com:Owner/Repo.git",
+        "ssh://git@example.com:22/Owner/Repo.git",
+        "/srv/git/repo.git",
+        "  https://github.com/Owner/Repo.git  ",
+        "",
+        "   ",
+    ];
+
+    /// The memo must be transparent: every remote shape normalizes to exactly
+    /// what an uncached parse produces, on the miss and again on the hit.
+    #[test]
+    fn memoized_normalization_matches_the_uncached_normalization() {
+        for remote in REMOTES {
+            let expected = normalize_remote_uncached(remote);
+            assert_eq!(
+                normalize_remote_without_credentials(remote),
+                expected,
+                "cold normalization diverged for {remote:?}"
+            );
+            assert_eq!(
+                normalize_remote_without_credentials(remote),
+                expected,
+                "memoized normalization diverged for {remote:?}"
+            );
+        }
+    }
+
+    /// A repository whose remote changes must not be served the previous
+    /// remote's identity, and evicted entries must recompute identically.
+    #[test]
+    fn changed_remotes_never_serve_a_previous_normalization() {
+        let first = normalize_remote_without_credentials("https://github.com/Owner/First.git");
+        let second = normalize_remote_without_credentials("https://github.com/Owner/Second.git");
+        assert_eq!(first.as_deref(), Some("https://github.com/Owner/First"));
+        assert_eq!(second.as_deref(), Some("https://github.com/Owner/Second"));
+
+        // Overflow the memo, then re-read the first remote.
+        for index in 0..32 {
+            let _ = normalize_remote_without_credentials(&format!(
+                "https://github.com/Owner/Filler{index}.git"
+            ));
+        }
+        assert_eq!(
+            normalize_remote_without_credentials("https://github.com/Owner/First.git"),
+            first
+        );
+    }
 }
