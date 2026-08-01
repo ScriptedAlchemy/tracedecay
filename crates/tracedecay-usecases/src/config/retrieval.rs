@@ -569,6 +569,12 @@ pub struct RetrievalProfileAuditEventV1 {
     pub occurred_at: UtcMicros,
 }
 
+struct RetrievalProfileCommitMetadataV1 {
+    freshness_vector_digest: ManifestDigest,
+    result_revision: ConfigurationRevisionId,
+    now: UtcMicros,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetrievalProfileStateV1 {
     configuration_revision: ConfigurationRevisionId,
@@ -689,15 +695,18 @@ impl RetrievalProfileStateV1 {
             .clone();
         self.active.executable_under(current_runtime)?;
         candidate.executable_under(candidate_runtime)?;
+        let commit = RetrievalProfileCommitMetadataV1 {
+            freshness_vector_digest,
+            result_revision: result_revision.clone(),
+            now,
+        };
         let event = audit_event(
             actor,
             RetrievalProfileAuditOperationV1::Activate,
             &self.active,
             &candidate,
-            freshness_vector_digest,
             self.configuration_revision.clone(),
-            result_revision.clone(),
-            now,
+            commit,
         )?;
         let prior = std::mem::replace(&mut self.active, candidate);
         self.rollback = Some(prior);
@@ -732,15 +741,18 @@ impl RetrievalProfileStateV1 {
             .as_ref()
             .ok_or(RetrievalProfileActivationErrorV1::RollbackUnavailable)?;
         restored.executable_under(restored_runtime)?;
+        let commit = RetrievalProfileCommitMetadataV1 {
+            freshness_vector_digest,
+            result_revision: result_revision.clone(),
+            now,
+        };
         let event = audit_event(
             actor,
             RetrievalProfileAuditOperationV1::Rollback { trigger },
             &self.active,
             restored,
-            freshness_vector_digest,
             self.configuration_revision.clone(),
-            result_revision.clone(),
-            now,
+            commit,
         )?;
         let restored = self
             .rollback
@@ -870,21 +882,21 @@ fn validate_audit_event(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn audit_event(
     actor_id: ActorId,
     operation: RetrievalProfileAuditOperationV1,
     prior: &AcceptedRetrievalProfileV1,
     resulting: &AcceptedRetrievalProfileV1,
-    freshness_vector_digest: ManifestDigest,
     base_revision: ConfigurationRevisionId,
-    result_revision: ConfigurationRevisionId,
-    occurred_at: UtcMicros,
+    commit: RetrievalProfileCommitMetadataV1,
 ) -> Result<RetrievalProfileAuditEventV1, RetrievalProfileActivationErrorV1> {
-    if result_revision == base_revision {
+    if commit.result_revision == base_revision {
         return Err(RetrievalProfileActivationErrorV1::StaleRevision);
     }
-    freshness_vector_digest.validate().map_err(contract_error)?;
+    commit
+        .freshness_vector_digest
+        .validate()
+        .map_err(contract_error)?;
     let event_id = canonical_sha256(&(
         AUDIT_ID_DOMAIN,
         &actor_id,
@@ -894,10 +906,10 @@ fn audit_event(
         &prior.profile_digest,
         &resulting.profile_digest,
         &resulting.profile.evaluation_result_anchor,
-        &freshness_vector_digest,
+        &commit.freshness_vector_digest,
         &base_revision,
-        &result_revision,
-        occurred_at,
+        &commit.result_revision,
+        commit.now,
     ))
     .map_err(contract_error)?;
     Ok(RetrievalProfileAuditEventV1 {
@@ -909,10 +921,10 @@ fn audit_event(
         prior_active_digest: prior.profile_digest.clone(),
         resulting_active_digest: resulting.profile_digest.clone(),
         evaluation_anchor: resulting.profile.evaluation_result_anchor.clone(),
-        freshness_vector_digest,
+        freshness_vector_digest: commit.freshness_vector_digest,
         base_revision,
-        result_revision,
-        occurred_at,
+        result_revision: commit.result_revision,
+        occurred_at: commit.now,
     })
 }
 

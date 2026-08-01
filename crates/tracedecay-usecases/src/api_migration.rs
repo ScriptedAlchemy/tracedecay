@@ -28,15 +28,25 @@ struct PendingSite {
     caller_node_id: Option<String>,
 }
 
+struct PlanWorkspace<'a> {
+    graph: &'a TraceDecay,
+    sources: BTreeMap<String, String>,
+    sites: Vec<PendingSite>,
+    graph_evidence: Vec<(String, String, String, String)>,
+}
+
 pub async fn plan_api_migration(
     graph: &TraceDecay,
     request: ApiMigrationPlanRequestV1,
 ) -> Result<ApiMigrationPlanV1> {
     request.validate().map_err(contract_error)?;
     let repository_revision = current_repository_revision(graph.project_root())?;
-    let mut sources = BTreeMap::<String, String>::new();
-    let mut sites = Vec::<PendingSite>::new();
-    let mut graph_evidence = Vec::<(String, String, String, String)>::new();
+    let mut workspace = PlanWorkspace {
+        graph,
+        sources: BTreeMap::new(),
+        sites: Vec::new(),
+        graph_evidence: Vec::new(),
+    };
 
     for operation in &request.operations {
         match operation {
@@ -55,14 +65,11 @@ pub async fn plan_api_migration(
                 ..
             } => {
                 plan_definition_replacement(
-                    graph,
+                    &mut workspace,
                     operation_id,
                     symbol,
                     expected_definition_digest,
                     replacement_definition,
-                    &mut sources,
-                    &mut sites,
-                    &mut graph_evidence,
                 )
                 .await?;
             }
@@ -72,16 +79,7 @@ pub async fn plan_api_migration(
                 new_name,
                 ..
             } => {
-                plan_bound_rename(
-                    graph,
-                    operation_id,
-                    symbol,
-                    new_name,
-                    &mut sources,
-                    &mut sites,
-                    &mut graph_evidence,
-                )
-                .await?;
+                plan_bound_rename(&mut workspace, operation_id, symbol, new_name).await?;
             }
             ApiMigrationOperationRequestV1::InsertCompatibility {
                 operation_id,
@@ -90,9 +88,9 @@ pub async fn plan_api_migration(
                 definition,
                 ..
             } => {
-                let node = resolve_exact_symbol(graph, anchor).await?;
-                graph_evidence.push(graph_tuple(&node));
-                let source = source_for(graph, &node.file_path, &mut sources)?;
+                let node = resolve_exact_symbol(workspace.graph, anchor).await?;
+                workspace.graph_evidence.push(graph_tuple(&node));
+                let source = source_for(workspace.graph, &node.file_path, &mut workspace.sources)?;
                 let (start, end) = node_definition_span(source, &node)?;
                 let offset = match position {
                     tracedecay_application::ApiDefinitionInsertionV1::Before => start,
@@ -115,7 +113,7 @@ pub async fn plan_api_migration(
                         .then_some((offset, offset + insertion.len())),
                 };
                 if let Some((start, end)) = already_satisfied {
-                    sites.push(PendingSite {
+                    workspace.sites.push(PendingSite {
                         operation_id: operation_id.clone(),
                         path: node.file_path,
                         start,
@@ -127,7 +125,7 @@ pub async fn plan_api_migration(
                         caller_node_id: None,
                     });
                 } else {
-                    sites.push(PendingSite {
+                    workspace.sites.push(PendingSite {
                         operation_id: operation_id.clone(),
                         path: node.file_path,
                         start: offset,
@@ -149,16 +147,13 @@ pub async fn plan_api_migration(
                 ..
             } => {
                 plan_selected_ast_occurrences(
-                    graph,
+                    &mut workspace,
                     operation_id,
                     enclosing_symbol,
                     old_term,
                     Some(new_term),
                     occurrence_indexes,
                     "selected AST terminology replacement",
-                    &mut sources,
-                    &mut sites,
-                    &mut graph_evidence,
                 )
                 .await?;
             }
@@ -171,22 +166,25 @@ pub async fn plan_api_migration(
                 ..
             } => {
                 plan_selected_ast_occurrences(
-                    graph,
+                    &mut workspace,
                     operation_id,
                     enclosing_symbol,
                     exact_bytes,
                     None,
                     occurrence_indexes,
                     &format!("protected {category} remains byte-identical"),
-                    &mut sources,
-                    &mut sites,
-                    &mut graph_evidence,
                 )
                 .await?;
             }
         }
     }
 
+    let PlanWorkspace {
+        graph: _,
+        sources,
+        mut sites,
+        mut graph_evidence,
+    } = workspace;
     block_overlapping_sites(&mut sites);
     block_protected_value_changes(&request.operations, &sources, &mut sites)?;
     let files = materialize_file_plans(&sources, &sites)?;
@@ -221,15 +219,18 @@ pub async fn plan_api_migration(
 }
 
 async fn plan_definition_replacement(
-    graph: &TraceDecay,
+    workspace: &mut PlanWorkspace<'_>,
     operation_id: &str,
     identity: &ApiMigrationSymbolV1,
     expected_definition_digest: &ManifestDigest,
     replacement: &str,
-    sources: &mut BTreeMap<String, String>,
-    sites: &mut Vec<PendingSite>,
-    graph_evidence: &mut Vec<(String, String, String, String)>,
 ) -> Result<()> {
+    let PlanWorkspace {
+        graph,
+        sources,
+        sites,
+        graph_evidence,
+    } = workspace;
     let node = resolve_exact_symbol(graph, identity).await?;
     graph_evidence.push(graph_tuple(&node));
     let source = source_for(graph, &node.file_path, sources)?;
@@ -270,16 +271,18 @@ async fn plan_definition_replacement(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn plan_bound_rename(
-    graph: &TraceDecay,
+    workspace: &mut PlanWorkspace<'_>,
     operation_id: &str,
     identity: &ApiMigrationSymbolV1,
     new_name: &str,
-    sources: &mut BTreeMap<String, String>,
-    sites: &mut Vec<PendingSite>,
-    graph_evidence: &mut Vec<(String, String, String, String)>,
 ) -> Result<()> {
+    let PlanWorkspace {
+        graph,
+        sources,
+        sites,
+        graph_evidence,
+    } = workspace;
     let node = match resolve_exact_symbol(graph, identity).await {
         Ok(node) => node,
         Err(_) => {
@@ -415,19 +418,21 @@ async fn plan_bound_rename(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn plan_selected_ast_occurrences(
-    graph: &TraceDecay,
+    workspace: &mut PlanWorkspace<'_>,
     operation_id: &str,
     identity: &ApiMigrationSymbolV1,
     pattern: &str,
     replacement: Option<&str>,
     indexes: &[u32],
     reason: &str,
-    sources: &mut BTreeMap<String, String>,
-    sites: &mut Vec<PendingSite>,
-    graph_evidence: &mut Vec<(String, String, String, String)>,
 ) -> Result<()> {
+    let PlanWorkspace {
+        graph,
+        sources,
+        sites,
+        graph_evidence,
+    } = workspace;
     let node = resolve_exact_symbol(graph, identity).await?;
     graph_evidence.push(graph_tuple(&node));
     let source = source_for(graph, &node.file_path, sources)?;
