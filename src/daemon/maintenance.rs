@@ -9,6 +9,12 @@ use tokio::task::JoinHandle;
 use super::branch_admin::StoreAdministration;
 
 const COLD_STORE_PAGE_LIMIT: usize = 8;
+/// Upper bound on mounted session databases + project graphs a single
+/// maintenance tick may process. The tick holds the writer lane while it works,
+/// so an unbounded loop over every mounted project×branch starved query/index
+/// writers; this budget caps the per-tick work and a round-robin cursor
+/// (`store_cursor`) guarantees every store is still reached across ticks.
+const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 
@@ -102,6 +108,10 @@ pub(super) struct MaintenanceCoordinator {
     wake: Arc<Notify>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     metrics: Arc<Mutex<MaintenanceMetricsV1>>,
+    /// Round-robin fairness cursor over mounted stores: the sort key of the
+    /// last store processed. The next tick resumes immediately after it so no
+    /// store is starved when the mounted set exceeds `MAINTENANCE_STORE_PAGE_LIMIT`.
+    store_cursor: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for MaintenanceCoordinator {
@@ -111,8 +121,44 @@ impl Default for MaintenanceCoordinator {
             wake: Arc::new(Notify::new()),
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
+            store_cursor: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+/// One unit of bounded per-tick maintenance work: either a mounted session
+/// database or a mounted project graph. Arcs are cloned into the item so the
+/// store stays alive for the duration of the writer-held critical section.
+enum MaintenanceStoreWork {
+    Session(Arc<crate::global_db::RegisteredGlobalDb>),
+    Graph(Arc<crate::tracedecay::TraceDecay>),
+}
+
+/// Pure round-robin window selection over stably-sorted store keys.
+///
+/// Returns the indices to process this tick (at most `budget`, always
+/// `min(budget, keys.len())`) and the cursor to resume after next tick. Sorting
+/// the keys and resuming after the previous cursor guarantees that, across
+/// `ceil(len / budget)` consecutive ticks, every store is processed at least
+/// once — nothing that should be reclaimed is starved forever — while any
+/// single tick touches no more than `budget` stores.
+fn select_store_window(
+    keys: &[String],
+    after: Option<&str>,
+    budget: usize,
+) -> (Vec<usize>, Option<String>) {
+    let count = keys.len();
+    if count == 0 || budget == 0 {
+        return (Vec::new(), after.map(str::to_owned));
+    }
+    let start = match after {
+        Some(cursor) => keys.partition_point(|key| key.as_str() <= cursor) % count,
+        None => 0,
+    };
+    let take = budget.min(count);
+    let indices = (0..take).map(|offset| (start + offset) % count).collect::<Vec<_>>();
+    let next = indices.last().map(|&index| keys[index].clone());
+    (indices, next)
 }
 
 impl MaintenanceCoordinator {
@@ -201,45 +247,89 @@ impl MaintenanceCoordinator {
     ) -> bool {
         let session_databases = administration.mounted_registered_session_databases().await;
         let project_graphs = administration.mounted_project_graphs().await;
+
+        // Build one stably-sorted work list across both store kinds so the
+        // per-tick budget and round-robin cursor bound the total work, not each
+        // loop independently. Keys are unique on-disk identities (session db
+        // path; project root + serving branch), prefixed by kind so the order
+        // is deterministic regardless of the mounted maps' iteration order.
+        let mut work: Vec<(String, MaintenanceStoreWork)> =
+            Vec::with_capacity(session_databases.len() + project_graphs.len());
+        for database in &session_databases {
+            work.push((
+                format!("s:{}", database.db_path().display()),
+                MaintenanceStoreWork::Session(Arc::clone(database)),
+            ));
+        }
+        for graph in &project_graphs {
+            work.push((
+                format!(
+                    "g:{}\u{1f}{}",
+                    graph.project_root().display(),
+                    graph.serving_branch().unwrap_or_default()
+                ),
+                MaintenanceStoreWork::Graph(Arc::clone(graph)),
+            ));
+        }
+        work.sort_by(|left, right| left.0.cmp(&right.0));
+        let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        let after = self.store_cursor.lock().await.clone();
+        let (window, next_cursor) =
+            select_store_window(&keys, after.as_deref(), MAINTENANCE_STORE_PAGE_LIMIT);
+
         let admitted = administration
             .try_with_writer(|| async {
                 let mut succeeded = true;
-                for database in &session_databases {
+                // Bounded, round-robin slice of mounted stores. The cursor
+                // advances even on cancellation so the next tick resumes past
+                // the stores already handled rather than restarting.
+                for &index in &window {
                     if self.cancellation.is_cancelled() {
+                        *self.store_cursor.lock().await = next_cursor.clone();
                         return false;
                     }
-                    succeeded &=
-                        super::store_maintenance::run_session_retention(database, retention).await;
-                }
-                for graph in &project_graphs {
-                    if self.cancellation.is_cancelled() {
-                        return false;
+                    match &work[index].1 {
+                        MaintenanceStoreWork::Session(database) => {
+                            succeeded &= super::store_maintenance::run_session_retention(
+                                database, retention,
+                            )
+                            .await;
+                        }
+                        MaintenanceStoreWork::Graph(graph) => {
+                            succeeded &=
+                                super::store_maintenance::run_code_generation_retention(graph)
+                                    .await;
+                            // Generation retention only ever sees the one scope
+                            // root derived from this graph's project root. Scope
+                            // reconciliation is the sibling pass that reaches
+                            // whole scope directories whose project root no
+                            // longer exists.
+                            succeeded &=
+                                super::store_maintenance::run_code_index_scope_reconciliation(graph)
+                                    .await;
+                            if let Some(compaction) = &retention.compaction {
+                                succeeded &= super::store_maintenance::run_project_compaction(
+                                    graph.db(),
+                                    compaction,
+                                )
+                                .await;
+                                succeeded &= super::store_maintenance::run_branch_compaction(
+                                    graph, compaction,
+                                )
+                                .await;
+                            }
+                        }
                     }
-                    succeeded &=
-                        super::store_maintenance::run_code_generation_retention(graph).await;
-                    // Generation retention only ever sees the one scope root
-                    // derived from this graph's project root. Scope
-                    // reconciliation is the sibling pass that reaches whole
-                    // scope directories whose project root no longer exists.
-                    succeeded &=
-                        super::store_maintenance::run_code_index_scope_reconciliation(graph).await;
                 }
+                *self.store_cursor.lock().await = next_cursor.clone();
+                // Global (profile-wide) compaction is a single bounded op, not a
+                // per-store loop, so it runs every tick outside the round-robin.
                 if let Some(compaction) = &retention.compaction {
                     succeeded &= super::store_maintenance::run_global_compaction(
                         profile_database,
                         compaction,
                     )
                     .await;
-                    for graph in &project_graphs {
-                        succeeded &= super::store_maintenance::run_project_compaction(
-                            graph.db(),
-                            compaction,
-                        )
-                        .await;
-                        succeeded &=
-                            super::store_maintenance::run_branch_compaction(graph, compaction)
-                                .await;
-                    }
                 }
                 match run_cold_store_page(
                     profile_root,
@@ -254,9 +344,11 @@ impl MaintenanceCoordinator {
                         metrics.processed_stores = metrics
                             .processed_stores
                             .saturating_add(page.processed_stores);
-                        metrics.unavailable_stores = metrics
-                            .unavailable_stores
-                            .saturating_add(page.unavailable_stores);
+                        // Per-tick gauge, not a lifetime total: a store missing
+                        // from disk is re-observed every census pass, so a
+                        // cumulative sum grew without bound (the "148"). Report
+                        // the current census page's unavailable count instead.
+                        metrics.unavailable_stores = page.unavailable_stores;
                         metrics.reclaimed_bytes =
                             metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
                         metrics.last_outcome = Some(page.outcome);
@@ -481,8 +573,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ColdStoreCursorV1, MaintenanceCadence, MaintenanceStoreOutcomeV1, checkpoint_path,
-        classify_cold_store_state, load_cursor, next_cold_store_cursor, persist_cursor,
+        ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
+        MaintenanceStoreOutcomeV1, checkpoint_path, classify_cold_store_state, load_cursor,
+        next_cold_store_cursor, persist_cursor, select_store_window,
     };
 
     #[test]
@@ -499,6 +592,72 @@ mod tests {
         assert_eq!(cadence.finish(retried, true), Duration::from_mins(1));
         assert!(!cadence.reserve(retried + Duration::from_secs(59)));
         assert!(cadence.reserve(retried + Duration::from_mins(1)));
+    }
+
+    fn store_keys(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("s:{index:03}")).collect()
+    }
+
+    #[test]
+    fn store_window_is_bounded_by_the_per_tick_budget() {
+        let keys = store_keys(50);
+        let (window, _) = select_store_window(&keys, None, MAINTENANCE_STORE_PAGE_LIMIT);
+        assert_eq!(window.len(), MAINTENANCE_STORE_PAGE_LIMIT);
+
+        // A mounted set smaller than the budget is processed whole.
+        let small = store_keys(3);
+        let (window, _) = select_store_window(&small, None, MAINTENANCE_STORE_PAGE_LIMIT);
+        assert_eq!(window, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn store_window_round_robin_reaches_every_store_and_never_starves() {
+        // With more stores than the budget, feeding each tick's cursor into the
+        // next must cover every store within ceil(count / budget) ticks while
+        // no tick exceeds the budget — nothing reclaimable is skipped forever.
+        for &(count, budget) in &[(7usize, 3usize), (50, 8), (17, 5), (8, 8), (1, 8)] {
+            let keys = store_keys(count);
+            let ticks = count.div_ceil(budget);
+            let mut cursor: Option<String> = None;
+            let mut covered = std::collections::BTreeSet::new();
+            for _ in 0..ticks {
+                let (window, next) = select_store_window(&keys, cursor.as_deref(), budget);
+                assert!(
+                    window.len() <= budget,
+                    "count={count} budget={budget}: tick exceeded budget"
+                );
+                for index in window {
+                    covered.insert(index);
+                }
+                cursor = next;
+            }
+            assert_eq!(
+                covered.len(),
+                count,
+                "count={count} budget={budget}: not every store reached within {ticks} ticks"
+            );
+        }
+    }
+
+    #[test]
+    fn store_window_resumes_after_the_cursor() {
+        let keys = store_keys(10);
+        let (first, next) = select_store_window(&keys, None, 4);
+        assert_eq!(first, vec![0, 1, 2, 3]);
+        assert_eq!(next.as_deref(), Some("s:003"));
+        let (second, next) = select_store_window(&keys, next.as_deref(), 4);
+        assert_eq!(second, vec![4, 5, 6, 7]);
+        assert_eq!(next.as_deref(), Some("s:007"));
+        // The window wraps past the end back to the front.
+        let (third, _) = select_store_window(&keys, next.as_deref(), 4);
+        assert_eq!(third, vec![8, 9, 0, 1]);
+    }
+
+    #[test]
+    fn store_window_empty_set_preserves_cursor() {
+        let (window, next) = select_store_window(&[], Some("s:005"), 8);
+        assert!(window.is_empty());
+        assert_eq!(next.as_deref(), Some("s:005"));
     }
 
     #[test]
