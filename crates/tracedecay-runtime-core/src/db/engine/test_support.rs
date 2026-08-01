@@ -15,7 +15,7 @@ use tracedecay_store::{
     StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
-use super::Connection;
+use super::{Connection, Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows};
 
 pub struct TestConnection {
     connection: Connection,
@@ -28,7 +28,7 @@ impl TestConnection {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
-    pub fn open_without_write_authority(path: &Path) -> Self {
+    pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
 
@@ -97,6 +97,31 @@ impl Deref for TestConnection {
 
     fn deref(&self) -> &Self::Target {
         &self.connection
+    }
+}
+
+// The test double has to satisfy the same executor ports as a real
+// `Connection`; `Deref` alone does not carry trait bounds, so schema helpers
+// generic over `Executor` could not accept it.
+impl QueryExecutor for TestConnection {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        Connection::query(&self.connection, sql, params).await
+    }
+}
+
+impl Executor for TestConnection {
+    async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
+    where
+        P: IntoParams,
+    {
+        Connection::execute(&self.connection, sql, params).await
+    }
+
+    async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
+        Connection::execute_batch(&self.connection, sql).await
     }
 }
 

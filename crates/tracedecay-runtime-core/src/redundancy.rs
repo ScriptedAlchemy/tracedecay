@@ -76,7 +76,7 @@ pub struct RedundancyMatchScore {
 impl Fingerprint {
     /// Render the shingles vector as a comma-separated lowercase hex
     /// string (suitable for storage in a TEXT column).
-    pub fn shingles_to_string(&self) -> String {
+    pub(crate) fn shingles_to_string(&self) -> String {
         let mut s = String::with_capacity(self.shingles.len() * 9);
         for (i, h) in self.shingles.iter().enumerate() {
             if i > 0 {
@@ -90,7 +90,7 @@ impl Fingerprint {
 
     /// Parse a comma-separated lowercase hex string back into a shingles
     /// vector. Best-effort: unparseable entries are skipped.
-    pub fn shingles_from_string(s: &str) -> Vec<u32> {
+    pub(crate) fn shingles_from_string(s: &str) -> Vec<u32> {
         if s.is_empty() {
             return Vec::new();
         }
@@ -385,7 +385,7 @@ fn compute_shingles(tokens: &[&str]) -> Vec<u32> {
 
 /// Jaccard similarity over two sorted/dedup'd shingle sets. Returns 1.0
 /// for two empty sets (vacuous match — they're both "no content").
-pub fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
+pub(crate) fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
     if a.is_empty() && b.is_empty() {
         return 1.0;
     }
@@ -419,7 +419,7 @@ pub fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
 /// redundancy tool for candidate discovery and ranking. Unlike Jaccard, it is
 /// less harsh when two larger bodies share a strong core but differ in a few
 /// surrounding shingles.
-pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
+pub(crate) fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
@@ -445,7 +445,7 @@ pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Blend the four signals into a single \[0,1\] similarity score.
-pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
+pub(crate) fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
     composite_similarity_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
 }
 
@@ -487,14 +487,14 @@ fn overlap_kind_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> 
 /// Minimum score for a non-AST match to be bucketed `likely`. Shared with the
 /// `naming` -> `body_vector` relabel in [`redundancy_match_score`] so a pair
 /// can never carry the `body_vector` kind with a `naming_only` severity.
-pub const LIKELY_SEVERITY_FLOOR: f64 = 0.55;
+pub(crate) const LIKELY_SEVERITY_FLOOR: f64 = 0.55;
 
 /// Severity bucket for a `(score, overlap_kind)` pair.
 ///
 /// `definite` requires AST isomorphism — anything less can still be a
 /// false positive. `likely` covers control-flow or algorithmic matches
 /// with high shingle overlap. `naming_only` is the long tail.
-pub fn severity_bucket(score: f64, kind: &str) -> &'static str {
+pub(crate) fn severity_bucket(score: f64, kind: &str) -> &'static str {
     if kind == "ast_isomorphic" && score >= 0.80 {
         "definite"
     } else if kind == "naming" {
@@ -755,7 +755,7 @@ pub fn body_token_window(body_tokens: usize) -> (usize, usize) {
 /// Orientation is fixed by `(file_path, start_line, id)` so the same logical
 /// pair always presents the same `a`/`b` sides regardless of input order
 /// (scoring is symmetric).
-pub fn redundant_pair<'a>(
+pub(crate) fn redundant_pair<'a>(
     node_a: &'a crate::types::Node,
     fp_a: &'a Fingerprint,
     node_b: &'a crate::types::Node,

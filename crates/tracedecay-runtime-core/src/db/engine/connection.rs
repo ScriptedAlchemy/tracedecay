@@ -207,7 +207,7 @@ impl Connection {
             .map(ReadSnapshot::from_runtime)
     }
 
-    pub async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
+    pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot())
             .await

@@ -35,7 +35,7 @@ impl MemoryCategory {
     /// Durable projections that round-trip a stored label must use this so a
     /// non-canonical spelling stays a parse failure rather than becoming a
     /// silently reinterpreted category.
-    pub fn from_canonical_label(value: &str) -> Option<Self> {
+    pub(crate) fn from_canonical_label(value: &str) -> Option<Self> {
         match value {
             "general" => Some(Self::General),
             "user_pref" => Some(Self::UserPref),
@@ -455,7 +455,7 @@ pub struct AddFactDiff {
 }
 
 impl AddFactDiff {
-    pub const fn plain_add() -> Self {
+    pub(crate) const fn plain_add() -> Self {
         Self {
             diff: AddFactDiffKind::Add,
             closest_fact_id: None,

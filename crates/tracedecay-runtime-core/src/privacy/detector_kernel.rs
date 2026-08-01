@@ -7,7 +7,7 @@ use serde_json::Value;
 const KNOWN_CREDENTIAL_PATTERN: &str = r"\b(?:sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialPatternKind {
+pub(crate) enum CredentialPatternKind {
     PrivateKey,
     BearerToken,
     KnownCredential,
@@ -15,12 +15,12 @@ pub enum CredentialPatternKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CredentialPatternProfile {
+pub(crate) enum CredentialPatternProfile {
     Observation,
     Memory,
 }
 
-pub struct CredentialPattern {
+pub(crate) struct CredentialPattern {
     kind: CredentialPatternKind,
     regex: Regex,
     assignment_min_len: Option<usize>,
@@ -51,7 +51,7 @@ impl CredentialPattern {
     }
 }
 
-pub fn compile_credential_patterns(
+pub(crate) fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, regex::Error> {
     pattern_specs(profile)
@@ -219,7 +219,7 @@ impl NormalizedSensitiveKey {
         }
     }
 
-    pub fn ascii_compact(&self) -> &str {
+    pub(crate) fn ascii_compact(&self) -> &str {
         &self.ascii_compact
     }
 
@@ -249,7 +249,7 @@ pub enum JsonVisitMut<'a, M> {
     String(&'a mut String),
 }
 
-pub fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
+pub(crate) fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
     V: FnMut(&str, &[JsonPathSegment]) -> bool,
@@ -337,7 +337,7 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
-pub fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
+pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
     let mut start = 0usize;
@@ -370,7 +370,7 @@ pub fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-pub fn looks_high_entropy_token(token: &str) -> bool {
+pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
     if token.len() < 36
         || !token.bytes().all(token_byte)
         || token.bytes().all(|byte| byte.is_ascii_hexdigit())

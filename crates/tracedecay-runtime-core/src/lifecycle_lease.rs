@@ -145,10 +145,6 @@ pub fn acquire_exclusive_for_profile(
     acquire_exclusive_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
-pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
-    acquire_shared_at(&lifecycle_lock_path()?, operation)
-}
-
 /// Waits for the current exclusive owner to finish, then acquires a shared
 /// lease. Reserved for restoring a daemon that was stopped before a losing
 /// exclusive-acquisition race.
@@ -192,15 +188,9 @@ pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
 
 /// Attempts to acquire a shared lifecycle lease without blocking. A live
 /// unrelated exclusive owner is reported as [`SharedLeaseAttempt::Busy`];
-/// lock-file and profile configuration failures remain errors.
-pub fn try_acquire_shared_or_inherited(operation: &str) -> Result<SharedLeaseAttempt> {
-    let path = lifecycle_lock_path()?;
-    try_acquire_shared_or_inherited_at(&path, operation)
-}
-
-/// Explicit-profile counterpart used when ambient HOME/profile resolution is
-/// not authoritative.
-pub fn try_acquire_shared_or_inherited_for_profile(
+/// lock-file and profile configuration failures remain errors. Explicit-profile
+/// form, used when ambient HOME/profile resolution is not authoritative.
+pub(crate) fn try_acquire_shared_or_inherited_for_profile(
     profile_root: &Path,
     operation: &str,
 ) -> Result<SharedLeaseAttempt> {

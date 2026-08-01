@@ -5,13 +5,15 @@ use tracedecay_store::StoreShardScopeV1;
 use super::registry::{StoreRuntimeHandle, StoreRuntimeRegistryFailure};
 use crate::db::engine::{Connection, TransactionBehavior};
 
-pub struct GraphRuntimeMetadata<'runtime> {
+pub(crate) struct GraphRuntimeMetadata<'runtime> {
     _runtime: &'runtime StoreRuntimeHandle,
     connection: Connection,
 }
 
 impl StoreRuntimeHandle {
-    pub fn graph_metadata(&self) -> Result<GraphRuntimeMetadata<'_>, StoreRuntimeRegistryFailure> {
+    pub(crate) fn graph_metadata(
+        &self,
+    ) -> Result<GraphRuntimeMetadata<'_>, StoreRuntimeRegistryFailure> {
         if !matches!(
             &self.binding().shard_id.scope,
             StoreShardScopeV1::Code { .. }

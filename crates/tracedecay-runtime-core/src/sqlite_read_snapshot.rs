@@ -1081,7 +1081,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-pub fn immutable_uri(path: &Path) -> io::Result<String> {
+pub(crate) fn immutable_uri(path: &Path) -> io::Result<String> {
     Ok(format!("{}&immutable=1", read_only_uri(path)?))
 }
 

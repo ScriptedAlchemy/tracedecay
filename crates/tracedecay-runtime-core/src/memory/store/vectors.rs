@@ -207,14 +207,14 @@ impl MemoryStore<'_> {
         Ok(rebuilt)
     }
 
-    pub async fn repair_fact_vector(&self, fact_id: i64) -> Result<bool> {
+    pub(crate) async fn repair_fact_vector(&self, fact_id: i64) -> Result<bool> {
         self.with_immediate_tx("repair_fact_vector", move |store| {
             Box::pin(store.repair_fact_vector_inner(fact_id))
         })
         .await
     }
 
-    pub async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
+    pub(crate) async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
         let Some(fact) = self.get_fact(fact_id).await? else {
             return Err(db_message(
                 "repair_fact_vector",

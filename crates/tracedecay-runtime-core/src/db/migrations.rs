@@ -28,7 +28,7 @@ pub const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
 /// V1 is the initial graph generation. Other migrations either preserve and
 /// transform graph rows in place (V5/V9), add indexes, or add auxiliary
 /// memory/evidence tables.
-pub const GRAPH_INVALIDATING_VERSIONS: &[u32] = &[1, 3, 4, 7, 17];
+pub(crate) const GRAPH_INVALIDATING_VERSIONS: &[u32] = &[1, 3, 4, 7, 17];
 
 pub fn graph_reindex_required(from: u32, to: u32) -> bool {
     GRAPH_INVALIDATING_VERSIONS
@@ -144,7 +144,7 @@ pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
     create_schema_connection(writer.engine_connection()).await
 }
 
-pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
+pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
     // Fresh databases only need the pragma before tables are created.
     configure_fresh_auto_vacuum(conn, "create_schema").await?;
 
