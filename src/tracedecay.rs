@@ -16,6 +16,8 @@ use crate::errors::Result;
 use crate::storage::{self, StoreLayout};
 use tracedecay_code_extraction::LanguageRegistry;
 
+#[cfg(test)]
+mod concrete_runtime_tests;
 mod diagnostics;
 mod edits;
 pub(crate) mod facts;
