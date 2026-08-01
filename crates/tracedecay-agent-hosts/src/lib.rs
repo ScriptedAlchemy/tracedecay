@@ -12,10 +12,28 @@
 //! `src/automation.rs` so every previously public path
 //! (`tracedecay::agents::…`, `tracedecay::automation::…`) still resolves.
 //!
-//! Root couplings that this crate cannot yet satisfy (`crate::errors`,
-//! `crate::db`, `crate::storage`, `crate::daemon`, `crate::mcp`, …) are
-//! cataloged in `SEAMS.md`; they resolve when the kernel/daemon/mcp crates
-//! land in the same split.
+//! Remaining root couplings that this crate satisfies through injected ports
+//! rather than a dependency edge are cataloged in `SEAMS.md`.
 
 pub mod agents;
 pub mod automation;
+pub mod ports;
+
+// Kernel shims. `tracedecay-runtime-core` owns the substrate these two
+// subsystems were extracted alongside; aliasing the kernel modules into this
+// crate's root keeps every historical `crate::<module>::…` path in the moved
+// code resolving verbatim, exactly as the root crate's `src/<module>.rs` shims
+// do on the other side of the split.
+pub(crate) use tracedecay_runtime_core::{
+    branch, config, db, errors, lifecycle_lease, memory, privacy, runtime_identity, serde_util,
+    storage, store, timeutil, worktree,
+};
+
+/// Kernel-owned slice of the former root `tracedecay` façade module.
+///
+/// Only `current_timestamp` moved down into the kernel; the `TraceDecay`
+/// orchestrator itself stays in the root crate and reaches this crate through
+/// [`ports::ProjectRuntime`].
+pub(crate) mod tracedecay {
+    pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
+}
