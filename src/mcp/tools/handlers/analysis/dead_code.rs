@@ -51,11 +51,10 @@ pub(crate) async fn handle_dead_code(
         "symbols": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }

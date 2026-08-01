@@ -285,10 +285,7 @@ use super::{LegacyToolCompatibilityOwner, ToolResult};
 use support::{project_registry_context, project_selector_present};
 
 pub(super) fn text_tool_result(text: &str) -> ToolResult {
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    )
+    support::text_tool_result(text, Vec::new())
 }
 
 pub(super) fn json_result(value: &Value) -> ToolResult {
@@ -427,10 +424,7 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
                     record.content,
                 )
             };
-            return Ok(ToolResult::new(
-                json!({ "content": [{ "type": "text", "text": text }] }),
-                Vec::new(),
-            ));
+            return Ok(text_tool_result(&text));
         }
         ResponseHandleLookup::Missing => json!({
             "handle": handle,
@@ -458,13 +452,7 @@ fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
             "expires_at": expires_at,
         }),
     };
-    let text = render::finalize(Some(cg.project_root()), args, &payload, || {
-        render::generic_md(&payload)
-    });
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    ))
+    Ok(support::tool_json(Some(cg.project_root()), args, &payload))
 }
 
 /// Dispatches a tool call to the appropriate handler.

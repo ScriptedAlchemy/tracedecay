@@ -35,7 +35,7 @@ use crate::types::Node;
 
 use super::super::ToolResult;
 use super::super::render;
-use super::support::unique_file_paths;
+use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose
 /// cap — libtest filters are passed as positional args so very long lists
@@ -267,14 +267,12 @@ pub(super) async fn handle_diagnose(
         "published": publication,
         "diagnostics": items,
     });
-    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::diagnostics_md(&body)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(rendered_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &body,
         touched.into_iter().collect(),
+        || render::diagnostics_md(&body),
     ))
 }
 
@@ -735,13 +733,10 @@ where
         &output.stdout,
     );
 
-    let text = render::finalize(Some(cg.project_root()), &args, &body, || {
-        render::generic_md(&body)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
+    Ok(generic_tool_result(
+        Some(cg.project_root()),
+        &args,
+        &body,
         touched_files,
     ))
 }
@@ -1141,13 +1136,7 @@ fn empty_result(args: &Value, message: &str) -> ToolResult {
     let value = json!({
         "passed": 0, "failed": 0, "results": [], "note": message
     });
-    let text = render::finalize(None, args, &value, || render::generic_md(&value));
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    generic_tool_result(None, args, &value, vec![])
 }
 
 fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
@@ -1161,13 +1150,7 @@ fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Too
             "message": message,
         }
     });
-    let text = render::finalize(None, args, &value, || render::generic_md(&value));
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    generic_tool_result(None, args, &value, vec![])
 }
 
 /// Returns the last `n` characters of `s`, trimmed to a char boundary.

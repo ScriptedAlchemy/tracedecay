@@ -127,12 +127,11 @@ pub(crate) async fn handle_status(
         if let Some(prefix) = scope_prefix {
             output["scope_prefix"] = json!(prefix);
         }
-        return Ok(rendered_tool_result(
+        return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
             &output,
             vec![],
-            || render::generic_md(&output),
         ));
     }
 
@@ -405,7 +404,5 @@ pub(crate) fn handle_active_project(
 ) -> ToolResult {
     let branch = cg.branch_diagnostics();
     let output = active_project_context(cg, &branch, server_stats, scope_prefix);
-    rendered_tool_result(Some(cg.project_root()), args, &output, vec![], || {
-        render::generic_md(&output)
-    })
+    generic_tool_result(Some(cg.project_root()), args, &output, vec![])
 }

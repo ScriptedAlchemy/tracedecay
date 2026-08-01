@@ -28,8 +28,7 @@ use std::pin::Pin;
 use serde_json::{Value, json};
 
 use super::super::ToolResult;
-use super::super::render;
-use super::support::{rendered_tool_result, unique_file_paths};
+use super::support::{generic_tool_result, unique_file_paths};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -53,11 +52,9 @@ fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &st
             "message": message,
         }
     });
-    rendered_tool_result(Some(cg.project_root()), args, &output, vec![], || {
-        render::generic_md(&output)
-    })
-    .with_semantic_error(true)
-    .with_failure_message(message)
+    generic_tool_result(Some(cg.project_root()), args, &output, vec![])
+        .with_semantic_error(true)
+        .with_failure_message(message)
 }
 
 fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {

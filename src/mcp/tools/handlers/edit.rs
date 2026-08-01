@@ -18,6 +18,7 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::super::render;
+use super::support::{generic_tool_result, rendered_tool_result};
 
 fn missing_required_param(name: &str) -> TraceDecayError {
     TraceDecayError::Config {
@@ -95,17 +96,14 @@ async fn source_edit_tool_result(
     let value = result.value();
     let touched_files = result.outcome.touched_files(result.dry_run);
     let success = result.outcome.success();
-    let text = render::finalize(Some(cg.project_root()), args, &value, || {
-        result
-            .outcome
-            .as_move()
-            .map_or_else(|| render::generic_md(&value), move_result_md)
-    });
-    let tool_result = ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files,
-    )
-    .with_semantic_error(!success);
+    let tool_result =
+        rendered_tool_result(Some(cg.project_root()), args, &value, touched_files, || {
+            result
+                .outcome
+                .as_move()
+                .map_or_else(|| render::generic_md(&value), move_result_md)
+        })
+        .with_semantic_error(!success);
     if success {
         Ok(tool_result)
     } else {
@@ -201,14 +199,8 @@ pub(super) async fn handle_source_edit_reconcile(
     .await?;
     let value = result.value();
     let success = result.outcome.success();
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    let tool_result = ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        Vec::new(),
-    )
-    .with_semantic_error(!success);
+    let tool_result = generic_tool_result(Some(cg.project_root()), &args, &value, Vec::new())
+        .with_semantic_error(!success);
     if success {
         Ok(tool_result)
     } else {
@@ -515,14 +507,10 @@ pub(super) async fn handle_api_migration_plan(cg: &TraceDecay, args: Value) -> R
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files,
+    Ok(
+        generic_tool_result(Some(cg.project_root()), &args, &value, touched_files)
+            .with_semantic_error(plan.blocked),
     )
-    .with_semantic_error(plan.blocked))
 }
 
 pub(super) async fn handle_api_migration_apply(

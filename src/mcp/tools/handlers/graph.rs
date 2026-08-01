@@ -106,6 +106,27 @@ fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
 
+/// Resolves the nodes a symbol-addressing tool was pointed at: `node_id` (with
+/// the `id` alias) when present, otherwise `qualified_name`. An id that no
+/// longer resolves yields no nodes rather than an error, so the caller renders
+/// an empty match list; only an argument-less call is rejected.
+async fn nodes_addressed_by_args(cg: &TraceDecay, args: &Value) -> Result<Vec<Node>> {
+    let node_id = args
+        .get("node_id")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str());
+    if let Some(node_id) = node_id {
+        return Ok(cg.get_node(node_id).await?.into_iter().collect());
+    }
+
+    let Some(qualified_name) = args.get("qualified_name").and_then(|v| v.as_str()) else {
+        return Err(TraceDecayError::Config {
+            message: "missing required parameter: qualified_name or node_id".to_string(),
+        });
+    };
+    cg.get_nodes_by_qualified_name(qualified_name).await
+}
+
 fn rendered_tool_result<F>(
     cg: &TraceDecay,
     args: &Value,
@@ -117,6 +138,16 @@ where
     F: FnOnce() -> String,
 {
     support::rendered_tool_result(Some(cg.project_root()), args, value, touched_files, md)
+}
+
+/// [`rendered_tool_result`] with the default [`render::generic_md`] body.
+fn generic_tool_result(
+    cg: &TraceDecay,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+) -> ToolResult {
+    support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
 }
 
 fn rendered_context_tool_result(
@@ -887,13 +918,7 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_callees` tool calls.
@@ -965,13 +990,7 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
     );
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
@@ -1044,13 +1063,7 @@ pub(super) async fn handle_find_exact_symbol(
         "matches": items,
         "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &body,
-        touched_files,
-        || render::generic_md(&body),
-    ))
+    Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
 
 /// Handles `tracedecay_impact` tool calls.
@@ -1086,13 +1099,7 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
         "nodes": nodes,
     });
 
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_node` tool calls.
@@ -1157,13 +1164,7 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "cost_to_expand": cost_to_expand(&n, file_size_bytes),
                 "derives": derives,
             });
-            Ok(rendered_tool_result(
-                cg,
-                &args,
-                &output,
-                touched_files,
-                || render::generic_md(&output),
-            ))
+            Ok(generic_tool_result(cg, &args, &output, touched_files))
         }
         None => Ok(text_tool_result(
             &format!("Node not found: {node_id}"),
@@ -1236,13 +1237,7 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
@@ -1423,13 +1418,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
         "text_only_matches": text_only_matches,
     });
 
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
@@ -1495,9 +1484,7 @@ pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<T
         "truncated": truncated,
         "max_per_item": max_per_item,
     });
-    Ok(rendered_tool_result(cg, &args, &output, vec![], || {
-        render::generic_md(&output)
-    }))
+    Ok(generic_tool_result(cg, &args, &output, vec![]))
 }
 
 /// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
@@ -1529,42 +1516,14 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_signature` — signature-only lookup (no body) by
 /// qualified name or node ID. Returns the public-API surface of a symbol so
 /// callers can avoid reading the source file just to inspect the signature.
 pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let qname = args.get("qualified_name").and_then(|v| v.as_str());
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str());
-
-    if qname.is_none() && node_id.is_none() {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: qualified_name or node_id".to_string(),
-        });
-    }
-
-    let nodes = if let Some(id) = node_id {
-        match cg.get_node(id).await? {
-            Some(n) => vec![n],
-            None => vec![],
-        }
-    } else if let Some(q) = qname {
-        cg.get_nodes_by_qualified_name(q).await?
-    } else {
-        vec![]
-    };
-
+    let nodes = nodes_addressed_by_args(cg, &args).await?;
     let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
@@ -1588,13 +1547,7 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
     }
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
@@ -1643,41 +1596,14 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
         "truncated": truncated,
         "impls": items,
     });
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
 /// and the trait + method names each one synthesizes (per the static
 /// `derive_table`). Accepts either `node_id` or `qualified_name`.
 pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let qname = args.get("qualified_name").and_then(|v| v.as_str());
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str());
-    if qname.is_none() && node_id.is_none() {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: qualified_name or node_id".to_string(),
-        });
-    }
-
-    let nodes = if let Some(id) = node_id {
-        match cg.get_node(id).await? {
-            Some(n) => vec![n],
-            None => vec![],
-        }
-    } else if let Some(q) = qname {
-        cg.get_nodes_by_qualified_name(q).await?
-    } else {
-        vec![]
-    };
-
+    let nodes = nodes_addressed_by_args(cg, &args).await?;
     let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
@@ -1708,13 +1634,7 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
     }
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Approximate token cost of expanding a node's body and its full file.
@@ -1865,9 +1785,7 @@ pub(super) async fn handle_implementations(
         "match_count": entries.len(),
         "implementations": entries,
     });
-    Ok(rendered_tool_result(cg, &args, &payload, touched, || {
-        render::generic_md(&payload)
-    }))
+    Ok(generic_tool_result(cg, &args, &payload, touched))
 }
 
 async fn collect_method_bodies(

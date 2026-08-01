@@ -13,7 +13,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::super::render;
+use super::support::generic_tool_result;
 
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardAutomationWriter, bind_dashboard,
@@ -36,15 +36,7 @@ fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
 }
 
 fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
-    let text = render::finalize(Some(cg.project_root()), args, payload, || {
-        render::generic_md(payload)
-    });
-    ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    )
+    generic_tool_result(Some(cg.project_root()), args, payload, vec![])
 }
 
 /// Handles `tracedecay_dashboard` tool calls.
