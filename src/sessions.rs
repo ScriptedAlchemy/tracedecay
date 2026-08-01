@@ -12,6 +12,19 @@
 
 pub use tracedecay_sessions::runtime::*;
 
+pub mod session_temporal_benchmark;
+
+mod transcript_backfill_test_runtimes;
+
+/// Production transcript-backfill APIs plus the registered root-composition
+/// fixtures retained for integration tests.
+pub mod transcript_backfill {
+    pub use super::transcript_backfill_test_runtimes::{
+        StructuredBackfillTestRuntimeV1, TranscriptFactsBackfillTestRuntimeV1,
+    };
+    pub use tracedecay_sessions::runtime::transcript_backfill::*;
+}
+
 #[cfg(test)]
 mod claude_observation_benchmark;
 

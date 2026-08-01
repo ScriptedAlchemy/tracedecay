@@ -37,8 +37,8 @@ use crate::application::context::{
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use crate::admission::{HostAdmissionAuthorities, HostAdmission};
-use crate::observation::ObservationCancellation;
+use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::ObservationCancellation;
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshSchedulerError,
@@ -48,14 +48,14 @@ use crate::application::session::{
     SessionTemporalQuery,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::sessions::codex;
+use crate::store::GlobalDbSessionTemporalStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use crate::runtime::codex;
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, read_repository_identity_marker, write_enrollment_marker,
     write_repository_identity_marker,
 };
-use crate::store::GlobalDbSessionTemporalStore;
 use tracedecay_runtime_core::timeutil::nearest_rank;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -81,11 +81,11 @@ const DIGEST: [u8; 32] = [0x8b; 32];
 const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-        include_str!("../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"),
+        include_str!("../../tests/fixtures/provider_normalization/codex/session_meta.input.json"),
     ),
     (
         "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-        include_str!("../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
+        include_str!("../../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
     ),
 ];
 
@@ -657,7 +657,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         .map_err(|error| format!("mount benchmark project sessions: {error}"))?;
     let session_id = format!("benchmark-codex-session-{repetition}");
     let rollout = write_codex_rollout(env.home(), &project, &session_id)?;
-    let admission = HostAdmission::new(HostAdmissionAuthorities::for_project(
+    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
         brain_id,
         profile_id,
         project_id.clone(),
