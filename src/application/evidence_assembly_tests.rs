@@ -6,22 +6,24 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRefV3, AnchorOwnerBindingV1,
-    AnchorProvenanceRelationV2, AnchorSourceGenerationV3, CoverageReportV1, EvidenceClass,
-    ManifestDigest, PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
-    ProjectId, ProjectionGenerationId, RepositoryId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorId, RetrievalAnchorRecordV3, RetrievalAnchorRecordV3Parts,
-    RetrievalAnchorTargetV3, ScopeResolutionId, SourceOccurrenceId, UserProfileId, UtcMicros,
-    VectorWatermark, WorktreeId,
+    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, AnchorSourceGenerationV3,
+    CanonicalObservationIdV1, CoverageReportV1, EvidenceClass, FactOwnerV1, ManifestDigest,
+    ObservationScopeV1, ObservationSourceGenerationV1, PayloadAccessState,
+    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
+    RepositoryId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorRecordV3,
+    RetrievalAnchorRecordV3Parts, RetrievalAnchorTargetV2, RetrievalAnchorTargetV3,
+    ScopeResolutionId, SourceOccurrenceId, UserProfileId, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionReasonClassV1, AnchorDispositionStateV1,
     EvidenceAssemblyOwnerV1, EvidenceAssemblyStoreError, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1,
+    StoredRetrievalAnchorRecordV1,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::*;
-use crate::db::engine::Executor;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 fn product_context() -> ProductRequestContext {
@@ -228,7 +230,7 @@ async fn runtime_anchor_resolution_uses_one_snapshot_across_terminal_write() {
             .await
             .unwrap(),
         EvidenceAssemblyAnchorResolutionV1::Resolved {
-            record: anchor,
+            record: StoredRetrievalAnchorRecordV1::V3(anchor),
             derivatives: vec![derivative],
         }
     );
@@ -245,4 +247,94 @@ async fn runtime_anchor_resolution_uses_one_snapshot_across_terminal_write() {
         EvidenceAssemblyAnchorResolutionV1::Tombstone(tombstone)
             if tombstone.terminal_state() == AnchorDispositionStateV1::Deleted
     ));
+}
+
+/// The observation and repository-provenance writers still commit V2 anchor
+/// records. If evidence assembly only served V3, every anchor those writers
+/// produced would resolve as `Unavailable` — an absence the store cannot
+/// justify, because the record is right there. This pins that a persisted V2
+/// anchor is served.
+#[tokio::test]
+async fn runtime_anchor_resolution_serves_persisted_v2_anchor_records() {
+    let context = product_context();
+    let anchor = legacy_anchor(&context);
+    let anchor_id = anchor.anchor_id().clone();
+    let anchor_owner = RetrievalAnchorOwnerV1::V2(FactOwnerV1::from(anchor.owner().clone()));
+
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("project.db");
+    let authority = DatabaseAuthority::acquire_test(&path, "legacy anchor resolution test").unwrap();
+    let (database, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    let transaction = database
+        .begin_write_transaction("seed legacy anchor resolution test")
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                anchor_id.as_str(),
+                serde_json::to_string(&anchor).unwrap(),
+                serde_json::to_string(&anchor_owner).unwrap(),
+                anchor.projection_generation().as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let snapshot = database
+        .begin_engine_read_snapshot("legacy anchor resolution test")
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve_anchor_snapshot(&snapshot, &anchor_id, &anchor_owner)
+            .await
+            .unwrap(),
+        EvidenceAssemblyAnchorResolutionV1::Resolved {
+            record: StoredRetrievalAnchorRecordV1::V2(anchor),
+            derivatives: vec![],
+        }
+    );
+}
+
+fn legacy_anchor(context: &ProductRequestContext) -> RetrievalAnchorRecordV2 {
+    let digest = format!("sha256:{}", "44".repeat(32));
+    let observation_id =
+        CanonicalObservationIdV1::new(format!("sha256:{}", "55".repeat(32))).unwrap();
+    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
+        owner: ObservationScopeV1::Project {
+            project_id: context.scope().project_id.clone(),
+        },
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(1),
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV2::Observation(
+            ObservationSourceGenerationV1::new(1).unwrap(),
+        ),
+        projection_generation: ProjectionGenerationId::new("projection.evidence-test").unwrap(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![observation_id],
+        source_anchors: vec![],
+        authorization: ResolutionAuthorizationV1 {
+            resolved_scope_id: ScopeResolutionId::new("scope.evidence-test").unwrap(),
+            privacy_domain_id: PrivacyDomainId::new("privacy.evidence-test").unwrap(),
+            access_policy_digest: AccessPolicyDigest::new(digest.clone()).unwrap(),
+            capability_id: tracedecay_domain::CapabilityId::new("capability.evidence-test")
+                .unwrap(),
+            canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(digest).unwrap(),
+        },
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.evidence-test").unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap()
 }
