@@ -333,7 +333,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
 }
 
 #[test]
-fn sealed_generation_rejects_file_authority_from_foreign_project() {
+fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
     let store = SharedPublicationStore::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
         .expect("production owner");
@@ -341,10 +341,22 @@ fn sealed_generation_rejects_file_authority_from_foreign_project() {
         .build_and_publish(request("file.project-binding", 1_200_000), &ActiveControl)
         .expect("valid generation publishes");
     let sealed = generation.encode_sealed().expect("valid generation seals");
+    assert_eq!(
+        generation
+            .encode_sealed()
+            .expect("memoized generation seals again"),
+        sealed
+    );
 
     let restored =
         CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
     assert_eq!(restored.manifest().project_id, config().project_id);
+    assert_eq!(
+        restored
+            .encode_sealed()
+            .expect("restored generation retains successful validation"),
+        sealed
+    );
 
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&sealed).expect("sealed generation JSON");

@@ -451,6 +451,10 @@ pub struct CodeIndexPublishedGenerationV1 {
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
     projection: ProjectionPublicationHandoffV1,
+    /// Set only after a complete fail-closed integrity sweep. All generation
+    /// evidence is private and immutable after construction, so successful
+    /// validation remains authoritative for every clone and serving read.
+    integrity_validated: bool,
 }
 
 /// Immutable test-attribution reader derived from one sealed production code
@@ -839,8 +843,9 @@ impl CodeIndexPublishedGenerationV1 {
             coverage: envelope.generation.coverage,
             capability: envelope.generation.capability,
             projection,
+            integrity_validated: false,
         };
-        generation.validate()?;
+        let generation = generation.validate_new()?;
         Ok(generation)
     }
 
@@ -855,6 +860,22 @@ impl CodeIndexPublishedGenerationV1 {
     }
 
     fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
+        if self.integrity_validated {
+            Ok(())
+        } else {
+            Err(CodeIndexProductionErrorV1::Contract(
+                "published generation has not passed integrity validation".to_owned(),
+            ))
+        }
+    }
+
+    fn validate_new(mut self) -> Result<Self, CodeIndexProductionErrorV1> {
+        self.validate_fresh()?;
+        self.integrity_validated = true;
+        Ok(self)
+    }
+
+    fn validate_fresh(&self) -> Result<(), CodeIndexProductionErrorV1> {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
@@ -1250,8 +1271,9 @@ where
             coverage,
             capability,
             projection,
+            integrity_validated: false,
         };
-        candidate.validate()?;
+        let candidate = candidate.validate_new()?;
 
         let expected = active
             .as_ref()
