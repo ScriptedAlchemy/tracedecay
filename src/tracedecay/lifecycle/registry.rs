@@ -126,7 +126,7 @@ impl TraceDecay {
         {
             let cache = LAST_REGISTERED_DIGEST
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if registration_digest_matches(&cache, project_id, &digest) {
                 return Ok(());
             }
@@ -138,7 +138,7 @@ impl TraceDecay {
         {
             let cache = LAST_REGISTERED_DIGEST
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if registration_digest_matches(&cache, project_id, &digest) {
                 return Ok(());
             }
@@ -284,7 +284,7 @@ impl TraceDecay {
 
         LAST_REGISTERED_DIGEST
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(project_id.to_string(), digest);
         Ok(())
     }
@@ -366,7 +366,7 @@ mod tests {
             project_id: "proj-1".to_string(),
             canonical_root: PathBuf::from(canonical_root),
             git_common_dir: Some(PathBuf::from("/repo/.git")),
-            tracked_branches: branches.iter().map(|b| b.to_string()).collect(),
+            tracked_branches: branches.iter().map(ToString::to_string).collect(),
             artifact_mtimes: vec![None, None, None, None],
         }
     }
