@@ -67,9 +67,8 @@ impl McpServer {
             return 0;
         }
         // Paths arrive from indexed node rows on every tool response. A blank
-        // one is bad index data, not a broken invariant, and it already fails
-        // the map lookup below — asserting here only converted it into a
-        // worker panic on the shared response path.
+        // one is bad index data, not a broken invariant, so it is skipped
+        // rather than asserted on this shared response path.
         let map = crate::mcp::server::requests::recover_lock(&self.file_token_map);
         file_paths
             .iter()

@@ -12,11 +12,11 @@ pub type GraphPath = Vec<(Node, Option<Edge>)>;
 /// Rejects a blank node identifier with a typed error.
 ///
 /// Every entry point below is reachable straight from MCP/CLI tool
-/// arguments (`tracedecay_impact --args '{"node_id":""}'`). These used to be
-/// `debug_assert!`s, which turned hostile-but-ordinary input into a panic
-/// that unwound the daemon's client task; the caller only saw "daemon closed
-/// the connection" with no indication of which argument was wrong. Argument
-/// shape is not an internal invariant, so it is validated, not asserted.
+/// arguments (`tracedecay_impact --args '{"node_id":""}'`). Argument shape is
+/// caller input, not an internal invariant, so it is validated, not asserted:
+/// a panic here unwinds the daemon's client task and the caller sees only
+/// "daemon closed the connection" with no indication of which argument was
+/// wrong.
 fn require_traversal_id(value: &str, operation: &str, parameter: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(TraceDecayError::Config {
@@ -29,7 +29,8 @@ fn require_traversal_id(value: &str, operation: &str, parameter: &str) -> Result
 /// Rejects a zero traversal depth with a typed error.
 ///
 /// Tool handlers clamp a caller-supplied depth with `min(max)`, which leaves
-/// `0` intact, so `{"max_depth": 0}` reached these functions directly.
+/// `0` intact, so an explicit `{"max_depth": 0}` reaches these functions
+/// directly.
 fn require_positive_depth(depth: u64, operation: &str, parameter: &str) -> Result<()> {
     if depth == 0 {
         return Err(TraceDecayError::Config {

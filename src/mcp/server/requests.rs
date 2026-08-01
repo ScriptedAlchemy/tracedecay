@@ -57,12 +57,12 @@ pub(super) fn accounting_project_root<'a>(
 /// Locks a server-side `std::sync::Mutex`, recovering from poisoning.
 ///
 /// A panic anywhere in a client task poisons every `Mutex` a guard was alive
-/// for, and the previous `.lock().ok()` / `if let Ok(..)` call sites treated
-/// that as "skip this work" *forever*: request counters stopped counting and,
-/// worse, the cancellation registry stopped registering, so shutdown could no
-/// longer cancel in-flight requests and the drain hung. None of the guarded
-/// state is left torn by an unwind (each critical section is a single map or
-/// counter update), so recovering the value is the correct response.
+/// for. Treating poison as "skip this work" would be permanent: request
+/// counters stop counting and, worse, the cancellation registry stops
+/// registering, so shutdown can no longer cancel in-flight requests and the
+/// drain hangs. None of the guarded state can be left torn by an unwind (each
+/// critical section is a single map or counter update), so recovering the
+/// value is the correct response.
 pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
