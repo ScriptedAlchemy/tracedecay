@@ -16,7 +16,7 @@ use crate::automation::skill_writer::{
 };
 use crate::automation::text::truncate_chars_for_prompt;
 use crate::errors::Result;
-use crate::global_db::RegisteredGlobalDb;
+use crate::ports::session_store::AutomationSessionStore;
 use crate::tracedecay::current_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -752,7 +752,7 @@ pub(super) async fn build_session_reflector_evidence(
 pub(super) async fn build_skill_writer_evidence(
     retrieval: &dyn AutomationSessionRetrieval,
     analytics_project_root: Option<&std::path::Path>,
-    analytics_db: Option<&RegisteredGlobalDb>,
+    analytics_db: Option<&dyn AutomationSessionStore>,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterEvidenceOutcome> {
     let profile_root = match options.profile_root {
