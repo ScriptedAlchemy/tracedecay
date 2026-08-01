@@ -59,8 +59,11 @@ pub(crate) fn checked_in_fixture_root() -> PathBuf {
 
 const DEFAULT_WORKLOAD: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
+// Re-pinned 2026-08-01: the workload's partition digests were refreshed
+// deliberately (its sibling pins in the suite fixture and the -direct bin
+// were updated in the same commit); this whole-file pin was the one missed.
 const DEFAULT_WORKLOAD_SHA256: &str =
-    "78782062ce57b3b0dcea3f82e103c1b6b9e50b362af49d3868b04994db54909b";
+    "1c546758a8c61f65ac48e6d834c2112caf9f98926c0802310aa8c76cb1f1749a";
 const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
