@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "family": "cline_like",
-  "shared_adapter": "src/sessions/cline_like.rs",
+  "shared_adapter": "crates/tracedecay-sessions/src/runtime/cline_like.rs",
   "notes": [
     "Cline, Roo Code, and Kilo share one production adapter (ClineLikeSource) with distinct provider ids and storage roots.",
     "Golden inputs mirror the checked-in write_task / observation_tests shapes — not invented protocol fields.",

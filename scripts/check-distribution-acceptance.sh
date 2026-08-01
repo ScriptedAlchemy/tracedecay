@@ -357,15 +357,24 @@ while IFS=$'\t' read -r name version; do
   package_dirs["$name"]=$directory
 done <"$package_table"
 
-root_package=${package_dirs[tracedecay]:-}
-application_package=${package_dirs[tracedecay-application]:-}
-api_package=${package_dirs[tracedecay-api]:-}
-catalog_package=${package_dirs[tracedecay-tool-catalog]:-}
-lsp_package=${package_dirs[tracedecay-lsp]:-}
-code_extraction_package=${package_dirs[tracedecay-code-extraction]:-}
-query_package=${package_dirs[tracedecay-query]:-}
-[[ -n $root_package && -n $application_package && -n $api_package && -n $catalog_package && -n $lsp_package && -n $code_extraction_package && -n $query_package ]] ||
-  die "workspace packages required by the distribution gate were not produced"
+for required_package in \
+  tracedecay \
+  tracedecay-application \
+  tracedecay-api \
+  tracedecay-tool-catalog \
+  tracedecay-lsp \
+  tracedecay-code-extraction \
+  tracedecay-query \
+  tracedecay-semantic; do
+  [[ -n ${package_dirs[$required_package]:-} ]] ||
+    die "workspace package required by the distribution gate was not produced: $required_package"
+done
+root_package=${package_dirs[tracedecay]}
+lsp_package=${package_dirs[tracedecay-lsp]}
+code_extraction_package=${package_dirs[tracedecay-code-extraction]}
+query_package=${package_dirs[tracedecay-query]}
+semantic_package=${package_dirs[tracedecay-semantic]}
+catalog_package=${package_dirs[tracedecay-tool-catalog]}
 
 assert_required_assets "$root_package"
 assert_code_extraction_assets "$code_extraction_package"
@@ -429,20 +438,24 @@ PY
   die "cached ONNX Runtime library is unavailable for the offline semantic tests"
 export ORT_LIB_PATH="$ort_lib_path"
 
+# The lifecycle suite moved out of the root crate's `semantic_code` module into
+# the extracted `tracedecay-semantic` crate, so it is filtered against that
+# package's own module path now.
 echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
 REQUIRE_EXACT_TEST_COUNT=nonzero \
   CARGO_NET_OFFLINE=true \
   "$repo/scripts/require-exact-test.sh" cargo test \
-  --manifest-path "$root_package/Cargo.toml" \
+  --manifest-path "$semantic_package/Cargo.toml" \
   --release \
-  --no-default-features \
-  --features production \
+  --features semantic-fastembed \
   --lib \
   --config "$patch_config" \
-  semantic_code::model_lifecycle::tests::
+  model_lifecycle::tests::
 
 echo "distribution acceptance: checking extracted query semantic fallback behavior"
-CARGO_NET_OFFLINE=true cargo test \
+REQUIRE_EXACT_TEST_COUNT=nonzero \
+  CARGO_NET_OFFLINE=true \
+  "$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$query_package/Cargo.toml" \
   --release \
   --all-features \
@@ -451,7 +464,9 @@ CARGO_NET_OFFLINE=true cargo test \
   retrieval::semantic::tests::
 
 echo "distribution acceptance: checking extracted root strict semantic unavailability"
-CARGO_NET_OFFLINE=true cargo test \
+REQUIRE_EXACT_TEST_COUNT=nonzero \
+  CARGO_NET_OFFLINE=true \
+  "$repo/scripts/require-exact-test.sh" cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
@@ -499,13 +514,12 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   CARGO_NET_OFFLINE=true \
   HF_HUB_OFFLINE=1 \
   "$repo/scripts/require-exact-test.sh" cargo test \
-  --manifest-path "$root_package/Cargo.toml" \
+  --manifest-path "$semantic_package/Cargo.toml" \
   --release \
-  --no-default-features \
-  --features production \
+  --features semantic-fastembed \
   --lib \
   --config "$patch_config" \
-  semantic_code::model_lifecycle::distribution_acquisition_acceptance::distribution_background_acquisition_installs_verified_jina_model \
+  model_lifecycle::distribution_acquisition_acceptance::distribution_background_acquisition_installs_verified_jina_model \
   -- \
   --exact
 

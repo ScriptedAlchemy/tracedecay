@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python3 - .github/workflows/sdk-conformance.yml <<'PY'
+# shellcheck source=../scripts/lib/gate-test.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib/gate-test.sh"
+
+python3 - "$GATE_REPO_ROOT/.github/workflows/sdk-conformance.yml" <<'PY'
 import pathlib
 import re
 import sys
@@ -47,27 +50,21 @@ fake_ignored_cargo() {
 export -f fake_ignored_cargo
 
 sdk_command=(
+  "$GATE_REPO_ROOT/scripts/require-exact-test.sh"
   bash -c 'fake_ignored_cargo "$@"' _
   cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
   --test production_daemon -- --ignored
 )
 
-REQUIRE_EXACT_TEST_COUNT=nonzero \
-  scripts/require-exact-test.sh "${sdk_command[@]}"
+export REQUIRE_EXACT_TEST_COUNT=nonzero
 
-set +e
-negative_output="$(
-  FAKE_IGNORED_SELECTION_EMPTY=1 REQUIRE_EXACT_TEST_COUNT=nonzero \
-    scripts/require-exact-test.sh "${sdk_command[@]}" 2>&1
-)"
-negative_status=$?
-set -e
-if [[ $negative_status -eq 0 ]]; then
-  echo "SDK ignored conformance lane accepted a zero-test selection" >&2
-  exit 1
-fi
-if [[ $negative_output != *"expected 'at least one passed; 0 failed'"* ]]; then
-  echo "$negative_output" >&2
-  echo "SDK ignored zero-test rejection did not come from the nonzero guard" >&2
-  exit 1
-fi
+gate_run "${sdk_command[@]}"
+gate_expect_success "populated ignored selection"
+
+export FAKE_IGNORED_SELECTION_EMPTY=1
+gate_run "${sdk_command[@]}"
+unset FAKE_IGNORED_SELECTION_EMPTY
+gate_expect_failure "SDK ignored conformance lane accepted a zero-test selection"
+gate_output_contains \
+  "SDK ignored zero-test rejection did not come from the nonzero guard" \
+  "expected 'at least one passed; 0 failed'"
