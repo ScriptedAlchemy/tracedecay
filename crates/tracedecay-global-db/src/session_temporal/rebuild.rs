@@ -311,9 +311,14 @@ pub(super) async fn validate_candidate_frontier(
             )
             .as_str()
             .to_owned();
+            // Mirrors `derive_retained_projection_relations`: only a re-emission
+            // of the same logical message is a derived logical copy. A parent
+            // link to a *different* message is conversation threading and must
+            // not be demanded as copy coverage.
             let parent_message_id = envelope
                 .as_ref()
                 .and_then(|value| value.relations().parent_message_id())
+                .filter(|parent| parent.as_str() == output.message().message_id)
                 .map(|value| value.as_str().to_owned());
             canonical_outputs.push((occurrence_id, parent_message_id));
         }

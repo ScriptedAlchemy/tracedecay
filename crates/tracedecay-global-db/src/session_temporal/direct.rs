@@ -52,6 +52,11 @@ pub async fn resolve_expand_target(
     }
 }
 
+/// `ObservationSourceIdentityV1` omits `provider` on the wire whenever it is the
+/// default (`claude`), so every SQL comparison against `observation_json` must
+/// restore that default before matching — exactly as the candidate, hydration,
+/// and derived-evidence queries do. Matching the bare `json_extract` misses
+/// every Claude observation, which reports a live message as deleted.
 async fn resolve_occurrence_anchor(
     read: &TemporalSqlRead<'_>,
     provider: &str,
@@ -72,9 +77,12 @@ async fn resolve_occurrence_anchor(
                ON observation.observation_id = occurrence.source_observation_id
              WHERE raw.provider = ?1
                AND raw.store_id = ?2
-               AND json_extract(
-                   observation.observation_json,
-                   '$.identity.source.provider'
+               AND COALESCE(
+                   json_extract(
+                       observation.observation_json,
+                       '$.identity.source.provider'
+                   ),
+                   'claude'
                ) = ?1
              ORDER BY occurrence.occurrence_id
              LIMIT 2",
@@ -175,9 +183,12 @@ async fn resolve_external_anchor(
              WHERE raw.provider = ?1
                AND raw.session_id = ?2
                AND raw.payload_ref = ?3
-               AND json_extract(
-                   observation.observation_json,
-                   '$.identity.source.provider'
+               AND COALESCE(
+                   json_extract(
+                       observation.observation_json,
+                       '$.identity.source.provider'
+                   ),
+                   'claude'
                ) = ?1
              ORDER BY occurrence.occurrence_id
              LIMIT 2",
