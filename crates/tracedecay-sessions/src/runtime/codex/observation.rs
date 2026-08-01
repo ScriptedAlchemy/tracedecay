@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub use tracedecay_capture::codex::codex_native_record_id;
+pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
@@ -169,7 +169,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
     .await
 }
 
-pub enum CodexObservationAdmission<'a> {
+pub(super) enum CodexObservationAdmission<'a> {
     Project {
         root: &'a Path,
         project_id: ProjectId,
@@ -181,7 +181,7 @@ pub enum CodexObservationAdmission<'a> {
 }
 
 impl CodexObservationAdmission<'_> {
-    pub fn scope(&self) -> ObservationScopeV1 {
+    pub(super) fn scope(&self) -> ObservationScopeV1 {
         match self {
             Self::Project { project_id, .. } => ObservationScopeV1::Project {
                 project_id: project_id.clone(),
@@ -190,7 +190,7 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    pub fn accepts(&self, cwd: Option<&Path>) -> bool {
+    pub(super) fn accepts(&self, cwd: Option<&Path>) -> bool {
         match self {
             Self::Project { root, .. } => cwd.is_some_and(|cwd| path_belongs_to_project(cwd, root)),
             Self::Profile {
@@ -203,7 +203,7 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    pub fn accepts_session(&self, session_id: &str) -> bool {
+    pub(super) fn accepts_session(&self, session_id: &str) -> bool {
         !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
     }
 

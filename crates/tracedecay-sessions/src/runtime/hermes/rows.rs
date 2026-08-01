@@ -8,7 +8,7 @@ use crate::runtime::shared::StoredCursor;
 use super::MAX_HERMES_VALUE_BYTES;
 
 /// One joined `messages` × `sessions` row read past the cursor.
-pub struct HermesRow {
+pub(super) struct HermesRow {
     pub id: i64,
     pub session_id: String,
     pub role: String,
@@ -40,7 +40,7 @@ pub struct HermesRow {
 
 /// One bounded `SQLite` page: row count, per-value, and cumulative byte caps applied
 /// before `String`/`Vec` materialization.
-pub struct HermesPageRead {
+pub(super) struct HermesPageRead {
     pub items: Vec<HermesRow>,
     #[cfg(test)]
     pub new_cursor: StoredCursor,
@@ -54,7 +54,7 @@ fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> u64 {
     })
 }
 
-pub fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
+pub(super) fn hermes_native_payload_bytes(row: &HermesRow) -> u64 {
     let text_bytes = text_bytes([
         Some(row.session_id.as_str()),
         Some(row.role.as_str()),
@@ -84,7 +84,7 @@ fn hermes_row_bytes(row: &HermesRow) -> u64 {
         .saturating_add(16)
 }
 
-pub fn hermes_budget_bytes(row: &HermesRow) -> u64 {
+pub(super) fn hermes_budget_bytes(row: &HermesRow) -> u64 {
     let capped = u64::try_from(MAX_OBSERVATION_RECORD_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);
@@ -95,7 +95,7 @@ pub fn hermes_budget_bytes(row: &HermesRow) -> u64 {
         .min(capped)
 }
 
-pub fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
+pub(super) fn hermes_page_row_charge(sql_measured_bytes: u64) -> u64 {
     let capped = u64::try_from(MAX_HERMES_VALUE_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);

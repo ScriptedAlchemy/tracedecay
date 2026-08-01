@@ -17,7 +17,7 @@ pub(super) const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-provider-frontier:v1";
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).
-pub fn default_ingest_pass_bounds() -> IngestPassBounds {
+pub(super) fn default_ingest_pass_bounds() -> IngestPassBounds {
     let jsonl_bytes = u64::try_from(MAX_JSONL_RECORD_BYTES)
         .unwrap_or(u64::MAX)
         .saturating_add(1);

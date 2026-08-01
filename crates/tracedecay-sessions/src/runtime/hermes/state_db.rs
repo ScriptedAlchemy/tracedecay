@@ -28,13 +28,13 @@ use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HE
 /// Column names of the `messages` table — `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
-pub async fn message_columns(
+pub(super) async fn message_columns(
     conn: &SqliteReadConn,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     table_columns(conn, "messages").await
 }
 
-pub async fn table_columns(
+pub(super) async fn table_columns(
     conn: &SqliteReadConn,
     table: &str,
 ) -> Result<std::collections::BTreeSet<String>, String> {
@@ -153,7 +153,7 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-pub fn select_new_messages_sql(
+pub(super) fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
 ) -> String {
@@ -433,7 +433,7 @@ where
     }
 }
 
-pub async fn try_ingest_state_db_bounded_with_admission(
+pub(super) async fn try_ingest_state_db_bounded_with_admission(
     source: &HermesProfileSource,
     project_root: &Path,
     project_id: ProjectId,
@@ -472,7 +472,7 @@ pub async fn try_ingest_state_db_bounded_with_admission(
 /// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
 /// once, then each destination independently admits routed rows against its own
 /// authoritative observation cursor.
-pub async fn try_ingest_state_db_for_projects(
+pub(super) async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
     budget: &mut IngestByteBudget,
@@ -561,7 +561,7 @@ pub async fn try_ingest_state_db_for_projects(
     }
 }
 
-pub async fn try_ingest_user_state_db_bounded_with_admission(
+pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
@@ -607,7 +607,7 @@ pub async fn try_ingest_user_state_db_bounded_with_admission(
 
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write
 /// to (or create) another agent's live store.
-pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
+pub(super) async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
     let opened = tokio::task::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
@@ -619,7 +619,7 @@ pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String
         .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
 }
 
-pub async fn read_new_rows_strict(
+pub(super) async fn read_new_rows_strict(
     conn: &SqliteReadConn,
     select_sql: &str,
     prev: StoredCursor,

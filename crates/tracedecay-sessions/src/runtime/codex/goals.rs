@@ -13,7 +13,7 @@ use crate::runtime::SessionMessageRecord;
 /// Codex's structured session goal, parsed from a `thread_goal_updated`
 /// `event_msg`. `status` is stored verbatim; the parser deliberately does not
 /// map it to a fixed enum so an unrecognized future value survives round-trip.
-pub struct CodexGoalEvent {
+pub(super) struct CodexGoalEvent {
     pub objective: String,
     pub status: Option<String>,
     pub thread_id: Option<String>,
@@ -27,11 +27,11 @@ impl CodexGoalEvent {
     /// Key used to collapse identical consecutive lifecycle states within one
     /// parse pass. Token/time drift on the same `(objective, status)` is
     /// progress within a state, not a transition, so it does not open a new row.
-    pub fn dedup_key(&self) -> (String, Option<String>) {
+    pub(super) fn dedup_key(&self) -> (String, Option<String>) {
         (self.objective.clone(), self.status.clone())
     }
 
-    pub fn metadata(&self) -> Value {
+    pub(super) fn metadata(&self) -> Value {
         let mut goal = serde_json::Map::new();
         goal.insert(
             "source".to_string(),
@@ -73,7 +73,7 @@ impl CodexGoalEvent {
 /// Parse a `thread_goal_updated` `event_msg` into a [`CodexGoalEvent`], or
 /// `None` for any other line. A goal with an empty/absent objective is skipped
 /// (there is nothing to catalog or search).
-pub fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
+pub(super) fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
     if record.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
     }
@@ -112,7 +112,7 @@ pub fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
 /// Build the compact `goal` session row: the objective as searchable text, the
 /// lifecycle fields in `metadata_json`. Role `system` matches the other
 /// non-conversational Codex rows (goal context, compaction summaries).
-pub fn goal_event_message(
+pub(super) fn goal_event_message(
     meta: &CodexMeta,
     model: Option<&str>,
     path: &Path,
@@ -137,7 +137,7 @@ pub fn goal_event_message(
     }
 }
 
-pub struct CodexGoalContext {
+pub(super) struct CodexGoalContext {
     objective: String,
     tokens_used: Option<i64>,
     token_budget: Option<i64>,
@@ -147,11 +147,11 @@ pub struct CodexGoalContext {
 }
 
 impl CodexGoalContext {
-    pub fn storage_text(&self) -> String {
+    pub(super) fn storage_text(&self) -> String {
         format!("Codex active goal: {}", self.objective)
     }
 
-    pub fn metadata(&self) -> Value {
+    pub(super) fn metadata(&self) -> Value {
         let mut goal = serde_json::Map::new();
         goal.insert("source".to_string(), Value::String("goal".to_string()));
         goal.insert(
@@ -180,7 +180,7 @@ impl CodexGoalContext {
     }
 }
 
-pub fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContext> {
+pub(super) fn codex_goal_context_from_text(text: &str) -> Option<CodexGoalContext> {
     const START: &str = "<codex_internal_context source=\"goal\">";
     const END: &str = "</codex_internal_context>";
     let start = text.find(START)?;
@@ -248,7 +248,7 @@ fn is_unbounded_budget_value(value: &str) -> bool {
     )
 }
 
-pub fn goal_context_from_line(
+pub(super) fn goal_context_from_line(
     record: &Value,
     meta: &CodexMeta,
     model: Option<&str>,

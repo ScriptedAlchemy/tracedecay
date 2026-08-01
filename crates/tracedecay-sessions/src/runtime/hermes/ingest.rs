@@ -216,7 +216,7 @@ pub async fn ingest_homes_capped_with_admission(
     .await
 }
 
-pub async fn ingest_homes_capped_with_admission_and_cancellation(
+pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
@@ -441,7 +441,7 @@ pub async fn ingest_legacy_pinned_profile(
 /// profile is only a bounded candidate source and each session must carry a
 /// matching code-project cwd.
 ///
-pub struct HermesProfileSource {
+pub(super) struct HermesProfileSource {
     pub state_db: PathBuf,
     pub legacy_project_pin: Option<PathBuf>,
     pub profile: Option<String>,
