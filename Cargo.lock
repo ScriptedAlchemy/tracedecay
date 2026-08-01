@@ -5546,6 +5546,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-global-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-jsonrpc",
@@ -5673,6 +5674,35 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "url",
+]
+
+[[package]]
+name = "tracedecay-global-db"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac 0.13.0",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-capture",
+ "tracedecay-domain",
+ "tracedecay-migrate",
+ "tracedecay-query",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
