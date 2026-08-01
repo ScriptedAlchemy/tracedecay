@@ -1572,15 +1572,19 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let unsafe_noop_payload =
         extract_lcm_json_following_handle(&cg, &unsafe_noop_compress.value).await;
-    assert_eq!(unsafe_noop_payload["status"], "needs_summary");
-    assert_eq!(
-        unsafe_noop_payload["reason"],
-        "hermes_auxiliary_not_available"
-    );
+    // An explicit no-op summarizer is honored even under hard pressure; the
+    // pressure is reported as a typed advisory instead of silently switching
+    // the caller to a different summarizer.
+    assert_eq!(unsafe_noop_payload["status"], "ok");
+    assert_eq!(unsafe_noop_payload["reason"], "noop_summarizer");
     assert_eq!(unsafe_noop_payload["summary_nodes_created"], 0);
-    assert!(
-        unsafe_noop_payload["summary_request"].is_object(),
-        "hard-overflow explicit noop should be upgraded to auxiliary summary mode"
+    assert_eq!(
+        unsafe_noop_payload["summarizer_advisory"]["code"],
+        "noop_summarizer_under_hard_pressure"
+    );
+    assert_eq!(
+        unsafe_noop_payload["summarizer_advisory"]["recommended_summarizer"],
+        "hermes_auxiliary"
     );
 
     let reserve_cap_noop_compress = handle_tool_call(
@@ -1604,14 +1608,11 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let reserve_cap_noop_payload =
         extract_lcm_json_following_handle(&cg, &reserve_cap_noop_compress.value).await;
-    assert_eq!(reserve_cap_noop_payload["status"], "needs_summary");
+    assert_eq!(reserve_cap_noop_payload["status"], "ok");
+    assert_eq!(reserve_cap_noop_payload["reason"], "noop_summarizer");
     assert_eq!(
-        reserve_cap_noop_payload["reason"],
-        "hermes_auxiliary_not_available"
-    );
-    assert!(
-        reserve_cap_noop_payload["summary_request"].is_object(),
-        "reserve-derived hard pressure should upgrade explicit noop to auxiliary summary mode"
+        reserve_cap_noop_payload["summarizer_advisory"]["code"],
+        "noop_summarizer_under_hard_pressure"
     );
 
     for (index, content) in [
