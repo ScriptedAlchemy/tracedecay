@@ -591,16 +591,7 @@ pub(crate) async fn setup_branch_drift_fixture()
 // ---------------------------------------------------------------------------
 
 /// Captures stdout of a git command (trimmed).
-pub(crate) fn git_capture(project: &std::path::Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(project)
-        .output()
-        .expect("git failed to spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+///
+/// The shared fixture helper resolves `git` once per process and applies the
+/// hermetic fixture config, which a raw `Command::new("git")` here did not.
+pub(crate) use crate::common::fixture::git_capture;
