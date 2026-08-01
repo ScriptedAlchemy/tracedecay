@@ -15,6 +15,21 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::StoreShardScopeV1;
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTemporalFixtureCountV1 {
+    ProjectionReceipts,
+    Occurrences,
+    LogicalCopyEdges,
+    Assertions,
+    RefreshReceipts,
+    RefreshProgress,
+    RefreshOperations,
+    RefreshBindings,
+    RefreshBatchBindings,
+    TemporalGenerations,
+}
+
 /// Registered host-admission fixture assembled by the composition root.
 ///
 /// This retains the canonical daemon scope, registered databases, and
@@ -201,6 +216,118 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> Result<[u8; 32]> {
         self.checkpoint_session_database_for_test(scope).await?;
         canonical_session_domain_sha256(self.session_database_for_test(scope)?.db_path())
+    }
+
+    #[doc(hidden)]
+    pub fn observation_store(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> std::result::Result<crate::store::GlobalDbObservationStore<'_>, HostAdmissionOutcome> {
+        let database = self
+            .registered_database(scope)
+            .ok_or_else(registered_authority_unavailable_outcome)?;
+        Ok(crate::store::GlobalDbObservationStore::with_runtime(
+            database.runtime(),
+            database.authority(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub async fn replay_observations(
+        &self,
+        scope: HostAdmissionScope,
+        request: tracedecay_store::ObservationReplayRequest,
+    ) -> tracedecay_store::ObservationStoreResult<Vec<tracedecay_store::StoredObservation>> {
+        use tracedecay_store::ObservationStore as _;
+
+        let store = self.observation_store(scope).map_err(|outcome| {
+            tracedecay_store::ObservationStoreError::Storage {
+                operation: "bind registered host admission replay",
+                source: Box::new(std::io::Error::other(
+                    outcome
+                        .reason_code
+                        .unwrap_or("registered_authority_unavailable"),
+                )),
+            }
+        })?;
+        store.replay_observations(request).await
+    }
+
+    #[doc(hidden)]
+    pub fn project_observation_database_arc_for_test(&self) -> Result<Arc<RegisteredGlobalDb>> {
+        self.project_registered
+            .clone()
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "bind registered project Work test runtime".to_owned(),
+                message: "registered ProjectSessions mount is unavailable".to_owned(),
+            })
+    }
+
+    #[doc(hidden)]
+    pub fn session_temporal_store_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<crate::store::GlobalDbSessionTemporalStore<'_>> {
+        Ok(crate::store::GlobalDbSessionTemporalStore::new(
+            self.session_database_for_test(scope)?,
+        ))
+    }
+
+    #[doc(hidden)]
+    pub async fn session_temporal_fixture_count_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        kind: SessionTemporalFixtureCountV1,
+    ) -> Result<i64> {
+        let table = match kind {
+            SessionTemporalFixtureCountV1::ProjectionReceipts => {
+                "session_temporal_projection_receipts"
+            }
+            SessionTemporalFixtureCountV1::Occurrences => "session_occurrences",
+            SessionTemporalFixtureCountV1::LogicalCopyEdges => "session_logical_copy_edges",
+            SessionTemporalFixtureCountV1::Assertions => "session_assertions",
+            SessionTemporalFixtureCountV1::RefreshReceipts => "session_refresh_receipts",
+            SessionTemporalFixtureCountV1::RefreshProgress => "session_refresh_progress",
+            SessionTemporalFixtureCountV1::RefreshOperations => "session_refresh_operations",
+            SessionTemporalFixtureCountV1::RefreshBindings => "session_refresh_bindings",
+            SessionTemporalFixtureCountV1::RefreshBatchBindings => "session_refresh_batch_bindings",
+            SessionTemporalFixtureCountV1::TemporalGenerations => "session_temporal_generations",
+        };
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "read session-temporal fixture count".to_owned(),
+                message: "count query returned no row".to_owned(),
+            })?;
+        row.get(0).map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_session_temporal_refresh_test_authority(
+        self,
+        scope: HostAdmissionScope,
+    ) -> Result<
+        crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority,
+    > {
+        let database =
+            self.registered_database_arc(scope)
+                .ok_or_else(|| TraceDecayError::Database {
+                    operation: "bind session temporal refresh test authority".to_owned(),
+                    message: "registered session database mount is unavailable".to_owned(),
+                })?;
+        Ok(
+            crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority::new(
+                self, database,
+            ),
+        )
     }
 
     #[doc(hidden)]
@@ -734,6 +861,14 @@ fn session_domain_digest_error(operation: &str, error: rusqlite::Error) -> Trace
     TraceDecayError::Database {
         operation: operation.to_owned(),
         message: error.to_string(),
+    }
+}
+
+const fn registered_authority_unavailable_outcome() -> HostAdmissionOutcome {
+    HostAdmissionOutcome {
+        status: HostAdmissionStatus::Unavailable,
+        retryable: true,
+        reason_code: Some("registered_authority_unavailable"),
     }
 }
 
