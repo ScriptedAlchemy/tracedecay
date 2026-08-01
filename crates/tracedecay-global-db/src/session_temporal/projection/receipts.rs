@@ -290,16 +290,16 @@ pub async fn record_canonical_observation_effect(
     let mut outputs = effect
         .messages()
         .map(|output| {
-            json!({
+            Ok(json!({
                 "anchor_id": output.provenance().retrieval_anchor_id().as_str(),
-                "digest": output.output_digest().as_str(),
+                "digest": output.output_digest()?.as_str(),
                 "ordinal": output.output_ordinal(),
                 "provider": output.message().provider,
                 "message_id": output.message().message_id,
                 "session_id": output.session().session_id,
-            })
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<ProjectionStoreResult<Vec<_>>>()?;
     outputs.sort_unstable_by_key(ToString::to_string);
     let temporal_output_count = outputs.len();
     let effect_digest = digest_bytes(

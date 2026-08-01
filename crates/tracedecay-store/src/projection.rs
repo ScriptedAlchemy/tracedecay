@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::future::Future;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -9,6 +10,9 @@ use tracedecay_domain::{
 };
 
 use crate::{SessionMessageRecord, SessionRecord};
+
+#[cfg(test)]
+mod tests;
 
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V1: &str = "claude-session-message-v1";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V2: &str = "claude-session-message-v2";
@@ -132,37 +136,34 @@ impl ObservationProjection {
         session: SessionRecord,
         message: SessionMessageRecord,
     ) -> ProjectionStoreResult<Self> {
+        let provenance = ProjectionProvenance::for_observation(observation)?;
         Ok(Self::Message(Box::new(Self::message_projection(
-            observation,
-            session,
-            message,
-            0,
-        )?)))
+            provenance, session, message, 0,
+        ))))
     }
 
+    /// Binds one message output to its observation provenance.
+    ///
+    /// The deterministic `output_digest` is a pure function of the projector
+    /// version, ordinal, session, and message, so it is derived lazily on first
+    /// use (see [`SessionMessageProjection::output_digest`]) instead of on
+    /// every derivation. Read paths that only need the projected records —
+    /// temporal hydration, occurrence materialization, parent resolution —
+    /// therefore never pay the canonical-JSON plus SHA-256 cost, while write
+    /// paths that persist the digest observe byte-identical values.
     fn message_projection(
-        observation: &DurableObservationV1,
+        provenance: ProjectionProvenance,
         session: SessionRecord,
         message: SessionMessageRecord,
         output_ordinal: u32,
-    ) -> ProjectionStoreResult<SessionMessageProjection> {
-        let digest_value = serde_json::json!({
-            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
-            "output_ordinal": output_ordinal,
-            "session": &session,
-            "message": &message,
-        });
-        let output_digest = PayloadReferenceV1::for_payload(&digest_value)
-            .map_err(ProjectionStoreError::Contract)?
-            .digest()
-            .clone();
-        Ok(SessionMessageProjection {
+    ) -> SessionMessageProjection {
+        SessionMessageProjection {
             session,
             message,
-            provenance: ProjectionProvenance::for_observation(observation)?,
-            output_digest,
+            provenance,
+            output_digest: OnceLock::new(),
             output_ordinal,
-        })
+        }
     }
 
     pub fn for_outputs(
@@ -175,6 +176,10 @@ impl ObservationProjection {
                 ObservationContractError::InvalidCanonicalPayload,
             ));
         }
+        // Provenance is a pure function of the observation, so the anchor
+        // derivation runs once per observation and is cloned across outputs
+        // instead of once per output row.
+        let provenance = ProjectionProvenance::for_observation(observation)?;
         let mut messages = messages
             .into_iter()
             .enumerate()
@@ -184,13 +189,18 @@ impl ObservationProjection {
                         ObservationContractError::InvalidCanonicalPayload,
                     )
                 })?;
-                Self::message_projection(observation, session, message, ordinal)
+                Ok(Self::message_projection(
+                    provenance.clone(),
+                    session,
+                    message,
+                    ordinal,
+                ))
             })
             .collect::<ProjectionStoreResult<Vec<_>>>()?;
         let workflow_facts = workflow_facts
             .into_iter()
-            .map(|(session, fact)| WorkflowFactProjection::new(observation, session, fact))
-            .collect::<ProjectionStoreResult<Vec<_>>>()?;
+            .map(|(session, fact)| WorkflowFactProjection::new(provenance.clone(), session, fact))
+            .collect::<Vec<_>>();
         if workflow_facts.is_empty() && messages.len() == 1 {
             return Ok(Self::Message(Box::new(messages.remove(0))));
         }
@@ -211,14 +221,29 @@ impl ObservationProjection {
 }
 
 /// Deterministic searchable message derived from one durable observation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct SessionMessageProjection {
     session: SessionRecord,
     message: SessionMessageRecord,
     provenance: ProjectionProvenance,
-    output_digest: PayloadDigestV1,
+    output_digest: OnceLock<PayloadDigestV1>,
     output_ordinal: u32,
 }
+
+/// `output_digest` is a memoized pure function of the projector version, the
+/// ordinal, the session, and the message, so comparing those inputs is exactly
+/// equivalent to comparing the derived digest. Equality must not depend on
+/// whether a projection happens to have materialized its memo yet.
+impl PartialEq for SessionMessageProjection {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.message == other.message
+            && self.provenance == other.provenance
+            && self.output_ordinal == other.output_ordinal
+    }
+}
+
+impl Eq for SessionMessageProjection {}
 
 impl SessionMessageProjection {
     pub fn session(&self) -> &SessionRecord {
@@ -233,13 +258,38 @@ impl SessionMessageProjection {
         &self.provenance
     }
 
-    pub fn output_digest(&self) -> &PayloadDigestV1 {
-        &self.output_digest
+    /// Deterministic content digest of this output, derived on first use and
+    /// memoized thereafter. The digested value is byte-identical to the
+    /// eagerly derived form: same projector version, ordinal, session, and
+    /// message, canonicalized by the same encoder.
+    pub fn output_digest(&self) -> ProjectionStoreResult<&PayloadDigestV1> {
+        if let Some(digest) = self.output_digest.get() {
+            return Ok(digest);
+        }
+        let digest = message_output_digest(&self.session, &self.message, self.output_ordinal)?;
+        Ok(self.output_digest.get_or_init(|| digest))
     }
 
     pub fn output_ordinal(&self) -> u32 {
         self.output_ordinal
     }
+}
+
+fn message_output_digest(
+    session: &SessionRecord,
+    message: &SessionMessageRecord,
+    output_ordinal: u32,
+) -> ProjectionStoreResult<PayloadDigestV1> {
+    let digest_value = serde_json::json!({
+        "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
+        "output_ordinal": output_ordinal,
+        "session": session,
+        "message": message,
+    });
+    Ok(PayloadReferenceV1::for_payload(&digest_value)
+        .map_err(ProjectionStoreError::Contract)?
+        .digest()
+        .clone())
 }
 
 /// Provider-neutral workflow row derived from one canonical semantic fact.
@@ -264,52 +314,38 @@ pub struct WorkflowFactRecord {
 }
 
 /// Deterministic normalized workflow output and receipt provenance.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct WorkflowFactProjection {
     session: SessionRecord,
     fact: WorkflowFactRecord,
     provenance: ProjectionProvenance,
-    output_digest: PayloadDigestV1,
+    output_digest: OnceLock<PayloadDigestV1>,
 }
+
+/// See [`SessionMessageProjection`]'s equality note: the memoized digest is a
+/// pure function of the compared fields.
+impl PartialEq for WorkflowFactProjection {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session
+            && self.fact == other.fact
+            && self.provenance == other.provenance
+    }
+}
+
+impl Eq for WorkflowFactProjection {}
 
 impl WorkflowFactProjection {
     fn new(
-        observation: &DurableObservationV1,
+        provenance: ProjectionProvenance,
         session: SessionRecord,
         fact: WorkflowFactRecord,
-    ) -> ProjectionStoreResult<Self> {
-        let digest_value = serde_json::json!({
-            "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
-            "session": &session,
-            "fact": {
-                "fact_ordinal": fact.fact_ordinal,
-                "semantic_kind": fact.semantic_kind,
-                "provider_reference": fact.provider_reference,
-                "item_id": fact.item_id,
-                "parent_reference": fact.parent_reference,
-                "list_reference": fact.list_reference,
-                "state": fact.state,
-                "status": fact.status,
-                "item_order": fact.item_order,
-                "native_revision": fact.native_revision,
-                "event_sequence": fact.event_sequence,
-                "source_sequence": fact.source_sequence,
-                "native_timestamp": fact.native_timestamp,
-                "ordering_domain": fact.ordering_domain,
-                "content": fact.content,
-                "content_text": fact.content_text,
-            },
-        });
-        let output_digest = PayloadReferenceV1::for_payload(&digest_value)
-            .map_err(ProjectionStoreError::Contract)?
-            .digest()
-            .clone();
-        Ok(Self {
+    ) -> Self {
+        Self {
             session,
             fact,
-            provenance: ProjectionProvenance::for_observation(observation)?,
-            output_digest,
-        })
+            provenance,
+            output_digest: OnceLock::new(),
+        }
     }
 
     pub fn session(&self) -> &SessionRecord {
@@ -324,9 +360,47 @@ impl WorkflowFactProjection {
         &self.provenance
     }
 
-    pub fn output_digest(&self) -> &PayloadDigestV1 {
-        &self.output_digest
+    /// Deterministic content digest of this workflow output, derived on first
+    /// use and memoized thereafter. Byte-identical to the eagerly derived form.
+    pub fn output_digest(&self) -> ProjectionStoreResult<&PayloadDigestV1> {
+        if let Some(digest) = self.output_digest.get() {
+            return Ok(digest);
+        }
+        let digest = workflow_fact_output_digest(&self.session, &self.fact)?;
+        Ok(self.output_digest.get_or_init(|| digest))
     }
+}
+
+fn workflow_fact_output_digest(
+    session: &SessionRecord,
+    fact: &WorkflowFactRecord,
+) -> ProjectionStoreResult<PayloadDigestV1> {
+    let digest_value = serde_json::json!({
+        "projector_version": SESSION_MESSAGE_PROJECTOR_VERSION,
+        "session": session,
+        "fact": {
+            "fact_ordinal": fact.fact_ordinal,
+            "semantic_kind": fact.semantic_kind,
+            "provider_reference": fact.provider_reference,
+            "item_id": fact.item_id,
+            "parent_reference": fact.parent_reference,
+            "list_reference": fact.list_reference,
+            "state": fact.state,
+            "status": fact.status,
+            "item_order": fact.item_order,
+            "native_revision": fact.native_revision,
+            "event_sequence": fact.event_sequence,
+            "source_sequence": fact.source_sequence,
+            "native_timestamp": fact.native_timestamp,
+            "ordering_domain": fact.ordering_domain,
+            "content": fact.content,
+            "content_text": fact.content_text,
+        },
+    });
+    Ok(PayloadReferenceV1::for_payload(&digest_value)
+        .map_err(ProjectionStoreError::Contract)?
+        .digest()
+        .clone())
 }
 
 pub type ClaudeObservationProjection = ObservationProjection;

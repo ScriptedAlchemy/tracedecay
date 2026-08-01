@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
+use std::sync::{LazyLock, RwLock};
 
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationIdV1,
@@ -142,11 +144,30 @@ pub fn build_scope_resolution_authorization_v1(
     build_resolution_authorization_v1(authority_namespace, canonical_request_digest)
 }
 
-fn build_resolution_authorization_v1(
-    authority_namespace: &str,
-    canonical_request_digest: String,
-) -> ObservationStoreResult<ResolutionAuthorizationV1> {
-    let access_policy_digest = PayloadReferenceV1::for_payload(&serde_json::json!({
+/// Upper bound on memoized access-policy digests.
+///
+/// Authority namespaces are compile-time constants in production, so this only
+/// exists so a caller passing unbounded namespaces cannot grow the memo without
+/// limit; past the bound the digest is derived without being retained.
+const MAX_MEMOIZED_ACCESS_POLICY_DIGESTS: usize = 64;
+
+/// Access-policy digests keyed by authority namespace.
+///
+/// The digested value binds nothing but the authorization domain constant and
+/// the namespace, so it is the same bytes for every resolution in that
+/// namespace. Deriving it per resolution put a canonical-JSON encode plus a
+/// SHA-256 compression on the anchor-resolution serving path for a value that
+/// was born the first time the namespace was used.
+static ACCESS_POLICY_DIGESTS: LazyLock<RwLock<HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn access_policy_digest_for(authority_namespace: &str) -> ObservationStoreResult<String> {
+    if let Ok(memo) = ACCESS_POLICY_DIGESTS.read()
+        && let Some(digest) = memo.get(authority_namespace)
+    {
+        return Ok(digest.clone());
+    }
+    let digest = PayloadReferenceV1::for_payload(&serde_json::json!({
         "domain": "tracedecay.observation-anchor.authorization.v1",
         "authority": authority_namespace,
     }))
@@ -154,6 +175,19 @@ fn build_resolution_authorization_v1(
     .digest()
     .as_str()
     .to_owned();
+    if let Ok(mut memo) = ACCESS_POLICY_DIGESTS.write()
+        && memo.len() < MAX_MEMOIZED_ACCESS_POLICY_DIGESTS
+    {
+        memo.insert(authority_namespace.to_owned(), digest.clone());
+    }
+    Ok(digest)
+}
+
+fn build_resolution_authorization_v1(
+    authority_namespace: &str,
+    canonical_request_digest: String,
+) -> ObservationStoreResult<ResolutionAuthorizationV1> {
+    let access_policy_digest = access_policy_digest_for(authority_namespace)?;
     Ok(ResolutionAuthorizationV1 {
         resolved_scope_id: ScopeResolutionId::new(format!("scope.{authority_namespace}"))
             .map_err(ObservationStoreError::RetrievalAnchorContract)?,

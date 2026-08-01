@@ -1095,7 +1095,7 @@ async fn stage_rebuild_provenance(
             provenance.receipt_id(),
             message.provider.as_str(),
             message.message_id.as_str(),
-            projection.output_digest().as_str(),
+            projection.output_digest()?.as_str(),
             i64::from(message_created),
         ],
     )
@@ -1139,7 +1139,7 @@ async fn stage_rebuild_provenance(
         provenance.receipt_id().to_owned(),
         message.provider.clone(),
         message.message_id.clone(),
-        projection.output_digest().as_str().to_owned(),
+        projection.output_digest()?.as_str().to_owned(),
     );
     if actual == expected {
         Ok(())
