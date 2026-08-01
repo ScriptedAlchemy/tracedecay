@@ -196,10 +196,10 @@ duplicating business logic.
   proposal-decision, and runtime-effect grants remain separate; no generic
   task query DSL, invoke-anything operation, task-local scheduler, or hidden
   alias is admitted.
-- **PR18 — SDK bindings:** add Rust, TypeScript, and Python SDK BindingIds only
+- **PR18 — SDK bindings:** add Rust and TypeScript SDK BindingIds only
   with shipped typed methods and behavioral/lifecycle conformance fixtures.
   Every supported public operation, including operations accepted before
-  PR17, must receive bindings in all three SDKs; absence from a generated list
+  PR17, must receive bindings in both SDKs; absence from a generated list
   or late milestone is not permission to omit a family. PR12 may describe
   future SDK availability as unavailable protocol metadata but cannot
   advertise an unimplemented SDK method.
@@ -379,8 +379,8 @@ same behavior is covered directly.
   deterministic lookup, and rejection of shell-string, recursive-dispatch, or
   graph/runtime-mutation capabilities.
 - PR18 SDK parity tests require every supported public operation—not only
-  PR17 task/runtime additions—to resolve through shipped Rust, TypeScript, and
-  Python methods to the canonical application handler, with matching
+  PR17 task/runtime additions—to resolve through shipped Rust and TypeScript
+  methods to the canonical application handler, with matching
   authorization, paging/streaming, problems/retry directives, cancellation,
   receipts, reconnect/resume, and unavailable/partial lifecycle semantics.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.

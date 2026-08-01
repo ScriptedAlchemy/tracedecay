@@ -384,7 +384,7 @@ delivery phases:
 - Plan 35 owns LSP projection, including the versioned TraceDecay context
   extension carried over standard LSP/JSON-RPC framing, and short-lived
   one-way investigation and task-cue handoff projections; Plan 17 freezes the
-  two public token-consumption operations and their Rust/TypeScript/Python
+  two public token-consumption operations and their Rust/TypeScript
   bindings; Plan 08 catalogs only typed, negotiated callable bindings; Plan 09
   owns transport-neutral investigation results; Plan 24 owns task identity,
   ready-commit, cross-worktree, and task-context semantics; Plan 21 binds
@@ -751,7 +751,7 @@ silently choose a model, mutate the graph, or execute an unadmitted step.
 
 ## PR18 — supported external development
 
-**User outcome.** Rust, TypeScript, and Python users can perform every
+**User outcome.** Rust and TypeScript users can perform every
 supported public TraceDecay operation—not only PR17 graph,
 task-intelligence, and workflow additions—through first-party SDKs with the
 same behavior and lifecycle as built-in surfaces.
@@ -779,8 +779,8 @@ reauthorize exact scope, and never carry or apply an edit.
 **Library-first implementation defaults.** Derive accepted wire contracts from
 Serde plus `schemars`; admit Aide only after typed DTOs exist and only when it
 removes route/OpenAPI glue without creating parallel models. Generate
-TypeScript and Python wire models, then keep handwritten lifecycle façades
-over Rust `reqwest`, browser/Node `fetch`, and Python `httpx-sse`; use
+TypeScript wire models, then keep handwritten lifecycle façades
+over Rust `reqwest` and browser/Node `fetch`; use
 `oasdiff` and ecosystem semver tooling for compatibility checks. This replaces
 hand-copied wire types, route schema glue, SSE framing, and bespoke
 compatibility comparison while retaining server-owned authorization, retry
@@ -790,13 +790,13 @@ keep or repair the typed façade and reject the generator/Aide path rather than
 weakening conformance.
 
 **Direct acceptance.** Run behavioral/lifecycle conformance for every
-supported public operation through all three published SDKs against local and
+supported public operation through both published SDKs against local and
 PR16-enrolled remote authority, including representative complete journeys for
 each capability family, the create/evidence/admit/monitor/cancel/resume loop,
 version negotiation, paging, streaming interruption, typed failure and retry
 directive, unavailable capability, receipts, and cross-version compatibility.
 Produce and consume both the investigation and task handoff token through
-Rust, TypeScript, and Python; prove exact destination, scope, authorization,
+Rust and TypeScript; prove exact destination, scope, authorization,
 single-use expiry, policy-safe non-enumeration, wrong-scope/expired/
 unauthorized behavior, and local/remote semantic parity. LSP only opens the
 owning surface; it retrieves no task body and mutates no work. Compilation,

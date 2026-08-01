@@ -67,10 +67,8 @@ Only the protected publish job receives `id-token: write`; it re-verifies both
 artifacts and publishes the unchanged tarball without installing executable
 packages or using an npm token.
 
-The Python SDK remains supported source with local and CI typecheck,
-build/install, unit, and real-daemon conformance tests. Locally built wheels
-are test artifacts only. No workflow uploads or publishes Python
-distributions, and the Python SDK is not a registry-published artifact.
+The Rust SDK (`crates/tracedecay-sdk`) is published to crates.io through the
+standard release automation. There is no Python SDK.
 
 ### npm Trusted Publishing
 

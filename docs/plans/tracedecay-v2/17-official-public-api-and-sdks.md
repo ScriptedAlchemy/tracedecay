@@ -5,8 +5,9 @@
 PR12 ships the official daemon API. PR17 adds accepted task/work graph and
 workflow-runtime application operations. PR18 stabilizes every supported
 public operation, including the PR12 base and all later accepted additions, and
-publishes working Rust, TypeScript, and Python SDKs. No operation family or
-language is deferred.
+publishes working Rust and TypeScript SDKs. No operation family is deferred. The
+originally planned Python SDK was dropped: delivery is TypeScript-first plus a
+retained Rust SDK for native consumers, with no Python package.
 
 Earlier operation inventories, compatibility matrices, generated declarations,
 package fixtures, and conformance packets are historical evidence, not
@@ -15,7 +16,7 @@ wire schemas, SDK APIs, and persisted cursors or receipts remain compatibility
 contracts; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
-PR18's first Rust, TypeScript, and Python package shapes are not yet published;
+PR18's first Rust and TypeScript package shapes are not yet published;
 branch acceptance and generated schemas do not create an older supported SDK
 contract. Pure request/response APIs change in place only when they have not
 potentially reached an independently deployed dogfood client or host
@@ -51,7 +52,7 @@ requests.
 
 ### Supported public operation coverage
 
-Every Rust, TypeScript, and Python SDK exposes every supported public
+Every Rust and TypeScript SDK exposes every supported public
 operation, not only the PR17 additions, with distinct IDs and typed legal
 actions. The base includes all callable PR12 families and every operation
 accepted before the PR18 freeze; the PR17 additions include:
@@ -103,7 +104,7 @@ when their syntax is idiomatic to the surface.
 ### Compatibility and lifecycle behavior
 
 Each accepted operation proves semantic and lifecycle parity across CLI, MCP,
-HTTP, Rust, TypeScript, and Python. Compatibility with an older shape is tested
+HTTP, Rust, and TypeScript. Compatibility with an older shape is tested
 when release evidence, an independently deployed dogfood client, or a live host
 installation establishes that shape; potentially deployed shapes remain in
 conformance until an authorized installed-client/host census proves absence.
@@ -144,7 +145,7 @@ events, cancellation, backpressure, reconnect, and bounded terminal errors;
 and does not expose an arbitrary LSP or daemon invocation tunnel through SDKs.
 
 PR18 freezes two distinct public handoff-token consumption operations and
-exposes each through Rust, TypeScript, and Python:
+exposes each through Rust and TypeScript:
 
 - `open_investigation_handoff` consumes a feedback/diagnostic-cue token and
   delegates to Plan 09's owning investigation application operation/result;
@@ -173,9 +174,9 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 - Use Serde plus `schemars` as the accepted wire-model source. Admit Aide only
   after typed DTOs exist and only when it deletes route/OpenAPI glue without
   creating parallel request, response, error, or lifecycle models.
-- Generate TypeScript and Python wire models, then build reviewed handwritten
-  lifecycle façades over Rust `reqwest`, browser/Node `fetch`, and Python
-  `httpx-sse`. Generation replaces hand-copied DTOs; the façades retain
+- Generate TypeScript wire models, then build reviewed handwritten
+  lifecycle façades over Rust `reqwest` and browser/Node `fetch`.
+  Generation replaces hand-copied DTOs; the façades retain
   idiomatic paging, streaming, backpressure, cancellation, retry directives,
   idempotency, reconnect/resume, problems, and receipts rather than generating
   client-side product behavior.
@@ -209,14 +210,14 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
   Syntax may differ; semantics and lifecycle may not.
 - Bind both `open_investigation_handoff` and `open_task_handoff` to their
   owning application operations and expose the same authorized,
-  non-enumerating result in Rust, TypeScript, and Python without a raw LSP
+  non-enumerating result in Rust and TypeScript without a raw LSP
   tunnel. Plan 35 owns transport projection, Plan 09 owns investigation
   results, and Plan 24 owns task semantics; PR18 owns only the public names,
   token-consumption contract, SDK bindings, and compatibility.
 
-### Publish three usable SDKs
+### Publish two usable SDKs
 
-- Ship Rust, TypeScript, and Python packages with authenticated connection
+- Ship Rust and TypeScript packages with authenticated connection
   setup, typed operation calls, pagination iterators, streaming, cancellation,
   timeout, retry/idempotency, reconnect/resume, and structured errors idiomatic
   to each ecosystem.
@@ -230,7 +231,7 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 
 - Publish executable quickstarts that cover every public capability family,
   plus complete work-graph, admitted-runtime, investigation-handoff, and
-  task-handoff journeys in all three languages.
+  task-handoff journeys in both languages.
 - Test installed packages against one released daemon build on Linux and
   Windows, including current and oldest-supported client/daemon combinations.
 - Publish package versions only after the examples and lifecycle tests pass
@@ -252,11 +253,11 @@ matrices, and compilation-only conformance are not retained as release gates.
 
 ## Direct acceptance
 
-- Every supported public operation is callable from Rust, TypeScript, and
-  Python against the same production daemon boundary; no operation family is
+- Every supported public operation is callable from Rust and TypeScript
+  against the same production daemon boundary; no operation family is
   omitted because it predates PR17, and no SDK operation bypasses daemon
   authorization or opens product storage.
-- Each Rust, TypeScript, and Python SDK runs representative read, paged,
+- Each Rust and TypeScript SDK runs representative read, paged,
   streamed, cancellable, and effect/receipt operations against both a local
   daemon and a PR16-enrolled remote authority. The two routes preserve
   identical application semantics, stable problem/error taxonomy, exact retry
@@ -280,7 +281,7 @@ matrices, and compilation-only conformance are not retained as release gates.
   request defaults, authorization, scope, paging/streaming, coverage,
   redaction, stable problem plus exact retry directive, idempotency/effect
   receipt, cancellation, reconnect/resume, and unavailable/partial states
-  through Rust, TypeScript, and Python.
+  through Rust and TypeScript.
 - Stateful fixtures cover task/work versioning, dependencies, paged
   projections/history, assignment/review, assessment/proposal/recommendation/
   outcome/calibration semantics, abstention and deterministic fallback,
@@ -296,8 +297,8 @@ matrices, and compilation-only conformance are not retained as release gates.
   bindings and idiomatic façades share those fixtures.
 - The Plan 35 session journey covers negotiation, ordered bidirectional
   delivery, cancellation, backpressure, reconnect, stale revisions, and
-  authentication without exposing a raw LSP tunnel. For each Rust,
-  TypeScript, and Python SDK, local-daemon and PR16-enrolled-remote variants
+  authentication without exposing a raw LSP tunnel. For each Rust and
+  TypeScript SDK, local-daemon and PR16-enrolled-remote variants
   produce and consume both token kinds: a feedback/diagnostic cue opens the
   owning investigation surface, and a ready-commit/cross-worktree/task cue
   opens the owning task surface. Both variants assert identical application
@@ -308,8 +309,8 @@ matrices, and compilation-only conformance are not retained as release gates.
   policy-safe non-enumeration and never return task bodies through LSP, mutate
   work, apply edits, invoke arbitrary methods, or create local fallback
   authority.
-- Linux and Windows package-install and documentation examples pass for all
-  three languages, followed by the ordinary aggregate repository checks rather
+- Linux and Windows package-install and documentation examples pass for both
+  languages, followed by the ordinary aggregate repository checks rather
   than a separate acceptance gate.
 
 ## Not in PR18
