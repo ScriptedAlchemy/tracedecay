@@ -63,7 +63,9 @@ impl<'a> DiagnosticsStore<'a> {
         }
     }
 
-    pub(crate) const fn new_runtime(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
+    pub(crate) const fn new_runtime(
+        conn: &'a tracedecay_runtime_core::db::engine::Connection,
+    ) -> Self {
         Self::new(conn)
     }
 
@@ -1269,7 +1271,9 @@ mod tests {
         record
     }
 
-    async fn open_store(path: &std::path::Path) -> tracedecay_runtime_core::db::engine::TestConnection {
+    async fn open_store(
+        path: &std::path::Path,
+    ) -> tracedecay_runtime_core::db::engine::TestConnection {
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(path);
         DiagnosticsStore::new_runtime(&conn)
             .ensure_schema()

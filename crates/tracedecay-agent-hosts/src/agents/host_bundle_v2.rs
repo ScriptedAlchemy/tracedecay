@@ -110,7 +110,9 @@ static EMBEDDED_NATIVE_HOST_FIXTURES: [EmbeddedNativeHostFixtureV1; 7] = [
     },
     EmbeddedNativeHostFixtureV1 {
         host: HostKindV1::OpenCode,
-        bytes: include_bytes!("../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"),
+        bytes: include_bytes!(
+            "../../../../tests/fixtures/packaged_host_events/opencode/baseline.json"
+        ),
     },
 ];
 

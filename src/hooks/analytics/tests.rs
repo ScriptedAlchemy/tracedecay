@@ -254,8 +254,7 @@ fn payload_bytes_are_length_only_and_omit_forbidden_content() {
         .iter()
         .find(|row| row["event"] == "hook_completed")
         .expect("hook_completed");
-    let analytics_jsonl =
-        std::fs::read_to_string(data_root.join(HOOK_ANALYTICS_FILENAME)).unwrap();
+    let analytics_jsonl = std::fs::read_to_string(data_root.join(HOOK_ANALYTICS_FILENAME)).unwrap();
     assert_eq!(completed["payload_bytes"], measured);
     assert_eq!(completed["daemon_rtt_us"], 12);
     assert_eq!(completed["daemon_ipc_payload_bytes"], 34);
@@ -312,11 +311,10 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
         let data_root = enroll_project(&project_root, "proj_hook_daemon_boundary");
 
         {
-            let _guard =
-                crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-                    "admission": { "status": "committed", "retryable": false },
-                    "reset": true,
-                })]);
+            let _guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+                "admission": { "status": "committed", "retryable": false },
+                "reset": true,
+            })]);
             let span = record_hook_invoked(
                 Some(&project_root),
                 HintAgent::Cursor,
@@ -335,9 +333,7 @@ fn daemon_hook_action_records_completed_rtt_and_wire_length() {
         let rows = read_analytics_rows(&data_root.join(HOOK_ANALYTICS_FILENAME));
         let completed = rows
             .iter()
-            .find(|row| {
-                row["event"] == "hook_completed" && row["hook_name"] == "daemonBoundary"
-            })
+            .find(|row| row["event"] == "hook_completed" && row["hook_name"] == "daemonBoundary")
             .expect("daemon boundary completed row");
         assert!(completed["daemon_rtt_us"].as_u64().is_some());
         assert_eq!(completed["daemon_call_count"], 1);
@@ -370,9 +366,7 @@ fn one_way_notification_does_not_claim_round_trip_time() {
     let rows = read_analytics_rows(&data_root.join(HOOK_ANALYTICS_FILENAME));
     let completed = rows
         .iter()
-        .find(|row| {
-            row["event"] == "hook_completed" && row["hook_name"] == "notificationBoundary"
-        })
+        .find(|row| row["event"] == "hook_completed" && row["hook_name"] == "notificationBoundary")
         .expect("notification boundary completed row");
     assert!(completed["daemon_rtt_us"].is_null());
     assert_eq!(completed["daemon_call_count"], 0);
@@ -729,8 +723,7 @@ fn untyped_ok_daemon_output_emits_unknown_not_default_success() {
     let data_root = enroll_project(&project_root, "proj_untyped_ok_disposition");
 
     {
-        let span =
-            record_hook_invoked(Some(&project_root), HintAgent::Claude, "untypedOk", "{}");
+        let span = record_hook_invoked(Some(&project_root), HintAgent::Claude, "untypedOk", "{}");
         span.note_daemon_result(&Ok(serde_json::json!({"result": {}})));
     }
 

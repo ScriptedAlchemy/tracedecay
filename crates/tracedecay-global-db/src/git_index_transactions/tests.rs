@@ -1,4 +1,3 @@
-use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,
@@ -9,6 +8,7 @@ use tracedecay_domain::{
     RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
     UtcMicros, WorktreeId,
 };
+use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
     CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,

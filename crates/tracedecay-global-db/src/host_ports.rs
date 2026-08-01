@@ -42,8 +42,7 @@ pub mod profile_sessions {
     }
 
     /// Result of [`ProfileSessionsRuntime::mount`].
-    pub type MountFuture<'a> =
-        Pin<Box<dyn Future<Output = Arc<RegisteredGlobalDb>> + Send + 'a>>;
+    pub type MountFuture<'a> = Pin<Box<dyn Future<Output = Arc<RegisteredGlobalDb>> + Send + 'a>>;
 
     /// Result of an [`Opener`] call.
     pub type OpenFuture = Pin<Box<dyn Future<Output = Box<dyn ProfileSessionsRuntime>> + Send>>;

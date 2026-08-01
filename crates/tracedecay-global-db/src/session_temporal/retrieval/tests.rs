@@ -10,7 +10,9 @@ use super::queries::*;
 use super::records::*;
 use super::*;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay_runtime_core::db::engine::{Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue};
+use tracedecay_runtime_core::db::engine::{
+    Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue,
+};
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
@@ -194,10 +196,13 @@ impl RegisteredTemporalRead {
             request,
         )
         .expect("record query");
-        let mut rows =
-            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
-                .await
-                .expect("record rows");
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
+            &self.read,
+            &query.sql,
+            query.params,
+        )
+        .await
+        .expect("record rows");
         let mut kinds = Vec::new();
         while let Some(row) = rows.next().await.expect("record row") {
             kinds.push(row.get(3).expect("record kind"));
@@ -226,10 +231,13 @@ impl RegisteredTemporalRead {
             request,
         )
         .expect("record query");
-        let mut rows =
-            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
-                .await
-                .expect("record rows");
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
+            &self.read,
+            &query.sql,
+            query.params,
+        )
+        .await
+        .expect("record rows");
         let mut records = Vec::new();
         while let Some(row) = rows.next().await.expect("record row") {
             records.push(temporal_record_from_row(&row).expect("typed temporal record"));
@@ -239,9 +247,13 @@ impl RegisteredTemporalRead {
 
     async fn explain_record_query(&self, query: RecordQuery) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {}", query.sql);
-        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &explain, query.params)
-            .await
-            .expect("record query must parse and plan");
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
+            &self.read,
+            &explain,
+            query.params,
+        )
+        .await
+        .expect("record query must parse and plan");
         let mut details = Vec::new();
         while let Some(row) = rows.next().await.expect("plan row") {
             let detail: String = row.get(3).expect("record plan detail");
@@ -251,9 +263,10 @@ impl RegisteredTemporalRead {
     }
 
     async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: i32) -> Vec<String> {
-        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
-            .await
-            .expect("query must execute");
+        let mut rows =
+            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
+                .await
+                .expect("query must execute");
         let mut values = Vec::new();
         while let Some(row) = rows.next().await.expect("query row") {
             values.push(row.get(column).expect("text column"));
@@ -267,9 +280,10 @@ impl RegisteredTemporalRead {
         params: Vec<SqlValue>,
         column: i32,
     ) -> Vec<Option<String>> {
-        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
-            .await
-            .expect("query must execute");
+        let mut rows =
+            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
+                .await
+                .expect("query must execute");
         let mut values = Vec::new();
         while let Some(row) = rows.next().await.expect("query row") {
             values.push(row.get(column).expect("optional text column"));
@@ -279,9 +293,10 @@ impl RegisteredTemporalRead {
 
     async fn explain_query_plan(&self, sql: &str, params: Vec<SqlValue>) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {sql}");
-        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &explain, params)
-            .await
-            .expect("query must plan");
+        let mut rows =
+            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &explain, params)
+                .await
+                .expect("query must plan");
         let mut details = Vec::new();
         while let Some(row) = rows.next().await.expect("plan row") {
             let detail: String = row.get(3).expect("plan detail");

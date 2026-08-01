@@ -16,8 +16,8 @@ use tracedecay_store::{
     SanitizedCleanDiagnosticSnapshotV1,
 };
 
-use tracedecay_runtime_core::db::Database;
 use crate::diagnostics_store::DiagnosticsStore;
+use tracedecay_runtime_core::db::Database;
 
 /// Owned adapter that lets long-lived feedback runtimes reuse the canonical
 /// diagnostics store without retaining a borrowed database connection.

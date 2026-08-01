@@ -53,8 +53,7 @@ pub fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestD
     })
 }
 
-pub type DashboardDiagnosticsResultV1<T> =
-    std::result::Result<T, DashboardDiagnosticsErrorV1>;
+pub type DashboardDiagnosticsResultV1<T> = std::result::Result<T, DashboardDiagnosticsErrorV1>;
 
 pub fn diagnostic_broker(
     project_root: PathBuf,

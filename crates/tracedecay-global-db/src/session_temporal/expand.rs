@@ -2,7 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::db::engine::{Row, params};
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorId, SessionCursorKeyIdV1,
@@ -11,6 +10,7 @@ use tracedecay_domain::{
     SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
     UtcMicros,
 };
+use tracedecay_runtime_core::db::engine::{Row, params};
 use tracedecay_store::{
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1, SessionRetrievalPageV1,
     SessionStoreError, SessionStoreResult, SessionTemporalCapabilitiesV1,

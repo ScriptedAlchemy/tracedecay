@@ -76,7 +76,9 @@ fn append_plugin_files(
          pub const {const_name}: &[PluginFile] = &[\n"
     );
     for relative in collect_files_relative(source_root) {
-        println!("cargo::rerun-if-changed={REPO_ROOT_FROM_CRATE}/plugin/{source_prefix}/{relative}");
+        println!(
+            "cargo::rerun-if-changed={REPO_ROOT_FROM_CRATE}/plugin/{source_prefix}/{relative}"
+        );
         let abs = source_root.join(&relative);
         if !is_probably_utf8_text(&abs) {
             panic!(

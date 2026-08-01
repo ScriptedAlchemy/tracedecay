@@ -319,8 +319,7 @@ pub async fn global_retention_report(
     now_secs: i64,
 ) -> Result<Vec<RetentionTableReport>> {
     let transaction = database.begin_write_transaction().await?;
-    let report =
-        prune_global_tables(&transaction, config, RetentionMode::DryRun, now_secs).await;
+    let report = prune_global_tables(&transaction, config, RetentionMode::DryRun, now_secs).await;
     match transaction.rollback().await {
         Ok(()) => report,
         Err(error) => Err(error.into()),
@@ -334,8 +333,7 @@ pub async fn prune_global_retention(
     now_secs: i64,
 ) -> Result<Vec<RetentionTableReport>> {
     let transaction = database.begin_write_transaction().await?;
-    let reports =
-        prune_global_tables(&transaction, config, RetentionMode::Apply, now_secs).await?;
+    let reports = prune_global_tables(&transaction, config, RetentionMode::Apply, now_secs).await?;
     transaction.commit().await?;
     Ok(reports)
 }

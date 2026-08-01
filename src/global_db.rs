@@ -11,11 +11,12 @@ pub(crate) use tracedecay_global_db::*;
 
 pub use tracedecay_global_db::{
     AccountingMode, AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord,
-    AnalyticsHintCounts, AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
-    ParseOffset, PendingCodexCompactionSummary, ProjectAliasRecord, ProjectObservationStoreError,
-    ProjectObservationStoreResolution, ProjectRegistryContext, ProjectStoreContext,
-    ProjectStoreResolution, SavingsDay, SavingsTotal, SessionActivityRow, SessionIngestHealth,
-    StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
-    TranscriptBatch, WorkflowScopeFilter, configuration, env_flag, env_value_truthy,
-    global_accounting_enabled, global_accounting_mode, global_db_path, global_db_path_is_overridden,
+    AnalyticsHintCounts, AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord,
+    GraphScopeUpsert, ParseOffset, PendingCodexCompactionSummary, ProjectAliasRecord,
+    ProjectObservationStoreError, ProjectObservationStoreResolution, ProjectRegistryContext,
+    ProjectStoreContext, ProjectStoreResolution, SavingsDay, SavingsTotal, SessionActivityRow,
+    SessionIngestHealth, StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord,
+    StoreInstanceUpsert, TranscriptBatch, WorkflowScopeFilter, configuration, env_flag,
+    env_value_truthy, global_accounting_enabled, global_accounting_mode, global_db_path,
+    global_db_path_is_overridden,
 };

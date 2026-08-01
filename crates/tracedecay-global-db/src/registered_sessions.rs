@@ -2,10 +2,10 @@ use std::fmt::Write as _;
 
 use serde_json::Value as JsonValue;
 
+use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_sessions::compatibility::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
-use tracedecay_runtime_core::db::engine::Value;
 
 use super::{
     RegisteredGlobalDb, SESSION_MESSAGE_SEARCH_MAX_FETCH, SessionActivityRow, SessionIngestHealth,
@@ -533,7 +533,8 @@ impl RegisteredGlobalDb {
     /// Reads the canonical workflow fact columns used by projection acceptance.
     pub async fn workflow_fact_rows(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>>
+    {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),
@@ -548,35 +549,38 @@ impl RegisteredGlobalDb {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered workflow facts".to_owned(),
-                message: error.to_string(),
-            })?;
-        let mut values = Vec::new();
-        while let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered workflow fact row".to_owned(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered workflow facts".to_owned(),
                     message: error.to_string(),
-                })?
-        {
+                },
+            )?;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered workflow fact row".to_owned(),
+                message: error.to_string(),
+            }
+        })? {
             values.push((
-                row.get(0)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                row.get(0).map_err(|error| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact kind".to_owned(),
                         message: error.to_string(),
-                    })?,
-                row.get(1)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    }
+                })?,
+                row.get(1).map_err(|error| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact status".to_owned(),
                         message: error.to_string(),
-                    })?,
-                row.get(2)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    }
+                })?,
+                row.get(2).map_err(|error| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact state".to_owned(),
                         message: error.to_string(),
-                    })?,
+                    }
+                })?,
             ));
         }
         Ok(values)
@@ -684,7 +688,10 @@ fn row_to_session(row: &tracedecay_runtime_core::db::engine::Row) -> Option<Sess
     })
 }
 
-fn row_to_message(row: &tracedecay_runtime_core::db::engine::Row, offset: i32) -> Option<SessionMessageRecord> {
+fn row_to_message(
+    row: &tracedecay_runtime_core::db::engine::Row,
+    offset: i32,
+) -> Option<SessionMessageRecord> {
     Some(SessionMessageRecord {
         provider: row.get(offset).ok()?,
         message_id: row.get(offset + 1).ok()?,
@@ -789,8 +796,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::ParseOffset;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
         SessionRecord {

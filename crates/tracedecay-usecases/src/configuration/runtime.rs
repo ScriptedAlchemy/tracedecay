@@ -59,9 +59,7 @@ pub struct ProjectConfigurationRuntime {
 }
 
 impl ProjectConfigurationRuntime {
-    pub fn open(
-        opened: OpenedRuntimeConfiguration,
-    ) -> Result<(Self, PinnedRuntimeConfiguration)> {
+    pub fn open(opened: OpenedRuntimeConfiguration) -> Result<(Self, PinnedRuntimeConfiguration)> {
         let OpenedRuntimeConfiguration {
             configuration,
             registered_database,

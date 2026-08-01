@@ -115,10 +115,7 @@ pub enum TranscriptPersistenceError {
 }
 
 impl TranscriptPersistenceError {
-    pub fn storage(
-        operation: &'static str,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
+    pub fn storage(operation: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
         Self::Storage {
             operation,
             source: Box::new(source),

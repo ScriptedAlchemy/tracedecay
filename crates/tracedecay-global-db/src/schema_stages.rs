@@ -10,7 +10,9 @@ use super::{
     ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
     observation_projection, project_registry, session_temporal,
 };
-use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{
+    Connection, Executor, QueryExecutor, TransactionBehavior, params,
+};
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 
@@ -221,7 +223,9 @@ const TRANSCRIPT_SCHEMA: &str = "
 
 /// Installs and migrates the global/session schema through the exact
 /// registered runtime connection. No database path is resolved or reopened.
-pub async fn ensure_registered_schema(conn: &Connection) -> tracedecay_runtime_core::errors::Result<()> {
+pub async fn ensure_registered_schema(
+    conn: &Connection,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let convergence = ensure_registered_schema_for_admission(conn).await?;
     converge_registered_schema(conn, convergence).await
 }
@@ -392,7 +396,10 @@ pub async fn converge_registered_schema(
     ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
 }
 
-async fn table_exists(conn: &impl QueryExecutor, table: &str) -> tracedecay_runtime_core::errors::Result<bool> {
+async fn table_exists(
+    conn: &impl QueryExecutor,
+    table: &str,
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",

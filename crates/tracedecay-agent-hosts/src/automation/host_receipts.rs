@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::PrivateStoreIo;
 use crate::tracedecay::current_timestamp;
+use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 
 const STATE_FILE: &str = "host_receipts.json";
 const LOCK_FILE: &str = "host_receipts.lock";

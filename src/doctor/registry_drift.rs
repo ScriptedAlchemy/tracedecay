@@ -282,12 +282,14 @@ fn reconcile_one_store_root(
 
     let mut manifest = finding.manifest.clone();
     manifest.project_root = canonical.to_path_buf();
-    crate::storage::write_store_manifest_to_path(&finding.manifest_path, &manifest).map_err(|e| {
-        format!(
-            "could not rewrite store manifest '{}': {e}",
-            finding.manifest_path.display()
-        )
-    })?;
+    crate::storage::write_store_manifest_to_path(&finding.manifest_path, &manifest).map_err(
+        |e| {
+            format!(
+                "could not rewrite store manifest '{}': {e}",
+                finding.manifest_path.display()
+            )
+        },
+    )?;
 
     Ok(Some(ReconciledStoreRoot {
         store_id: finding.store_id.clone(),

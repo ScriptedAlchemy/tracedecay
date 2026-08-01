@@ -1,5 +1,5 @@
-use tracedecay_runtime_core::db::engine::Executor;
 use crate::global_db_operation_error;
+use tracedecay_runtime_core::db::engine::Executor;
 
 /// Adds the durable, project-local authority for PR11 index transactions.
 ///

@@ -256,11 +256,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub async fn savings_history(
-        &self,
-        project: Option<&str>,
-        since: i64,
-    ) -> Vec<SavingsDay> {
+    pub async fn savings_history(&self, project: Option<&str>, since: i64) -> Vec<SavingsDay> {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
         let Ok(snapshot) = self.read_snapshot().await else {
@@ -336,7 +332,10 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub async fn insert_turns(&self, turns: &[tracedecay_domain::observability::CostTurn]) -> usize {
+    pub async fn insert_turns(
+        &self,
+        turns: &[tracedecay_domain::observability::CostTurn],
+    ) -> usize {
         if turns.is_empty() {
             return 0;
         }
@@ -480,10 +479,7 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub async fn try_token_breakdown_since(
-        &self,
-        since: u64,
-    ) -> Result<(u64, u64, u64), String> {
+    pub async fn try_token_breakdown_since(&self, since: u64) -> Result<(u64, u64, u64), String> {
         let snapshot = self
             .read_snapshot()
             .await
@@ -596,7 +592,9 @@ impl RegisteredGlobalDb {
     }
 }
 
-fn turn_params(turn: &tracedecay_domain::observability::CostTurn) -> tracedecay_runtime_core::db::engine::Params {
+fn turn_params(
+    turn: &tracedecay_domain::observability::CostTurn,
+) -> tracedecay_runtime_core::db::engine::Params {
     tracedecay_runtime_core::db::engine::params![
         turn.message_id.as_str(),
         turn.project_hash.as_str(),

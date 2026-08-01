@@ -40,9 +40,9 @@ use tracedecay_lsp::{
 };
 use tracedecay_policy::CapabilityRoutingDecisionV1;
 
-use tracedecay_runtime_core::db::Database;
 use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 use super::concrete::{
     Pr12FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,

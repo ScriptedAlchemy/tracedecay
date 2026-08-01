@@ -17,8 +17,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tracedecay_domain::{RetrievalAnchorId, SessionSourceCoverageReceiptV1};
 use tracedecay_domain::SessionSourceCoverageAggregateStateV1;
+use tracedecay_domain::{RetrievalAnchorId, SessionSourceCoverageReceiptV1};
 use tracedecay_temporal_query::context::{ContextBudget, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::{ExecutionLimits, TemporalSnapshotRequest};
 use tracedecay_temporal_query::ranking::DiversityLimits;

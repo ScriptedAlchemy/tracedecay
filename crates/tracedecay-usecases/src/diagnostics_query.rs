@@ -27,8 +27,8 @@ use tracedecay_domain::{
     RetrievalAnchorId,
 };
 
-use tracedecay_runtime_core::db::engine::{Connection, params};
 use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
+use tracedecay_runtime_core::db::engine::{Connection, params};
 use tracedecay_runtime_core::errors::{Result as CrateResult, TraceDecayError};
 
 /// Default page limit when a request carries `limit: 0`.
@@ -894,11 +894,11 @@ fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::db::engine::TestConnection;
     use tracedecay_domain::{
         DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
         DiagnosticSeverityV1, SourceSpan, UtcMicros,
     };
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     fn id<T>(value: &str) -> T
     where

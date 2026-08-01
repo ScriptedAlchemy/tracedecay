@@ -10,8 +10,7 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 /// Message shown when the composition root never installed the opener.
-pub(crate) const UNWIRED_PROFILE_SESSIONS: &str =
-    "tracedecay_global_db::host_ports::profile_sessions::register must be called by the \
+pub(crate) const UNWIRED_PROFILE_SESSIONS: &str = "tracedecay_global_db::host_ports::profile_sessions::register must be called by the \
      composition root before a registered harness can open";
 
 pub struct RegisteredGlobalDbHarness {
@@ -28,8 +27,9 @@ impl RegisteredGlobalDbHarness {
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         // The scope guard is entered before the runtime opens; the root opener
         // creates the profile identity on its way to the session registry.
-        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
-            .expect("daemon database scope");
+        let scope =
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
+                .expect("daemon database scope");
         let registry = profile_sessions::open(profile_root)
             .expect(UNWIRED_PROFILE_SESSIONS)
             .await;

@@ -44,8 +44,9 @@ impl RegisteredTemporalHarness {
         let profile_root = directory.path().join("profile");
         // The scope guard is entered before the runtime opens; the root opener
         // creates the profile identity on its way to the session registry.
-        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, label)
-            .expect("daemon database scope");
+        let scope =
+            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, label)
+                .expect("daemon database scope");
         let registry = profile_sessions::open(profile_root)
             .expect(UNWIRED_PROFILE_SESSIONS)
             .await;

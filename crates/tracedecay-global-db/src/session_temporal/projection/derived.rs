@@ -1,10 +1,10 @@
-use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_domain::{
     DerivedEvidenceKindV1, DerivedEvidenceOccurrenceRefV1, MessageId, MessageOccurrenceIdV1,
     RetrievalAnchorId, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,
     SessionDerivedEvidenceRecordV1, SessionId, ThreadId, UtcMicros,
     derive_session_evidence_from_occurrences,
 };
+use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{SessionStoreResult, SessionTemporalProjectionBatchV1};
 
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};

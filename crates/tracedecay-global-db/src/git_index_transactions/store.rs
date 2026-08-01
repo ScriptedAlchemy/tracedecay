@@ -11,10 +11,12 @@ use tracedecay_store::{
     GitIndexTransactionTerminalWriteV1,
 };
 
+use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, Transaction, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params};
-use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params,
+};
 
 /// Async canonical-store adapter for PR11 transaction state.
 ///
@@ -39,7 +41,11 @@ enum GitIndexWriteTransaction<'db> {
 }
 
 impl QueryExecutor for GitIndexWriteTransaction<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -52,7 +58,11 @@ impl QueryExecutor for GitIndexWriteTransaction<'_> {
 }
 
 impl Executor for GitIndexWriteTransaction<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -365,9 +375,7 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
             .collect())
     }
 
-    pub async fn recovery_repositories(
-        &self,
-    ) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
+    pub async fn recovery_repositories(&self) -> GitIndexTransactionStoreResult<Vec<RepositoryId>> {
         let snapshot = self.read_snapshot().await?;
         let mut rows = snapshot
             .query(

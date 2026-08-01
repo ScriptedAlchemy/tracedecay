@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::HydrationStateV1;
 
+use super::render::apply_canonical_content;
+use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
@@ -11,8 +13,6 @@ use tracedecay_sessions::lcm::contracts::{
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessage, LcmRawMessageOverview, LcmSourceRef,
     LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
-use super::render::apply_canonical_content;
-use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -887,7 +887,9 @@ where
         .map_err(|error| LcmError::Db(error.to_string()))
 }
 
-async fn next_row(rows: &mut tracedecay_runtime_core::db::engine::Rows) -> Result<Option<Row>, LcmError> {
+async fn next_row(
+    rows: &mut tracedecay_runtime_core::db::engine::Rows,
+) -> Result<Option<Row>, LcmError> {
     rows.next()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))

@@ -5,12 +5,12 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use crate::session_temporal_operations::{
     FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
     receipt_id as summary_receipt_id,
 };
 use crate::{global_db_operation_error, global_db_operation_message};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::triggers::{INVARIANTS, Invariant};
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
@@ -90,7 +90,9 @@ pub(super) async fn query_has_rows(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(super) fn authority_violation(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
+pub(super) fn authority_violation(
+    message: impl Into<String>,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
     global_db_operation_message(OPERATION, message)
 }
 

@@ -7,8 +7,8 @@ use tracedecay_store::{
     SessionMessageProjection, WorkflowFactProjection,
 };
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db_operation_error;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::rows::{authority_violation, decode_authority_json};
 use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
@@ -340,7 +340,10 @@ struct ProjectionAuthorityState {
 }
 
 impl ProjectionAuthorityState {
-    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> tracedecay_runtime_core::errors::Result<Self> {
+    async fn load(
+        conn: &impl QueryExecutor,
+        observation_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT
@@ -420,7 +423,10 @@ struct ProjectionAliasRow {
 }
 
 impl ProjectionAliasRow {
-    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> tracedecay_runtime_core::errors::Result<Self> {
+    async fn load(
+        conn: &impl QueryExecutor,
+        observation_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT output_provider, output_message_id
@@ -512,7 +518,10 @@ struct ProjectionDispositionRow {
 }
 
 impl ProjectionDispositionRow {
-    async fn load(conn: &impl QueryExecutor, observation_id: &str) -> tracedecay_runtime_core::errors::Result<Self> {
+    async fn load(
+        conn: &impl QueryExecutor,
+        observation_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         let mut rows = conn
             .query(
                 "SELECT receipt_id, reason FROM observation_projection_dispositions
@@ -810,12 +819,9 @@ async fn validate_projection_effect(
     // and audits through the `Skipped` arm below natively. The unaliased
     // projection is only needed to validate alias bindings, so it is derived
     // lazily inside the arms that consume it.
-    let effect =
-        crate::observation_projection::derive_projection_with_alias(conn, observation)
-            .await
-            .map_err(|error| {
-                authority_violation(format!("invalid projection authority: {error}"))
-            })?;
+    let effect = crate::observation_projection::derive_projection_with_alias(conn, observation)
+        .await
+        .map_err(|error| authority_violation(format!("invalid projection authority: {error}")))?;
     let observation_id = observation.observation_id().as_str();
     let state = ProjectionAuthorityState::load(conn, observation_id).await?;
     match &effect {
@@ -1181,16 +1187,13 @@ async fn validate_projection_authority_suffix_pages(
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 "projected observation authority JSON",
             )?;
-            let skip_reason =
-                match crate::observation_projection::derive_projection(&observation)
-                    .map_err(|error| {
-                        authority_violation(format!("invalid projection authority: {error}"))
-                    })? {
-                    ObservationProjection::Skipped(reason) => Some(reason),
-                    ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
-                        None
-                    }
-                };
+            let skip_reason = match crate::observation_projection::derive_projection(&observation)
+                .map_err(|error| {
+                authority_violation(format!("invalid projection authority: {error}"))
+            })? {
+                ObservationProjection::Skipped(reason) => Some(reason),
+                ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => None,
+            };
             if let Some(reason) = skip_reason {
                 if !state.is_skip() {
                     return Err(authority_violation(
@@ -1405,10 +1408,10 @@ mod tests {
         historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
         validate_projection_authority_suffix,
     };
+    use crate::ensure_registered_schema;
     use tracedecay_runtime_core::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
     };
-    use crate::ensure_registered_schema;
 
     struct CountingQuery<'a> {
         inner: &'a TestConnection,
@@ -1623,8 +1626,7 @@ mod tests {
         for index in 0..OBSERVATIONS {
             let observation = skipped_observation(index);
             let receipt = observation.receipt();
-            let effect =
-                crate::observation_projection::derive_projection(&observation).unwrap();
+            let effect = crate::observation_projection::derive_projection(&observation).unwrap();
             let ObservationProjection::Skipped(reason) = effect else {
                 panic!("session metadata fixture must project as a skip");
             };

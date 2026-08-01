@@ -71,7 +71,9 @@ pub async fn authority_invariant_triggers_intact(
     trigger_contracts_intact(conn).await
 }
 
-pub async fn require_foreign_key_audit(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
+pub async fn require_foreign_key_audit(
+    conn: &impl Executor,
+) -> tracedecay_runtime_core::errors::Result<()> {
     conn.execute(
         "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
          VALUES (?1, '')
@@ -83,7 +85,9 @@ pub async fn require_foreign_key_audit(conn: &impl Executor) -> tracedecay_runti
     Ok(())
 }
 
-async fn foreign_key_audit_required(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<bool> {
+async fn foreign_key_audit_required(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM authority_foreign_key_audit_progress
@@ -98,7 +102,9 @@ async fn foreign_key_audit_required(conn: &impl QueryExecutor) -> tracedecay_run
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-async fn projection_checkpoint(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<i64> {
+async fn projection_checkpoint(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut rows = conn
         .query(
             "SELECT COALESCE((

@@ -248,7 +248,8 @@ impl RegisteredGlobalDb {
                 "registered relink target is no longer live",
             ));
         }
-        let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path =
+            data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let original_manifest_bytes =
             std::fs::read(&manifest_path).map_err(|error| TraceDecayError::Config {
                 message: format!(
@@ -262,14 +263,15 @@ impl RegisteredGlobalDb {
                 "store manifest changed after orphan classification",
             ));
         }
-        let original_manifest =
-            serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(&original_manifest_bytes)
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to parse store manifest '{}': {error}",
-                        manifest_path.display()
-                    ),
-                })?;
+        let original_manifest = serde_json::from_slice::<
+            tracedecay_runtime_core::storage::StoreManifest,
+        >(&original_manifest_bytes)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to parse store manifest '{}': {error}",
+                manifest_path.display()
+            ),
+        })?;
         if original_manifest.data_root != data_root {
             return Err(dashboard_message(
                 "relink orphan store instance",
@@ -450,9 +452,10 @@ impl RegisteredGlobalDb {
                     ),
                 }
             })?;
-        if let Err(error) =
-            tracedecay_runtime_core::storage::write_store_manifest_to_path(&manifest_path, &relinked_manifest)
-        {
+        if let Err(error) = tracedecay_runtime_core::storage::write_store_manifest_to_path(
+            &manifest_path,
+            &relinked_manifest,
+        ) {
             transaction.rollback().await.map_err(|rollback_error| {
                 dashboard_message(
                     "rollback orphan relink after manifest failure",

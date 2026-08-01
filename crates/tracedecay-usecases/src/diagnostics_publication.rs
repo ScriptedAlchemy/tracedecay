@@ -1071,7 +1071,9 @@ mod tests {
     #[tokio::test]
     async fn published_pillar_records_map_to_producer_specific_lsp_sources() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("diagnostics.db"),
+        );
         let store = DiagnosticsStore::new_runtime(&conn);
         store.ensure_schema().await.expect("ensure schema");
 
@@ -1181,7 +1183,9 @@ mod tests {
         assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
         assert_eq!(resolved.len(), 1);
 
-        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("diagnostics.db"),
+        );
         let store = DiagnosticsStore::new_runtime(&conn);
         store.ensure_schema().await.expect("ensure schema");
 
@@ -1234,7 +1238,9 @@ mod tests {
         let parsed = crate::diagnose::parse_cargo_output(
             "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n",
         );
-        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("diagnostics.db"),
+        );
         let store = DiagnosticsStore::new_runtime(&conn);
 
         for attempt in 0..2 {
@@ -1270,7 +1276,9 @@ mod tests {
         let parsed = crate::diagnose::parse_cargo_output(
             "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n",
         );
-        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("diagnostics.db"),
+        );
         let store = DiagnosticsStore::new_runtime(&conn);
 
         let first = StaticCodeIndexIdentity(code_index_identity(
@@ -1449,7 +1457,9 @@ mod tests {
     #[tokio::test]
     async fn aggregated_snapshot_publishes_and_reads_back_by_anchor() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &temp.path().join("diagnostics.db"),
+        );
         let store = DiagnosticsStore::new_runtime(&conn);
         store.ensure_schema().await.expect("ensure schema");
 

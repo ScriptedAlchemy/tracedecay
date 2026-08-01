@@ -1,4 +1,3 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1,
@@ -6,6 +5,7 @@ use tracedecay_domain::{
     SessionAuthorityClassV1, SessionId, TemporalAssertionKindV1, TemporalAssertionRecordV1,
     TemporalValidityV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_store::{
     SessionStoreError, SessionStoreResult, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,

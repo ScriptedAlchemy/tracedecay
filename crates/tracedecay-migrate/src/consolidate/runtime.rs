@@ -395,22 +395,21 @@ impl ConsolidationRuntimeOwnerV1 {
                 "mounted consolidation artifact identity differs from its ledger record",
             ));
         }
-        let database =
-            match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
-            {
-                Ok(database) => database,
-                Err(error) => {
-                    if let Err(failure) = self.registry.close_exact(&binding, &authority).await {
-                        self.active_artifact.store(false, Ordering::Release);
-                        return Err(registry_error(
-                            "close unpublished consolidation database facade",
-                            failure,
-                        ));
-                    }
+        let database = match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
+        {
+            Ok(database) => database,
+            Err(error) => {
+                if let Err(failure) = self.registry.close_exact(&binding, &authority).await {
                     self.active_artifact.store(false, Ordering::Release);
-                    return Err(error);
+                    return Err(registry_error(
+                        "close unpublished consolidation database facade",
+                        failure,
+                    ));
                 }
-            };
+                self.active_artifact.store(false, Ordering::Release);
+                return Err(error);
+            }
+        };
         Ok(MountedConsolidationArtifactV1 {
             registry: self.registry.clone(),
             active_artifact: Arc::clone(&self.active_artifact),
@@ -754,20 +753,19 @@ impl FrozenInputRuntimeSetV1 {
                 "frozen input runtime identity differs from its exact record",
             ));
         }
-        let database =
-            match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
-            {
-                Ok(database) => database,
-                Err(error) => {
-                    self.registry
-                        .close_exact(&binding, &authority)
-                        .await
-                        .map_err(|failure| {
-                            registry_error("close unpublished frozen input runtime", failure)
-                        })?;
-                    return Err(error);
-                }
-            };
+        let database = match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
+        {
+            Ok(database) => database,
+            Err(error) => {
+                self.registry
+                    .close_exact(&binding, &authority)
+                    .await
+                    .map_err(|failure| {
+                        registry_error("close unpublished frozen input runtime", failure)
+                    })?;
+                return Err(error);
+            }
+        };
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {

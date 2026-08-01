@@ -22,10 +22,10 @@ use tracedecay_domain::{
 use crate::configuration::{
     ConfigurationMutationAuthority, CurrentConfigurationMutationAuthorizationV1,
 };
+use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 use tracedecay_search_eval::{
     DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
 };
-use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
 const EVALUATION_ID_DOMAIN: &str = "tracedecay.retrieval.evaluation-pass.v1";
 const PROFILE_ID_DOMAIN: &str = "tracedecay.retrieval.accepted-profile.v1";

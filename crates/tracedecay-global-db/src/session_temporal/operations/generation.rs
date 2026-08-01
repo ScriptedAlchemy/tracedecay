@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use tracedecay_runtime_core::db::engine::{Executor, params};
 use serde_json::json;
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmImmutableSummaryPublication};
 
@@ -22,7 +22,9 @@ pub(super) async fn validate_lineage_graph(
 ) -> Result<(), LcmError> {
     let summary_id = publication.summary_id.as_str();
     for source in &publication.draft.source_refs {
-        let tracedecay_sessions::runtime::lcm::types::LcmSourceRef::SummaryNode { node_id } = source else {
+        let tracedecay_sessions::runtime::lcm::types::LcmSourceRef::SummaryNode { node_id } =
+            source
+        else {
             continue;
         };
         if node_id == summary_id {

@@ -13,7 +13,9 @@ pub(super) const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str =
 
 pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
-async fn observation_table_exists(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<bool> {
+async fn observation_table_exists(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'",
@@ -27,7 +29,9 @@ async fn observation_table_exists(conn: &impl QueryExecutor) -> tracedecay_runti
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn observation_columns(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
+async fn observation_columns(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
     let mut rows = conn
         .query("SELECT name FROM pragma_table_xinfo('observations')", ())
         .await
@@ -154,7 +158,9 @@ async fn migrate_observation_schema(
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
+async fn migrate_source_cursor_advances_schema(
+    conn: &impl Executor,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_xinfo('source_cursor_advances')",

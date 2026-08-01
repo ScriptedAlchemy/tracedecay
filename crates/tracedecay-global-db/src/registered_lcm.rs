@@ -6,20 +6,18 @@ use tracedecay_runtime_core::db::engine::{
     Executor, IntoParams, QueryExecutor, Rows, Value, params,
 };
 use tracedecay_sessions::compatibility::projected_content_hash;
-use tracedecay_sessions::{
-    runtime::{
-        SessionMessageRecord,
-        lcm::{
-            LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
-            LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
-            LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
-            LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-            LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-            LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-            LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-            LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-            compression, dag, doctor, gc, payload, query, raw, schema,
-        },
+use tracedecay_sessions::runtime::{
+    SessionMessageRecord,
+    lcm::{
+        LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
+        LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
+        LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
+        LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
+        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
+        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
+        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
+        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
+        compression, dag, doctor, gc, payload, query, raw, schema,
     },
 };
 
@@ -35,7 +33,11 @@ const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
 );
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -44,7 +46,11 @@ impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriterConnection<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -221,10 +227,7 @@ impl RegisteredGlobalDb {
         query::expand_query(&snapshot, request).await
     }
 
-    pub async fn lcm_grep(
-        &self,
-        request: LcmGrepRequest,
-    ) -> Result<LcmGrepOutcome, LcmError> {
+    pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
         let snapshot = self.read_snapshot().await?;
         query::grep(&snapshot, request, LcmGrepFilters::default()).await
     }
@@ -246,10 +249,7 @@ impl RegisteredGlobalDb {
         query::recent_sessions(&snapshot, provider, limit).await
     }
 
-    pub async fn lcm_session_providers(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<String>, LcmError> {
+    pub async fn lcm_session_providers(&self, session_id: &str) -> Result<Vec<String>, LcmError> {
         let snapshot = self.read_snapshot().await?;
         query::session_providers(&snapshot, session_id).await
     }
@@ -389,9 +389,7 @@ impl RegisteredGlobalDb {
             return Err(LcmError::SummaryNodeNotFound);
         }
         draft.summary_text = summary_text.trim().to_string();
-        draft.summary_token_count = i64::from(crate::estimate_tokens(
-            &draft.summary_text,
-        ));
+        draft.summary_token_count = i64::from(crate::estimate_tokens(&draft.summary_text));
         metadata.insert(
             "tracedecay_summary_source".to_string(),
             JsonValue::String(route.to_string()),

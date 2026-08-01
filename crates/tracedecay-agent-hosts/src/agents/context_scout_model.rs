@@ -8,12 +8,12 @@ use super::context_scout_v2::{
     ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
     serialized_token_count,
 };
-use crate::ports::pricing::cost_of_turn;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     CodexAppServerBackend, backend_availability,
 };
 use crate::automation::config::{AutomationBackend, AutomationConfig};
+use crate::ports::pricing::cost_of_turn;
 
 const CONTEXT_SCOUT_PROMPT_V1: &str = "\
 Select one supplied candidate and return only the JSON object required by the response schema. \
@@ -250,8 +250,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::ports::context::{CancellationToken, MonotonicDeadline};
     use crate::automation::backend::AgentTaskResponse;
+    use crate::ports::context::{CancellationToken, MonotonicDeadline};
     use tracedecay_automation::Result;
 
     #[derive(Clone)]

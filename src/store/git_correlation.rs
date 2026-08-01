@@ -136,9 +136,7 @@ impl GitCorrelationSessionStore for GlobalDbGitCorrelationStore<'_> {
         GlobalDbGitCorrelationStore::read_snapshot(self).await
     }
 
-    async fn open_write_transaction(
-        &self,
-    ) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
+    async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
 }

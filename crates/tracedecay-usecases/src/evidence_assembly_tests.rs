@@ -263,7 +263,8 @@ async fn runtime_anchor_resolution_serves_persisted_v2_anchor_records() {
 
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("project.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "legacy anchor resolution test").unwrap();
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "legacy anchor resolution test").unwrap();
     let (database, _) =
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
