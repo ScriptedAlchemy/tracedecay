@@ -949,7 +949,7 @@ impl FakeVectorGenerationStoreV1 {
             .map(|payload| Arc::clone(&payload.values.0))
     }
 
-    pub(crate) fn fail_before_publication_swap_once(&mut self) {
+    pub fn fail_before_publication_swap_once(&mut self) {
         self.fail_before_publication_swap = true;
     }
 }
@@ -999,7 +999,7 @@ impl ActiveVectorGenerationSnapshotV1 {
 /// Identity-only snapshot of the legacy state. The SQL adapter never returns
 /// legacy vector payloads to Rust.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DatabaseLegacyVectorInventoryV1 {
+pub struct DatabaseLegacyVectorInventoryV1 {
     revision: i64,
     inventory: LegacyVectorInventoryV1,
 }
@@ -1035,7 +1035,7 @@ pub(crate) fn retained_readable_sources_from_read_only_database(
 /// project store. Code-index files are project-scoped while vector inventories
 /// may reside in the root graph database or a branch graph database, so an
 /// offline sweep must conservatively mark sources from all inventories.
-pub(crate) fn retained_readable_sources_from_read_only_project_store(
+pub fn retained_readable_sources_from_read_only_project_store(
     data_root: &Path,
 ) -> Result<BTreeSet<CodeGenerationId>, VectorGenerationStoreErrorV1> {
     let mut database_paths = vec![data_root.join(tracedecay_runtime_core::config::DB_FILENAME)];
@@ -1186,7 +1186,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     ///
     /// Unlike normal runtime open, this does not deserialize legacy state and
     /// therefore remains callable when old vector payloads are unreadable.
-    pub(crate) async fn open_legacy_migration(
+    pub async fn open_legacy_migration(
         database: &'database Database,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
         database
@@ -1423,7 +1423,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
 
     /// Snapshot legacy generation identities without deserializing or
     /// returning any legacy vector payload.
-    pub(crate) async fn read_legacy_inventory(
+    pub async fn read_legacy_inventory(
         &self,
     ) -> Result<DatabaseLegacyVectorInventoryV1, VectorGenerationStoreErrorV1> {
         let mut rows = self
