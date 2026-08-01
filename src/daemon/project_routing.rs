@@ -108,7 +108,7 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
-#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
+#[cfg(unix)]
 pub(super) async fn maintenance_transition_gate(
     gates: &tokio::sync::Mutex<MaintenanceTransitionGates>,
     key: &ProjectServerKey,

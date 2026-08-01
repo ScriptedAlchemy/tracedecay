@@ -105,8 +105,10 @@ use connection_serving::{
 use connection_serving::{serve_authenticated_socket_client, serve_socket_client};
 mod core_admission;
 mod engine;
+#[cfg(unix)]
+use engine::DaemonEngine;
 use engine::{
-    DaemonEngine, ensure_context_scout_owner_before_advertising,
+    ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
 };
 mod core_client;
@@ -196,12 +198,15 @@ use project_composition::{ProductionProjectCompositionRuntime, production_projec
 mod project_open_admission;
 #[cfg(test)]
 use project_open_admission::project_open_retry_backoff;
+#[cfg(unix)]
 use project_open_admission::{
     MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
-    MaintenanceTransitionKey, ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates,
-    ProjectOpenTaskClaim, ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey,
-    ProjectServerKey, ProjectServerPublication, ProjectServerRequirement, StoreOwnerKey,
-    project_server_requirement,
+    MaintenanceTransitionKey,
+};
+use project_open_admission::{
+    ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskClaim,
+    ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey, ProjectServerKey,
+    ProjectServerPublication, ProjectServerRequirement, StoreOwnerKey, project_server_requirement,
 };
 mod project_open_handshake;
 #[cfg(test)]
@@ -213,26 +218,29 @@ use project_open_handshake::{
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
+use project_open_orchestration::ensure_registered_project_route;
 #[cfg(not(unix))]
 use project_open_orchestration::shutdown_portable_project_open_tasks;
-use project_open_orchestration::{
-    ensure_registered_project_route, spawn_lifecycle_automation_scheduler_activation,
-    start_lifecycle_project_open,
-};
 #[cfg(any(not(unix), test))]
 use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,
     portable_project_server_for_request, schedule_portable_project_server_warmup,
 };
+#[cfg(unix)]
+use project_open_orchestration::{
+    spawn_lifecycle_automation_scheduler_activation, start_lifecycle_project_open,
+};
 // The portable reconciler only exists off-unix (or under test transports), so
 // its import carries the same gate as its definition.
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use project_routing::portable_database_owner_reconciler;
+#[cfg(unix)]
+use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    CatalogRefreshClientKey, bind_authenticated_profile_identity, maintenance_transition_gate,
-    project_open_cancellation_checkpoint, project_open_cancellation_error, project_open_gate,
-    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error,
+    bind_authenticated_profile_identity, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
+    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
+    project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

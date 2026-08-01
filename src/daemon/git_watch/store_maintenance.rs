@@ -5,9 +5,11 @@
 //! state machine.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
@@ -99,6 +101,7 @@ pub(super) fn linked_worktree_names(common: &Path) -> std::collections::HashSet<
 /// coordinator, logging what it removed. Returns `false` when layout resolution
 /// or administration fails so the backstop keeps the GC cadence eligible for a
 /// retry.
+#[cfg(unix)]
 pub(super) async fn run_gc(inner: &Arc<GitWatcherInner>, cg: &TraceDecay) -> bool {
     let root = cg.project_root();
     let data_root = &cg.store_layout().data_root;
