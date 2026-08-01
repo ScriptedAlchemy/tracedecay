@@ -100,11 +100,44 @@ pub(super) async fn collect_rowid_pages<T, C>(
 where
     C: crate::db::engine::QueryExecutor + ?Sized,
 {
+    collect_rowid_pages_with(conn, page_sql, &[], cursor_index, map_fn, operation).await
+}
+
+/// Like [`collect_rowid_pages`], but for a filtered scan that also binds its own
+/// parameters.
+///
+/// `leading_params` are bound first as `?1..?N`; `page_sql` must then bind the
+/// exclusive `rowid` cursor to `?{N+1}` and the page row budget to `?{N+2}`.
+/// Everything else matches [`collect_rowid_pages`]: `page_sql` appends `rowid`
+/// after the columns `map_fn` reads, orders by `rowid`, and `cursor_index` is
+/// the position of that trailing cursor column.
+///
+/// A `WHERE` clause is not a bound. A partition of a graph table — one node
+/// kind, one edge kind, one path prefix — routinely holds far more rows on a
+/// real repository than the `SQLite` runtime will materialize for one query,
+/// and the runtime refuses an oversized query outright rather than truncating
+/// it. Filtered whole-partition reads therefore have to page exactly like
+/// whole-table reads do.
+pub(super) async fn collect_rowid_pages_with<T, C>(
+    conn: &C,
+    page_sql: &str,
+    leading_params: &[Value],
+    cursor_index: i32,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
+    operation: &str,
+) -> Result<Vec<T>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+{
     let mut items = Vec::new();
     let mut after_rowid = i64::MIN;
     loop {
+        let mut page_params: Vec<Value> = Vec::with_capacity(leading_params.len() + 2);
+        page_params.extend_from_slice(leading_params);
+        page_params.push(Value::Integer(after_rowid));
+        page_params.push(Value::Integer(FULL_SCAN_PAGE_ROWS));
         let mut rows = conn
-            .query(page_sql, (after_rowid, FULL_SCAN_PAGE_ROWS))
+            .query(page_sql, crate::db::engine::params_from_iter(page_params))
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to query page: {e}"),

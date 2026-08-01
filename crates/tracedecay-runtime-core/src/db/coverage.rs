@@ -3,8 +3,40 @@ use std::collections::HashSet;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::engine::{Value, params_from_iter};
-use super::sql::build_qmark_placeholders;
+use super::sql::{build_qmark_placeholders, collect_rowid_pages};
 use crate::errors::{Result, TraceDecayError};
+
+/// One `rowid` keyset page of the file paths that hold a test-annotated
+/// function or method. Paged over the annotated node's `rowid`, so the same
+/// path can repeat across pages; the caller dedupes into a [`HashSet`].
+pub(super) const TEST_ANNOTATION_FILE_PAGE_SQL: &str = "SELECT t.file_path, t.rowid \
+     FROM edges e \
+     JOIN nodes n ON e.source = n.id \
+     JOIN nodes t ON e.target = t.id \
+     WHERE n.kind = 'annotation_usage' \
+       AND n.name = 'test' \
+       AND e.kind = 'annotates' \
+       AND t.kind IN ('function', 'method') \
+       AND t.rowid > ?1 \
+     ORDER BY t.rowid LIMIT ?2";
+
+/// One `rowid` keyset page of the nodes whose docstring opts out of test
+/// coverage.
+pub(super) const SKIP_TEST_COVERAGE_PAGE_SQL: &str = "SELECT id, rowid FROM nodes WHERE docstring LIKE '%skip-test-coverage%' \
+     AND rowid > ?1 ORDER BY rowid LIMIT ?2";
+
+/// One `rowid` keyset page of the `annotation_usage` nodes whose name marks a
+/// function as a test.
+pub(super) const TEST_MARKER_PAGE_SQL: &str = "SELECT id, rowid FROM nodes
+                   WHERE kind = 'annotation_usage'
+                     AND (
+                         name = 'test'
+                         OR name LIKE '%::test'
+                         OR name = 'wasm_bindgen_test'
+                         OR name LIKE '%::wasm_bindgen_test'
+                     )
+                     AND rowid > ?1
+                   ORDER BY rowid LIMIT ?2";
 
 impl Database {
     /// Returns the subset of `candidate_ids` that are annotated with `#[test]`
@@ -58,56 +90,40 @@ impl Database {
 
     /// Returns all file paths that contain at least one node annotated with
     /// `#[test]` (useful for detecting inline test modules in source files).
+    ///
+    /// Read through `rowid` keyset pages over the annotated node. A real
+    /// repository annotates far more functions than the `SQLite` runtime will
+    /// materialize for one query, and the runtime refuses an oversized query
+    /// outright rather than truncating it. Paging drops the SQL `DISTINCT` —
+    /// a page cursor and a distinct projection cannot coexist — so the same
+    /// path arrives once per annotated function and the [`HashSet`] dedupes.
     pub async fn get_files_with_test_annotations(&self) -> Result<HashSet<String>> {
-        let sql = "SELECT DISTINCT t.file_path \
-                   FROM edges e \
-                   JOIN nodes n ON e.source = n.id \
-                   JOIN nodes t ON e.target = t.id \
-                   WHERE n.kind = 'annotation_usage' \
-                     AND n.name = 'test' \
-                     AND e.kind = 'annotates' \
-                     AND t.kind IN ('function', 'method')";
-        let mut rows =
-            self.engine_conn()
-                .query(sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query test-annotation files: {e}"),
-                    operation: "get_files_with_test_annotations".to_string(),
-                })?;
-        let mut result = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read test-annotation file row: {e}"),
-            operation: "get_files_with_test_annotations".to_string(),
-        })? {
-            if let Ok(path) = row.get::<String>(0) {
-                result.insert(path);
-            }
-        }
-        Ok(result)
+        let paths = collect_rowid_pages(
+            &self.engine_conn(),
+            TEST_ANNOTATION_FILE_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "get_files_with_test_annotations",
+        )
+        .await?;
+        Ok(paths.into_iter().collect())
     }
 
     /// Returns all node IDs whose docstring contains `skip-test-coverage`.
+    ///
+    /// Read through `rowid` keyset pages: the leading-wildcard `LIKE` has no
+    /// index to narrow it, so the statement is a whole-`nodes` scan whose
+    /// result set is bounded only by how often the marker appears.
     pub async fn get_skip_test_coverage_node_ids(&self) -> Result<HashSet<String>> {
-        let sql = "SELECT id FROM nodes WHERE docstring LIKE '%skip-test-coverage%'";
-        let mut rows =
-            self.engine_conn()
-                .query(sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query skip-test-coverage nodes: {e}"),
-                    operation: "get_skip_test_coverage_node_ids".to_string(),
-                })?;
-        let mut result = HashSet::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read skip-test-coverage row: {e}"),
-            operation: "get_skip_test_coverage_node_ids".to_string(),
-        })? {
-            if let Ok(id) = row.get::<String>(0) {
-                result.insert(id);
-            }
-        }
-        Ok(result)
+        let ids = collect_rowid_pages(
+            &self.engine_conn(),
+            SKIP_TEST_COVERAGE_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "get_skip_test_coverage_node_ids",
+        )
+        .await?;
+        Ok(ids.into_iter().collect())
     }
 
     /// Resolves the set of `annotation_usage` node ids whose name marks a
@@ -130,38 +146,29 @@ impl Database {
         result
     }
 
+    /// Read through `rowid` keyset pages. A real repository carries far more
+    /// test markers than the `SQLite` runtime will materialize for one query,
+    /// and the runtime refuses an oversized query outright rather than
+    /// truncating it — which failed `tracedecay_health` with "failed to query
+    /// test marker ids: … migration SQL query materialization exceeded its
+    /// limit".
+    ///
+    /// Paging keeps the property the two-step "resolve + use" pattern depends
+    /// on: each page resumes at the previous page's cursor, so the wildcard
+    /// scan still crosses the `nodes` table exactly once in aggregate rather
+    /// than once per candidate row.
     pub async fn collect_test_marker_ids_on(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<Vec<String>> {
-        let op = "collect_test_marker_ids";
-        let sql = "SELECT id FROM nodes
-                   WHERE kind = 'annotation_usage'
-                     AND (
-                         name = 'test'
-                         OR name LIKE '%::test'
-                         OR name = 'wasm_bindgen_test'
-                         OR name LIKE '%::wasm_bindgen_test'
-                     )";
-        let mut rows = conn
-            .query_engine(sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query test marker ids: {e}"),
-                operation: op.to_string(),
-            })?;
-        let mut ids = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read marker id row: {e}"),
-            operation: op.to_string(),
-        })? {
-            let id: String = row.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read marker id column: {e}"),
-                operation: op.to_string(),
-            })?;
-            ids.push(id);
-        }
-        Ok(ids)
+        collect_rowid_pages(
+            conn,
+            TEST_MARKER_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "collect_test_marker_ids",
+        )
+        .await
     }
 
     /// Drops, recreates, and bulk-inserts `ids` into `temp.test_markers`.

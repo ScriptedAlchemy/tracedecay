@@ -26,6 +26,10 @@ pub struct NodeMetrics {
 /// scan. Stays under the `SQLite` runtime's per-query materialization admission.
 const ADJACENCY_SCAN_PAGE_ROWS: i64 = 2_000;
 
+/// Candidate rows requested per keyset page of the dead-code scan. Same budget,
+/// and the same reason, as [`ADJACENCY_SCAN_PAGE_ROWS`].
+const DEAD_CODE_SCAN_PAGE_ROWS: i64 = 2_000;
+
 /// Bounded whole-graph file adjacency plus the rows examined to build it.
 #[derive(Debug)]
 pub struct FileAdjacencyScan {
@@ -243,7 +247,13 @@ impl<'a> GraphQueryManager<'a> {
             "AND id NOT IN (SELECT target FROM temp.test_annotated_targets)"
         };
 
-        let limit_clause = limit.map_or_else(String::new, |limit| format!("LIMIT {limit}"));
+        // Read through keyset pages on the result ordering itself. An
+        // unlimited call — and a call whose limit exceeds one page — selects
+        // more candidates than the SQLite runtime will materialize for a single
+        // query on a real project (~134 K on chromium), and the runtime refuses
+        // an oversized query outright rather than truncating it. Keying the
+        // cursor on `(file_path, start_line, id)` rather than `rowid` keeps the
+        // documented ordering and lets a small limit still stop early.
         let sql = format!(
             "SELECT id, kind, name, qualified_name, file_path, start_line, end_line,
                     start_column, end_column, docstring, signature, visibility,
@@ -260,29 +270,67 @@ impl<'a> GraphQueryManager<'a> {
                  AND kind IN ('calls', 'implements', 'extends', 'type_of', 'returns', 'receives', 'uses')
              )
              {test_annotated_targets_filter}
+             AND (
+                 file_path > ?1
+                 OR (file_path = ?1 AND (start_line > ?2 OR (start_line = ?2 AND id > ?3)))
+             )
              ORDER BY file_path ASC, start_line ASC, id ASC
-             {limit_clause}"
+             LIMIT ?4"
         );
 
-        let mut rows =
-            connection
-                .query_engine(&sql, ())
+        let mut dead: Vec<Node> = Vec::new();
+        let mut cursor = (String::new(), 0_i64, String::new());
+        loop {
+            let page_rows_budget = match limit {
+                Some(limit) => {
+                    let remaining =
+                        i64::try_from(limit.saturating_sub(dead.len())).unwrap_or(i64::MAX);
+                    if remaining <= 0 {
+                        break;
+                    }
+                    remaining.min(DEAD_CODE_SCAN_PAGE_ROWS)
+                }
+                None => DEAD_CODE_SCAN_PAGE_ROWS,
+            };
+
+            let mut rows = connection
+                .query_engine(
+                    &sql,
+                    (
+                        cursor.0.clone(),
+                        cursor.1,
+                        cursor.2.clone(),
+                        page_rows_budget,
+                    ),
+                )
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to find dead code: {e}"),
                     operation: "find_dead_code".to_string(),
                 })?;
 
-        let mut dead = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read row: {e}"),
-            operation: "find_dead_code".to_string(),
-        })? {
-            let node = row_to_node_dead_code(&row).map_err(|error| TraceDecayError::Database {
-                message: format!("failed to decode dead-code node: {error}"),
-                operation: "find_dead_code".to_owned(),
-            })?;
-            dead.push(node);
+            let mut page_rows = 0_i64;
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read row: {e}"),
+                operation: "find_dead_code".to_string(),
+            })? {
+                let node =
+                    row_to_node_dead_code(&row).map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to decode dead-code node: {error}"),
+                        operation: "find_dead_code".to_owned(),
+                    })?;
+                cursor = (
+                    node.file_path.clone(),
+                    i64::from(node.start_line),
+                    node.id.clone(),
+                );
+                page_rows += 1;
+                dead.push(node);
+            }
+            drop(rows);
+            if page_rows < page_rows_budget {
+                break;
+            }
         }
         Ok(dead)
     }
