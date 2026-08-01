@@ -2,3 +2,4 @@
 //! graph query/traversal layers.
 
 mod graph;
+mod search;
