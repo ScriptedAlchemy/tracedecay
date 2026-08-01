@@ -18,7 +18,9 @@ use tracedecay_store::{
     SessionTemporalRetrievalRequestV1, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 
-use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
+use super::refresh::SessionRefreshRecoveryV1;
+#[cfg(any(test, feature = "test-helpers"))]
+use super::refresh::SessionRefreshRestartStateV1;
 use crate::RegisteredGlobalDb;
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_store::SessionStoreError;
