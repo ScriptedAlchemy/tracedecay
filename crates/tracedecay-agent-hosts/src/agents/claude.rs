@@ -1123,27 +1123,14 @@ fn ensure_claude_dir(claude_dir: &Path) -> Result<()> {
     })
 }
 
-/// Permission-allowlist prefix for the tracedecay tools exposed through the
-/// Claude **plugin** MCP server. Claude namespaces a plugin server's tools as
-/// `mcp__plugin_<pluginName>_<serverKey>__<tool>`; with plugin name
-/// `tracedecay` and the server key `graph` (see `plugin/.mcp.json`), that
-/// yields `mcp__plugin_tracedecay_graph__<tool>`. The server key is `graph`
-/// rather than `tracedecay` so the host UI renders `plugin tracedecay graph`
-/// instead of the redundant `plugin tracedecay tracedecay`.
-///
-/// The legacy config-managed install wrote `mcp__tracedecay__<tool>` entries,
-/// which do NOT match the plugin namespace, so every plugin tool call prompted
-/// interactively (and hard-failed headless/in subagents). The installer now
-/// also writes the plugin-namespace twins.
-const PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
-/// Legacy config-managed permission prefix, kept only to detect and mirror
-/// existing entries into the plugin namespace during migration.
-const LEGACY_TOOL_PERM_PREFIX: &str = "mcp__tracedecay__";
-/// Prior plugin-namespace prefix, from when the plugin MCP server key was also
-/// `tracedecay` (`plugin_tracedecay_tracedecay`). Kept only to detect entries a
-/// pre-rename install wrote and mirror them onto the current `graph` namespace;
-/// like the legacy entries, they are never removed.
-const PRIOR_PLUGIN_TOOL_PERM_PREFIX: &str = "mcp__plugin_tracedecay_tracedecay__";
+/// Permission-allowlist prefixes, shared with usage classification so the
+/// installer and the analytics reader agree on which namespaces are ours. The
+/// legacy and prior-plugin prefixes are read only to detect and mirror existing
+/// entries onto the current plugin namespace; they are never removed.
+use crate::tool_name::{
+    LEGACY_TOOL_PREFIX as LEGACY_TOOL_PERM_PREFIX, PLUGIN_TOOL_PREFIX as PLUGIN_TOOL_PERM_PREFIX,
+    PRIOR_PLUGIN_TOOL_PREFIX as PRIOR_PLUGIN_TOOL_PERM_PREFIX,
+};
 
 /// Every managed tracedecay tool's plugin-namespace permission entry.
 fn plugin_tool_perms() -> Vec<String> {
