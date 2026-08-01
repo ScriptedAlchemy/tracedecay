@@ -8,7 +8,7 @@ use tracedecay_application::DirectorySyncPolicy;
 
 use super::{config_error, io_error};
 use tracedecay_runtime_core::errors::Result;
-use crate::root_seam::storage;
+use tracedecay_runtime_core::storage;
 
 pub(super) fn relative_file_map(root: &Path) -> Result<BTreeMap<PathBuf, PathBuf>> {
     let mut files = BTreeMap::new();

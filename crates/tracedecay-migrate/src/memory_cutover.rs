@@ -18,14 +18,14 @@ use tracedecay_store::{
     plan_memory_v2_owner_merge,
 };
 
-use crate::root_seam::branch_meta;
+use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_runtime_core::db::{
     MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, list_memory_v2_archive_owners,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::root_seam::storage;
-use crate::root_seam::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::storage;
+use tracedecay_runtime_core::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 const LEGACY_SOURCE_STORE: &str = "legacy-memory-v1";
 const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
@@ -850,7 +850,7 @@ fn write_cutover_receipt(
         version: 2,
         project_id: resolved.project_id.clone(),
         archive_schema: MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1.to_owned(),
-        completed_at: crate::root_seam::tracedecay::current_timestamp(),
+        completed_at: tracedecay_runtime_core::tracedecay::current_timestamp(),
         sources: sources
             .iter()
             .map(|source| {

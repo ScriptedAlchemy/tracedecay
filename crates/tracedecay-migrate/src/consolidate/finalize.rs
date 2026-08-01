@@ -121,7 +121,7 @@ pub(super) async fn register_destination(
         .ok_or_else(|| config_error("could not register consolidated project alias"))?;
     let store_id = format!("store:{}:profile_sharded", project.project_id);
     let store_relpath = format!("projects/{}", project.project_id);
-    let now = crate::root_seam::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: store_id.clone(),
         project_id: project.project_id.clone(),
