@@ -1366,7 +1366,9 @@ fn systemd_service_state_detects_runtime_mask() {
     let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
 
     assert_eq!(
-        ServiceRunner::Systemd.service_state(&dir.path().join("daemon.sock")),
+        ServiceRunner::Systemd
+            .service_state(&dir.path().join("daemon.sock"))
+            .expect("systemd service state"),
         DaemonServiceState::Masked
     );
 }
