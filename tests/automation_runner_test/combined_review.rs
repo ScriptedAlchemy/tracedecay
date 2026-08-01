@@ -4,6 +4,7 @@
 //! dashboard scheduler status stay coherent.
 
 use crate::support::*;
+#[cfg(feature = "test-transport")]
 use tracedecay::automation::scheduler::{SessionActivity, schedule_decision};
 
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
