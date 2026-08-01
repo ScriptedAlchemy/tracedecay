@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::config::registry::ConfigurationRegistry;
+use crate::configuration::registry::ConfigurationRegistry;
 fn decode_snapshot_entry(
     value: &str,
 ) -> ConfigurationStoreResult<StoredConfigurationSnapshotEntryV1> {
