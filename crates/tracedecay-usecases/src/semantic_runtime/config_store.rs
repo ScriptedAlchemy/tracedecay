@@ -917,11 +917,10 @@ fn decode_optional_digest(
 mod tests {
     use tracedecay_application::ResolvedScope;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
-    use tracedecay_domain::{ProjectId, RepositoryId, RetrieverKind, WorktreeId};
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::*;
-    use crate::daemon::query_authority_provider::tests::accepted_profile;
-    use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
     #[tokio::test]
     async fn exact_query_bootstrap_is_explicit_and_required_before_activation() {
@@ -929,16 +928,14 @@ mod tests {
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
         let project_id = ProjectId::new("project.semantic-bootstrap").unwrap();
-        let runtime = HostAdmissionTestRuntimeV1::project(
+        let runtime = RegisteredGlobalDbTestRuntime::project(
             directory.path().join("profile"),
             &project_root,
             project_id.clone(),
         )
         .await
         .unwrap();
-        let database = runtime
-            .registered_database_arc(HostAdmissionScope::Project)
-            .unwrap();
+        let database = runtime.project_database_arc().unwrap();
         let scope = ResolvedScope::new(
             project_id,
             RepositoryId::new("repository.semantic-bootstrap").unwrap(),
@@ -954,18 +951,9 @@ mod tests {
             SemanticConfigurationBackendErrorV1::Unavailable
         );
 
-        let accepted = accepted_profile(
-            "query.bootstrap.pass.v1",
-            &RetrieverKind::QUERY_FALLBACK_LANES,
-        );
+        let (_, accepted, compatibility) =
+            crate::semantic_runtime::bundled_query_authority().unwrap();
         assert!(accepted.is_exact_query_fallback());
-        let compatibility = RetrievalRuntimeCompatibilityV1 {
-            retrieval_ceiling: accepted.profile().retrieval_budget,
-            semantic: None,
-            semantic_ceiling: None,
-            rerank: None,
-            rerank_ceiling: None,
-        };
         let configuration = SemanticConfigurationPinV1 {
             revision_id: ConfigurationRevisionId::new("configuration.revision.semantic-bootstrap")
                 .unwrap(),

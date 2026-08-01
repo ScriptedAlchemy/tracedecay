@@ -959,7 +959,6 @@ impl ConfigurationClock for SystemConfigurationClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
     use tracedecay_domain::configuration::{
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
@@ -968,6 +967,7 @@ mod tests {
         DIAGNOSTICS_PREWARM_SETTING_KEY,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
     use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
 
@@ -1100,16 +1100,17 @@ mod tests {
             tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
                 .unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
-        let host_runtime =
-            HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
-                .await
-                .unwrap();
+        let host_runtime = RegisteredGlobalDbTestRuntime::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
         let opened = crate::config::open_runtime_configuration_for_registered_database(
             &project_root,
             &layout,
-            host_runtime
-                .registered_database_arc(HostAdmissionScope::Project)
-                .unwrap(),
+            host_runtime.project_database_arc().unwrap(),
         )
         .await
         .unwrap();
@@ -1175,16 +1176,17 @@ mod tests {
             tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
                 .unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
-        let host_runtime =
-            HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
-                .await
-                .unwrap();
+        let host_runtime = RegisteredGlobalDbTestRuntime::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
         let opened = crate::config::open_runtime_configuration_for_registered_database(
             &project_root,
             &layout,
-            host_runtime
-                .registered_database_arc(HostAdmissionScope::Project)
-                .unwrap(),
+            host_runtime.project_database_arc().unwrap(),
         )
         .await
         .unwrap();

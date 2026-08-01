@@ -10,7 +10,7 @@ include = ["/src/**"]
 [features]
 # Explicit opt-in (same policy as the query kernel): exposes the registered
 # global-db harness to dependent crates' test builds only.
-test-helpers = []
+test-helpers = ["tracedecay-runtime-core/test-helpers"]
 
 [dependencies]
 futures-util = "0.3.33"
