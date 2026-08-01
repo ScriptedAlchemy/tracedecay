@@ -28,7 +28,7 @@ mod unresolved;
 pub use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
-#[cfg(not(any(test, feature = "test-transport")))]
+#[cfg(not(test))]
 pub use access::enter_owned_maintenance_database_scope;
 #[cfg(any(test, feature = "test-transport"))]
 pub use access::is_isolated_test_path;
