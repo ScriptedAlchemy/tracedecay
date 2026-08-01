@@ -469,7 +469,6 @@ mod tests {
         });
         // Exercise the internal-analytics lifting branch too.
         value[CONTEXT_MEMORY_ANALYTICS_KEY] = json!({"matches": 1});
-        let value = value;
         let touched = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
 
         for args in [
