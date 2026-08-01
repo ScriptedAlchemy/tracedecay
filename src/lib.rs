@@ -113,6 +113,8 @@ pub mod request_identity;
 pub mod resolution;
 pub mod retention;
 pub mod runtime_identity;
+mod runtime_ports;
+pub use runtime_ports::register_runtime_ports;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;

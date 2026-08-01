@@ -452,6 +452,37 @@ impl<'a> HostAdmissionAuthorities<'a> {
         self
     }
 
+    /// Admission bound to a project identity with **no** registered database
+    /// and no resolved profile identity behind it.
+    ///
+    /// Standalone callers (a CLI invocation with no daemon-owned registry
+    /// mount) still need an admission handle to walk a transcript and count
+    /// what it *would* admit. Every capture fails closed; only scope
+    /// validation against `project_id` is authoritative.
+    pub fn unregistered_for_project(project_id: ProjectId) -> Self {
+        Self {
+            project_id: Some(project_id),
+            project_registered: None,
+            brain_id: None,
+            profile_id: None,
+            profile_registered: None,
+            repository_provenance: None,
+        }
+    }
+
+    /// Profile-scoped counterpart of [`Self::unregistered_for_project`].
+    #[must_use]
+    pub const fn unregistered_for_profile() -> Self {
+        Self {
+            project_id: None,
+            project_registered: None,
+            brain_id: None,
+            profile_id: None,
+            profile_registered: None,
+            repository_provenance: None,
+        }
+    }
+
     pub fn unavailable_for_project(
         brain_id: BrainId,
         profile_id: UserProfileId,
