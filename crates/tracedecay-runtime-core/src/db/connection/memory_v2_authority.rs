@@ -17,7 +17,7 @@ impl Database {
     /// tests; production reads progress inside a caller-owned authority
     /// transaction via `*_in_transaction`.
     #[cfg(test)]
-    pub async fn feedback_history_repair_progress(
+    pub(crate) async fn feedback_history_repair_progress(
         &self,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,

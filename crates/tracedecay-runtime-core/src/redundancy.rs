@@ -444,13 +444,9 @@ pub(crate) fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
 // Composite similarity + severity
 // ---------------------------------------------------------------------------
 
-/// Blend the four signals into a single \[0,1\] similarity score.
-pub(crate) fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
-    composite_similarity_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
-}
-
-/// [`composite_similarity`] with the shingle Jaccard already computed, so a
-/// caller scoring a pair pays the merge cost once.
+/// Blend the four signals into a single \[0,1\] similarity score, taking the
+/// shingle Jaccard already computed so a caller scoring a pair pays the merge
+/// cost once.
 fn composite_similarity_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> f64 {
     let ast = if a.ast_hash == b.ast_hash { 1.0 } else { 0.0 };
     let cfg = if a.cfg_hash == b.cfg_hash { 1.0 } else { 0.0 };
@@ -884,7 +880,8 @@ mod tests {
         );
         // AST + CFG + call-seq all match; shingles diverge because token
         // names changed. Score lower-bound: 0.40+0.25+0.20 = 0.85.
-        let score = composite_similarity(&a, &b);
+        let score =
+            composite_similarity_with_jaccard(&a, &b, jaccard_similarity(&a.shingles, &b.shingles));
         assert!(score >= 0.85, "expected >= 0.85, got {score}");
         assert_eq!(overlap_kind(&a, &b), "ast_isomorphic");
         assert_eq!(severity_bucket(score, "ast_isomorphic"), "definite");
