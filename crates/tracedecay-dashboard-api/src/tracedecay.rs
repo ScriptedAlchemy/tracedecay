@@ -26,20 +26,9 @@ pub trait DashboardProjectRuntime: GraphRuntimePort {
 pub type TraceDecay = dyn DashboardProjectRuntime;
 
 pub mod facts {
-    use tracedecay_domain::FactOwnerV1;
-    use tracedecay_runtime_core::db::Database;
-    use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-    use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-    use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
-
-    fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
-        TraceDecayError::database_operation("memory application", error)
-    }
-
-    pub fn memory_application_for_db(
-        owner: FactOwnerV1,
-        db: &Database,
-    ) -> Result<MemoryApplication<DatabaseFactStore<'_>>> {
-        MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
-    }
+    // The shared resolvers live in `tracedecay_usecases::memory` — the crate
+    // that owns `MemoryApplication`/`MemoryApplicationError` — rather than a
+    // copy kept in sync by hand here. `tracedecay::facts::memory_application_for_db`
+    // remains the stable call-site path for this crate's ~20 dashboard routes.
+    pub use tracedecay_usecases::memory::memory_application_for_db;
 }
