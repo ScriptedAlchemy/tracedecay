@@ -9,5 +9,4 @@ pub mod metrics;
 pub mod parser;
 pub mod pricing;
 
-pub use classifier::TaskCategory;
 pub use metrics::CostSummary;

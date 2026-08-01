@@ -761,14 +761,6 @@ impl SyncConfig {
     }
 }
 
-/// Reads the sync settings from the already-pinned runtime snapshot.
-///
-/// This compatibility name intentionally no longer reads `config.json`, opens
-/// a store, or applies an environment override at call time.
-pub fn load_sync_config(project_root: &Path) -> Result<SyncConfig> {
-    cached_sync_config(project_root)
-}
-
 impl Default for TraceDecayConfig {
     fn default() -> Self {
         Self {
@@ -786,15 +778,6 @@ impl Default for TraceDecayConfig {
             telemetry: TelemetryConfig::default(),
         }
     }
-}
-
-/// Reads telemetry settings from the already-pinned runtime snapshot.
-///
-/// This compatibility name intentionally performs no file, database, or IPC
-/// access. A missing authority is an error; hooks handle that by disabling
-/// optional telemetry rather than inventing a fallback value.
-pub fn load_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
-    cached_telemetry_config(project_root)
 }
 
 /// Typed project route for the configuration daemon boundary. The path is
@@ -941,21 +924,11 @@ fn runtime_configuration_cache() -> &'static RuntimeConfigurationCache {
 #[derive(Default)]
 struct ConfigurationDaemonClients {
     by_project: BTreeMap<String, Arc<dyn ConfigurationDaemonClient>>,
-    fallback: Option<Arc<dyn ConfigurationDaemonClient>>,
 }
 
 fn configuration_daemon_client_slot() -> &'static RwLock<ConfigurationDaemonClients> {
     static CLIENT: OnceLock<RwLock<ConfigurationDaemonClients>> = OnceLock::new();
     CLIENT.get_or_init(|| RwLock::new(ConfigurationDaemonClients::default()))
-}
-
-/// Installs a fallback daemon-owned mutation client for compatibility callers
-/// that have no authoritative project route.
-pub fn install_configuration_daemon_client(client: Arc<dyn ConfigurationDaemonClient>) {
-    configuration_daemon_client_slot()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .fallback = Some(client);
 }
 
 /// Installs one daemon-owned client for its exact project identity. CLI, MCP,
@@ -1449,12 +1422,10 @@ pub async fn mutate_pinned_runtime_configuration(
         let clients = configuration_daemon_client_slot()
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients.fallback.clone().or_else(|| {
-            clients
-                .by_project
-                .get(current.target.project_id.as_str())
-                .cloned()
-        })
+        clients
+            .by_project
+            .get(current.target.project_id.as_str())
+            .cloned()
     }
     .ok_or_else(|| {
         config_error(
