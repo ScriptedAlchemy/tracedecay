@@ -14,8 +14,6 @@ use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application::semantic_runtime::{SemanticRuntimeStateV1, SemanticRuntimeStatusV1};
 use crate::display::{format_bytes, format_token_count};
-#[cfg(test)]
-use crate::storage::StoreLayout;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
@@ -452,52 +450,6 @@ fn skill_drift_report(
             format!("{scope_desc}: '{skill_id}' {message} ({path})"),
         ),
     }
-}
-
-/// How the doctor "Current project" check sees the working directory's store.
-#[cfg(test)]
-#[derive(Debug)]
-enum CurrentProjectStore {
-    /// A store resolved through the same registry/alias-aware path the tools
-    /// use (enrollment marker, git-common-dir alias, profile shard, …).
-    Resolved(Box<StoreLayout>),
-    /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
-    LegacyRepoLocal,
-    /// Resolution genuinely found nothing — `tracedecay init` is warranted.
-    Uninitialized,
-}
-
-#[cfg(test)]
-async fn resolve_current_project_store(
-    project_path: &Path,
-    open_options: &TraceDecayOpenOptions,
-) -> crate::errors::Result<CurrentProjectStore> {
-    if let Some(layout) =
-        TraceDecay::try_initialized_store_layout_with_options(project_path, open_options).await?
-    {
-        return Ok(CurrentProjectStore::Resolved(Box::new(layout)));
-    }
-    if crate::config::has_project_database(project_path) {
-        return Ok(CurrentProjectStore::LegacyRepoLocal);
-    }
-    Ok(CurrentProjectStore::Uninitialized)
-}
-
-#[cfg(test)]
-fn describe_resolved_store(layout: &StoreLayout) -> String {
-    let mode = match layout.storage_mode {
-        crate::storage::StorageMode::ProjectLocal => "repo-local",
-        crate::storage::StorageMode::ProfileSharded => "profile-sharded",
-    };
-    let store_id = layout
-        .identity
-        .project_id
-        .as_deref()
-        .map_or_else(String::new, |id| format!(", store {id}"));
-    format!(
-        "Index found: {}/ ({mode}{store_id})",
-        layout.data_root.display()
-    )
 }
 
 async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
