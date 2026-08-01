@@ -7,6 +7,7 @@
 //! wire format while later providers retain typed native ordering evidence.
 
 use std::cmp::Ordering;
+use std::fmt;
 use std::io::{self, Write};
 
 use serde::ser::SerializeStruct;
@@ -453,37 +454,13 @@ impl ObservationIdentityMaterialV1 {
 /// Compatibility name for Claude observation identity material.
 pub type ClaudeObservationIdentityMaterialV1 = ObservationIdentityMaterialV1;
 
-macro_rules! sha256_newtype {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ObservationContractError> {
-                let value = value.into();
-                validate_sha256(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
-
-sha256_newtype!(CanonicalObservationIdV1, "observation identity");
-sha256_newtype!(PayloadDigestV1, "payload digest");
+crate::canonical_text::validated_string_newtype!(
+    plain,
+    ObservationContractError,
+    validate_sha256;
+    CanonicalObservationIdV1 => "observation identity",
+    PayloadDigestV1 => "payload digest",
+);
 
 /// Wire-compatible name for the canonical observation identity.
 pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
@@ -1886,12 +1863,7 @@ pub fn classify_observation_collision(
 }
 
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), ObservationContractError> {
-    let valid = value.strip_prefix("sha256:").is_some_and(|encoded| {
-        encoded.len() == 64
-            && encoded
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
+    let valid = crate::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64);
     if valid {
         Ok(())
     } else {

@@ -32,12 +32,10 @@ pub(crate) fn validate_integrity_digest(
                 "sha512" => 128,
                 _ => return None,
             };
-            Some(
-                encoded.len() == expected_len
-                    && encoded
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            )
+            Some(crate::canonical_text::is_lowercase_hex(
+                encoded,
+                expected_len,
+            ))
         })
         .unwrap_or(false);
 

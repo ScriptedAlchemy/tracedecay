@@ -443,12 +443,8 @@ pub struct CommandDigestV1(String);
 impl CommandDigestV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
         let value = value.into();
-        let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        });
+        let valid =
+            tracedecay_domain::canonical_text::is_tagged_lowercase_hex(&value, "sha256:", 64);
         if !valid {
             return Err(StorageRuntimeContractErrorV1::NonCanonical {
                 field: "command digest",

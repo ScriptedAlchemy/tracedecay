@@ -7,9 +7,7 @@
 
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::configuration::UserProfileId;
-use tracedecay_domain::feedback::{
-    FeedbackCycleId, GitHubReviewIdV1, ProximityWarningIdV1,
-};
+use tracedecay_domain::feedback::{FeedbackCycleId, GitHubReviewIdV1, ProximityWarningIdV1};
 use tracedecay_domain::research::{EntityId, canonical_sha256};
 use tracedecay_domain::retrieval::PrincipalId;
 

@@ -159,10 +159,8 @@ impl FactId {
 fn validate_fact_owner(fact_id: &FactId, owner: &FactOwnerV1) -> Result<(), DomainError> {
     fact_id.validate()?;
     owner.validate()?;
-    let encoded = fact_id
-        .as_str()
-        .strip_prefix(&format!("{FACT_ID_NAMESPACE}."))
-        .ok_or(DomainError::NonCanonical {
+    let encoded =
+        strip_namespace(FACT_ID_NAMESPACE, fact_id.as_str()).ok_or(DomainError::NonCanonical {
             field: "fact identity",
         })?;
     let (claimed_owner, identity) = encoded.split_once('.').ok_or(DomainError::NonCanonical {
@@ -686,9 +684,15 @@ fn validate_unique<'a, T: 'a + Ord>(
     Ok(())
 }
 
-fn memory_id_suffix(namespace: &'static str, value: &str) -> Result<String, DomainError> {
+/// Strip a `"{namespace}."` prefix without allocating the prefix to match on.
+fn strip_namespace<'a>(namespace: &str, value: &'a str) -> Option<&'a str> {
     value
-        .strip_prefix(&format!("{namespace}."))
+        .strip_prefix(namespace)
+        .and_then(|rest| rest.strip_prefix('.'))
+}
+
+fn memory_id_suffix(namespace: &'static str, value: &str) -> Result<String, DomainError> {
+    strip_namespace(namespace, value)
         .map(str::to_owned)
         .ok_or(DomainError::NonCanonical {
             field: "memory identity",
@@ -696,14 +700,11 @@ fn memory_id_suffix(namespace: &'static str, value: &str) -> Result<String, Doma
 }
 
 fn validate_sha256_hex(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(DomainError::NonCanonical { field });
+    if crate::canonical_text::is_lowercase_hex(value, 64) {
+        Ok(())
+    } else {
+        Err(DomainError::NonCanonical { field })
     }
-    Ok(())
 }
 
 #[cfg(test)]
