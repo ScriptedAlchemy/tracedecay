@@ -4,9 +4,9 @@ mod executor;
 mod params;
 mod row;
 mod snapshot;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 mod statement;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 mod test_support;
 mod transaction;
 mod value;
@@ -17,9 +17,9 @@ pub use executor::{DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheck
 pub use params::{IntoParams, IntoValue, Params, params, params_from_iter};
 pub use row::{Row, Rows};
 pub use snapshot::ReadSnapshot;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use statement::Statement;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub use test_support::TestConnection;
 pub use transaction::{Transaction, TransactionBehavior};
 pub use value::{FromValue, Value};

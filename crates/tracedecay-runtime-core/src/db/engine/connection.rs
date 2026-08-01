@@ -6,7 +6,7 @@ use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlTransaction as RuntimeTransaction,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
 use super::{IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value};
 
@@ -18,13 +18,13 @@ pub(super) trait Runtime: Send + Sync {
     fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
     fn repair_incremental_auto_vacuum(&self) -> Result<()>;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn last_insert_rowid(&self) -> i64;
     fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
     fn begin_immediate(&self) -> Result<RuntimeTransaction>;
     fn begin_schema_migration_immediate(&self) -> Result<RuntimeTransaction>;
@@ -51,12 +51,12 @@ impl Runtime for MigrationSqlHandle {
         self.repair_incremental_auto_vacuum().map_err(Into::into)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()> {
         self.validate(statement).map_err(Into::into)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn last_insert_rowid(&self) -> i64 {
         self.last_insert_rowid()
     }
@@ -70,7 +70,7 @@ impl Runtime for MigrationSqlHandle {
             .map_err(Into::into)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction> {
         self.begin_deferred().map_err(Into::into)
     }
@@ -184,7 +184,7 @@ impl Connection {
             .map_err(join_error)?
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
         let statement = statement(sql, ())?;
         let runtime = Arc::clone(&self.runtime);
@@ -194,7 +194,7 @@ impl Connection {
         Statement::for_connection(self, sql)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn last_insert_rowid(&self) -> i64 {
         self.runtime.last_insert_rowid()
     }
@@ -215,7 +215,7 @@ impl Connection {
             .map(ReadSnapshot::from_runtime)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn transaction(&self) -> Result<Transaction> {
         self.transaction_with_behavior(TransactionBehavior::Deferred)
             .await
@@ -226,7 +226,7 @@ impl Connection {
         behavior: TransactionBehavior,
     ) -> Result<Transaction> {
         match behavior {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-helpers"))]
             TransactionBehavior::Deferred => {
                 let runtime = Arc::clone(&self.runtime);
                 tokio::task::spawn_blocking(move || runtime.begin_deferred())
