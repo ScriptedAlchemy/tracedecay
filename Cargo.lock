@@ -5724,11 +5724,22 @@ dependencies = [
 name = "tracedecay-migrate"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "fs2",
+ "gix",
+ "hex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-store",
+ "tracing",
 ]
 
 [[package]]

@@ -182,6 +182,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
+    "tracedecay-migrate/test-transport",
 ]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import

@@ -1,12 +1,21 @@
-//! Planning vocabulary for a migration preflight scan.
+//! Planning vocabulary for a migration preflight scan, plus the scanners that
+//! produce it.
 //!
-//! These records describe what a scan found — stores, roles, artifacts,
-//! registry state, and integrity outcomes — without performing the scan. The
-//! scanners that open databases and read the registry stay in the root crate.
+//! The records below describe what a scan found — stores, roles, artifacts,
+//! registry state, and integrity outcomes. [`scan`] performs the scan itself;
+//! it reaches storage through the runtime seam re-exported by the root crate.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+mod artifacts;
+mod hermes;
+mod project;
+mod scan;
+mod sqlite;
+
+pub use scan::*;
 
 #[derive(Debug, Clone, Default)]
 pub struct MigrationInventoryOptions {
