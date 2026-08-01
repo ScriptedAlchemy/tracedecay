@@ -77,46 +77,82 @@ struct ControlObservation {
     diagnostic: String,
 }
 
+#[derive(Debug)]
+enum ShutdownRequestAttempt {
+    Acknowledged,
+    SentWithoutAcknowledgement(String),
+    NotSent(String),
+}
+
+impl ShutdownRequestAttempt {
+    fn may_have_been_delivered(&self) -> bool {
+        !matches!(self, Self::NotSent(_))
+    }
+
+    fn diagnostic(&self) -> String {
+        match self {
+            Self::Acknowledged => "acknowledged".to_string(),
+            Self::SentWithoutAcknowledgement(error) => {
+                format!("sent without acknowledgement ({error})")
+            }
+            Self::NotSent(error) => format!("not sent ({error})"),
+        }
+    }
+}
+
 trait DaemonControlApi {
-    fn request_shutdown(&mut self) -> Result<()>;
-    fn readiness(&mut self) -> ControlObservation;
-    fn quiescence(&mut self) -> ControlObservation;
+    fn request_shutdown(&mut self) -> ShutdownRequestAttempt;
+    fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation;
+    fn quiescence(&mut self, timeout: std::time::Duration) -> ControlObservation;
+    fn elapsed(&self) -> std::time::Duration;
     fn wait(&mut self, duration: std::time::Duration);
 }
 
 const LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-const START_READINESS_POLLS: usize = 30;
-const GRACEFUL_STOP_POLLS: usize = 40;
-const HARD_STOP_POLLS: usize = 20;
+const CONTROL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+const START_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const GRACEFUL_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+const HARD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(windows)]
 struct NativeDaemonControl {
     transport_hint: PathBuf,
+    clock_origin: std::time::Instant,
 }
 
 #[cfg(windows)]
 impl DaemonControlApi for NativeDaemonControl {
-    fn request_shutdown(&mut self) -> Result<()> {
-        super::probe::request_daemon_shutdown(&self.transport_hint)
+    fn request_shutdown(&mut self) -> ShutdownRequestAttempt {
+        match super::probe::request_daemon_shutdown(&self.transport_hint) {
+            Ok(super::probe::DaemonShutdownRequest::Acknowledged) => {
+                ShutdownRequestAttempt::Acknowledged
+            }
+            Ok(super::probe::DaemonShutdownRequest::SentWithoutAcknowledgement(error)) => {
+                ShutdownRequestAttempt::SentWithoutAcknowledgement(error)
+            }
+            Err(error) => ShutdownRequestAttempt::NotSent(error.to_string()),
+        }
     }
 
-    fn readiness(&mut self) -> ControlObservation {
-        let protocol = super::probe::daemon_protocol_state_with_timeout(
-            &self.transport_hint,
-            std::time::Duration::from_millis(750),
-        );
+    fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation {
+        let protocol =
+            super::probe::daemon_protocol_state_with_timeout(&self.transport_hint, timeout);
         ControlObservation {
             satisfied: matches!(protocol, super::probe::DaemonProtocolState::Ready),
             diagnostic: format!("protocol {protocol}"),
         }
     }
 
-    fn quiescence(&mut self) -> ControlObservation {
-        let socket = super::probe::daemon_socket_state(&self.transport_hint);
+    fn quiescence(&mut self, timeout: std::time::Duration) -> ControlObservation {
+        let socket = super::probe::daemon_socket_state_with_timeout(&self.transport_hint, timeout);
         ControlObservation {
             satisfied: socket.is_proven_quiesced(),
             diagnostic: format!("endpoint {socket}"),
         }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.clock_origin.elapsed()
     }
 
     fn wait(&mut self, duration: std::time::Duration) {
@@ -363,40 +399,37 @@ fn register_task_xml_with(api: &mut dyn TaskSchedulerApi, xml: &str) -> Result<(
         return Ok(());
     }
 
-    api.register_xml(xml)?;
+    if let Err(registration_error) = api.register_xml(xml) {
+        let restore_result = match previous {
+            Some(snapshot) => restore_registered_snapshot_with(api, snapshot),
+            None => api.delete(),
+        };
+        return combine_task_operations(
+            "register daemon task",
+            Err(registration_error),
+            restore_result,
+        );
+    }
     let Some(previous) = previous else {
         return Ok(());
     };
 
-    if previous.running {
-        // Registration publishes an enabled definition. Ensure it is running
-        // before restoring disabled state so both properties survive an update.
-        api.set_enabled(true)?;
-        if !api.snapshot()?.is_some_and(|snapshot| snapshot.running) {
-            let run_result = api.run();
-            if !previous.enabled {
-                let disable_result = api.set_enabled(false);
-                return combine_task_operations(
-                    "restore running disabled task after registration",
-                    run_result,
-                    disable_result,
-                );
-            }
-            run_result?;
-        }
-        if !previous.enabled {
-            api.set_enabled(false)?;
-        }
-        return Ok(());
-    }
+    restore_registered_snapshot_with(api, previous)
+}
 
-    apply_state_with(
-        api,
-        if previous.enabled {
-            DaemonServiceState::StoppedEnabled
-        } else {
-            DaemonServiceState::StoppedDisabled
-        },
+fn restore_registered_snapshot_with(
+    api: &mut dyn TaskSchedulerApi,
+    previous: TaskSnapshot,
+) -> Result<()> {
+    let restore_result = restore_snapshot_with(api, previous);
+    if previous.enabled {
+        return restore_result;
+    }
+    let disable_result = restore_enablement_with(api, false);
+    combine_task_operations(
+        "restore disabled daemon task after registration",
+        restore_result,
+        disable_result,
     )
 }
 
@@ -485,6 +518,7 @@ fn start_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     combine_task_operations("start disabled task", run_result, disable_result)
 }
 
+#[cfg(test)]
 fn stop_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     let current = api.snapshot()?.ok_or_else(|| missing_task("stop"))?;
     if current.running {
@@ -508,7 +542,7 @@ fn apply_managed_state_with(
                     api,
                     control,
                     desired,
-                    START_READINESS_POLLS,
+                    START_READINESS_TIMEOUT,
                     true,
                     "start",
                 )
@@ -518,7 +552,7 @@ fn apply_managed_state_with(
             stop_managed_with(api, control).and_then(|()| {
                 let enabled = desired == DaemonServiceState::StoppedEnabled;
                 restore_enablement_with(api, enabled)?;
-                wait_for_task_state_with(api, control, desired, HARD_STOP_POLLS, false, "stop")
+                wait_for_task_state_with(api, control, desired, HARD_STOP_TIMEOUT, false, "stop")
             })
         }
         DaemonServiceState::Masked => stop_managed_with(api, control).and_then(|()| {
@@ -527,7 +561,7 @@ fn apply_managed_state_with(
                 api,
                 control,
                 DaemonServiceState::StoppedDisabled,
-                HARD_STOP_POLLS,
+                HARD_STOP_TIMEOUT,
                 false,
                 "deactivate",
             )
@@ -556,7 +590,14 @@ fn start_managed_with(
         DaemonServiceState::RunningDisabled
     };
     let operation_result = start_with(api).and_then(|()| {
-        wait_for_task_state_with(api, control, desired, START_READINESS_POLLS, true, "start")
+        wait_for_task_state_with(
+            api,
+            control,
+            desired,
+            START_READINESS_TIMEOUT,
+            true,
+            "start",
+        )
     });
     if let Err(operation_error) = operation_result {
         let restore_result = restore_snapshot_with(api, previous);
@@ -579,7 +620,7 @@ fn stop_managed_with(
     } else {
         DaemonServiceState::StoppedDisabled
     };
-    let initial_quiescence = control.quiescence();
+    let initial_quiescence = control.quiescence(CONTROL_PROBE_TIMEOUT);
     if !current.running {
         if initial_quiescence.satisfied {
             return Ok(());
@@ -592,29 +633,34 @@ fn stop_managed_with(
         });
     }
 
-    let graceful_result = control.request_shutdown().and_then(|()| {
+    let shutdown_attempt = control.request_shutdown();
+    let graceful_result = shutdown_attempt.may_have_been_delivered().then(|| {
         wait_for_task_state_with(
             api,
             control,
             desired,
-            GRACEFUL_STOP_POLLS,
+            GRACEFUL_STOP_TIMEOUT,
             false,
             "graceful stop",
         )
     });
-    if graceful_result.is_ok() {
+    if matches!(graceful_result, Some(Ok(()))) {
         return Ok(());
     }
-    let graceful_diagnostic = graceful_result
-        .err()
-        .map_or_else(|| "ok".to_string(), |error| error.to_string());
+    let graceful_diagnostic = graceful_result.map_or_else(
+        || shutdown_attempt.diagnostic(),
+        |result| match result {
+            Ok(()) => shutdown_attempt.diagnostic(),
+            Err(error) => format!("{}; {error}", shutdown_attempt.diagnostic()),
+        },
+    );
 
     let hard_stop_result = api.stop();
     let hard_stop_diagnostic = hard_stop_result
         .as_ref()
         .err()
         .map_or_else(|| "ok".to_string(), ToString::to_string);
-    match wait_for_task_state_with(api, control, desired, HARD_STOP_POLLS, false, "hard stop") {
+    match wait_for_task_state_with(api, control, desired, HARD_STOP_TIMEOUT, false, "hard stop") {
         Ok(()) => Ok(()),
         Err(postcondition_error) => Err(TraceDecayError::Config {
             message: format!(
@@ -628,31 +674,38 @@ fn wait_for_task_state_with(
     api: &mut dyn TaskSchedulerApi,
     control: &mut dyn DaemonControlApi,
     desired: DaemonServiceState,
-    polls: usize,
+    timeout: std::time::Duration,
     require_ready: bool,
     operation: &str,
 ) -> Result<()> {
+    let deadline = control.elapsed().saturating_add(timeout);
+    let mut observations = 0_usize;
     let mut last_state = DaemonServiceState::Missing;
     let mut last_control = "not observed".to_string();
-    for attempt in 0..polls {
+    while control.elapsed() < deadline {
+        let remaining = deadline.saturating_sub(control.elapsed());
+        let probe_timeout = CONTROL_PROBE_TIMEOUT.min(remaining);
         last_state = state_from_snapshot(api.snapshot()?);
         let observation = if require_ready {
-            control.readiness()
+            control.readiness(probe_timeout)
         } else {
-            control.quiescence()
+            control.quiescence(probe_timeout)
         };
+        observations += 1;
         last_control = observation.diagnostic;
         if last_state == desired && observation.satisfied {
             return Ok(());
         }
-        if attempt + 1 < polls {
-            control.wait(LIFECYCLE_POLL_INTERVAL);
+        let remaining = deadline.saturating_sub(control.elapsed());
+        if remaining.is_zero() {
+            break;
         }
+        control.wait(LIFECYCLE_POLL_INTERVAL.min(remaining));
     }
     Err(TraceDecayError::Config {
         message: format!(
-            "TraceDecay daemon task {operation} postcondition failed after {} polls: task {last_state:?}, {last_control}",
-            polls
+            "TraceDecay daemon task {operation} postcondition failed at its {:.3}s deadline after {observations} observations: task {last_state:?}, {last_control}",
+            timeout.as_secs_f64()
         ),
     })
 }
@@ -663,7 +716,13 @@ fn restore_snapshot_with(api: &mut dyn TaskSchedulerApi, previous: TaskSnapshot)
             .snapshot()?
             .ok_or_else(|| missing_task("restore state of"))?;
         if current.running && !previous.running {
-            api.stop()?;
+            let stop_result = api.stop();
+            let enablement_result = restore_enablement_with(api, previous.enabled);
+            combine_task_operations(
+                "restore daemon task stopped state",
+                stop_result,
+                enablement_result,
+            )?;
         } else if !current.running && previous.running {
             if !current.enabled {
                 api.set_enabled(true)?;
@@ -959,6 +1018,7 @@ fn with_platform_control_api<T>(
                 })?;
             let mut control = NativeDaemonControl {
                 transport_hint: profile_root.join("daemon.sock"),
+                clock_origin: std::time::Instant::now(),
             };
             operation(api, &mut control)
         })
@@ -981,7 +1041,8 @@ mod native {
     };
     use windows::Win32::System::TaskScheduler::{
         IRegisteredTask, ITaskFolder, ITaskService, TASK_CREATE_OR_UPDATE,
-        TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_QUEUED, TASK_STATE_RUNNING, TaskScheduler,
+        TASK_DONT_ADD_PRINCIPAL_ACE, TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_QUEUED,
+        TASK_STATE_RUNNING, TaskScheduler,
     };
     use windows::Win32::System::Variant::VARIANT;
     use windows::core::{BSTR, HRESULT};
@@ -1119,7 +1180,7 @@ mod native {
                 self.root.RegisterTask(
                     &BSTR::from(self.identity.task_path.as_str()),
                     &BSTR::from(xml),
-                    TASK_CREATE_OR_UPDATE.0,
+                    TASK_CREATE_OR_UPDATE.0 | TASK_DONT_ADD_PRINCIPAL_ACE.0,
                     &user,
                     &password,
                     TASK_LOGON_INTERACTIVE_TOKEN,
@@ -1194,7 +1255,10 @@ mod tests {
         task: Option<TaskSnapshot>,
         xml: Option<String>,
         operations: Vec<Operation>,
+        fail_registration_after_mutation: bool,
+        fail_next_enablement: bool,
         fail_next_run: bool,
+        fail_next_stop: bool,
         stop_leaves_running: bool,
         snapshots_until_exit: Option<usize>,
         snapshot_count: usize,
@@ -1213,7 +1277,10 @@ mod tests {
                 task: Some(TaskSnapshot { running, enabled }),
                 xml: Some(xml.to_string()),
                 operations: Vec::new(),
+                fail_registration_after_mutation: false,
+                fail_next_enablement: false,
                 fail_next_run: false,
+                fail_next_stop: false,
                 stop_leaves_running: false,
                 snapshots_until_exit: None,
                 snapshot_count: 0,
@@ -1249,10 +1316,20 @@ mod tests {
                 enabled: true,
             });
             self.xml = Some(xml.to_string());
+            if self.fail_registration_after_mutation {
+                return Err(TraceDecayError::Config {
+                    message: "fake scheduler registration failed after mutation".to_string(),
+                });
+            }
             Ok(())
         }
 
         fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+            if std::mem::take(&mut self.fail_next_enablement) {
+                return Err(TraceDecayError::Config {
+                    message: "fake scheduler enablement change failed".to_string(),
+                });
+            }
             let task = self.task.as_mut().ok_or_else(|| missing_task("enable"))?;
             self.operations.push(Operation::Enable(enabled));
             task.enabled = enabled;
@@ -1277,6 +1354,11 @@ mod tests {
         }
 
         fn stop(&mut self) -> Result<()> {
+            if std::mem::take(&mut self.fail_next_stop) {
+                return Err(TraceDecayError::Config {
+                    message: "fake scheduler stop failed".to_string(),
+                });
+            }
             let task = self.task.as_mut().ok_or_else(|| missing_task("stop"))?;
             self.operations.push(Operation::Stop);
             if !self.stop_leaves_running {
@@ -1302,21 +1384,32 @@ mod tests {
         ready_after: Option<usize>,
         quiesced_after: Option<usize>,
         shutdown_fails: bool,
+        shutdown_loses_acknowledgement: bool,
+        probe_latency: std::time::Duration,
+        probe_timeouts: Vec<std::time::Duration>,
+        elapsed: std::time::Duration,
     }
 
     impl DaemonControlApi for FakeDaemonControl {
-        fn request_shutdown(&mut self) -> Result<()> {
+        fn request_shutdown(&mut self) -> ShutdownRequestAttempt {
             self.shutdown_requests += 1;
             if self.shutdown_fails {
-                return Err(TraceDecayError::Config {
-                    message: "fake graceful shutdown failed".to_string(),
-                });
+                return ShutdownRequestAttempt::NotSent(
+                    "fake graceful shutdown failed".to_string(),
+                );
             }
-            Ok(())
+            if self.shutdown_loses_acknowledgement {
+                return ShutdownRequestAttempt::SentWithoutAcknowledgement(
+                    "fake acknowledgement lost".to_string(),
+                );
+            }
+            ShutdownRequestAttempt::Acknowledged
         }
 
-        fn readiness(&mut self) -> ControlObservation {
+        fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation {
             self.readiness_checks += 1;
+            self.probe_timeouts.push(timeout);
+            self.elapsed = self.elapsed.saturating_add(self.probe_latency.min(timeout));
             ControlObservation {
                 satisfied: self
                     .ready_after
@@ -1325,8 +1418,10 @@ mod tests {
             }
         }
 
-        fn quiescence(&mut self) -> ControlObservation {
+        fn quiescence(&mut self, timeout: std::time::Duration) -> ControlObservation {
             self.quiescence_checks += 1;
+            self.probe_timeouts.push(timeout);
+            self.elapsed = self.elapsed.saturating_add(self.probe_latency.min(timeout));
             ControlObservation {
                 satisfied: self
                     .quiesced_after
@@ -1335,8 +1430,13 @@ mod tests {
             }
         }
 
-        fn wait(&mut self, _duration: std::time::Duration) {
+        fn elapsed(&self) -> std::time::Duration {
+            self.elapsed
+        }
+
+        fn wait(&mut self, duration: std::time::Duration) {
             self.waits += 1;
+            self.elapsed = self.elapsed.saturating_add(duration);
         }
     }
 
@@ -1568,7 +1668,6 @@ mod tests {
             api.operations,
             vec![
                 Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Enable(true),
                 Operation::Run,
                 Operation::Enable(false),
             ]
@@ -1604,7 +1703,50 @@ mod tests {
             api.operations,
             vec![
                 Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Enable(true),
+                Operation::Enable(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn registration_failure_still_restores_disabled_state() {
+        let mut api =
+            FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
+        api.fail_next_enablement = true;
+
+        let error = register_task_xml_with(&mut api, "<Task>new</Task>")
+            .expect_err("restoration must fail");
+
+        assert!(error.to_string().contains("enablement change failed"));
+        assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
+        assert_eq!(
+            api.operations,
+            vec![
+                Operation::Register("<Task>new</Task>".to_string()),
+                Operation::Enable(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn registration_api_failure_after_mutation_restores_disabled_state() {
+        let mut api =
+            FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
+        api.fail_registration_after_mutation = true;
+
+        let error = register_task_xml_with(&mut api, "<Task>new</Task>")
+            .expect_err("registration must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("registration failed after mutation")
+        );
+        assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
+        assert_eq!(
+            api.operations,
+            vec![
+                Operation::Register("<Task>new</Task>".to_string()),
                 Operation::Enable(false),
             ]
         );
@@ -1676,6 +1818,25 @@ mod tests {
     }
 
     #[test]
+    fn rollback_restores_disabled_state_even_when_stop_fails() {
+        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
+        api.fail_next_stop = true;
+
+        let error = restore_snapshot_with(
+            &mut api,
+            TaskSnapshot {
+                running: false,
+                enabled: false,
+            },
+        )
+        .expect_err("stop must fail");
+
+        assert!(error.to_string().contains("fake scheduler stop failed"));
+        assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
+        assert_eq!(api.operations, vec![Operation::Enable(false)]);
+    }
+
+    #[test]
     fn managed_stop_uses_authenticated_graceful_shutdown_without_hard_stop() {
         let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
         api.snapshots_until_exit = Some(3);
@@ -1705,10 +1866,43 @@ mod tests {
     }
 
     #[test]
+    fn managed_stop_observes_graceful_exit_when_acknowledgement_is_lost() {
+        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
+        api.snapshots_until_exit = Some(3);
+        let mut control = FakeDaemonControl {
+            quiesced_after: Some(2),
+            shutdown_loses_acknowledgement: true,
+            ..FakeDaemonControl::default()
+        };
+
+        stop_managed_with(&mut api, &mut control).expect("unacknowledged graceful stop");
+
+        assert_eq!(api.state(), DaemonServiceState::StoppedEnabled);
+        assert!(!api.operations.contains(&Operation::Stop));
+    }
+
+    #[test]
+    fn managed_stop_hard_stops_immediately_when_shutdown_was_not_sent() {
+        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
+        let mut control = FakeDaemonControl {
+            quiesced_after: Some(2),
+            shutdown_fails: true,
+            ..FakeDaemonControl::default()
+        };
+
+        stop_managed_with(&mut api, &mut control).expect("unsent hard-stop fallback");
+
+        assert_eq!(api.operations, vec![Operation::Stop]);
+        assert_eq!(control.waits, 0);
+    }
+
+    #[test]
     fn managed_stop_uses_bounded_hard_stop_fallback_and_verifies_quiescence() {
         let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task/>");
+        let graceful_observations =
+            (GRACEFUL_STOP_TIMEOUT.as_millis() / LIFECYCLE_POLL_INTERVAL.as_millis()) as usize;
         let mut control = FakeDaemonControl {
-            quiesced_after: Some(GRACEFUL_STOP_POLLS + 2),
+            quiesced_after: Some(graceful_observations + 2),
             ..FakeDaemonControl::default()
         };
 
@@ -1717,7 +1911,11 @@ mod tests {
         assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
         assert_eq!(control.shutdown_requests, 1);
         assert_eq!(api.operations, vec![Operation::Stop]);
-        assert!(control.waits < GRACEFUL_STOP_POLLS + HARD_STOP_POLLS);
+        assert!(
+            control.waits
+                < ((GRACEFUL_STOP_TIMEOUT + HARD_STOP_TIMEOUT).as_millis()
+                    / LIFECYCLE_POLL_INTERVAL.as_millis()) as usize
+        );
     }
 
     #[test]
@@ -1751,7 +1949,10 @@ mod tests {
                 Operation::Stop,
             ]
         );
-        assert_eq!(control.readiness_checks, START_READINESS_POLLS);
+        assert_eq!(
+            control.readiness_checks,
+            (START_READINESS_TIMEOUT.as_millis() / LIFECYCLE_POLL_INTERVAL.as_millis()) as usize
+        );
     }
 
     #[test]
@@ -1767,6 +1968,36 @@ mod tests {
         assert_eq!(api.state(), DaemonServiceState::RunningEnabled);
         assert_eq!(api.operations, vec![Operation::Run]);
         assert_eq!(control.readiness_checks, 2);
+    }
+
+    #[test]
+    fn readiness_uses_remaining_absolute_deadline_for_each_probe() {
+        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::RunningEnabled, "<Task/>");
+        let timeout = std::time::Duration::from_millis(2_600);
+        let mut control = FakeDaemonControl {
+            probe_latency: std::time::Duration::from_secs(2),
+            ..FakeDaemonControl::default()
+        };
+
+        wait_for_task_state_with(
+            &mut api,
+            &mut control,
+            DaemonServiceState::RunningEnabled,
+            timeout,
+            true,
+            "start",
+        )
+        .expect_err("readiness must reach deadline");
+
+        assert_eq!(control.elapsed, timeout);
+        assert_eq!(
+            control.probe_timeouts,
+            vec![
+                CONTROL_PROBE_TIMEOUT,
+                CONTROL_PROBE_TIMEOUT,
+                std::time::Duration::from_millis(600),
+            ]
+        );
     }
 
     #[test]
