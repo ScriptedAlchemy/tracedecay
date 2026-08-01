@@ -2090,7 +2090,7 @@ fn doctor_check_hooks(
 /// `~/.codex/memories/` — the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
 fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
-    if !crate::hooks::memory_inject::memory_injection_enabled() {
+    if !crate::ports::hook_runtime::memory_injection_enabled() {
         return;
     }
     let config_path = codex_config_path(home);

@@ -15,9 +15,17 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::serve::DEGRADED_SERVE_STDERR_MARKER;
-
 use super::DoctorCounters;
+
+/// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
+///
+/// Proxy-only `serve` no longer emits it, but older logs remain actionable, so
+/// the scanner below still has to recognize it. The literal moved down here
+/// with the Cursor diagnostics that are its only reader; `serve` itself stays
+/// in the root crate. Root wiring: `src/serve.rs` re-exports this constant
+/// instead of declaring its own copy.
+pub const DEGRADED_SERVE_STDERR_MARKER: &str =
+    "[tracedecay] serve: staying alive in degraded MCP mode";
 
 /// How many of the newest Cursor log sessions to scan. Each session directory
 /// corresponds to one Cursor launch; older sessions describe long-fixed runs.

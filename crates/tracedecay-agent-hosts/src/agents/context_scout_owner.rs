@@ -25,7 +25,7 @@ use super::context_scout_v2::{
     ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
     ContextScoutWorkV1, ProjectContextScoutDurableStoreV1,
 };
-use crate::application::context::{CancellationToken, MonotonicDeadline};
+use crate::ports::context::{CancellationToken, MonotonicDeadline};
 use crate::automation::config::AutomationConfig;
 use crate::db::Database;
 
