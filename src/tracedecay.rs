@@ -70,7 +70,7 @@ pub struct TraceDecay {
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
     standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
@@ -115,7 +115,7 @@ impl TraceDecay {
     }
 
     #[doc(hidden)]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub fn test_runtime_for_test(
         &self,
     ) -> Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {

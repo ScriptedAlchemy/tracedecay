@@ -1,30 +1,39 @@
 #![allow(clippy::too_many_arguments, clippy::clone_on_copy)] // test builders
 //! Shared fixtures and helpers for the MCP handler test domains.
 
+#[cfg(feature = "test-transport")]
 use crate::common;
 use crate::fixture;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(feature = "test-transport")]
+use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
+#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::TraceDecayError;
-use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
+use tracedecay::mcp::ToolResult;
+#[cfg(feature = "test-transport")]
+use tracedecay::mcp::{McpServer, McpTransport};
+#[cfg(feature = "test-transport")]
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion,
@@ -37,6 +46,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId, SessionProjectionGenerationV1, UtcMicros, derive_exact_observation_anchor_id,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionFrozenWatermarksV1, SessionGenerationActivationRequestV1,
@@ -62,11 +72,13 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
     "tracedecay_move_symbol",
 ];
 
+#[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
     pub(crate) output: String,
 }
 
+#[cfg(feature = "test-transport")]
 impl McpTransport for CaptureTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         Ok(None)
@@ -82,6 +94,7 @@ impl McpTransport for CaptureTransport {
     }
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn handle_real_server_tool_call(
     server: &McpServer,
     tool_name: &str,
@@ -97,6 +110,7 @@ pub(crate) async fn handle_real_server_tool_call(
 /// Handlers that return `Err` are mapped to a JSON-RPC error rather than an
 /// `isError` tool result (see `crate::mcp::server::tool_errors`), so tests
 /// asserting on infrastructure failures need the envelope, not just `result`.
+#[cfg(feature = "test-transport")]
 pub(crate) async fn handle_real_server_tool_call_raw(
     server: &McpServer,
     tool_name: &str,
@@ -124,6 +138,7 @@ pub(crate) async fn handle_real_server_tool_call_raw(
     serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) fn extract_real_server_text(result: &Value) -> &str {
     result["content"][0]["text"]
         .as_str()
@@ -180,11 +195,13 @@ pub(crate) async fn production_composition_fixture() -> ProductionCompositionFix
     }
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) struct TemporalLcmProjectionInput {
     pub(crate) occurrence: MessageOccurrenceRecordV1,
     pub(crate) source_frontier: u64,
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn activate_test_temporal_generation(
     runtime: &HostAdmissionTestRuntimeV1,
     session_id: &str,
@@ -338,6 +355,7 @@ pub(crate) async fn handle_tool_call(
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn handle_tool_call_with_runtime(
     cg: &TraceDecay,
     runtime: &HostAdmissionTestRuntimeV1,
@@ -484,11 +502,13 @@ pub(crate) struct HomeEnvGuard {
     pub(crate) previous_data_dir: Option<OsString>,
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) struct TestEnvVarGuard {
     pub(crate) key: &'static str,
     pub(crate) previous: Option<OsString>,
 }
 
+#[cfg(feature = "test-transport")]
 impl TestEnvVarGuard {
     pub(crate) fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
@@ -499,6 +519,7 @@ impl TestEnvVarGuard {
     }
 }
 
+#[cfg(feature = "test-transport")]
 impl Drop for TestEnvVarGuard {
     fn drop(&mut self) {
         unsafe {
@@ -895,6 +916,7 @@ pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
         .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().lcm_payload_root.clone()
 }
@@ -1179,6 +1201,7 @@ pub(crate) fn extract_first_json_content(value: &Value) -> Value {
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) fn assert_fact_results(payload: &Value, included: &str, excluded: &str, context: &str) {
     assert_eq!(payload["count"].as_u64(), Some(1), "{context}: {payload}");
     let results = payload["results"].to_string();
@@ -1192,6 +1215,7 @@ pub(crate) fn assert_fact_results(payload: &Value, included: &str, excluded: &st
     );
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn extract_lcm_json_following_handle(cg: &TraceDecay, value: &Value) -> Value {
     let payload = extract_json(value);
     if payload.get("truncated").and_then(Value::as_bool) != Some(true) {
@@ -1225,6 +1249,7 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> Str
     }
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_project_registry(
     db_path: &Path,
     project_root: &Path,
@@ -1334,6 +1359,7 @@ pub(crate) fn tool_properties<'a>(
         .unwrap_or_else(|| panic!("{name} properties"))
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_session_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -1345,6 +1371,7 @@ pub(crate) async fn seed_lcm_session_message(
         .await;
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_session_message_for_provider(
     cg: &TraceDecay,
     provider: &str,
@@ -1402,6 +1429,7 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
     );
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_tool_result_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -1413,6 +1441,7 @@ pub(crate) async fn seed_lcm_tool_result_message(
         .await;
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     cg: &TraceDecay,
     provider: &str,
@@ -1470,6 +1499,7 @@ pub(crate) async fn seed_lcm_tool_result_message_for_provider(
     );
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_session_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -1491,6 +1521,7 @@ pub(crate) async fn seed_temporal_lcm_session_message(
     .await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_session_message_with_access(
     cg: &TraceDecay,
     session_id: &str,
@@ -1514,6 +1545,7 @@ pub(crate) async fn seed_temporal_lcm_session_message_with_access(
     .await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_session_message_for_provider(
     cg: &TraceDecay,
     provider: &str,
@@ -1536,6 +1568,7 @@ pub(crate) async fn seed_temporal_lcm_session_message_for_provider(
     .await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_session_message_at(
     cg: &TraceDecay,
     session_id: &str,
@@ -1559,6 +1592,7 @@ pub(crate) async fn seed_temporal_lcm_session_message_at(
     .await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_session_message_at_micros(
     cg: &TraceDecay,
     session_id: &str,
@@ -1582,6 +1616,7 @@ pub(crate) async fn seed_temporal_lcm_session_message_at_micros(
     .await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_temporal_lcm_tool_result_message(
     cg: &TraceDecay,
     session_id: &str,
@@ -1618,6 +1653,7 @@ pub(crate) async fn seed_temporal_lcm_tool_result_message(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-transport")]
 pub(crate) async fn persist_temporal_lcm_observation(
     cg: &TraceDecay,
     provider: &str,
@@ -1645,6 +1681,7 @@ pub(crate) async fn persist_temporal_lcm_observation(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "test-transport")]
 pub(crate) async fn persist_temporal_lcm_observation_with_access(
     cg: &TraceDecay,
     provider: &str,
@@ -1819,6 +1856,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
     }
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_session_message_in_db(
     runtime: &HostAdmissionTestRuntimeV1,
     project_path: &Path,
@@ -1875,10 +1913,12 @@ pub(crate) async fn seed_lcm_session_message_in_db(
     );
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
     open_active_project_session_db(cg).await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
     project_lcm_conn(cg)
         .await
@@ -1887,10 +1927,12 @@ pub(crate) async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
         .unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
     lcm_raw_store_id_for_provider(cg, "cursor", message_id).await
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_store_id_for_provider(
     cg: &TraceDecay,
     provider: &str,
@@ -1904,6 +1946,7 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
         .store_id
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
     project_lcm_conn(cg)
         .await
@@ -1912,6 +1955,7 @@ pub(crate) async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> 
         .unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
     let conn = tracedecay_rusqlite_runtime::open_immutable_reader(db_path).unwrap();
     conn.query_row(
@@ -1922,6 +1966,7 @@ pub(crate) async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &s
     .unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
     project_lcm_conn(cg)
         .await
@@ -1930,6 +1975,7 @@ pub(crate) async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
         .unwrap();
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
     project_lcm_conn(cg)
         .await
