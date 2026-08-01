@@ -231,9 +231,9 @@ async fn plan_definition_replacement(
         sites,
         graph_evidence,
     } = workspace;
-    let node = resolve_exact_symbol(graph, identity).await?;
+    let node = resolve_exact_symbol(*graph, identity).await?;
     graph_evidence.push(graph_tuple(&node));
-    let source = source_for(graph, &node.file_path, sources)?;
+    let source = source_for(*graph, &node.file_path, sources)?;
     let (start, end) = node_definition_span(source, &node)?;
     let expected = source[start..end].to_owned();
     let observed_digest = api_migration_definition_digest(&expected).map_err(contract_error)?;
@@ -283,7 +283,7 @@ async fn plan_bound_rename(
         sites,
         graph_evidence,
     } = workspace;
-    let node = match resolve_exact_symbol(graph, identity).await {
+    let node = match resolve_exact_symbol(*graph, identity).await {
         Ok(node) => node,
         Err(_) => {
             let new_qualified_name = identity
@@ -304,7 +304,7 @@ async fn plan_bound_rename(
                 });
             if let Some(already) = already {
                 graph_evidence.push(graph_tuple(&already));
-                let source = source_for(graph, &already.file_path, sources)?;
+                let source = source_for(*graph, &already.file_path, sources)?;
                 let (start, _) = node_definition_span(source, &already)?;
                 sites.push(PendingSite {
                     operation_id: operation_id.to_owned(),
@@ -351,7 +351,7 @@ async fn plan_bound_rename(
             "AST rename planning exceeded its bounded match budget",
         ));
     }
-    let source = source_for(graph, &node.file_path, sources)?;
+    let source = source_for(*graph, &node.file_path, sources)?;
     let (definition_start, definition_end) = node_definition_span(source, &node)?;
     let declaration = matches
         .matches
@@ -413,7 +413,7 @@ async fn plan_bound_rename(
                 },
             ));
         }
-        source_for(graph, &path, sources)?;
+        source_for(*graph, &path, sources)?;
     }
     Ok(())
 }
@@ -433,9 +433,9 @@ async fn plan_selected_ast_occurrences(
         sites,
         graph_evidence,
     } = workspace;
-    let node = resolve_exact_symbol(graph, identity).await?;
+    let node = resolve_exact_symbol(*graph, identity).await?;
     graph_evidence.push(graph_tuple(&node));
-    let source = source_for(graph, &node.file_path, sources)?;
+    let source = source_for(*graph, &node.file_path, sources)?;
     let (start, end) = node_definition_span(source, &node)?;
     let result = search_tree(
         graph.project_root(),
