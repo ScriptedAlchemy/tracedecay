@@ -733,6 +733,7 @@ impl TraceDecay {
             serving_branch: self.serving_branch.clone(),
             fallback_warning: self.fallback_warning.clone(),
             read_only: self.read_only,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: self.context_scout_owner.clone(),
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(test)]
