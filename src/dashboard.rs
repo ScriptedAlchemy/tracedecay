@@ -27,6 +27,15 @@ pub fn spa_router() -> axum::Router {
         .fallback(get(assets::app_spa_fallback))
 }
 
+/// Installs the canonical root-owned registered schema port before dashboard
+/// integration fixtures open any database authority.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub fn register_test_schema_installer() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(crate::daemon::store_runtime::register_registered_schema_installer);
+}
+
 /// Root-owned graph composition used by dashboard integration tests.
 ///
 /// The dashboard API crate cannot own daemon session registration or graph

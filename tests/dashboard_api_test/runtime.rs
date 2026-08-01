@@ -27,6 +27,7 @@ impl DashboardTestRuntimeV1 {
         project_root: impl AsRef<Path>,
         project_id: ProjectId,
     ) -> Result<Self> {
+        dashboard::register_test_schema_installer();
         let profile_root = profile_root.as_ref();
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
