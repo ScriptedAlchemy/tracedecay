@@ -8,17 +8,17 @@ use tracedecay_domain::{
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 
-use super::super::super::super::message_search::{
+use super::super::super::*;
+use super::super::test_support::*;
+use super::*;
+use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
+use crate::mcp::tools::handlers::session::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
     SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
     SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-use super::super::super::*;
-use super::super::test_support::*;
-use super::*;
-use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
 use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
 
 #[tokio::test]
