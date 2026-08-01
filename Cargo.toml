@@ -263,6 +263,14 @@ name = "serve_proxy_lifecycle_test"
 path = "tests/serve_proxy_lifecycle_test.rs"
 required-features = ["test-transport"]
 
+# Operator-run suite that exercises the *real* running managed daemon. Every
+# test is `#[ignore]` and additionally gated on TRACEDECAY_LIVE_DAEMON_TESTS=1,
+# so it stays inert in CI and in ordinary `cargo test` runs. Entry point:
+# `scripts/live-daemon-check.sh`.
+[[test]]
+name = "live_daemon_suite"
+path = "tests/live_daemon_suite.rs"
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
