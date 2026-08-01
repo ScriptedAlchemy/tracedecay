@@ -166,6 +166,16 @@ pub async fn advance_transcript_facts_backfill<A: SessionStoreAuthority>(
     advance_transcript_facts_backfill_with_limit(db, TRANSCRIPT_FACTS_BATCH).await
 }
 
+/// Test-helper variant that preserves the production path while allowing a
+/// bounded batch size to be asserted by root integration fixtures.
+#[doc(hidden)]
+pub async fn advance_transcript_facts_backfill_with_limit_for_test<A: SessionStoreAuthority>(
+    db: &A,
+    limit: usize,
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
+    advance_transcript_facts_backfill_with_limit(db, limit).await
+}
+
 async fn advance_transcript_facts_backfill_with_limit<A: SessionStoreAuthority>(
     db: &A,
     limit: usize,
@@ -721,6 +731,20 @@ fn structured_marker_name(provider: &str) -> String {
     format!("{STRUCTURED_MARKER_NAME}:{provider}")
 }
 
+/// Returns the durable marker name used by structured-backfill integration
+/// fixtures, including the retired global marker when no provider is given.
+#[doc(hidden)]
+pub fn structured_backfill_marker_name_for_test(provider: Option<&str>) -> String {
+    provider.map_or_else(|| STRUCTURED_MARKER_NAME.to_owned(), structured_marker_name)
+}
+
+/// Returns the retired structured-backfill cursor prefix used by migration
+/// fixtures.
+#[doc(hidden)]
+pub const fn structured_backfill_cursor_key_prefix_for_test() -> &'static str {
+    STRUCTURED_CURSOR_KEY_PREFIX
+}
+
 /// Provider-scoped, version-namespaced watermark key. Because both the provider
 /// and its target version are part of the key, bumping a provider's entry in
 /// [`STRUCTURED_BACKFILL_VERSIONS`] yields a key that has never been written, so
@@ -1031,6 +1055,16 @@ async fn insert_absent_session_messages(
         );
     }
     Some(inserted)
+}
+
+/// Test-helper entry point for seeding parsed messages through the same
+/// insert-only persistence path used by structured backfill.
+#[doc(hidden)]
+pub async fn insert_absent_session_messages_for_test(
+    conn: &(impl Executor + ?Sized),
+    messages: &[crate::runtime::SessionMessageRecord],
+) -> Option<u64> {
+    insert_absent_session_messages(conn, messages).await
 }
 
 fn parse_structured_messages(

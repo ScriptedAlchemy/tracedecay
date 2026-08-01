@@ -1,7 +1,22 @@
+use std::ops::Deref;
+use std::path::Path;
+
+use tracedecay_domain::ProjectId;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
+use tracedecay_sessions::runtime::transcript_backfill::{
+    TranscriptFactsBackfillOutcome, advance_transcript_facts_backfill_with_limit_for_test,
+    backfill_structured_rows, insert_absent_session_messages_for_test,
+    read_structured_backfill_cursor_for_test, structured_backfill_cursor_key_prefix_for_test,
+    structured_backfill_marker_name_for_test, transcript_facts_backfill_status,
+    write_structured_backfill_cursor_for_test,
+};
+
 /// Opaque registered ProjectSessions fixture for transcript-facts backfill tests.
 #[doc(hidden)]
 pub struct TranscriptFactsBackfillTestRuntimeV1 {
-    authority: crate::admission::HostAdmissionTestRuntimeV1,
+    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
 }
 
 impl TranscriptFactsBackfillTestRuntimeV1 {
@@ -11,7 +26,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
         project_id: ProjectId,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
-            authority: crate::admission::HostAdmissionTestRuntimeV1::project(
+            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -23,7 +38,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
     fn database(&self) -> &RegisteredGlobalDb {
         match self
             .authority
-            .registered_database(crate::admission::HostAdmissionScope::Project)
+            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
         {
             Some(database) => database,
             None => panic!("transcript facts test runtime has ProjectSessions authority"),
@@ -40,12 +55,12 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
         &self,
         limit: usize,
     ) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
-        advance_transcript_facts_backfill_with_limit(self.database(), limit).await
+        advance_transcript_facts_backfill_with_limit_for_test(self.database(), limit).await
     }
 }
 
 impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
-    type Target = crate::admission::HostAdmissionTestRuntimeV1;
+    type Target = crate::application::host_admission::HostAdmissionTestRuntimeV1;
 
     fn deref(&self) -> &Self::Target {
         &self.authority
@@ -55,7 +70,7 @@ impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
 /// Opaque registered ProjectSessions fixture for structured-backfill integration tests.
 #[doc(hidden)]
 pub struct StructuredBackfillTestRuntimeV1 {
-    authority: crate::admission::HostAdmissionTestRuntimeV1,
+    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
 }
 
 impl StructuredBackfillTestRuntimeV1 {
@@ -65,7 +80,7 @@ impl StructuredBackfillTestRuntimeV1 {
         project_id: ProjectId,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
-            authority: crate::admission::HostAdmissionTestRuntimeV1::project(
+            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -77,7 +92,7 @@ impl StructuredBackfillTestRuntimeV1 {
     fn database(&self) -> &RegisteredGlobalDb {
         match self
             .authority
-            .registered_database(crate::admission::HostAdmissionScope::Project)
+            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
         {
             Some(database) => database,
             None => panic!("structured backfill test runtime has ProjectSessions authority"),
@@ -92,12 +107,12 @@ impl StructuredBackfillTestRuntimeV1 {
         &self,
         source: &dyn TranscriptSource,
         project_root: &Path,
-    ) -> Result<crate::runtime::shared::TranscriptIngestStats, String> {
+    ) -> Result<crate::sessions::shared::TranscriptIngestStats, String> {
         let discovery = source.discover_transcript_paths(
             project_root,
-            crate::runtime::source::TranscriptDiscoveryBounds::default_walk(),
+            crate::sessions::source::TranscriptDiscoveryBounds::default_walk(),
         );
-        let mut stats = crate::runtime::shared::TranscriptIngestStats::default();
+        let mut stats = crate::sessions::shared::TranscriptIngestStats::default();
         for path in discovery.paths {
             let Some(parsed) = source
                 .try_parse_new(&path, StoredCursor::default(), project_root, None)
@@ -157,7 +172,7 @@ impl StructuredBackfillTestRuntimeV1 {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-            let inserted = insert_absent_session_messages(&transaction, &parsed.messages)
+            let inserted = insert_absent_session_messages_for_test(&transaction, &parsed.messages)
                 .await
                 .ok_or_else(|| "seed structured transcript messages".to_string())?;
             transaction
@@ -270,10 +285,7 @@ impl StructuredBackfillTestRuntimeV1 {
     }
 
     pub async fn marker_version(&self, provider: Option<&str>) -> Result<Option<i64>, String> {
-        let name = provider.map_or_else(
-            || STRUCTURED_MARKER_NAME.to_string(),
-            structured_marker_name,
-        );
+        let name = structured_backfill_marker_name_for_test(provider);
         let snapshot = self
             .database()
             .read_snapshot()
@@ -296,7 +308,7 @@ impl StructuredBackfillTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: &str,
-    ) -> Result<Option<crate::runtime::SessionRecord>, String> {
+    ) -> Result<Option<crate::sessions::SessionRecord>, String> {
         let snapshot = self
             .database()
             .read_snapshot()
@@ -315,7 +327,7 @@ impl StructuredBackfillTestRuntimeV1 {
         let Some(row) = rows.next().await.map_err(|error| error.to_string())? else {
             return Ok(None);
         };
-        Ok(Some(crate::runtime::SessionRecord {
+        Ok(Some(crate::sessions::SessionRecord {
             provider: row.get(0).map_err(|error| error.to_string())?,
             session_id: row.get(1).map_err(|error| error.to_string())?,
             project_key: row.get(2).map_err(|error| error.to_string())?,
@@ -411,7 +423,7 @@ impl StructuredBackfillTestRuntimeV1 {
             .execute(
                 "INSERT INTO session_schema_migrations(name, version)
                  VALUES (?1, ?2)",
-                params![STRUCTURED_MARKER_NAME, version],
+                params![structured_backfill_marker_name_for_test(None), version],
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -423,9 +435,10 @@ impl StructuredBackfillTestRuntimeV1 {
             )
             .await
             .map_err(|error| error.to_string())?;
+        let cursor_key_prefix = structured_backfill_cursor_key_prefix_for_test();
         for key in [
-            STRUCTURED_CURSOR_KEY_PREFIX.to_string(),
-            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v{version}"),
+            cursor_key_prefix.to_string(),
+            format!("{cursor_key_prefix}:v{version}"),
         ] {
             transaction
                 .execute(
