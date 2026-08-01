@@ -561,10 +561,20 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
     Noop(CodeIndexNoopEvidenceV1),
 }
 
+/// The lazily built serving caches shared by every handle bound to one sealed
+/// generation: the exact/lexical/graph lane owners and the record lookup index.
+/// Both are rebuilt only when a new generation is loaded.
+type GenerationServingCachesV1 = (
+    CodeGenerationId,
+    Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+);
+
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     query_owners: Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -591,6 +601,17 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
         self.generation.as_ref()
+    }
+
+    /// Point-lookup indices over this sealed generation's record vectors.
+    ///
+    /// Built at most once per generation and shared by every clone of this
+    /// handle (and therefore by every concurrent query), the same way
+    /// [`Self::production_query_owners`] shares its lane owners. Serving a
+    /// query never rebuilds the indices; only loading a new generation does.
+    pub(in crate::daemon) fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
+        self.record_index
+            .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
     }
 
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
@@ -792,12 +813,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     shutting_down: Arc<AtomicBool>,
     reconcile_in_progress: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
-    query_owners: Mutex<
-        Option<(
-            CodeGenerationId,
-            Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
-        )>,
-    >,
+    query_owners: Mutex<Option<GenerationServingCachesV1>>,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -1307,17 +1323,21 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .query_owners
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let query_owners = match cached.as_ref() {
-                    Some((cached_id, owners)) if cached_id == &generation_id => Arc::clone(owners),
+                let (query_owners, record_index) = match cached.as_ref() {
+                    Some((cached_id, owners, index)) if cached_id == &generation_id => {
+                        (Arc::clone(owners), Arc::clone(index))
+                    }
                     _ => {
                         let owners = Arc::new(OnceLock::new());
-                        *cached = Some((generation_id, Arc::clone(&owners)));
-                        owners
+                        let index = Arc::new(OnceLock::new());
+                        *cached = Some((generation_id, Arc::clone(&owners), Arc::clone(&index)));
+                        (owners, index)
                     }
                 };
                 LatestCompleteCodeIndexV1 {
                     generation,
                     query_owners,
+                    record_index,
                 }
             })
     }
@@ -1332,6 +1352,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 generation.map(|generation| LatestCompleteCodeIndexV1 {
                     generation,
                     query_owners: Arc::new(OnceLock::new()),
+                    record_index: Arc::new(OnceLock::new()),
                 })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
