@@ -374,7 +374,7 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                     &authority,
                     crate::search_eval::root_admitted_corpus_scope,
                 )
-                    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)
+                .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)
             })
             .await
             .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?

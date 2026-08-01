@@ -5813,6 +5813,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-query",
+ "tracedecay-search-eval",
 ]
 
 [[package]]

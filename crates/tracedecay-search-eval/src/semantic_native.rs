@@ -1128,7 +1128,7 @@ mod tests {
 
     fn checked_in_workload() -> CandidateWorkloadV1 {
         load_candidate_workload(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            &crate::checked_in_fixture_root()
                 .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
         )
         .expect("checked-in Plan 15 workload")
