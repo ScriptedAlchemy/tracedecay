@@ -5,7 +5,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db_operation_error;
 
 use super::rows::{authority_violation, decode_authority_json, encode_authority_json};
@@ -24,7 +24,7 @@ struct CommittedCursorCandidate {
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
-async fn read_observation_frontier(conn: &impl QueryExecutor) -> crate::errors::Result<i64> {
+async fn read_observation_frontier(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await
@@ -40,7 +40,7 @@ async fn read_observation_frontier(conn: &impl QueryExecutor) -> crate::errors::
 pub(super) async fn repair_projection_frontier(
     conn: &impl Executor,
     trusted_checkpoint: i64,
-) -> crate::errors::Result<i64> {
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut rows = conn
         .query(
             "SELECT last_sequence FROM observation_projection_checkpoints
@@ -165,7 +165,7 @@ pub(super) async fn repair_projection_frontier(
 pub(super) async fn repair_committed_source_cursors(
     conn: &impl Executor,
     after_sequence: i64,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let candidates = latest_committed_source_cursors(conn, after_sequence).await?;
     for candidate in candidates {
         let stored =
@@ -216,7 +216,7 @@ pub(super) async fn repair_committed_source_cursors(
 async fn latest_committed_source_cursors(
     conn: &impl QueryExecutor,
     after_sequence: i64,
-) -> crate::errors::Result<Vec<CommittedCursorCandidate>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<CommittedCursorCandidate>> {
     let mut candidates = Vec::new();
     let mut seen = BTreeSet::new();
     // Newest-first keyset cursor. `sequence` is the observations rowid, so an
@@ -285,7 +285,7 @@ async fn read_source_cursor(
     conn: &impl QueryExecutor,
     source_json: &str,
     scope_json: &str,
-) -> crate::errors::Result<Option<ObservationSourceCursorV1>> {
+) -> tracedecay_runtime_core::errors::Result<Option<ObservationSourceCursorV1>> {
     let mut rows = conn
         .query(
             "SELECT cursor_json FROM source_cursors
@@ -309,7 +309,7 @@ async fn read_source_cursor(
 async fn write_source_cursor(
     conn: &impl Executor,
     candidate: &CommittedCursorCandidate,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     conn.execute(
         "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
          VALUES (?1, ?2, ?3)
@@ -331,7 +331,7 @@ async fn cursor_has_exact_advance_receipt(
     source_json: &str,
     scope_json: &str,
     cursor: &ObservationSourceCursorV1,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM source_cursor_advances
@@ -359,7 +359,7 @@ async fn cursor_has_exact_advance_receipt(
 pub(super) async fn validate_observation_cursor_coverage(
     conn: &impl QueryExecutor,
     after_sequence: i64,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for candidate in latest_committed_source_cursors(conn, after_sequence).await? {
         let Some(stored) =
             read_source_cursor(conn, &candidate.source_json, &candidate.scope_json).await?

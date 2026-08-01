@@ -15,7 +15,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
 };
 
-use crate::db::engine::{Executor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
 use crate::ensure_registered_schema;
 
 pub(super) const GENERATION: u64 = 7;

@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::engine::params;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_application::now_micros;
@@ -14,8 +14,8 @@ use tracedecay_domain::{
 use tracedecay_store::SessionMessageRecord;
 use zeroize::Zeroizing;
 
-use crate::application::session::lcm::contracts::validate_payload_ref;
-use crate::db::engine;
+use tracedecay_sessions::lcm::contracts::validate_payload_ref;
+use tracedecay_runtime_core::db::engine;
 use crate::observation_projection::derive_projection;
 use tracedecay_query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
@@ -24,7 +24,7 @@ use tracedecay_query::temporal::hydration::{
 use tracedecay_query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
-use crate::sessions::lcm::payload::read_verified_payload_content;
+use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
@@ -1188,7 +1188,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crate::db::engine::{Executor, ReadSnapshot, params};
+    use tracedecay_runtime_core::db::engine::{Executor, ReadSnapshot, params};
     use serde_json::{Value, json};
     use tempfile::tempdir;
     use tracedecay_domain::{
