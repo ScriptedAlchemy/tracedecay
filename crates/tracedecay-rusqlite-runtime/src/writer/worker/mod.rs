@@ -1,15 +1,18 @@
+//! The writer's single worker thread.
+//!
+//! [`Worker::run`] owns the connection and the loop; the siblings own the two
+//! halves the loop leans on — [`ingress`] for how work arrives and where it is
+//! parked, and [`rejection`] for settling work that will never run.
+
 use std::{
     collections::VecDeque,
-    future::poll_fn,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::SyncSender,
     },
-    task::Poll,
     time::Duration,
 };
 
@@ -19,9 +22,8 @@ use tokio::{
     sync::{mpsc, watch},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1,
-    RuntimeCancellationStageV1, RuntimeInterruptionV1, RuntimeSubmitOutcomeV1,
-    StoreRuntimeBindingV1, UnavailableReasonV1,
+    AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
+    StoreRuntimeBindingV1,
 };
 
 use crate::{
@@ -47,8 +49,19 @@ use super::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
         IncrementalVacuumCommand,
     },
-    settlement::{infrastructure, interruption_outcome},
     transaction::process_batch,
+};
+
+mod ingress;
+mod rejection;
+
+use ingress::{
+    AuxiliaryWork, WorkerWake, apply_wake, drain_command_ingress, drain_ingress,
+    select_auxiliary_work, wait_for_work,
+};
+use rejection::{
+    cancel_waiting, reject_all, reject_all_incremental_vacuum, reject_all_migration_sql,
+    reject_all_online_backup, reject_incremental_vacuum, reject_online_backup, reject_unauthorized,
 };
 
 const HARD_CHECKPOINT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -175,22 +188,22 @@ impl Worker {
                 &self.telemetry,
                 &mut input_closed,
             );
-            drain_checkpoint_ingress(
+            drain_command_ingress(
                 &mut self.checkpoint_receiver,
                 &mut checkpoint_queue,
                 &mut checkpoint_closed,
             );
-            drain_migration_sql_ingress(
+            drain_command_ingress(
                 &mut self.migration_sql_receiver,
                 &mut migration_sql_queue,
                 &mut migration_sql_closed,
             );
-            drain_incremental_vacuum_ingress(
+            drain_command_ingress(
                 &mut self.incremental_vacuum_receiver,
                 &mut incremental_vacuum_queue,
                 &mut incremental_vacuum_closed,
             );
-            drain_online_backup_ingress(
+            drain_command_ingress(
                 &mut self.online_backup_receiver,
                 &mut online_backup_queue,
                 &mut online_backup_closed,
@@ -515,317 +528,6 @@ pub(super) fn process_execution_batch(
     );
 }
 
-enum WorkerWake {
-    Write(Option<AcceptedRequest>),
-    MigrationSql(Box<Option<MigrationSqlWriterCommand>>),
-    IncrementalVacuum(Box<Option<IncrementalVacuumCommand>>),
-    OnlineBackup(Box<Option<OnlineBackupCommand>>),
-    Checkpoint(Box<Option<CheckpointCommand>>),
-    Shutdown,
-    CheckpointRetry,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_work(
-    receiver: &mut mpsc::Receiver<AcceptedRequest>,
-    migration_sql_receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
-    incremental_vacuum_receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
-    online_backup_receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
-    checkpoint_receiver: &mut mpsc::Receiver<CheckpointCommand>,
-    shutdown_receiver: &mut mpsc::UnboundedReceiver<()>,
-    input_closed: bool,
-    migration_sql_closed: bool,
-    incremental_vacuum_closed: bool,
-    online_backup_closed: bool,
-    checkpoint_closed: bool,
-    retry_checkpoint: bool,
-) -> WorkerWake {
-    let receive = poll_fn(|context| {
-        if Pin::new(&mut *shutdown_receiver)
-            .poll_recv(context)
-            .is_ready()
-        {
-            return Poll::Ready(WorkerWake::Shutdown);
-        }
-        if !checkpoint_closed
-            && let Poll::Ready(command) = Pin::new(&mut *checkpoint_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::Checkpoint(Box::new(command)));
-        }
-        if !migration_sql_closed
-            && let Poll::Ready(command) = Pin::new(&mut *migration_sql_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::MigrationSql(Box::new(command)));
-        }
-        if !incremental_vacuum_closed
-            && let Poll::Ready(command) =
-                Pin::new(&mut *incremental_vacuum_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::IncrementalVacuum(Box::new(command)));
-        }
-        if !online_backup_closed
-            && let Poll::Ready(command) = Pin::new(&mut *online_backup_receiver).poll_recv(context)
-        {
-            return Poll::Ready(WorkerWake::OnlineBackup(Box::new(command)));
-        }
-        if !input_closed && let Poll::Ready(item) = Pin::new(&mut *receiver).poll_recv(context) {
-            return Poll::Ready(WorkerWake::Write(item));
-        }
-        Poll::Pending
-    });
-    if retry_checkpoint {
-        match tokio::time::timeout(HARD_CHECKPOINT_RETRY_INTERVAL, receive).await {
-            Ok(wake) => wake,
-            Err(_) => WorkerWake::CheckpointRetry,
-        }
-    } else {
-        receive.await
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_wake(
-    wake: WorkerWake,
-    queue: &mut FairQueue<AcceptedRequest>,
-    migration_sql_queue: &mut VecDeque<MigrationSqlWriterCommand>,
-    incremental_vacuum_queue: &mut VecDeque<IncrementalVacuumCommand>,
-    online_backup_queue: &mut VecDeque<OnlineBackupCommand>,
-    checkpoint_queue: &mut VecDeque<CheckpointCommand>,
-    telemetry: &WriterTelemetry,
-    input_closed: &mut bool,
-    migration_sql_closed: &mut bool,
-    incremental_vacuum_closed: &mut bool,
-    online_backup_closed: &mut bool,
-    checkpoint_closed: &mut bool,
-) {
-    match wake {
-        WorkerWake::Write(Some(item)) => enqueue(queue, item, telemetry),
-        WorkerWake::Write(None) => *input_closed = true,
-        WorkerWake::MigrationSql(command) => match *command {
-            Some(command) => migration_sql_queue.push_back(command),
-            None => *migration_sql_closed = true,
-        },
-        WorkerWake::IncrementalVacuum(command) => match *command {
-            Some(command) => incremental_vacuum_queue.push_back(command),
-            None => *incremental_vacuum_closed = true,
-        },
-        WorkerWake::OnlineBackup(command) => match *command {
-            Some(command) => online_backup_queue.push_back(command),
-            None => *online_backup_closed = true,
-        },
-        WorkerWake::Checkpoint(command) => match *command {
-            Some(command) => checkpoint_queue.push_back(command),
-            None => *checkpoint_closed = true,
-        },
-        WorkerWake::Shutdown => {}
-        WorkerWake::CheckpointRetry => {}
-    }
-}
-
-fn drain_incremental_vacuum_ingress(
-    receiver: &mut mpsc::Receiver<IncrementalVacuumCommand>,
-    queue: &mut VecDeque<IncrementalVacuumCommand>,
-    input_closed: &mut bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(command) => queue.push_back(command),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                *input_closed = true;
-                break;
-            }
-        }
-    }
-}
-
-fn drain_online_backup_ingress(
-    receiver: &mut mpsc::Receiver<OnlineBackupCommand>,
-    queue: &mut VecDeque<OnlineBackupCommand>,
-    input_closed: &mut bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(command) => queue.push_back(command),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                *input_closed = true;
-                break;
-            }
-        }
-    }
-}
-
-fn drain_migration_sql_ingress(
-    receiver: &mut mpsc::Receiver<MigrationSqlWriterCommand>,
-    queue: &mut VecDeque<MigrationSqlWriterCommand>,
-    input_closed: &mut bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(command) => queue.push_back(command),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                *input_closed = true;
-                break;
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AuxiliaryWork {
-    MigrationSql,
-    IncrementalVacuum,
-    OnlineBackup,
-}
-
-fn select_auxiliary_work(
-    migration_waiting: bool,
-    incremental_vacuum_waiting: bool,
-    online_backup_waiting: bool,
-    product_queue_empty: bool,
-    prefer_auxiliary: bool,
-    next: AuxiliaryWork,
-) -> Option<AuxiliaryWork> {
-    if !product_queue_empty && !prefer_auxiliary {
-        return None;
-    }
-    let waiting = |work| match work {
-        AuxiliaryWork::MigrationSql => migration_waiting,
-        AuxiliaryWork::IncrementalVacuum => incremental_vacuum_waiting,
-        AuxiliaryWork::OnlineBackup => online_backup_waiting,
-    };
-    let order = match next {
-        AuxiliaryWork::MigrationSql => [
-            AuxiliaryWork::MigrationSql,
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-        ],
-        AuxiliaryWork::IncrementalVacuum => [
-            AuxiliaryWork::IncrementalVacuum,
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::MigrationSql,
-        ],
-        AuxiliaryWork::OnlineBackup => [
-            AuxiliaryWork::OnlineBackup,
-            AuxiliaryWork::MigrationSql,
-            AuxiliaryWork::IncrementalVacuum,
-        ],
-    };
-    order.into_iter().find(|work| waiting(*work))
-}
-
-fn drain_checkpoint_ingress(
-    receiver: &mut mpsc::Receiver<CheckpointCommand>,
-    queue: &mut VecDeque<CheckpointCommand>,
-    input_closed: &mut bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(command) => queue.push_back(command),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                *input_closed = true;
-                break;
-            }
-        }
-    }
-}
-
-fn drain_ingress(
-    receiver: &mut mpsc::Receiver<AcceptedRequest>,
-    queue: &mut FairQueue<AcceptedRequest>,
-    telemetry: &WriterTelemetry,
-    input_closed: &mut bool,
-) {
-    loop {
-        match receiver.try_recv() {
-            Ok(item) => enqueue(queue, item, telemetry),
-            Err(mpsc::error::TryRecvError::Empty) => break,
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                *input_closed = true;
-                break;
-            }
-        }
-    }
-}
-
-fn enqueue(
-    queue: &mut FairQueue<AcceptedRequest>,
-    item: AcceptedRequest,
-    telemetry: &WriterTelemetry,
-) {
-    if let Err(item) = queue.push(item) {
-        let result = Err(infrastructure(
-            "duplicate operation id reached persistent writer",
-        ));
-        telemetry.released(1, item.admission_bytes());
-        telemetry.completed(&result);
-        item.settle(result);
-    }
-}
-
-fn cancel_waiting(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
-    for item in queue.drain_matching(|item| item.probe.interruption().is_some()) {
-        let bytes = item.admission_bytes();
-        let outcome = interruption_outcome(
-            &item.request,
-            item.probe.as_ref(),
-            RuntimeCancellationStageV1::Queued,
-        )
-        .expect("selected request is interrupted");
-        let result = Ok(outcome);
-        telemetry.released(1, bytes);
-        telemetry.completed(&result);
-        item.settle(result);
-    }
-}
-
-fn reject_unauthorized(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
-    for item in queue.drain_matching(|item| {
-        item.authority
-            .verify(RuntimeWriteAuthorityStage::Dequeued)
-            .is_err()
-    }) {
-        let bytes = item.admission_bytes();
-        let result = Ok(super::settlement::missing_authority());
-        telemetry.released(1, bytes);
-        telemetry.completed(&result);
-        item.settle(result);
-    }
-}
-
-fn reject_all(queue: &mut FairQueue<AcceptedRequest>, telemetry: &WriterTelemetry) {
-    for item in queue.drain_all() {
-        let bytes = item.admission_bytes();
-        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
-            reason: UnavailableReasonV1::Faulted,
-        });
-        telemetry.released(1, bytes);
-        telemetry.completed(&result);
-        item.settle(result);
-    }
-}
-
-fn reject_all_migration_sql(queue: &mut VecDeque<MigrationSqlWriterCommand>) {
-    for command in queue.drain(..) {
-        reject_writer_command(command);
-    }
-}
-
-fn reject_online_backup(command: OnlineBackupCommand) {
-    command.settle(Err(WriterActorError::OnlineBackupFailed(
-        super::WriterOnlineBackupError::WriterShuttingDown,
-    )));
-}
-
-fn reject_all_online_backup(queue: &mut VecDeque<OnlineBackupCommand>) {
-    for command in queue.drain(..) {
-        reject_online_backup(command);
-    }
-}
-
 fn run_incremental_vacuum(
     connection: &mut rusqlite::Connection,
     command: IncrementalVacuumCommand,
@@ -877,18 +579,6 @@ fn run_incremental_vacuum(
         .commit()
         .map_err(|error| WriterActorError::IncrementalVacuumFailed(error.to_string()));
     command.settle(result);
-}
-
-fn reject_incremental_vacuum(command: IncrementalVacuumCommand) {
-    command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-        "writer is unavailable".to_owned(),
-    )));
-}
-
-fn reject_all_incremental_vacuum(queue: &mut VecDeque<IncrementalVacuumCommand>) {
-    for command in queue.drain(..) {
-        reject_incremental_vacuum(command);
-    }
 }
 
 fn build_batches(
