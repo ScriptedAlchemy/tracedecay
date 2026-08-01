@@ -491,7 +491,7 @@ async fn query_fact_response_metadata_tx(
 /// The typed runtime read port ([`FactReadOperationV1`]) admits only `Current`
 /// and `Lineage`, so a runtime-mounted shard has no read operation that can
 /// answer coverage or contradiction. The retained [`Database`] the runtime is
-/// mounted on is proven by `validate_mount` to be the identical SQLite file, so
+/// mounted on is proven by `validate_mount` to be the identical `SQLite` file, so
 /// this snapshot measures the same authority the runtime would read rather than
 /// substituting a constant for a measurement.
 ///
