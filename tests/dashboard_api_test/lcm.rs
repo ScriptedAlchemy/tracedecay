@@ -13,9 +13,10 @@ use crate::common::{
 };
 use crate::dashboard_api_support::{MessageDetails, message};
 
+use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
 use tracedecay::sessions::lcm::{
     LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
@@ -70,7 +71,7 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
 }
 
 async fn seed_lcm_store(
-    runtime: &HostAdmissionTestRuntimeV1,
+    runtime: &DashboardTestRuntimeV1,
     project: &Path,
     external_message: Option<SessionMessageRecord>,
 ) -> Result<(String, String, String), LcmError> {
@@ -217,7 +218,7 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     };
     let project_id = ProjectId::new("dashboard_lcm_fixture").expect("valid project identity");
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
             .expect("registered project session runtime"),
     );
@@ -296,12 +297,16 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     let server_runtime = Arc::clone(&runtime);
     let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
+        let authority = server_runtime
+            .dashboard_test_authority()
+            .expect("dashboard LCM authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
-            server_runtime,
+            authority,
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
+            dashboard::spa_router(),
             std::future::pending(),
         )
         .await;

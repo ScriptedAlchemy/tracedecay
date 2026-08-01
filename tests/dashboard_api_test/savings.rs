@@ -14,10 +14,11 @@ use crate::common::{
     pick_free_port, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, MessageRecordBuilder, message};
+use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::ParseOffset;
@@ -82,7 +83,7 @@ const TEXT_ASSISTANT: &str =
 const TEXT_UNKNOWN: &str = "This message was stored without any model id attached.";
 const TEXT_MIXED: &str = "Second message of the mixed session, no usage record here.";
 
-struct SavingsSeed<'a>(&'a HostAdmissionTestRuntimeV1);
+struct SavingsSeed<'a>(&'a DashboardTestRuntimeV1);
 
 impl SavingsSeed<'_> {
     async fn upsert(&self, project: &Path, tokens_saved: u64) {
@@ -147,7 +148,7 @@ impl SavingsSeed<'_> {
     }
 }
 
-async fn seed_ledger_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, day_start: i64) {
+async fn seed_ledger_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
     let gdb = SavingsSeed(runtime);
 
     // Lifetime counter (legacy `projects.tokens_saved`, what `tracedecay
@@ -170,7 +171,7 @@ async fn seed_ledger_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, da
     .await;
 }
 
-async fn seed_global_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, day_start: i64) {
+async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_start: i64) {
     seed_ledger_db(runtime, project, day_start).await;
     let gdb = SavingsSeed(runtime);
 
@@ -378,7 +379,7 @@ async fn seed_global_db(runtime: &HostAdmissionTestRuntimeV1, project: &Path, da
 }
 
 async fn seed_daily_limit_regression(
-    runtime: &HostAdmissionTestRuntimeV1,
+    runtime: &DashboardTestRuntimeV1,
     project: &Path,
     latest_day: i64,
 ) {
@@ -483,7 +484,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let project_id =
         tracedecay_domain::ProjectId::new("dashboard_savings_fixture").expect("project identity");
     let host_runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+        DashboardTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
             .expect("savings host-admission runtime"),
     );
@@ -509,12 +510,16 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
+        let authority = server_runtime
+            .dashboard_test_authority()
+            .expect("dashboard savings authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
-            server_runtime,
+            authority,
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
+            dashboard::spa_router(),
             std::future::pending(),
         )
         .await;

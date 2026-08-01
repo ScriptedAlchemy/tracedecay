@@ -2,12 +2,12 @@ use std::path::Path;
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
-    pick_free_port, tempdir_or_panic, wait_for_dashboard, write_empty_global_db_schema,
+    pick_free_port, tempdir_or_panic, wait_for_dashboard,
 };
 use crate::dashboard_api_support::write_file;
+use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
@@ -60,13 +60,13 @@ fn make_node(id: &str, kind: NodeKind, name: &str, file_path: &str, start_line: 
 async fn setup_project(
     project_root: &Path,
     profile_root: &Path,
-) -> (TraceDecay, std::sync::Arc<HostAdmissionTestRuntimeV1>) {
+) -> (TraceDecay, std::sync::Arc<DashboardTestRuntimeV1>) {
     write_file(
         &project_root.join("src/dashboard/mod.rs"),
         "pub fn dashboard() {}\npub fn route_graph() {}\npub fn render_graph() {}\n",
     );
     let runtime = std::sync::Arc::new(
-        HostAdmissionTestRuntimeV1::project(
+        DashboardTestRuntimeV1::project(
             profile_root,
             project_root,
             ProjectId::new("dashboard_graph_fixture").expect("project identity"),
@@ -305,11 +305,6 @@ async fn start_dashboard_fixture_with(
     let profile_root = tmp.path().join("profile").join(".tracedecay");
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    // Pre-create the global store from the cached empty template so init and
-    // dashboard startup open an existing DB instead of paying a full schema
-    // creation (slow on Windows).
-    write_empty_global_db_schema(&global_db_path).await;
-
     let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
     seed_graph_fixture(&cg).await;
     if with_orphan {
@@ -326,12 +321,16 @@ async fn start_dashboard_fixture_with(
     let base_url = format!("http://127.0.0.1:{port}");
     let server_graph = std::sync::Arc::new(cg);
     let server = tokio::spawn(async move {
+        let authority = host_runtime
+            .dashboard_test_authority()
+            .expect("dashboard graph authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
-            host_runtime,
+            authority,
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
+            dashboard::spa_router(),
             std::future::pending(),
         )
         .await;

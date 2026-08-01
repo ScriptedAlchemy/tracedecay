@@ -80,7 +80,7 @@ fn managed_skills_are_dashboard_controllable_and_persistent() {
             .host_runtime
             .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
                 provider: "mcp".to_string(),
-                project_id: HostAdmissionTestRuntimeV1::canonical_project_key(
+                project_id: DashboardTestRuntimeV1::canonical_project_key(
                     &fixture.project_root,
                 ),
                 session_id: Some("dashboard-skill-session".to_string()),
