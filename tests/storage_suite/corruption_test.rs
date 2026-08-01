@@ -287,9 +287,7 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
 // ─── begin_bulk_load no longer downgrades synchronous ────────────────────
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn bulk_load_preserves_platform_synchronous_mode() {
-    let _env_lock = common::lock_global_db_env();
     let (db, _dir, _path) = setup_db().await;
 
     let expected_sync = db
