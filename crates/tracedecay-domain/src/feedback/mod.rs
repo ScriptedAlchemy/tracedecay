@@ -31,61 +31,20 @@ const FEEDBACK_DEDUPE_KEY_DOMAIN: &str = "tracedecay.feedback.dedupe.v1";
 const FEEDBACK_FINDING_ID_DOMAIN: &str = "tracedecay.feedback.finding.v1";
 const FEEDBACK_RESULT_ID_DOMAIN: &str = "tracedecay.feedback.result.v1";
 
-macro_rules! feedback_id {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                validate_label(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_label(&self.0, $field)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = DomainError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    };
-}
-
-feedback_id!(FeedbackCycleId, "feedback cycle id");
-feedback_id!(FeedbackResultId, "feedback result id");
-feedback_id!(FeedbackFindingId, "feedback finding id");
-feedback_id!(FeedbackDedupeKeyV1, "feedback dedupe key");
-feedback_id!(FeedbackSavedDedupeKeyV1, "saved feedback dedupe key");
-feedback_id!(FeedbackDedupeClaimId, "feedback dedupe claim id");
-
 pub(crate) use crate::canonical_text::validate_canonical_string as validate_label;
+use crate::canonical_text::validated_string_newtype;
+
+validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_label;
+    FeedbackCycleId => "feedback cycle id",
+    FeedbackResultId => "feedback result id",
+    FeedbackFindingId => "feedback finding id",
+    FeedbackDedupeKeyV1 => "feedback dedupe key",
+    FeedbackSavedDedupeKeyV1 => "saved feedback dedupe key",
+    FeedbackDedupeClaimId => "feedback dedupe claim id",
+);
 
 /// Exact repository scope used for a feedback evaluation. A path, current
 /// working directory, repository display name, or mutable branch label is not

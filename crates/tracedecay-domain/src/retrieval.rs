@@ -24,7 +24,9 @@ use crate::code_intelligence::{
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
-use crate::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
+use crate::canonical_text::{
+    CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within, validated_string_newtype,
+};
 use crate::research::{DomainError, canonical_sha256};
 use crate::session::TemporalModeV1;
 
@@ -48,55 +50,6 @@ fn validate_retrieval_identity(
     }
 }
 
-macro_rules! retrieval_string_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, RetrievalContractError> {
-                let value = value.into();
-                validate_retrieval_identity(&value, stringify!($name))?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), RetrievalContractError> {
-                validate_retrieval_identity(&self.0, stringify!($name))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = RetrievalContractError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
 /// Restate a shared integrity-digest rejection as a retrieval-contract error.
 ///
 /// The retrieval kernel makes no distinction between an empty digest and a
@@ -109,7 +62,10 @@ fn retrieval_digest_error(error: DomainError) -> RetrievalContractError {
     RetrievalContractError::InvalidIdentity { field }
 }
 
-retrieval_string_id!(
+validated_string_newtype!(
+    plain,
+    RetrievalContractError,
+    validate_retrieval_identity;
     PrincipalId,
     SourceOccurrenceId,
     LogicalEvidenceId,
