@@ -675,6 +675,106 @@ fn rollback_refuses_database_with_active_authority() {
     );
 }
 
+/// A branch sync mounts the new branch database through the process-wide store
+/// runtime registry, and that mount keeps the database authority lease alive
+/// after the failed graph handle is dropped. Rollback fences the same `SQLite`
+/// family for deletion, and a deletion fence refuses any database this process
+/// still holds an authority for — so branch sync used to fail with "this
+/// process already holds an incompatible database authority or deletion fence
+/// (operation: roll back published branch SQLite family)" and leave the failed
+/// branch published until some other process cleaned it up.
+///
+/// Retiring the registered runtime first must make the exact same rollback
+/// succeed in this process, and must leave the pre-sync branch metadata intact.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_succeeds_after_the_failed_sync_retires_its_branch_runtime() {
+    use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+    use crate::db::{DatabaseAccessMode, DatabaseAuthority};
+    use tracedecay_store::ProjectId;
+
+    let temporary = tempfile::tempdir().expect("temporary fixture root");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    gix::init(&project_root).expect("initialize project repository");
+
+    let data_root = profile_root.join("projects/project.branch-rollback");
+    let branches_dir = data_root.join("branches");
+    std::fs::create_dir_all(&branches_dir).expect("branch database directory");
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &profile_root,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .expect("private profile identity root");
+    let db_path = branches_dir.join("feature.db");
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(&data_root, &meta).expect("publish branch metadata");
+
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 7, "branch rollback fixture")
+            .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_id = ProjectId::new("project.branch-rollback").expect("project id");
+    let authority = DatabaseAuthority::for_runtime(&db_path, "publish branch under sync")
+        .expect("branch database authority");
+    let database = registry
+        .code_graph_branch(
+            &project_root,
+            project_id,
+            "feature",
+            db_path.clone(),
+            authority,
+            DatabaseAccessMode::ReadWrite,
+        )
+        .await
+        .expect("branch publication");
+
+    // The sync failed: its graph handle is gone, but the registry still holds
+    // the mount and the authority behind it.
+    drop(database);
+    let fenced = rollback_branch_tracking(&data_root, "feature", "branches/feature.db", &db_path)
+        .expect_err("a retained branch runtime must still fence rollback");
+    assert!(
+        fenced
+            .to_string()
+            .contains("incompatible database authority or deletion fence"),
+        "unexpected rollback denial: {fenced}"
+    );
+    assert!(db_path.exists());
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .expect("branch metadata")
+            .is_tracked("feature")
+    );
+
+    registry
+        .close_code_graph_paths([db_path.clone()])
+        .await
+        .expect("retire the failed branch runtime");
+
+    rollback_branch_tracking(&data_root, "feature", "branches/feature.db", &db_path)
+        .expect("rollback must not require a second process");
+
+    assert!(!db_path.exists());
+    let persisted = crate::branch_meta::load_branch_meta(&data_root).expect("branch metadata");
+    assert!(!persisted.is_tracked("feature"));
+    assert_eq!(
+        persisted.default_branch, "main",
+        "rollback must leave the pre-sync branch family intact"
+    );
+}
+
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
     if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
         meta.touch_synced(&prepared.branch_name);
