@@ -11,35 +11,23 @@ use super::{
 };
 
 impl HookSpoolV1 {
-    /// Refresh a still-owned writer lease. Expired or replaced leases fail
-    /// closed; no caller may continue appending after that point.
+    /// Reject a mutation once the acquired lease deadline has passed.
     ///
-    /// DECISION NEEDED: this method has zero callers today, but it is the
-    /// only lease-renewal path in this crate. A long-lived spool writer
-    /// (e.g. a daemon replay loop that keeps a `HookSpoolV1` open across
-    /// many `append` calls) never renews its lease, so `writer_lease_micros`
-    /// after acquisition, `ensure_live_lease` (see below) starts rejecting
-    /// every subsequent append with `HookSpoolError::WriterLeaseExpired`
-    /// (or similar), even though nothing else holds the lease. Either wire
-    /// this into the daemon replay loop so long-lived writers renew before
-    /// expiry, or explicitly document spool writer leases as single-shot
-    /// (acquire, do bounded work, drop) and size `writer_lease_micros`
-    /// accordingly. Left in place pending that decision; do not delete.
-    pub fn renew_writer_lease(&mut self, now: UtcMicros) -> Result<(), HookSpoolError> {
-        self.ensure_live_lease(now)?;
-        let renewed = HookSpoolWriterLeaseV1 {
-            token: self.lease.token,
-            expires_at: UtcMicros(
-                now.0
-                    .checked_add(self.config.writer_lease_micros)
-                    .ok_or(HookSpoolError::InvalidLease)?,
-            ),
-        };
-        write_lease_file(&mut self.lease_file, renewed)?;
-        self.lease = renewed;
-        Ok(())
-    }
-
+    /// Writer leases are deliberately single-shot and non-renewable: a writer
+    /// acquires one in [`HookSpoolV1::open`], performs bounded work against the
+    /// same caller-supplied `now`, and drops. There is no renewal API, because
+    /// the recovery for an elapsed lease is to drop the spool and reopen it,
+    /// which acquires a fresh lease and rescans the durable records. Nothing is
+    /// lost by that: records, acknowledgements, and the replay cursor are all
+    /// on disk before a mutation returns.
+    ///
+    /// The consequence callers must respect is that a single spool handle must
+    /// not be held across a clock advance larger than
+    /// `HookSpoolConfigV1::writer_lease_micros`. Every mutating entry point
+    /// takes `now` from the caller, so a writer that reuses the timestamp it
+    /// opened with can never observe expiry mid-session; one that reads a fresh
+    /// clock per mutation must reopen instead of retrying, or it will spin on
+    /// [`HookSpoolError::WriterLeaseLost`] forever.
     pub(super) fn ensure_live_lease(&self, now: UtcMicros) -> Result<(), HookSpoolError> {
         if self.lease.expires_at.0 <= now.0 {
             return Err(HookSpoolError::WriterLeaseLost);
