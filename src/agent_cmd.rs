@@ -4433,7 +4433,6 @@ mod tests {
                 &mut interrupted_registration,
             )
             .expect_err("the injected verify failure must interrupt this transaction");
-        drop(transaction);
         drop(writer);
         let journal_path = lifecycle
             .path()
