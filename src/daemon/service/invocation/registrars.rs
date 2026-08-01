@@ -306,6 +306,16 @@ pub(super) struct DaemonFeedbackPublicationTestGate {
 
 #[cfg(test)]
 impl DaemonFeedbackPublicationTestGate {
+    pub(super) fn new(
+        publication_ready: tokio::sync::oneshot::Sender<()>,
+        continue_publication: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            publication_ready: StdMutex::new(Some(publication_ready)),
+            continue_publication: Mutex::new(Some(continue_publication)),
+        }
+    }
+
     async fn wait(&self) {
         self.publication_ready
             .lock()
