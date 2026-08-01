@@ -1599,3 +1599,121 @@ fn rich_wire_matches_handwritten_golden_and_literal_boundaries() {
         omission.anchor_id.is_none() && omission.reason == ContextOmissionReasonV1::TokenBudget
     }));
 }
+
+/// Finding 12 equivalence: the sorted available-anchor index is built once and
+/// shared by both the privacy/overlap validation and the omission-clearing pass
+/// (previously constructed and sorted twice per call). Behaviour must match the
+/// former build-it-twice implementation exactly.
+#[test]
+fn available_id_index_clears_and_validates_identically() {
+    fn budget() -> ContextBudget {
+        ContextBudget {
+            max_bytes: 100_000,
+            max_tokens: 100_000,
+            estimator_version: "words-v1".to_string(),
+        }
+    }
+    fn payload(id: &str, body: &[u8]) -> HydratedPayload {
+        HydratedPayload {
+            anchor_id: anchor(id),
+            bytes: body.to_vec(),
+        }
+    }
+
+    let available = vec![payload("a", b"alpha"), payload("b", b"bravo")];
+
+    // A non-terminal omission whose anchor is available is cleared to None; one
+    // for an unavailable anchor is retained.
+    let frames = TemporalContextFrames {
+        omissions: vec![
+            CompactContextOmissionV1 {
+                anchor_id: Some(anchor("a")),
+                reason: ContextOmissionReasonV1::Unavailable,
+            },
+            CompactContextOmissionV1 {
+                anchor_id: Some(anchor("x")),
+                reason: ContextOmissionReasonV1::Unavailable,
+            },
+        ],
+        ..TemporalContextFrames::default()
+    };
+    let context = assemble_context_parts_with_frames(
+        &available,
+        &[] as &[UnavailableHydration],
+        RetrievalGrainV1::Occurrence,
+        frames,
+        budget(),
+        &WordEstimator,
+        &ExecutionControl::default(),
+    )
+    .expect("assembles");
+    assert!(
+        context.bundle.omissions.iter().any(|omission| {
+            omission.anchor_id.is_none()
+                && omission.reason == ContextOmissionReasonV1::Unavailable
+        }),
+        "available anchor omission is cleared to None"
+    );
+    assert!(
+        context
+            .bundle
+            .omissions
+            .iter()
+            .any(|omission| omission.anchor_id.as_ref() == Some(&anchor("x"))),
+        "unavailable anchor omission is retained"
+    );
+
+    // Duplicate available anchors are rejected by the single dedup check.
+    let duplicates = vec![payload("a", b"one"), payload("a", b"two")];
+    assert!(matches!(
+        assemble_context_parts_with_frames(
+            &duplicates,
+            &[] as &[UnavailableHydration],
+            RetrievalGrainV1::Occurrence,
+            TemporalContextFrames::default(),
+            budget(),
+            &WordEstimator,
+            &ExecutionControl::default(),
+        ),
+        Err(ContextError::InvalidBundle(_))
+    ));
+
+    // An anchor that is both available and unavailable is rejected.
+    let unavailable = vec![UnavailableHydration {
+        anchor_id: anchor("a"),
+        state: HydrationStateV1::Redacted,
+    }];
+    assert!(matches!(
+        assemble_context_parts_with_frames(
+            &available,
+            &unavailable,
+            RetrievalGrainV1::Occurrence,
+            TemporalContextFrames::default(),
+            budget(),
+            &WordEstimator,
+            &ExecutionControl::default(),
+        ),
+        Err(ContextError::InvalidBundle(_))
+    ));
+
+    // A terminal-privacy omission for an available anchor is rejected.
+    let terminal = TemporalContextFrames {
+        omissions: vec![CompactContextOmissionV1 {
+            anchor_id: Some(anchor("a")),
+            reason: ContextOmissionReasonV1::Redacted,
+        }],
+        ..TemporalContextFrames::default()
+    };
+    assert!(matches!(
+        assemble_context_parts_with_frames(
+            &available,
+            &[] as &[UnavailableHydration],
+            RetrievalGrainV1::Occurrence,
+            terminal,
+            budget(),
+            &WordEstimator,
+            &ExecutionControl::default(),
+        ),
+        Err(ContextError::InvalidBundle(_))
+    ));
+}
