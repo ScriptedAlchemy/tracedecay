@@ -2483,7 +2483,12 @@ fn historical_candidates(
         max_blob_bytes: 8 * 1024 * 1024,
         max_total_bytes: 32 * 1024 * 1024,
     };
-    match read_historical_evidence(&published.repo_root, &scope, authorization.as_ref(), &request) {
+    match read_historical_evidence(
+        &published.repo_root,
+        &scope,
+        authorization.as_ref(),
+        &request,
+    ) {
         HistoricalGitReadOutcomeV1::Unavailable { reason } => {
             Ok((HistoricalQueryExecutionV1::Unavailable(reason), Vec::new()))
         }
@@ -2673,11 +2678,10 @@ fn publish_corpus_with_scale(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
-            .map_err(|error| {
-                CandidateOutputError::Contract(format!("open production owner: {error}"))
-            })?;
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("open production owner: {error}"))
+        })?;
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
@@ -3144,9 +3148,8 @@ fn prove_cancellation(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner =
-        CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let error = match owner.build_and_publish(request, &CancelledControl) {
         Err(error) => error,
         Ok(_) => {
@@ -3536,11 +3539,7 @@ mod tests {
     }
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root above crates/<crate>")
-            .to_path_buf()
+        crate::checked_in_fixture_root()
     }
 
     fn workload() -> CandidateWorkloadV1 {
@@ -3904,7 +3903,8 @@ mod tests {
     fn published_corpus_maps_production_source_occurrences() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope).expect("publish corpus");
+        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+            .expect("publish corpus");
 
         for chunk in published.generation.chunks().chunks() {
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
@@ -4012,7 +4012,8 @@ mod tests {
     fn native_query_stages_and_late_hydration_emit_raw_measurements() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope).expect("published corpus");
+        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+            .expect("published corpus");
         let profile = workload
             .profile_matrix
             .iter()
@@ -4099,8 +4100,7 @@ mod tests {
         })
         .expect("generate");
         let report =
-            crate::evaluate_generated_outputs(fixture_root, &workload, &result)
-                .expect("evaluate");
+            crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
 
         let expected_status = if peak_rss_bytes().is_some() {
             crate::DirectEvaluationStatusV1::Pass
@@ -4123,8 +4123,10 @@ mod tests {
                 .all(|profile| { profile.resource_status == expected_status })
         );
 
-        let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope).expect("current corpus");
-        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope).expect("10x corpus");
+        let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope)
+            .expect("current corpus");
+        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope)
+            .expect("10x corpus");
         assert_ne!(
             current.generation.manifest().generation_id,
             ten_x.generation.manifest().generation_id
@@ -4147,16 +4149,9 @@ mod tests {
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
-        let report = crate::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &missing_resource,
-        )
-        .expect("evaluate");
-        assert_eq!(
-            report.status,
-            crate::DirectEvaluationStatusV1::Fail
-        );
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &missing_resource)
+            .expect("evaluate");
+        assert_eq!(report.status, crate::DirectEvaluationStatusV1::Fail);
         assert_eq!(
             report.profiles[0].resource_status,
             crate::DirectEvaluationStatusV1::Fail
@@ -4164,12 +4159,8 @@ mod tests {
 
         let mut duplicate_query = result.clone();
         duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
-        let error = crate::evaluate_generated_outputs(
-            &repo_root(),
-            &workload,
-            &duplicate_query,
-        )
-        .expect_err("duplicate query row");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &duplicate_query)
+            .expect_err("duplicate query row");
         assert!(error.to_string().contains("duplicate query row"));
 
         let mut duplicate_profile_partition = result.clone();
@@ -4184,38 +4175,33 @@ mod tests {
 
         let mut forged = result;
         forged.outputs[0].production_boundary = "lookalike".to_owned();
-        let error =
-            crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged production boundary");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged production boundary");
         assert!(error.to_string().contains("production boundary"));
 
         forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
         forged.outputs[0].fixture_source_commit = "forged".to_owned();
-        let error =
-            crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged source commit");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged source commit");
         assert!(error.to_string().contains("source commit"));
 
         forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
         forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
-        let error =
-            crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged corpus digest");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged corpus digest");
         assert!(error.to_string().contains("byte-exact corpus"));
 
         forged.outputs[0].corpus_digest =
             compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
         forged.outputs[0].toolchain.clear();
-        let error =
-            crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("missing environment");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("missing environment");
         assert!(error.to_string().contains("environment summary"));
 
         forged.outputs[0].toolchain = "rustc:test".to_owned();
         forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
-        let error =
-            crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("inconsistent abstention");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("inconsistent abstention");
         assert!(error.to_string().contains("inconsistent abstention"));
     }
 
@@ -4238,9 +4224,8 @@ mod tests {
         .expect("generate");
         result.outputs[0].optional_stages.semantic = OptionalStageMeasurementV1::NotRequested;
 
-        let error =
-            crate::evaluate_generated_outputs(&fixture.root, &workload, &result)
-                .expect_err("configured semantic stage cannot be reported as not requested");
+        let error = crate::evaluate_generated_outputs(&fixture.root, &workload, &result)
+            .expect_err("configured semantic stage cannot be reported as not requested");
         assert!(error.to_string().contains("optional stage status"));
     }
 
@@ -4264,12 +4249,8 @@ mod tests {
             .expect("current resource");
         current.status = ResourceMeasurementStatusV1::Pending;
         current.pending_reason = None;
-        let report = crate::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &invalid_pending,
-        )
-        .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &invalid_pending)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
             crate::DirectEvaluationStatusV1::Fail
@@ -4286,9 +4267,8 @@ mod tests {
             .get_mut("10x")
             .expect("10x resource")
             .eligible_chunks = current_chunks;
-        let report =
-            crate::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
-                .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
             crate::DirectEvaluationStatusV1::Fail
@@ -4309,9 +4289,8 @@ mod tests {
                 .maximum_p99_latency_us
                 .saturating_add(1),
         );
-        let report =
-            crate::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
-                .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
             crate::DirectEvaluationStatusV1::Fail
@@ -4326,12 +4305,8 @@ mod tests {
         extra_resource.outputs[0]
             .resources
             .insert("synthetic".to_owned(), synthetic);
-        let report = crate::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &extra_resource,
-        )
-        .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &extra_resource)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
             crate::DirectEvaluationStatusV1::Fail
@@ -4380,8 +4355,8 @@ mod tests {
                 &workload,
                 "query-fallback",
                 query_id,
-            fixture_admitted_scope,
-        )
+                fixture_admitted_scope,
+            )
             .expect("direct retrieve");
             serde_json::from_slice::<QueryCandidateRowV1>(&bytes).expect("candidate row")
         };

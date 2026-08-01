@@ -35,10 +35,6 @@ pub use tracedecay_application::git::{
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
     GitIntelligenceError, GitReadPort, NativeHistoricalBlobReaderV1,
 };
-// Path-shape predicate shared with the adapter's own validation, not part of the
-// read contract. It was `pub(crate)` before the contracts moved to application,
-// so it stays crate-visible here rather than joining the root's public surface.
-pub(crate) use tracedecay_application::git::is_canonical_repository_relative_path;
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
     GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
@@ -1601,13 +1597,6 @@ fn looks_binary(path: &Path) -> bool {
     let mut buffer = [0u8; 8192];
     let read = file.take(8192).read(&mut buffer).unwrap_or(0);
     buffer[..read].contains(&0)
-}
-
-fn validate_historical_path(path: &str) -> Result<(), GitIntelligenceError> {
-    if !is_canonical_repository_relative_path(path) {
-        return Err(GitIntelligenceError::InvalidHistoricalPath(path.to_owned()));
-    }
-    Ok(())
 }
 
 /// Worktree file mode evidence (read-only metadata).

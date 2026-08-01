@@ -24,11 +24,11 @@ use crate::git_query::{
 // The historical outcome projection moved down beside the adapter that
 // produces it; both this owner and the extracted search evaluator mount the
 // same values.
-pub use tracedecay_application::historical_query::{
-    HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
-};
 use tracedecay_application::historical_query::{
     HistoricalGitQueryAdapter, HistoricalQueryRequestV1, HistoricalSourceAuthorizationV1,
+};
+pub use tracedecay_application::historical_query::{
+    HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

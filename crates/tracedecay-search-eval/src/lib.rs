@@ -20,15 +20,14 @@ pub mod semantic_native;
 
 pub use candidate_output::{
     AdmittedCorpusScopeFn, CandidateOutputError, CandidateWorkloadV1,
-    DirectEvaluatedProfileMaterialV1,
-    GenerateCandidateOutputsOptions, GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1,
-    OptionalStageMeasurementsV1, ProductionCandidateNativeExecutionAuthorityV1,
-    ProductionCandidateNativeGenerationResourcesV1, ProductionCandidateNativeQueryContextV1,
-    ProductionCandidateNativeQueryInputsV1, ProductionCandidateNativeResourceContextV1,
-    ProductionCandidateOutputV1, ResourceMeasurementStatusV1, WorkloadQueryV1,
-    compute_corpus_digest, compute_profile_material_digest, compute_workload_digest,
-    direct_evaluated_profile_material, generate_candidate_outputs,
-    generate_candidate_outputs_with_native, load_candidate_workload,
+    DirectEvaluatedProfileMaterialV1, GenerateCandidateOutputsOptions,
+    GenerateCandidateOutputsResultV1, OptionalStageMeasurementV1, OptionalStageMeasurementsV1,
+    ProductionCandidateNativeExecutionAuthorityV1, ProductionCandidateNativeGenerationResourcesV1,
+    ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
+    ProductionCandidateNativeResourceContextV1, ProductionCandidateOutputV1,
+    ResourceMeasurementStatusV1, WorkloadQueryV1, compute_corpus_digest,
+    compute_profile_material_digest, compute_workload_digest, direct_evaluated_profile_material,
+    generate_candidate_outputs, generate_candidate_outputs_with_native, load_candidate_workload,
     load_direct_evaluated_profile_material, no_admitted_corpus_scope,
     retrieve_partition_query_bytes, validate_workload_for_tuning, write_generate_outputs,
 };
@@ -43,6 +42,19 @@ pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
     }
     let rank = percentile.saturating_mul(sorted.len()).div_ceil(100);
     sorted.get(rank.saturating_sub(1)).copied()
+}
+
+/// The workspace root that hosts the checked-in evaluator fixtures.
+///
+/// Fixture paths are workspace-relative because the evaluator measures the
+/// product repository, not this crate's directory.
+#[cfg(test)]
+pub(crate) fn checked_in_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root above crates/<crate>")
+        .to_path_buf()
 }
 
 const DEFAULT_WORKLOAD: &str =
@@ -1437,9 +1449,9 @@ mod tests {
 
     #[test]
     fn activation_profile_chain_is_closed_and_ordered() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = crate::checked_in_fixture_root();
         let (_, workload) =
-            load_authoritative_default_workload(repo_root).expect("authoritative workload");
+            load_authoritative_default_workload(&repo_root).expect("authoritative workload");
 
         assert_eq!(
             activation_profile_chain(&workload, QUERY_BASELINE_PROFILE).expect("query chain"),
@@ -1598,10 +1610,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp repository");
         let path = temp.path().join(super::DEFAULT_WORKLOAD);
         std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
-        let mut bytes = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(super::DEFAULT_WORKLOAD),
-        )
-        .expect("checked-in workload");
+        let mut bytes =
+            std::fs::read(crate::checked_in_fixture_root().join(super::DEFAULT_WORKLOAD))
+                .expect("checked-in workload");
         bytes.push(b'\n');
         std::fs::write(path, bytes).expect("altered workload");
 
