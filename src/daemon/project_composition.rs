@@ -388,7 +388,7 @@ pub(super) async fn production_project_server(
             invocation.clone(),
             store_administration.clone(),
             canonical_project_path.to_path_buf(),
-            code_search_scope,
+            code_search_scope.clone(),
         ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let retained_graph_resolver = retained_project_graph_resolver(store_administration.clone());
