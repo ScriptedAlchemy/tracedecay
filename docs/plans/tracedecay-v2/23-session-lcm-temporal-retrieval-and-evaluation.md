@@ -154,7 +154,7 @@ This is the sole temporal retrieval kernel. Legacy `message_search` and
 delegate; they do not keep separate ranking, hydration, context, pagination, or
 freshness logic. `src/mcp/server.rs`,
 `src/mcp/tools/handlers/session/message_search.rs`, and
-`src/mcp/tools/handlers/session/lcm_handlers.rs` are translation/rendering
+`src/mcp/tools/handlers/session/lcm_handlers/mod.rs` are translation/rendering
 adapters only: they do not query LCM tables, call `get_session_message`,
 hydrate payloads, apply semantic filters after ranking, or encode a second LCM
 cursor. Workflow recovery consumes session evidence through this kernel; the
@@ -273,7 +273,7 @@ kind: CursorManifestLimitKindV1, observed, maximum }`, where
 256-participant and 65,536-byte limits. Rejection occurs before candidate
 generation and persists no cursor state.
 
-`src/global_db/session_temporal/cursor_keys.rs` owns cursor-key provisioning,
+`crates/tracedecay-global-db/src/session_temporal/cursor_keys.rs` owns cursor-key provisioning,
 rotation, and retention. A cursor expires 24 hours after issue; retired keys
 remain verification-only for 24 hours plus five minutes of clock skew. Reads
 never provision or rotate keys. The untrusted key-route ID may select a retained
@@ -366,7 +366,7 @@ values cannot disagree.
 
 The receipt is carried through `SessionRefreshProgressV1`,
 `SessionRefreshReceiptV1`, `SessionTemporalExecutionReport`, and
-`src/application/session/types.rs::SessionTemporalMetadataView`. The view binds
+`crates/tracedecay-usecases/src/session/types.rs::SessionTemporalMetadataView`. The view binds
 the requested mode/cutoff and the complete sorted source receipts. Aggregate
 freshness is derived from source receipts and is never hard-coded to `Fresh`.
 Wrong scope is the request-level
@@ -466,41 +466,41 @@ reads.
 - `src/query/temporal/context.rs` owns exact-budget context assembly.
 - `src/query/temporal/mod.rs::execute_temporal_kernel` is the sole orchestration
   entry point.
-- `src/application/session/retrieval.rs::SessionRetrievalService::retrieve`
+- `crates/tracedecay-usecases/src/session/retrieval.rs::SessionRetrievalService::retrieve`
   owns authorization and canonical request construction.
-- `src/application/session/ports.rs::SessionTemporalExecutionPort` owns the
+- `crates/tracedecay-usecases/src/session/ports.rs::SessionTemporalExecutionPort` owns the
   application/kernel boundary.
-- `src/application/session/refresh.rs::SessionRefreshService` owns explicit
+- `crates/tracedecay-usecases/src/session/refresh.rs::SessionRefreshService` owns explicit
   refresh begin-or-join, status, and cancellation.
-- `src/application/session/types.rs` owns application request, result,
+- `crates/tracedecay-usecases/src/session/types.rs` owns application request, result,
   freshness, abstention, and coverage views.
 
 ### Database, daemon, compatibility, and migration
 
-- `src/global_db/session_temporal/schema.rs::ensure_session_temporal_schema`
+- `crates/tracedecay-global-db/src/session_temporal/schema.rs::ensure_session_temporal_schema`
   owns the schema-version-2 to schema-version-3 DDL migration, exact
   column/index validation, append-only triggers, derived evidence/member
   tables, source-manifest tables, and receipt columns.
-- `src/global_db/schema_contract/definitions.rs` registers every new table,
-  foreign key, trigger, and index; `src/global_db/schema_stages.rs` keeps their
+- `crates/tracedecay-global-db/src/schema_contract/definitions.rs` registers every new table,
+  foreign key, trigger, and index; `crates/tracedecay-global-db/src/schema_stages.rs` keeps their
   installation atomic.
-- `src/global_db/session_temporal/{projection,rebuild,retrieval,hydration,refresh}.rs`
+- `crates/tracedecay-global-db/src/session_temporal/{projection,rebuild,retrieval,hydration,refresh}.rs`
   implement store/query ports without adding policy.
-- `src/global_db/session_temporal/cursor_keys.rs` owns explicit write-side key
+- `crates/tracedecay-global-db/src/session_temporal/cursor_keys.rs` owns explicit write-side key
   provisioning/rotation, 24-hour cursor expiry, and retained verification-key
   loading; read paths cannot create or rotate keys.
-- `src/global_db/session_temporal/operations/publication.rs::publish_immutable_summary`
+- `crates/tracedecay-global-db/src/session_temporal/operations/publication.rs::publish_immutable_summary`
   owns canonical atomic summary publication.
-- `src/global_db/session_temporal/operations/compatibility.rs` writes dashboard
+- `crates/tracedecay-global-db/src/session_temporal/operations/compatibility.rs` writes dashboard
   compatibility projections last in the same transaction.
-- `src/migrate/consolidate/sqlite/temporal.rs::forward_migrate_legacy_sources`
+- `crates/tracedecay-migrate/src/consolidate/sqlite/temporal.rs::forward_migrate_legacy_sources`
   owns eligible sanitized legacy forward migration, derives spans/bursts from
   migrated occurrences, and writes idempotent receipts. It skips quarantined or
   unsanitized input and never imports a derived row as authority.
 - `src/daemon/session_temporal_refresh_scheduler.rs` owns durable restart
   recovery and source scanning; it does not own query ranking or hydration.
 - `src/mcp/tools/handlers/session/message_search.rs` and
-  `src/mcp/tools/handlers/session/lcm_handlers.rs` translate legacy requests to
+  `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` translate legacy requests to
   the application service. Missing service wiring returns typed unavailable or
   deferred output and never probes legacy storage.
 

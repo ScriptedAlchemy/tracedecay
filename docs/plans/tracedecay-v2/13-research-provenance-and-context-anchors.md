@@ -34,7 +34,7 @@ contract, dispositions and safe tombstones, and the atomic evidence-assembly sto
 implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
-`src/application/evidence_assembly.rs`, and `src/db/retrieval_anchor_authority.rs`.
+`crates/tracedecay-usecases/src/evidence_assembly.rs`, and `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`.
 Per-section verdicts follow.
 
 **Status split (2026-07-26, closed 2026-07-29).** The core above is delivered
@@ -61,7 +61,7 @@ and index rebuilds, while deletion and retention remain explicit.
 removal, and index rebuilds; resolution reports
 `current`/`drifted`/`redacted`/`expired`/`deleted`/`unavailable`/`ambiguous` with
 coverage (`crates/tracedecay-domain/src/research/{anchor,resolution}.rs`,
-`src/db/retrieval_anchor_authority.rs`).
+`crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs`).
 
 ## Owns
 
@@ -226,7 +226,7 @@ Shipped reality:
   `crates/tracedecay-domain/src/research/anchor.rs`). The digest is over owner+target
   identity, never payload bytes, so "not a content hash" still holds. A legacy bare
   `sha256:<hex>` form persists in older stored rows and payload-integrity checks
-  (`src/global_db/session_temporal/hydration.rs`).
+  (`crates/tracedecay-global-db/src/session_temporal/hydration.rs`).
 - Item 5: the seven states are `AnchorResolutionStateV2`
   (`crates/tracedecay-domain/src/research/resolution.rs`).
 - Coverage: derived-group (Span/Burst) candidate anchors are excluded from the coverage
@@ -534,7 +534,7 @@ three exact targets and the `derive_exact_*` functions mint `retrieval.v3.sha256
 (`crates/tracedecay-store/src/evidence_assembly.rs`,
 `crates/tracedecay-domain/src/research/anchor.rs`). An application-layer mirror
 (`SourceOccurrenceRecord`/`CanonicalSourceOccurrenceSet`/`EvidenceSpanRecord`) lives in
-`src/application/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
+`crates/tracedecay-usecases/src/evidence_assembly.rs`. The plan's `PublishEvidenceAssembly::execute` is
 realized as the store trait method `EvidenceAssemblyStore::publish_or_replay`.
 
 ## Retriever-contribution evidence
@@ -658,7 +658,7 @@ copies cannot resurrect payload access.
 **Status (2026-07-23):** Implemented. Owner-bound create/resolve, append-only
 `RetrievalAnchorDispositionRecordV1`, and the strict-whitelist
 `RetrievalAnchorTombstoneV1` ship in `crates/tracedecay-store/src/retrieval_anchor.rs`
-and are enforced by `src/db/retrieval_anchor_authority.rs` (disposition-transition
+and are enforced by `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs` (disposition-transition
 rules, derivative suppression, newest-disposition-first resolution). `AnchorLineageRefV3`,
 `LogicalCopyRecordV1`/`CopiedFrom`, and `SessionSummaryRecordV1` provide copy/summary
 lineage (`crates/tracedecay-domain/src/{research/anchor,session}.rs`). Tombstone-expiry
@@ -696,7 +696,7 @@ re-enabling deleted or redacted payloads.
 
 **Status (2026-07-23):** Implemented. The four-layer split — domain validation, store
 publish-or-replay, application authorization/orchestration
-(`src/application/evidence_assembly.rs`), and infra persistence
+(`crates/tracedecay-usecases/src/evidence_assembly.rs`), and infra persistence
 (`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`) — is in place
 with immutable inserts and atomic rollback on replay conflict.
 
@@ -761,8 +761,8 @@ as a prerequisite. Plan 32 is required only for admitted write-side effects and
 workflow automation outside this contract.
 
 **Status (2026-07-23):** Implemented. CI-failure and feedback ingress already
-create/resolve anchors without Plan 32 (`src/application/advisory/ci_runtime/`,
-`src/application/feedback/owner.rs`); `rh_` response handles remain Plan 21 transport
+create/resolve anchors without Plan 32 (`crates/tracedecay-usecases/src/advisory/ci_runtime/`,
+`crates/tracedecay-usecases/src/feedback/owner.rs`); `rh_` response handles remain Plan 21 transport
 artifacts, not durable evidence identity. Anchor resolution is surfaced downstream by the
 shipped dashboard provenance UI (`dashboard/src/ui/EvidenceTruthStrip.tsx`, Observatory
 Doctor findings in `dashboard/src/workspaces/observatory/`), which passes anchor IDs

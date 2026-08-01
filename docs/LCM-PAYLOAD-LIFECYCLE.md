@@ -43,7 +43,7 @@ These claims were re-verified against source for this contract; the audit (`t_c2
 has the full map.
 
 - **File naming & location.** `write_external_payload`
-  (`src/sessions/lcm/payload.rs:117`) names each payload
+  (`crates/tracedecay-sessions/src/runtime/lcm/payload.rs:117`) names each payload
   `payload_<sha256(provider\0session_id\0message_id\0content_hash)>.payload` and writes it
   under `payload_dir(storage_root)` = `<storage_root>/lcm-payloads`
   (`payload.rs:52`). User-level project stores resolve the root to
@@ -51,13 +51,13 @@ has the full map.
   `<project>/.tracedecay` (or legacy `.tracedecay` fallback).
 - **Schema.** `lcm_external_payloads` is keyed by `payload_ref` (PK) with
   `UNIQUE(provider, message_id, payload_ref)` and `FOREIGN KEY(provider, session_id)
-  REFERENCES sessions ON DELETE CASCADE` (`src/sessions/lcm/schema.rs:133-149`). There is
+  REFERENCES sessions ON DELETE CASCADE` (`crates/tracedecay-sessions/src/runtime/lcm/schema.rs:133-149`). There is
   **no FK from `lcm_external_payloads` to `lcm_raw_messages`**, and no FK from raw rows to
   payload metadata. `lcm_raw_messages` carries a nullable `payload_ref` and a
   `storage_kind IN ('inline','external')` (`schema.rs:104-132`).
-- **Write order is not atomic with the DB transaction.** `upsert_session_message`
-  (`src/global_db.rs:957`) opens `BEGIN IMMEDIATE`, then calls
-  `upsert_raw_message_with_payload` (`src/sessions/lcm/raw.rs:226`), which writes the file
+- **Write order is not atomic with the DB transaction.** `upsert_session_message_in_existing_tx`
+  (`crates/tracedecay-global-db/src/transcript.rs:392`) opens `BEGIN IMMEDIATE`, then calls
+  `upsert_raw_message_with_payload` (`crates/tracedecay-sessions/src/runtime/lcm/raw.rs:226`), which writes the file
   (`raw.rs:258` → `payload.rs:117`) *before* the metadata row (`raw.rs:267`) and raw row
   (`raw.rs:275`). The file write happens inside the open transaction, but **SQLite cannot
   roll back a filesystem write.** On commit failure, rollback, or crash after the file is
@@ -74,7 +74,7 @@ has the full map.
   (`payload.rs:155`), which moves DB owner rows during compression-boundary carry-over and
   never touches files (refs are stable; files don't move).
 - **Deletes bypass payload-aware code today.** `lcm_doctor mode=clean apply`
-  (`delete_clean_candidates_in_transaction`, `src/sessions/lcm/doctor.rs:1239`) issues
+  (`delete_clean_candidates_in_transaction`, `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs:1239`) issues
   `DELETE FROM lcm_external_payloads` / `lcm_raw_messages` / `lcm_summary_nodes` /
   `lcm_lifecycle_state` but **never removes payload files**, deliberately converting them
   into GC candidates. **There is no public session- or message-delete API** anywhere in
@@ -82,7 +82,7 @@ has the full map.
   (`doctor.rs:1281`, `doctor.rs:1333`). Any future `DELETE FROM sessions` would FK-cascade
   through `lcm_*` rows and orphan files.
 - **Memory deletion is a separate subsystem.** Hard-deleting a memory fact
-  (`src/memory/store.rs`, `src/dashboard/memory_api.rs`) never touches LCM payloads or
+  (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) never touches LCM payloads or
   session storage.
 - **Re-externalization / inline-conversion orphans are not reconciled.** `upsert_inline_raw_message`
   (`raw.rs:139`) nulls `payload_ref` and sets `storage_kind='inline'` without removing the
@@ -94,7 +94,7 @@ has the full map.
   `missing_payload_refs`, `orphan_payload_refs` (= `gc_candidate_payload_refs`),
   `unreferenced_metadata`, `missing_placeholder_metadata`, `missing_placeholder_files`
   (`doctor.rs:370-379`). `lcm_status` reports `missing_count`, `unreferenced_count`, and
-  `gc_candidate_count` (== unreferenced) (`src/sessions/lcm/query.rs:495-500`).
+  `gc_candidate_count` (== unreferenced) (`crates/tracedecay-sessions/src/runtime/lcm/query.rs:495-500`).
 - **A GC tombstone marker is already reserved but unwritten.** `is_external_payload_placeholder`
   (`payload.rs:104`) recognizes both `[externalized payload: …]` and `[gc'd externalized
   payload: …]` (and the `tool output` variants), but nothing in the tree writes the `gc'd`
@@ -263,7 +263,7 @@ investigate before the reference is tombstoned.
 
 | Trigger | Behavior |
 |---|---|
-| **Memory fact hard-delete** | No LCM effect. Memory facts live in `memory_facts` and never cite LCM payloads (`src/memory/store.rs`, `src/dashboard/memory_api.rs`). Independent subsystem. |
+| **Memory fact hard-delete** | No LCM effect. Memory facts live in `memory_facts` and never cite LCM payloads (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`). Independent subsystem. |
 | **Session delete** (no public API today) | MUST route through the payload-aware deleter for every payload owned by `(provider, session_id)`, **or** explicitly delete the `sessions` row and leave the files for GC. Contract requires one of these two be *documented*; the recommended path is "delete `sessions` row, leave files, let GC reap after grace" because it is simplest and crash-safe (FK cascade drops the `lcm_*` rows; orphan files become GC candidates). The deleter is used only when immediate file removal is required. |
 | **Message delete** (no public API today) | Same two options as session delete, scoped to one message: either call the deleter (removes that message's referenced payloads synchronously) or drop the raw row and let GC reap the now-unreferenced payloads after grace. **Caveat:** because refs can be shared via nested placeholders within the same message, a message-delete reap must verify the ref is referenced by *no* surviving row before removing it. |
 | **`lcm_doctor clean apply`** | Unchanged in effect (deletes DB rows, leaves files) but now **classified**: it is a *deferred* delete that intentionally produces GC candidates. The doctor output must state that payload files will be reaped by GC after the grace period, so operators do not expect immediate disk reclamation. |
