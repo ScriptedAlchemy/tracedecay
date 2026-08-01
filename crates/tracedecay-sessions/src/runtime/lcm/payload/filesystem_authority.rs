@@ -1068,7 +1068,8 @@ unsafe extern "system" {
 }
 
 fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
-    tracedecay_runtime_core::storage::set_private_dir_permissions(path).map_err(|err| LcmError::Io(err.to_string()))
+    tracedecay_runtime_core::storage::set_private_dir_permissions(path)
+        .map_err(|err| LcmError::Io(err.to_string()))
 }
 
 #[cfg(all(test, windows))]

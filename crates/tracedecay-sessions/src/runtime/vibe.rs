@@ -24,16 +24,15 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
 };
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    title_from_messages, TranscriptScopeMatcher,
+    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
+    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
+    content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -42,6 +41,9 @@ use crate::runtime::source::{
     FileDiscoveryLimit, FileDiscoveryReport, ParsedTranscript, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     path_byte_len, stream_new_jsonl,
+};
+use tracedecay_runtime_core::privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 
 const PROVIDER: &str = "vibe";
@@ -96,11 +98,8 @@ impl VibeSource {
 
     fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
         let meta = read_meta(&path.parent()?.join("meta.json"))?;
-        if !TranscriptScopeMatcher::for_scope(
-            project_root,
-            self.user_registered_roots.as_deref(),
-        )
-        .accepts(Some(&meta.working_directory))
+        if !TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref())
+            .accepts(Some(&meta.working_directory))
         {
             return None;
         }

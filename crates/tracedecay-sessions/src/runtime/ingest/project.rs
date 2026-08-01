@@ -1,10 +1,10 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use crate::runtime::git_correlation::GitCorrelationSessionStore;
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::observation::ObservationCancellation;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use crate::runtime::git_correlation::GitCorrelationSessionStore;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, git_correlation};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
@@ -96,7 +96,9 @@ pub async fn ingest_project_sources_for_provider_with_cancellation<A: SessionIng
 /// closed for observation providers. Daemon-owned callers must use
 /// [`ingest_project_sources_for_provider`] with their retained registry mount.
 #[cfg(test)]
-pub async fn ingest_project_sources_for_provider_without_registered_authority<A: SessionIngestAuthority>(
+pub async fn ingest_project_sources_for_provider_without_registered_authority<
+    A: SessionIngestAuthority,
+>(
     _db: &A,
     _project_root: &Path,
     project_id: Option<ProjectId>,
@@ -176,16 +178,17 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
-    let repository_provenance = tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)
-        .ok()
-        .flatten()
-        .and_then(|marker| {
-            RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
-                project_root,
-                &canonical_project_id,
-                &marker,
-            )
-        });
+    let repository_provenance =
+        tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)
+            .ok()
+            .flatten()
+            .and_then(|marker| {
+                RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                    project_root,
+                    &canonical_project_id,
+                    &marker,
+                )
+            });
     let facade = registered.admission(IngestAdmissionBinding::Project {
         brain_id,
         profile_id,

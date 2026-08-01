@@ -70,7 +70,8 @@ impl RepositoryProvenanceAdmissionContext {
         project_id: &ProjectId,
         marker: &tracedecay_runtime_core::storage::RepositoryIdentityMarker,
     ) -> Option<Self> {
-        if marker.schema_version != tracedecay_runtime_core::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION
+        if marker.schema_version
+            != tracedecay_runtime_core::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION
             || marker.project_id != project_id.as_str()
         {
             return None;
@@ -209,9 +210,7 @@ impl PreparedRepositoryProvenanceV1 {
         }
     }
 
-    pub fn availability(
-        &self,
-    ) -> &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
+    pub fn availability(&self) -> &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
         &self.availability
     }
 

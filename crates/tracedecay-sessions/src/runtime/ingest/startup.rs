@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::observation::ObservationCancellation;
 use super::authority::SessionIngestAuthority;
+use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 
@@ -119,7 +119,9 @@ pub async fn ingest_user_global_sources_for_startup_with_db<A: SessionIngestAuth
 }
 
 #[cfg(test)]
-pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority<A: SessionIngestAuthority>(
+pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority<
+    A: SessionIngestAuthority,
+>(
     _db: &A,
     _registry_db: &A,
     _profile_root: &Path,

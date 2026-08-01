@@ -2,7 +2,6 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
 
 use super::store::GitCorrelationSessionStore;
 
-
 use super::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
     CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, GitCorrelationWriteTxn,

@@ -1,9 +1,9 @@
-use serde::Serialize;
-use tracedecay_domain::ObservationSourceRangeV1;
 use crate::{
     ProviderRunFailure, ProviderRunFold as GenericProviderRunFold,
     ProviderRunOutcome as GenericProviderRunOutcome,
 };
+use serde::Serialize;
+use tracedecay_domain::ObservationSourceRangeV1;
 
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{claude_observation, source};
@@ -411,9 +411,7 @@ pub fn classify_claude_observation_failure(
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
         Ingest::Application(error) => match error {
-            crate::observation::ObservationApplicationError::Store(error) => {
-                store(error)
-            }
+            crate::observation::ObservationApplicationError::Store(error) => store(error),
             crate::observation::ObservationApplicationError::Cancelled => {
                 retryable("observation_cancelled")
             }

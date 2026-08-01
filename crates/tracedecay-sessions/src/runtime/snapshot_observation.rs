@@ -21,12 +21,14 @@ use crate::admission::{
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{
     FileDiscoveryReport, TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
+};
+use tracedecay_runtime_core::privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 
 pub const MAX_SNAPSHOT_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -559,10 +561,7 @@ pub async fn advance_snapshot_coverage_maybe(
 
 /// Human-readable host-admission failure message shared by the SQLite-backed
 /// snapshot providers, prefixed with the caller's provider label.
-pub fn host_admission_status_message(
-    provider_label: &str,
-    status: HostAdmissionStatus,
-) -> String {
+pub fn host_admission_status_message(provider_label: &str, status: HostAdmissionStatus) -> String {
     match status {
         HostAdmissionStatus::Backpressured => {
             format!("{provider_label} observation admission was backpressured")

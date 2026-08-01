@@ -25,7 +25,6 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::jsonl_observation_admission::{
@@ -41,6 +40,9 @@ use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
     collect_files_with_ext_bounded, stream_new_jsonl,
+};
+use tracedecay_runtime_core::privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
 const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
@@ -887,7 +889,8 @@ fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {
     };
     let mut roots: Vec<PathBuf> = Vec::new();
     for candidate in candidates {
-        let root = tracedecay_runtime_core::config::discover_project_root(&candidate).unwrap_or(candidate);
+        let root =
+            tracedecay_runtime_core::config::discover_project_root(&candidate).unwrap_or(candidate);
         if !roots.iter().any(|seen| paths_equal(seen, &root)) {
             roots.push(root);
         }
@@ -1581,7 +1584,8 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
 }
 
 fn event_project(event: &Value) -> (String, String) {
-    let cwd_root = event_cwd(event).and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd));
+    let cwd_root = event_cwd(event)
+        .and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd));
     let candidates = event_project_candidates(event);
     let resolved = candidates
         .iter()

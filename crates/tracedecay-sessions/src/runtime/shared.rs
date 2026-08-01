@@ -249,10 +249,7 @@ impl TranscriptScopeMatcher {
     /// otherwise — the shape every provider source carries as an
     /// `Option<Vec<PathBuf>>` user scope beside its project root.
     pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
-        registered_roots.map_or_else(
-            || Self::project(project_root),
-            |roots| Self::profile(roots),
-        )
+        registered_roots.map_or_else(|| Self::project(project_root), |roots| Self::profile(roots))
     }
 
     /// True when a record with this working directory belongs to the scope.
@@ -346,10 +343,7 @@ pub fn content_storage_text_and_tools(
     (message_storage_text(content), tools)
 }
 
-pub fn append_tool_calls_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    message: &Value,
-) {
+pub fn append_tool_calls_metadata(map: &mut serde_json::Map<String, Value>, message: &Value) {
     if let Some(tool_calls) = message.get("tool_calls") {
         map.insert("tool_calls".to_string(), tool_calls.clone());
     }
@@ -389,10 +383,7 @@ impl io::Write for ByteCountSink {
 /// Records bounded per-call tool metadata (byte counts and identifiers only,
 /// never content) for `tool_use`/`tool_result` blocks found in `content`.
 /// Inserts the `tool_events` key only when at least one entry was collected.
-pub fn append_tool_event_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    content: &Value,
-) {
+pub fn append_tool_event_metadata(map: &mut serde_json::Map<String, Value>, content: &Value) {
     let Some(items) = content.as_array() else {
         return;
     };
@@ -457,11 +448,7 @@ pub struct TranscriptLocationMetadataKeys {
 }
 
 impl TranscriptLocationMetadataKeys {
-    pub const fn new(
-        cwd: &'static str,
-        worktree: &'static str,
-        provenance: &'static str,
-    ) -> Self {
+    pub const fn new(cwd: &'static str, worktree: &'static str, provenance: &'static str) -> Self {
         Self {
             cwd,
             worktree,
@@ -543,10 +530,7 @@ pub fn usage_counters_from(value: &Value) -> Option<Value> {
 /// Inserts transcript-recorded token usage into message metadata under the
 /// `usage` key the savings dashboard reads. Probes each candidate value in
 /// order and keeps the first recognized counters object.
-pub fn append_usage_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    candidates: &[&Value],
-) {
+pub fn append_usage_metadata(map: &mut serde_json::Map<String, Value>, candidates: &[&Value]) {
     if map.contains_key("usage") {
         return;
     }

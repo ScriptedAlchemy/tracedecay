@@ -413,9 +413,15 @@ pub struct SessionGitCorrelationHit {
     pub first_ts: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ts: Option<i64>,
-    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default"
+    )]
     pub event_count: i64,
-    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default"
+    )]
     pub span_count: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
@@ -559,9 +565,7 @@ fn digest_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 /// Creates the correlation tables when missing. Version-gated via
 /// `session_schema_migrations` like the LCM schema; idempotent.
-pub async fn ensure_git_correlation_schema(
-    conn: &Connection,
-) -> Result<(), GitCorrelationError> {
+pub async fn ensure_git_correlation_schema(conn: &Connection) -> Result<(), GitCorrelationError> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;

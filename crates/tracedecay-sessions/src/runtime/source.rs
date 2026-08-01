@@ -49,8 +49,8 @@ pub use crate::runtime::shared::{
     message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
     usage_counters_from,
 };
-use crate::runtime::{SessionMessageRecord, SessionRecord};
 use crate::runtime::store_port::TranscriptIngestStore;
+use crate::runtime::{SessionMessageRecord, SessionRecord};
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
 
@@ -542,7 +542,9 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
 fn protect_parsed_transcript_structural_ids(
     parsed: &mut ParsedTranscript,
 ) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
-    fn protect(value: &mut String) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
+    fn protect(
+        value: &mut String,
+    ) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
         *value = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value)?;
         Ok(())
     }

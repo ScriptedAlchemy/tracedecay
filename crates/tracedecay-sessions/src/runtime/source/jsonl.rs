@@ -262,10 +262,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         )
     }
 
-    pub fn next_frame_with_budget(
-        &mut self,
-        read_budget: u64,
-    ) -> std::io::Result<RawJsonlFrame> {
+    pub fn next_frame_with_budget(&mut self, read_budget: u64) -> std::io::Result<RawJsonlFrame> {
         self.record.clear();
         let mut byte_len = 0_u64;
         let mut oversized = false;
