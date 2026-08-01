@@ -3,17 +3,23 @@ use crate::common;
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
+#[cfg(feature = "test-transport")]
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+#[cfg(feature = "test-transport")]
+use std::time::Duration;
+use std::time::SystemTime;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::mcp::get_tool_definitions;
+#[cfg(feature = "test-transport")]
 use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay_domain::{CanonicalMessageRoleV1, PayloadAccessState};
+use tracedecay_domain::CanonicalMessageRoleV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::PayloadAccessState;
 
 #[test]
 fn lcm_compress_public_schema_excludes_test_summarizer_modes() {
@@ -818,6 +824,7 @@ async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_
     assert_eq!(payload["diagnostics"]["fts"]["raw"]["rebuild_needed"], true);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -855,6 +862,7 @@ async fn lcm_doctor_counts_summary_source_rows_with_missing_owner_node() {
     assert_eq!(payload["diagnostics"]["summaries"]["broken_sources"], 1);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_scopes_orphan_lifecycle_debt_to_requested_session() {
     let (cg, _env, _dir) = setup_empty_project().await;

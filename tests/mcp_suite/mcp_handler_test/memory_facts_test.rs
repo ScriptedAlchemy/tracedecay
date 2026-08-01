@@ -1,5 +1,6 @@
 use crate::support::*;
 use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -512,6 +513,7 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
     assert!(rendered.contains("No durable facts exported yet"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
@@ -719,6 +721,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     close_test_graph(active).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn memory_status_project_selector_reports_registered_project_memory() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
@@ -831,6 +834,7 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
