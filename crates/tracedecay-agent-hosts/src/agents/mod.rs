@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
-use crate::mcp::tools::get_tool_definitions;
+use crate::ports::mcp_tools::advertised_tools;
 
 pub use antigravity::AntigravityIntegration;
 pub use claude::ClaudeIntegration;
@@ -2620,30 +2620,24 @@ mod git_hook_tests {
 }
 
 pub fn tool_names() -> Vec<String> {
-    get_tool_definitions()
-        .iter()
-        .map(|t| t.name.clone())
+    advertised_tools()
+        .into_iter()
+        .map(|tool| tool.name)
         .collect()
 }
 
 pub fn read_only_tool_names() -> Vec<String> {
-    get_tool_definitions()
-        .iter()
-        .filter(|t| {
-            t.annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get("readOnlyHint"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        })
-        .map(|t| t.name.clone())
+    advertised_tools()
+        .into_iter()
+        .filter(|tool| tool.read_only)
+        .map(|tool| tool.name)
         .collect()
 }
 
 pub fn expected_tool_perms() -> Vec<String> {
-    get_tool_definitions()
+    advertised_tools()
         .iter()
-        .map(|t| format!("mcp__tracedecay__{}", t.name))
+        .map(|tool| format!("mcp__tracedecay__{}", tool.name))
         .collect()
 }
 

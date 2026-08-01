@@ -5,10 +5,10 @@
 //! `super::write_plugin_files` focused on filesystem orchestration.
 
 use crate::errors::{Result, TraceDecayError};
-use crate::mcp::tools::{format_capable_tool_names, get_tool_definitions};
+use crate::ports::mcp_tools::{advertised_tools, format_capable_tool_names};
 
 pub(super) fn plugin_manifest() -> String {
-    let tools = get_tool_definitions()
+    let tools = advertised_tools()
         .into_iter()
         .map(|tool| format!("  - {}", tool.name))
         .collect::<Vec<_>>()
@@ -45,7 +45,7 @@ with Path(__file__).with_name("schemas.json").open("r", encoding="utf-8") as sch
 }
 
 pub(super) fn plugin_schemas_json() -> Result<String> {
-    let defs = get_tool_definitions()
+    let defs = advertised_tools()
         .into_iter()
         .map(|tool| {
             serde_json::json!({

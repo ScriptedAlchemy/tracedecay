@@ -18,6 +18,15 @@ use std::{fmt::Write as _, fs, path::Path};
 /// Repository-root-relative prefix from this crate's directory.
 const REPO_ROOT_FROM_CRATE: &str = "../..";
 
+// Same include the root build script uses, so the commit stamp this crate
+// bakes into the Hermes plugin provenance headers is produced by the code its
+// unit tests exercise rather than a second copy that can drift. The probe is
+// pointed at the repository root, not this crate's directory: a crate
+// subdirectory is never its own git worktree top level, so `resolve` would
+// otherwise report an empty identity by design.
+#[path = "../../src/version/build_identity.rs"]
+mod build_identity;
+
 /// Recursively collects every file under `root`, relative to `root`, using
 /// forward-slash separators. Returns sorted paths so codegen is deterministic.
 fn collect_files_relative(root: &Path) -> Vec<String> {
@@ -249,6 +258,28 @@ fn generate_plugin_bundle() {
     }
 }
 
+/// Bakes the build's commit identity into `TRACEDECAY_GIT_SHA`.
+///
+/// `agents/hermes/templates.rs` stamps it into every generated Hermes plugin
+/// file so `tracedecay doctor` can tell a live install apart from one clobbered
+/// by a different generator build. The root build script emits the same pair
+/// for the root crate; `env!` is resolved per compiled crate, so this crate
+/// must emit its own.
+fn bake_build_identity() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(&manifest_dir).join(REPO_ROOT_FROM_CRATE);
+    let identity = build_identity::resolve(&repo_root);
+    for path in build_identity::watch_paths(&repo_root) {
+        println!("cargo::rerun-if-changed={}", path.display());
+    }
+    println!("cargo::rerun-if-changed={REPO_ROOT_FROM_CRATE}/src/version/build_identity.rs");
+    println!(
+        "cargo::rustc-env=TRACEDECAY_GIT_SHA={}",
+        identity.sha.as_deref().unwrap_or("unknown")
+    );
+}
+
 fn main() {
+    bake_build_identity();
     generate_plugin_bundle();
 }
