@@ -1,13 +1,77 @@
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::errors::{Result, TraceDecayError};
 
 use super::{DaemonServiceSpec, DaemonServiceState};
 
 const TASK_NAME_PREFIX: &str = "TraceDecay Daemon";
+const BETA_TASK_NAME_PREFIX: &str = "TraceDecay Beta Daemon";
+const SCOOP_STATE_SCHEMA: &str = "tracedecay.scoop-service-state.v1";
+const SCOOP_STATE_FILE_NAME: &str = "scoop-state.json";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum WindowsPackageId {
+    #[serde(rename = "tracedecay")]
+    Stable,
+    #[serde(rename = "tracedecay-beta")]
+    Beta,
+}
+
+impl WindowsPackageId {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "tracedecay" => Ok(Self::Stable),
+            "tracedecay-beta" => Ok(Self::Beta),
+            _ => Err(TraceDecayError::Config {
+                message: format!(
+                    "invalid Scoop package id '{value}'; expected tracedecay or tracedecay-beta"
+                ),
+            }),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "tracedecay",
+            Self::Beta => "tracedecay-beta",
+        }
+    }
+
+    const fn task_name_prefix(self) -> &'static str {
+        match self {
+            Self::Stable => TASK_NAME_PREFIX,
+            Self::Beta => BETA_TASK_NAME_PREFIX,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServiceRuntimeLayout {
+    directory: PathBuf,
+    executable: PathBuf,
+    state_file: PathBuf,
+}
+
+impl ServiceRuntimeLayout {
+    fn below(local_app_data: &Path, package_id: WindowsPackageId) -> Self {
+        let directory = local_app_data
+            .join("TraceDecay")
+            .join("service")
+            .join(package_id.as_str());
+        Self {
+            executable: directory.join("tracedecay.exe"),
+            state_file: directory.join(SCOOP_STATE_FILE_NAME),
+            directory,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TaskIdentity {
+    package_id: WindowsPackageId,
     user_sid: String,
     task_name: String,
     task_path: String,
@@ -18,11 +82,15 @@ impl TaskIdentity {
     fn current() -> Result<Self> {
         #[cfg(windows)]
         {
+            let package_id = std::env::current_exe()
+                .ok()
+                .and_then(|path| package_id_from_executable(&path))
+                .unwrap_or(WindowsPackageId::Stable);
             let user_sid = tracedecay_runtime_core::windows_security::current_user_sid_string()
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("could not determine current Windows user SID: {error}"),
                 })?;
-            Self::for_user_sid(&user_sid)
+            Self::for_package_user_sid(package_id, &user_sid)
         }
         #[cfg(not(windows))]
         {
@@ -34,6 +102,10 @@ impl TaskIdentity {
     }
 
     fn for_user_sid(user_sid: &str) -> Result<Self> {
+        Self::for_package_user_sid(WindowsPackageId::Stable, user_sid)
+    }
+
+    fn for_package_user_sid(package_id: WindowsPackageId, user_sid: &str) -> Result<Self> {
         let mut components = user_sid.split('-');
         let valid = components.next() == Some("S")
             && components.clone().count() >= 2
@@ -45,8 +117,9 @@ impl TaskIdentity {
                 message: format!("current Windows user SID '{user_sid}' is not canonical"),
             });
         }
-        let task_name = format!("{TASK_NAME_PREFIX} ({user_sid})");
+        let task_name = format!("{} ({user_sid})", package_id.task_name_prefix());
         Ok(Self {
+            package_id,
             user_sid: user_sid.to_string(),
             task_path: format!(r"\{task_name}"),
             task_name,
@@ -55,16 +128,160 @@ impl TaskIdentity {
     }
 }
 
+fn package_id_from_executable(executable: &Path) -> Option<WindowsPackageId> {
+    let file_name = executable.file_name()?.to_str()?;
+    if !file_name.eq_ignore_ascii_case("tracedecay.exe") {
+        return None;
+    }
+    if executable
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("shims"))
+    {
+        return Some(WindowsPackageId::Stable);
+    }
+
+    let components = executable
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    for pair in components.windows(2) {
+        if pair[0].eq_ignore_ascii_case("apps") {
+            if pair[1].eq_ignore_ascii_case(WindowsPackageId::Stable.as_str()) {
+                return Some(WindowsPackageId::Stable);
+            }
+            if pair[1].eq_ignore_ascii_case(WindowsPackageId::Beta.as_str()) {
+                return Some(WindowsPackageId::Beta);
+            }
+        }
+        if pair[0].eq_ignore_ascii_case("service") {
+            if pair[1].eq_ignore_ascii_case(WindowsPackageId::Stable.as_str()) {
+                return Some(WindowsPackageId::Stable);
+            }
+            if pair[1].eq_ignore_ascii_case(WindowsPackageId::Beta.as_str()) {
+                return Some(WindowsPackageId::Beta);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TaskSnapshot {
     running: bool,
     enabled: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ScoopTaskAction {
+    executable: PathBuf,
+    arguments: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ScoopServiceState {
+    schema: String,
+    package_id: WindowsPackageId,
+    user_sid: String,
+    task_name: String,
+    task_path: String,
+    task_sddl: String,
+    task_xml: String,
+    action: ScoopTaskAction,
+    profile_root: PathBuf,
+    enabled: bool,
+    running: bool,
+}
+
+impl ScoopServiceState {
+    fn capture(
+        package_id: WindowsPackageId,
+        identity: &TaskIdentity,
+        snapshot: TaskSnapshot,
+        task_xml: String,
+        task_sddl: String,
+    ) -> Result<Self> {
+        if !task_definition_is_owned(&task_xml, &task_sddl, identity) {
+            return Err(foreign_task(identity));
+        }
+        let action = task_action_from_xml(&task_xml).ok_or_else(|| foreign_task(identity))?;
+        if package_id_from_executable(&action.executable) != Some(package_id) {
+            return Err(foreign_task(identity));
+        }
+        let profile_root =
+            profile_root_from_task_xml(&task_xml).ok_or_else(|| foreign_task(identity))?;
+        Ok(Self {
+            schema: SCOOP_STATE_SCHEMA.to_string(),
+            package_id,
+            user_sid: identity.user_sid.clone(),
+            task_name: identity.task_name.clone(),
+            task_path: identity.task_path.clone(),
+            task_sddl,
+            task_xml,
+            action,
+            profile_root,
+            enabled: snapshot.enabled,
+            running: snapshot.running,
+        })
+    }
+
+    fn validate(&self, package_id: WindowsPackageId, identity: &TaskIdentity) -> Result<()> {
+        if self.schema != SCOOP_STATE_SCHEMA {
+            return Err(invalid_state("schema does not match"));
+        }
+        if self.package_id != package_id {
+            return Err(invalid_state("package id does not match"));
+        }
+        if self.user_sid != identity.user_sid
+            || self.task_name != identity.task_name
+            || self.task_path != identity.task_path
+        {
+            return Err(invalid_state(
+                "Windows SID or package-scoped task identity does not match",
+            ));
+        }
+        if !task_definition_is_owned(&self.task_xml, &self.task_sddl, identity) {
+            return Err(invalid_state(
+                "task XML or security descriptor is not privately owned",
+            ));
+        }
+        let action = task_action_from_xml(&self.task_xml)
+            .ok_or_else(|| invalid_state("task XML has no exact executable action"))?;
+        if action != self.action
+            || package_id_from_executable(&action.executable) != Some(package_id)
+        {
+            return Err(invalid_state(
+                "task action does not match the snapshotted package action",
+            ));
+        }
+        if profile_root_from_task_xml(&self.task_xml).as_ref() != Some(&self.profile_root) {
+            return Err(invalid_state(
+                "task profile does not match the snapshotted profile",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn desired_state(&self) -> DaemonServiceState {
+        match (self.running, self.enabled) {
+            (true, true) => DaemonServiceState::RunningEnabled,
+            (true, false) => DaemonServiceState::RunningDisabled,
+            (false, true) => DaemonServiceState::StoppedEnabled,
+            (false, false) => DaemonServiceState::StoppedDisabled,
+        }
+    }
+}
+
 trait TaskSchedulerApi {
     fn snapshot(&mut self) -> Result<Option<TaskSnapshot>>;
     fn registered_xml(&mut self) -> Result<Option<String>>;
+    fn registered_sddl(&mut self) -> Result<Option<String>>;
     fn register_xml(&mut self, xml: &str) -> Result<()>;
+    fn register_xml_with_sddl(&mut self, xml: &str, sddl: &str) -> Result<()> {
+        let _ = sddl;
+        self.register_xml(xml)
+    }
     fn set_enabled(&mut self, enabled: bool) -> Result<()>;
     fn disable_for_rollback(&mut self) -> Result<()>;
     fn run(&mut self) -> Result<()>;
@@ -308,49 +525,178 @@ pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn preferred_service_executable(executable: &Path) -> PathBuf {
-    let Some(file_name) = executable.file_name().and_then(|name| name.to_str()) else {
-        return executable.to_path_buf();
-    };
-    if !file_name.eq_ignore_ascii_case("tracedecay.exe") {
-        return executable.to_path_buf();
+pub(super) fn materialize_service_spec_after_quiescence(
+    spec: &DaemonServiceSpec,
+) -> Result<DaemonServiceSpec> {
+    #[cfg(windows)]
+    {
+        let Some(package_id) = package_id_from_executable(&spec.tracedecay_bin) else {
+            return Ok(spec.clone());
+        };
+        let layout = local_runtime_layout(package_id)?;
+        ensure_private_runtime_layout(&layout)?;
+        if !windows_paths_equal(&spec.tracedecay_bin, &layout.executable)? {
+            let source = scoop_service_source(&spec.tracedecay_bin, package_id)?;
+            atomic_copy_private_executable(&source, &layout.executable)?;
+        } else {
+            tracedecay_runtime_core::windows_security::validate_private_file(&layout.executable)
+                .map_err(|error| {
+                    secure_path_error("validate service executable", &layout.executable, error)
+                })?;
+        }
+        let mut materialized = spec.clone();
+        materialized.tracedecay_bin = layout.executable;
+        Ok(materialized)
     }
+    #[cfg(not(windows))]
+    {
+        Ok(spec.clone())
+    }
+}
+
+#[cfg(windows)]
+fn scoop_service_source(executable: &Path, package_id: WindowsPackageId) -> Result<PathBuf> {
     if executable
         .parent()
-        .is_some_and(|parent| path_file_name_eq(parent, "shims"))
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("shims"))
     {
-        let Some(scoop_root) = executable.parent().and_then(Path::parent) else {
-            return executable.to_path_buf();
-        };
-        let stable = scoop_root
+        let scoop_root =
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("Scoop shim '{}' has no package root", executable.display()),
+                })?;
+        let current = scoop_root
             .join("apps")
-            .join("tracedecay")
+            .join(package_id.as_str())
             .join("current")
             .join("tracedecay.exe");
-        return if stable.is_file() {
-            stable
-        } else {
-            executable.to_path_buf()
-        };
+        if !current.is_file() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Scoop package executable '{}' does not exist",
+                    current.display()
+                ),
+            });
+        }
+        return Ok(current);
     }
-    let Some(version_dir) = executable.parent() else {
-        return executable.to_path_buf();
-    };
-    let Some(app_dir) = version_dir.parent() else {
-        return executable.to_path_buf();
-    };
-    let Some(apps_dir) = app_dir.parent() else {
-        return executable.to_path_buf();
-    };
-    if !path_file_name_eq(app_dir, "tracedecay") || !path_file_name_eq(apps_dir, "apps") {
-        return executable.to_path_buf();
-    }
+    Ok(executable.to_path_buf())
+}
 
-    let stable = app_dir.join("current").join("tracedecay.exe");
-    if stable.is_file() {
-        stable
-    } else {
-        executable.to_path_buf()
+#[cfg(windows)]
+fn local_runtime_layout(package_id: WindowsPackageId) -> Result<ServiceRuntimeLayout> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "LOCALAPPDATA is required for the Windows daemon service runtime".to_string(),
+        })?;
+    let local_app_data = fully_qualified_windows_path(&local_app_data, "LOCALAPPDATA")?;
+    Ok(ServiceRuntimeLayout::below(&local_app_data, package_id))
+}
+
+#[cfg(windows)]
+fn ensure_private_runtime_layout(layout: &ServiceRuntimeLayout) -> Result<()> {
+    let local_app_data =
+        layout
+            .directory
+            .ancestors()
+            .nth(3)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "Windows service runtime '{}' has no LOCALAPPDATA ancestor",
+                    layout.directory.display()
+                ),
+            })?;
+    tracedecay_runtime_core::windows_security::validate_directory_path(local_app_data)
+        .map_err(|error| secure_path_error("validate LOCALAPPDATA", local_app_data, error))?;
+
+    let tracedecay_dir = local_app_data.join("TraceDecay");
+    let service_dir = tracedecay_dir.join("service");
+    for directory in [&tracedecay_dir, &service_dir, &layout.directory] {
+        tracedecay_runtime_core::windows_security::create_private_directory(directory).map_err(
+            |error| secure_path_error("create private service directory", directory, error),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tracedecay.exe");
+    let sequence = super::SERVICE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = destination.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let operation = (|| {
+        let mut input = std::fs::File::open(source).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to open Scoop service source '{}': {error}",
+                source.display()
+            ),
+        })?;
+        let mut output = tracedecay_runtime_core::windows_security::create_private_file(&temporary)
+            .map_err(|error| {
+                secure_path_error("create service executable temporary", &temporary, error)
+            })?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = input
+                .read(&mut buffer)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to read Scoop service source '{}': {error}",
+                        source.display()
+                    ),
+                })?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read]).map_err(|error| {
+                secure_path_error("write service executable temporary", &temporary, error)
+            })?;
+        }
+        output.sync_all().map_err(|error| {
+            secure_path_error("sync service executable temporary", &temporary, error)
+        })?;
+        drop(output);
+        tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+            &temporary,
+            destination,
+            "Scoop service executable",
+        )?;
+        tracedecay_runtime_core::windows_security::validate_private_file(destination)
+            .map_err(|error| secure_path_error("validate service executable", destination, error))
+    })();
+    if operation.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    operation
+}
+
+#[cfg(windows)]
+fn windows_paths_equal(left: &Path, right: &Path) -> Result<bool> {
+    let left = windows_path_text(left, "path comparison")?;
+    let right = windows_path_text(right, "path comparison")?;
+    Ok(left.eq_ignore_ascii_case(right))
+}
+
+#[cfg(windows)]
+fn secure_path_error(operation: &str, path: &Path, error: std::io::Error) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("{operation} '{}': {error}", path.display()),
     }
 }
 
@@ -397,6 +743,366 @@ pub(super) fn delete() -> Result<()> {
 
 pub(super) fn rollback_new_registration() -> Result<()> {
     with_platform_api(|api| rollback_registration_with(api, None, None))
+}
+
+pub(super) fn prepare_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        prepare_scoop_package_service_windows(WindowsPackageId::parse(package_id)?, state_file)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (package_id, state_file);
+        Err(TraceDecayError::Config {
+            message: "Scoop service hooks are only available on Windows".to_string(),
+        })
+    }
+}
+
+pub(super) fn restore_scoop_package_service(package_id: &str, state_file: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        restore_scoop_package_service_windows(WindowsPackageId::parse(package_id)?, state_file)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (package_id, state_file);
+        Err(TraceDecayError::Config {
+            message: "Scoop service hooks are only available on Windows".to_string(),
+        })
+    }
+}
+
+#[cfg(windows)]
+fn prepare_scoop_package_service_windows(
+    package_id: WindowsPackageId,
+    state_file: &Path,
+) -> Result<()> {
+    let identity = current_package_identity(package_id)?;
+    let layout = local_runtime_layout(package_id)?;
+    validate_state_file_path(state_file, &layout)?;
+
+    with_platform_api_for_package(package_id, |api| {
+        let snapshot = match api.snapshot() {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return Ok(()),
+            Err(error) if is_foreign_task_error(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let task_xml = api
+            .registered_xml()?
+            .ok_or_else(|| missing_task("snapshot Scoop service state for"))?;
+        let task_sddl = api
+            .registered_sddl()?
+            .ok_or_else(|| missing_task("snapshot Scoop service ACL for"))?;
+        let state = match ScoopServiceState::capture(
+            package_id, &identity, snapshot, task_xml, task_sddl,
+        ) {
+            Ok(state) => state,
+            Err(error) if is_foreign_task_error(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+
+        ensure_private_runtime_layout(&layout)?;
+        write_scoop_state(state_file, &state)?;
+
+        let mut control = NativeDaemonControl {
+            transport_hint: state.profile_root.join("daemon.sock"),
+            clock_origin: std::time::Instant::now(),
+        };
+        stop_managed_with(api, &mut control)?;
+        let _lifecycle_lease =
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                &state.profile_root,
+                "Scoop service prepare",
+            )?;
+        delete_with(api)?;
+        if api.snapshot()?.is_some() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Scoop service prepare could not prove task '{}' absent",
+                    identity.task_path
+                ),
+            });
+        }
+        let quiescence = control.quiescence(CONTROL_PROBE_TIMEOUT);
+        if !quiescence.satisfied {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Scoop service prepare could not prove profile '{}' quiescent: {}",
+                    state.profile_root.display(),
+                    quiescence.diagnostic
+                ),
+            });
+        }
+        remove_private_runtime_executable(&layout.executable)?;
+        Ok(())
+    })
+}
+
+#[cfg(windows)]
+fn restore_scoop_package_service_windows(
+    package_id: WindowsPackageId,
+    state_file: &Path,
+) -> Result<()> {
+    let identity = current_package_identity(package_id)?;
+    let layout = local_runtime_layout(package_id)?;
+    validate_state_file_path(state_file, &layout)?;
+    let Some(state) = read_scoop_state(state_file)? else {
+        return Ok(());
+    };
+    state.validate(package_id, &identity)?;
+
+    let current_exe = std::env::current_exe().map_err(|error| TraceDecayError::Config {
+        message: format!("could not resolve the new Scoop executable: {error}"),
+    })?;
+    if package_id_from_executable(&current_exe) != Some(package_id) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Scoop restore package {} cannot use executable '{}'",
+                package_id.as_str(),
+                current_exe.display()
+            ),
+        });
+    }
+    let source = scoop_service_source(&current_exe, package_id)?;
+    let restored_xml = replace_task_action_executable(&state.task_xml, &layout.executable)?;
+    let restored_action = task_action_from_xml(&restored_xml)
+        .ok_or_else(|| invalid_state("restored task XML has no executable action"))?;
+    if restored_action.arguments != state.action.arguments
+        || profile_root_from_task_xml(&restored_xml).as_ref() != Some(&state.profile_root)
+    {
+        return Err(invalid_state(
+            "restored task action or profile differs from the snapshot",
+        ));
+    }
+
+    with_platform_api_for_package(package_id, |api| {
+        let mut control = NativeDaemonControl {
+            transport_hint: state.profile_root.join("daemon.sock"),
+            clock_origin: std::time::Instant::now(),
+        };
+        match api.snapshot() {
+            Ok(Some(snapshot)) => {
+                let existing_xml = api
+                    .registered_xml()?
+                    .ok_or_else(|| missing_task("validate Scoop restore target for"))?;
+                let existing_sddl = api
+                    .registered_sddl()?
+                    .ok_or_else(|| missing_task("validate Scoop restore target ACL for"))?;
+                let existing = ScoopServiceState::capture(
+                    package_id,
+                    &identity,
+                    snapshot,
+                    existing_xml,
+                    existing_sddl,
+                )?;
+                if existing.profile_root != state.profile_root
+                    || existing.action.arguments != state.action.arguments
+                {
+                    return Err(foreign_task(&identity));
+                }
+                stop_managed_with(api, &mut control)?;
+            }
+            Ok(None) => {
+                let quiescence = control.quiescence(CONTROL_PROBE_TIMEOUT);
+                if !quiescence.satisfied {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "refusing Scoop restore while profile '{}' is not quiescent: {}",
+                            state.profile_root.display(),
+                            quiescence.diagnostic
+                        ),
+                    });
+                }
+            }
+            Err(error) => return Err(error),
+        }
+
+        let lifecycle_lease =
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                &state.profile_root,
+                "Scoop service restore",
+            )?;
+        ensure_private_runtime_layout(&layout)?;
+        atomic_copy_private_executable(&source, &layout.executable)?;
+        api.register_xml_with_sddl(&restored_xml, &state.task_sddl)?;
+        let stopped_state = if state.enabled {
+            DaemonServiceState::StoppedEnabled
+        } else {
+            DaemonServiceState::StoppedDisabled
+        };
+        apply_state_with(api, stopped_state)?;
+        verify_restored_task(api, &state, &layout, stopped_state)?;
+        drop(lifecycle_lease);
+
+        if state.running {
+            start_managed_with(api, &mut control)?;
+        } else {
+            let quiescence = control.quiescence(CONTROL_PROBE_TIMEOUT);
+            if !quiescence.satisfied {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "restored Scoop service profile '{}' is not quiescent: {}",
+                        state.profile_root.display(),
+                        quiescence.diagnostic
+                    ),
+                });
+            }
+        }
+        verify_restored_task(api, &state, &layout, state.desired_state())
+    })?;
+
+    remove_scoop_state(state_file)
+}
+
+#[cfg(windows)]
+fn verify_restored_task(
+    api: &mut dyn TaskSchedulerApi,
+    state: &ScoopServiceState,
+    layout: &ServiceRuntimeLayout,
+    expected_state: DaemonServiceState,
+) -> Result<()> {
+    let actual_state = state_from_snapshot(api.snapshot()?);
+    if actual_state != expected_state {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "restored Scoop service state is {actual_state:?}, expected {expected_state:?}"
+            ),
+        });
+    }
+    let xml = api
+        .registered_xml()?
+        .ok_or_else(|| missing_task("verify Scoop restore for"))?;
+    let sddl = api
+        .registered_sddl()?
+        .ok_or_else(|| missing_task("verify Scoop restore ACL for"))?;
+    let action = task_action_from_xml(&xml)
+        .ok_or_else(|| invalid_state("restored task XML has no executable action"))?;
+    if !windows_paths_equal(&action.executable, &layout.executable)?
+        || action.arguments != state.action.arguments
+        || profile_root_from_task_xml(&xml).as_ref() != Some(&state.profile_root)
+        || sddl != state.task_sddl
+    {
+        return Err(TraceDecayError::Config {
+            message: "restored Scoop service did not preserve its exact action, profile, or SDDL"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn current_package_identity(package_id: WindowsPackageId) -> Result<TaskIdentity> {
+    let user_sid =
+        tracedecay_runtime_core::windows_security::current_user_sid_string().map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("could not determine current Windows user SID: {error}"),
+            }
+        })?;
+    TaskIdentity::for_package_user_sid(package_id, &user_sid)
+}
+
+#[cfg(windows)]
+fn validate_state_file_path(state_file: &Path, layout: &ServiceRuntimeLayout) -> Result<()> {
+    let state_file = fully_qualified_windows_path(state_file, "Scoop state file")?;
+    if windows_paths_equal(&state_file, &layout.state_file)? {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!(
+            "Scoop state file must be '{}', got '{}'",
+            layout.state_file.display(),
+            state_file.display()
+        ),
+    })
+}
+
+#[cfg(windows)]
+fn write_scoop_state(state_file: &Path, state: &ScoopServiceState) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
+    let mut payload =
+        serde_json::to_vec_pretty(state).map_err(|error| TraceDecayError::Config {
+            message: format!("could not serialize Scoop service state: {error}"),
+        })?;
+    payload.push(b'\n');
+    let sequence = super::SERVICE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = state_file.with_file_name(format!(
+        ".{SCOOP_STATE_FILE_NAME}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    tracedecay_runtime_core::db::DatabaseAuthority::publish_record_atomically(
+        &temporary,
+        state_file,
+        &payload,
+        "Scoop service state",
+    )
+}
+
+#[cfg(windows)]
+fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
+    let file = match tracedecay_runtime_core::windows_security::open_private_file(state_file) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(secure_path_error(
+                "open Scoop service state",
+                state_file,
+                error,
+            ));
+        }
+    };
+    serde_json::from_reader(file)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "invalid Scoop service state marker '{}': {error}",
+                state_file.display()
+            ),
+        })
+}
+
+#[cfg(windows)]
+fn remove_scoop_state(state_file: &Path) -> Result<()> {
+    tracedecay_runtime_core::windows_security::validate_private_file(state_file).map_err(
+        |error| {
+            secure_path_error(
+                "validate Scoop service state before removal",
+                state_file,
+                error,
+            )
+        },
+    )?;
+    std::fs::remove_file(state_file).map_err(|error| {
+        secure_path_error("remove restored Scoop service state", state_file, error)
+    })
+}
+
+#[cfg(windows)]
+fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
+    match tracedecay_runtime_core::windows_security::validate_private_file(executable) {
+        Ok(()) => std::fs::remove_file(executable).map_err(|error| {
+            secure_path_error(
+                "remove quiesced Scoop service executable",
+                executable,
+                error,
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(secure_path_error(
+            "validate Scoop service executable before removal",
+            executable,
+            error,
+        )),
+    }
+}
+
+fn is_foreign_task_error(error: &TraceDecayError) -> bool {
+    error
+        .to_string()
+        .contains("refusing to manage scheduled task")
 }
 
 fn register_task_xml_with(api: &mut dyn TaskSchedulerApi, xml: &str) -> Result<()> {
@@ -882,12 +1588,6 @@ fn missing_task(operation: &str) -> TraceDecayError {
     }
 }
 
-fn path_file_name_eq(path: &Path, expected: &str) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
-}
-
 fn xml_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -928,6 +1628,37 @@ fn xml_section_text<'a>(xml: &'a str, section: &str) -> Option<&'a str> {
     let closing = format!("</{section}>");
     let value_end = xml[value_start..].find(&closing)? + value_start;
     Some(&xml[value_start..value_end])
+}
+
+fn task_action_from_xml(xml: &str) -> Option<ScoopTaskAction> {
+    let action = xml_section_text(xml, "Exec")?;
+    let executable = PathBuf::from(xml_unescape(xml_element_text(action, "Command")?));
+    let arguments = xml_unescape(xml_element_text(action, "Arguments")?);
+    Some(ScoopTaskAction {
+        executable,
+        arguments,
+    })
+}
+
+fn replace_task_action_executable(xml: &str, executable: &Path) -> Result<String> {
+    let action =
+        xml_section_text(xml, "Exec").ok_or_else(|| invalid_state("task XML has no Exec"))?;
+    let command = xml_element_text(action, "Command")
+        .ok_or_else(|| invalid_state("task XML has no Command"))?;
+    let action_start = xml
+        .find(action)
+        .ok_or_else(|| invalid_state("task XML is malformed"))?;
+    let command_start_in_action = action
+        .find(command)
+        .ok_or_else(|| invalid_state("task XML Command is malformed"))?;
+    let command_start = action_start + command_start_in_action;
+    let command_end = command_start + command.len();
+    let executable = windows_path_text(executable, "Scoop service executable")?;
+    let mut restored = String::with_capacity(xml.len() + executable.len());
+    restored.push_str(&xml[..command_start]);
+    restored.push_str(&xml_escape(executable));
+    restored.push_str(&xml[command_end..]);
+    Ok(restored)
 }
 
 fn task_definition_is_owned(xml: &str, sddl: &str, identity: &TaskIdentity) -> bool {
@@ -972,6 +1703,23 @@ fn task_sddl_is_private(sddl: &str, user_sid: &str) -> bool {
         aces = remaining;
     }
     saw_user && saw_system
+}
+
+fn foreign_task(identity: &TaskIdentity) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "refusing to manage scheduled task '{}': it is not owned by Scoop package {} for current SID {}",
+            identity.task_path,
+            identity.package_id.as_str(),
+            identity.user_sid
+        ),
+    }
+}
+
+fn invalid_state(reason: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("invalid Scoop service state marker: {reason}"),
+    }
 }
 
 fn quote_windows_argument(argument: &str) -> String {
@@ -1067,6 +1815,29 @@ fn with_platform_api<T>(
     }
 }
 
+fn with_platform_api_for_package<T>(
+    package_id: WindowsPackageId,
+    operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,
+) -> Result<T> {
+    #[cfg(windows)]
+    {
+        let user_sid = tracedecay_runtime_core::windows_security::current_user_sid_string()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("could not determine current Windows user SID: {error}"),
+            })?;
+        let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?;
+        let mut api = native::NativeTaskScheduler::connect_for(identity)?;
+        operation(&mut api)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (package_id, operation);
+        Err(TraceDecayError::Config {
+            message: "Windows Task Scheduler is unavailable on this platform".to_string(),
+        })
+    }
+}
+
 fn with_platform_control_api<T>(
     operation: impl FnOnce(&mut dyn TaskSchedulerApi, &mut dyn DaemonControlApi) -> Result<T>,
 ) -> Result<T> {
@@ -1142,6 +1913,10 @@ mod native {
     impl NativeTaskScheduler {
         pub(super) fn connect() -> Result<Self> {
             let identity = TaskIdentity::current()?;
+            Self::connect_for(identity)
+        }
+
+        pub(super) fn connect_for(identity: TaskIdentity) -> Result<Self> {
             let apartment = ComApartment::initialize()?;
             let service: ITaskService =
                 unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
@@ -1230,13 +2005,33 @@ mod native {
                 })
         }
 
+        fn registered_sddl(&mut self) -> Result<Option<String>> {
+            let Some(task) = self.task()? else {
+                return Ok(None);
+            };
+            let sddl = unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
+                .map_err(|error| com_error("read daemon task security descriptor", error))?;
+            String::try_from(sddl)
+                .map(Some)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "daemon task security descriptor is not valid UTF-16: {error}"
+                    ),
+                })
+        }
+
         fn register_xml(&mut self, xml: &str) -> Result<()> {
+            let sddl = self.identity.sddl.clone();
+            self.register_xml_with_sddl(xml, &sddl)
+        }
+
+        fn register_xml_with_sddl(&mut self, xml: &str, sddl: &str) -> Result<()> {
             if self.task_unchecked()?.is_some() {
                 let _ = self.task()?;
             }
             let user = VARIANT::from(self.identity.user_sid.as_str());
             let password = VARIANT::default();
-            let sddl = VARIANT::from(self.identity.sddl.as_str());
+            let sddl = VARIANT::from(sddl);
             let task = unsafe {
                 self.root.RegisterTask(
                     &BSTR::from(self.identity.task_path.as_str()),
@@ -1314,6 +2109,133 @@ mod tests {
 
     const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
+    #[test]
+    fn scoop_packages_have_isolated_runtime_and_task_identities() {
+        let local_app_data = Path::new(r"C:\Users\alice\AppData\Local");
+        let stable = ServiceRuntimeLayout::below(local_app_data, WindowsPackageId::Stable);
+        let beta = ServiceRuntimeLayout::below(local_app_data, WindowsPackageId::Beta);
+        assert_eq!(
+            stable.executable,
+            local_app_data
+                .join("TraceDecay")
+                .join("service")
+                .join("tracedecay")
+                .join("tracedecay.exe")
+        );
+        assert_eq!(
+            beta.executable,
+            local_app_data
+                .join("TraceDecay")
+                .join("service")
+                .join("tracedecay-beta")
+                .join("tracedecay.exe")
+        );
+        assert_ne!(stable.state_file, beta.state_file);
+
+        let stable_identity =
+            TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
+                .expect("stable task identity");
+        let beta_identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Beta, TEST_SID)
+            .expect("beta task identity");
+        assert_eq!(
+            stable_identity.task_name,
+            format!("TraceDecay Daemon ({TEST_SID})")
+        );
+        assert_eq!(
+            beta_identity.task_name,
+            format!("TraceDecay Beta Daemon ({TEST_SID})")
+        );
+        assert_ne!(stable_identity.task_path, beta_identity.task_path);
+    }
+
+    #[test]
+    fn scoop_package_detection_is_case_insensitive_and_strict() {
+        assert_eq!(
+            package_id_from_executable(Path::new(
+                "C:/Users/alice/scoop/apps/TraceDecay/5.0.0/tracedecay.exe"
+            )),
+            Some(WindowsPackageId::Stable)
+        );
+        assert_eq!(
+            package_id_from_executable(Path::new(
+                "C:/Users/alice/scoop/apps/TRACEDECAY-BETA/5.1.0-beta.1/tracedecay.exe"
+            )),
+            Some(WindowsPackageId::Beta)
+        );
+        assert_eq!(
+            package_id_from_executable(Path::new(
+                "C:/Users/alice/AppData/Local/TraceDecay/service/tracedecay-beta/tracedecay.exe"
+            )),
+            Some(WindowsPackageId::Beta)
+        );
+        assert_eq!(
+            package_id_from_executable(Path::new("C:/tools/tracedecay.exe")),
+            None
+        );
+    }
+
+    #[test]
+    fn scoop_state_marker_authenticates_exact_package_task_state() {
+        let identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Beta, TEST_SID)
+            .expect("beta identity");
+        let task_xml = render_task_xml_for(
+            &spec(
+                "C:/scoop/apps/tracedecay-beta/5.1.0-beta.1/tracedecay.exe",
+                "C:/profiles/beta",
+            ),
+            &identity,
+        )
+        .expect("task XML");
+        let marker = ScoopServiceState::capture(
+            WindowsPackageId::Beta,
+            &identity,
+            TaskSnapshot {
+                running: true,
+                enabled: false,
+            },
+            task_xml,
+            identity.sddl.clone(),
+        )
+        .expect("owned marker");
+        marker
+            .validate(WindowsPackageId::Beta, &identity)
+            .expect("valid marker");
+        assert_eq!(marker.desired_state(), DaemonServiceState::RunningDisabled);
+        assert!(
+            marker
+                .validate(WindowsPackageId::Stable, &identity)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn scoop_restore_rewrites_only_the_service_executable() {
+        let identity = TaskIdentity::for_package_user_sid(WindowsPackageId::Stable, TEST_SID)
+            .expect("stable identity");
+        let original = render_task_xml_for(
+            &spec(
+                "C:/scoop/apps/tracedecay/5.0.0/tracedecay.exe",
+                "C:/profiles/stable & exact",
+            ),
+            &identity,
+        )
+        .expect("task XML");
+        let replacement =
+            Path::new("C:/Users/alice/AppData/Local/TraceDecay/service/tracedecay/tracedecay.exe");
+        let restored =
+            replace_task_action_executable(&original, replacement).expect("rewritten action");
+        let action = task_action_from_xml(&restored).expect("restored action");
+        assert_eq!(action.executable, replacement);
+        assert_eq!(
+            profile_root_from_task_xml(&restored),
+            Some(PathBuf::from("C:/profiles/stable & exact"))
+        );
+        assert_eq!(
+            action.arguments,
+            r#"daemon run --profile-root "C:/profiles/stable & exact""#
+        );
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Operation {
         Register(String),
@@ -1382,6 +2304,12 @@ mod tests {
 
         fn registered_xml(&mut self) -> Result<Option<String>> {
             Ok(self.xml.clone())
+        }
+
+        fn registered_sddl(&mut self) -> Result<Option<String>> {
+            Ok(self
+                .task
+                .map(|_| TaskIdentity::for_user_sid(TEST_SID).expect("identity").sddl))
         }
 
         fn register_xml(&mut self, xml: &str) -> Result<()> {
@@ -2182,50 +3110,5 @@ mod tests {
             api.operations,
             vec![Operation::Stop, Operation::Enable(false), Operation::Delete]
         );
-    }
-
-    #[test]
-    fn scoop_install_prefers_existing_current_junction_executable() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let app = temp.path().join("apps/tracedecay");
-        let versioned = app.join("4.2.0/tracedecay.exe");
-        let current = app.join("current/tracedecay.exe");
-        std::fs::create_dir_all(versioned.parent().expect("version parent")).expect("version dir");
-        std::fs::create_dir_all(current.parent().expect("current parent")).expect("current dir");
-        std::fs::write(&versioned, b"versioned").expect("versioned executable");
-        std::fs::write(&current, b"current").expect("current executable");
-
-        assert_eq!(preferred_service_executable(&versioned), current);
-        assert_eq!(
-            preferred_service_executable(Path::new("/opt/tracedecay/bin/tracedecay")),
-            PathBuf::from("/opt/tracedecay/bin/tracedecay")
-        );
-    }
-
-    #[test]
-    fn scoop_shim_prefers_existing_current_junction_executable() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let shim = temp.path().join("shims/tracedecay.exe");
-        let current = temp.path().join("apps/tracedecay/current/tracedecay.exe");
-        std::fs::create_dir_all(shim.parent().expect("shim parent")).expect("shim dir");
-        std::fs::create_dir_all(current.parent().expect("current parent")).expect("current dir");
-        std::fs::write(&shim, b"shim").expect("shim executable");
-        std::fs::write(&current, b"current").expect("current executable");
-
-        assert_eq!(preferred_service_executable(&shim), current);
-    }
-
-    #[test]
-    fn scoop_component_matching_is_case_insensitive() {
-        let temp = tempfile::TempDir::new().expect("temp dir");
-        let app = temp.path().join("APPS/TraceDecay");
-        let versioned = app.join("4.2.0/tracedecay.EXE");
-        let current = app.join("current/tracedecay.exe");
-        std::fs::create_dir_all(versioned.parent().expect("version parent")).expect("version dir");
-        std::fs::create_dir_all(current.parent().expect("current parent")).expect("current dir");
-        std::fs::write(&versioned, b"versioned").expect("versioned executable");
-        std::fs::write(&current, b"current").expect("current executable");
-
-        assert_eq!(preferred_service_executable(&versioned), current);
     }
 }

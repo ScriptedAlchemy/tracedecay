@@ -140,6 +140,33 @@ pub enum PostUpdateMode {
     DogfoodRecoverInactive,
 }
 
+#[derive(Subcommand)]
+pub enum PackageHookAction {
+    /// Run Scoop package lifecycle integration.
+    Scoop {
+        #[command(subcommand)]
+        action: ScoopPackageHookAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ScoopPackageHookAction {
+    /// Snapshot and quiesce a managed service before Scoop replaces the app tree.
+    Prepare {
+        #[arg(long, value_parser = ["tracedecay", "tracedecay-beta"])]
+        package_id: String,
+        #[arg(long)]
+        state_file: std::path::PathBuf,
+    },
+    /// Restore a snapshotted managed service after Scoop installs the new binary.
+    Restore {
+        #[arg(long, value_parser = ["tracedecay", "tracedecay-beta"])]
+        package_id: String,
+        #[arg(long)]
+        state_file: std::path::PathBuf,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
@@ -509,6 +536,12 @@ pub enum Commands {
         /// forward-only mode after installing the new binary.
         #[arg(long, value_enum, default_value_t, hide = true)]
         mode: PostUpdateMode,
+    },
+    /// Internal package-manager lifecycle integration.
+    #[command(name = "package-hook", hide = true)]
+    PackageHook {
+        #[command(subcommand)]
+        action: PackageHookAction,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]
