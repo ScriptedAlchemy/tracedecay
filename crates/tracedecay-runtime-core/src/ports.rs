@@ -85,6 +85,23 @@ pub mod registered_schema {
         let _ = INSTALLER.set(installer);
     }
 
+    /// The fail-closed error returned when no installer is registered.
+    ///
+    /// Kept as a standalone constructor so the fail-closed contract can be
+    /// asserted in a unit test without depending on the process-global
+    /// [`INSTALLER`] slot, which any earlier test in the binary may already have
+    /// populated.
+    fn missing_installer_error() -> TraceDecayError {
+        TraceDecayError::Database {
+            message: "no registered global/session schema installer is registered; \
+                      the root crate must call \
+                      tracedecay_runtime_core::ports::registered_schema::register \
+                      before opening a profile or session shard"
+                .to_owned(),
+            operation: "create initialized global/session schema".to_owned(),
+        }
+    }
+
     /// Installs the registered global/session schema through `connection`.
     ///
     /// # Errors
@@ -93,14 +110,30 @@ pub mod registered_schema {
     pub async fn ensure_registered_schema(connection: &Connection) -> Result<()> {
         match INSTALLER.get() {
             Some(installer) => installer(connection).await,
-            None => Err(TraceDecayError::Database {
-                message: "no registered global/session schema installer is registered; \
-                          the root crate must call \
-                          tracedecay_runtime_core::ports::registered_schema::register \
-                          before opening a profile or session shard"
-                    .to_owned(),
-                operation: "create initialized global/session schema".to_owned(),
-            }),
+            None => Err(missing_installer_error()),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The port stays fail-closed: with no installer registered, the open
+        /// path yields a `Database` error naming the missing registrar. This
+        /// guards the production contract that an uninitialised profile or
+        /// session store is never silently published.
+        #[test]
+        fn missing_installer_is_fail_closed() {
+            let error = missing_installer_error();
+            assert!(
+                matches!(error, TraceDecayError::Database { .. }),
+                "fail-closed error must be a Database error, got: {error:?}"
+            );
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("no registered global/session schema installer is registered"),
+                "unexpected fail-closed message: {rendered}"
+            );
         }
     }
 }
