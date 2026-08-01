@@ -4,6 +4,8 @@
 //! Tarjan's SCC-based acyclicity scoring, dependency depth analysis,
 //! modularity estimation, and composite health scoring.
 
+pub mod delta;
+pub mod snapshot;
 pub mod test_risk;
 
 use std::collections::{HashMap, HashSet, VecDeque};
