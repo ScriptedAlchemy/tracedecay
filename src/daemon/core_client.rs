@@ -11,16 +11,12 @@ use tokio::time::{Duration, Instant, timeout};
 use super::unavailable_error;
 use super::{
     BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonEndpoint, DaemonHandshake,
-    JsonRpcRequest, JsonRpcResponse, PROJECT_WARMING_RETRY_HINT, Result, TraceDecayError,
-    authority, default_socket_path,
+    JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
+    TraceDecayError, authority, default_socket_path, error_message_is_project_open_retryable,
 };
 
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-// Matches core_proxy: a cold project open outlasts 2s even on fast hosts;
-// the warming loop still exits immediately on a real failure.
-const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(15);
-const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How long daemon clients keep retrying a failed connect before giving up.
 ///
@@ -449,11 +445,11 @@ pub async fn call_tool_within(
     .await
 }
 
-fn is_project_warming_error(error: &TraceDecayError) -> bool {
-    error.to_string().contains(PROJECT_WARMING_RETRY_HINT)
+fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
+    error_message_is_project_open_retryable(&error.to_string())
 }
 
-async fn call_tool_with_project_warming_retry(
+async fn call_tool_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     tool_name: &str,
@@ -470,9 +466,9 @@ async fn call_tool_with_project_warming_retry(
         )
         .await
         {
-            Err(error) if is_project_warming_error(&error) => {
+            Err(error) if is_project_open_retryable_error(&error) => {
                 let remaining = DaemonClientDeadline::until(deadline)?.remaining()?;
-                tokio::time::sleep(remaining.min(PROJECT_WARMING_RETRY_INTERVAL)).await;
+                tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
             }
             result => return result,
         }
@@ -486,13 +482,13 @@ pub async fn call_default_tool(
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
     match call_tool(&socket_path, handshake, tool_name, arguments.clone()).await {
-        Err(error) if is_project_warming_error(&error) => {
-            call_tool_with_project_warming_retry(
+        Err(error) if is_project_open_retryable_error(&error) => {
+            call_tool_with_project_open_retry(
                 &socket_path,
                 handshake,
                 tool_name,
                 arguments,
-                Instant::now() + PROJECT_WARMING_RETRY_GRACE,
+                Instant::now() + PROJECT_OPEN_RETRY_GRACE,
             )
             .await
         }
@@ -528,7 +524,7 @@ pub async fn call_default_tool_awaiting_project_open(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_with_project_warming_retry(&socket_path, handshake, tool_name, arguments, deadline)
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline)
         .await
 }
 
