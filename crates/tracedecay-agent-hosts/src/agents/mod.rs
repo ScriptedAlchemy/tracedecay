@@ -17,6 +17,9 @@ pub mod context_scout_v2;
 pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
+/// Legacy Cursor `serve` log marker; the root crate's `src/serve.rs`
+/// re-exports this instead of declaring its own copy.
+pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
 pub mod gemini;
 pub mod hermes;
 pub mod host_bundle_registry;
@@ -1901,30 +1904,10 @@ pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
 }
 
 /// Returns the VS Code user data directory, platform-specific.
-pub fn vscode_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Code")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Code")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Code");
-            }
-        }
-        home.join("AppData/Roaming/Code")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Code")
-    }
-}
+///
+/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
+/// dependency graph; see SEAMS.md).
+pub use tracedecay_sessions::host_ports::vscode_data_dir;
 
 /// Returns the platform-specific VS Code Insiders data directory.
 pub fn vscode_insiders_data_dir(home: &Path) -> PathBuf {
@@ -1958,30 +1941,10 @@ pub fn copilot_cli_dir(home: &Path) -> PathBuf {
 }
 
 /// Returns the Kiro IDE user data directory (VS Code-style layout).
-pub fn kiro_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Kiro")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Kiro")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Kiro");
-            }
-        }
-        home.join("AppData/Roaming/Kiro")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Kiro")
-    }
-}
+///
+/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
+/// dependency graph; see SEAMS.md).
+pub use tracedecay_sessions::host_ports::kiro_data_dir;
 
 /// Returns agent IDs that have tracedecay configured under `home` but are
 /// absent from `current`. Pure — does no I/O on the config file.
@@ -1996,16 +1959,18 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
     additions
 }
 
-/// The tracked-agent list this crate backfills, as a port over the root
-/// crate's `user_config::UserConfig`.
+/// The tracked-agent list this crate backfills, as a port over
+/// `tracedecay_usecases::user_config::UserConfig`.
 ///
-/// `UserConfig` stays above this crate — it is the whole user-level profile,
-/// most of which host detection has no business seeing. The backfill below
-/// needs exactly three operations, so it takes them as a port rather than the
-/// concrete type.
+/// `UserConfig` stays in `tracedecay-usecases` — it is the whole user-level
+/// profile, most of which host detection has no business seeing. The
+/// backfill below needs exactly three operations, so it takes them as a port
+/// rather than the concrete type.
 ///
-/// Root wiring: the root implements this for `user_config::UserConfig`
-/// (`installed_agents` field reads/extends, and its existing `save`).
+/// This crate implements the port for `UserConfig` directly below (it
+/// already depends on `tracedecay-usecases`); the root crate's
+/// `user_config::UserConfig` is a re-export of the same type, so the impl
+/// applies there too without any root-side wiring.
 pub trait InstalledAgentsConfig {
     /// Agent ids currently recorded as installed.
     fn installed_agents(&self) -> &[String];
@@ -2016,6 +1981,24 @@ pub trait InstalledAgentsConfig {
     /// Persists the config. Failures are logged, never fatal: a lost backfill
     /// is retried on the next run.
     fn save(&self) -> Result<()>;
+}
+
+impl InstalledAgentsConfig for tracedecay_usecases::user_config::UserConfig {
+    fn installed_agents(&self) -> &[String] {
+        &self.installed_agents
+    }
+
+    fn extend_installed_agents(&mut self, additions: Vec<String>) {
+        self.installed_agents.extend(additions);
+    }
+
+    fn save(&self) -> Result<()> {
+        tracedecay_usecases::user_config::UserConfig::save(self).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })
+    }
 }
 
 /// Backfill `installed_agents` for users upgrading from older versions.

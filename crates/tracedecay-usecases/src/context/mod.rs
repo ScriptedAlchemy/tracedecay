@@ -2,7 +2,7 @@
 //! the root binary's `src/context/{read_modes,source_read}.rs` (their only
 //! consumer is `primitives::concrete` in this crate). See SEAMS.md.
 
-mod read_cache;
+pub mod read_cache;
 pub mod read_modes;
 pub mod source_read;
 
