@@ -423,7 +423,7 @@ impl McpServer {
             source: SpanSource::HookRoute,
         };
         self.spawn_observed_ledger_write(async move {
-            if let Err(e) = crate::store::GlobalDbGitCorrelationStore::new(&db)
+            if let Err(e) = crate::store::GlobalDbGitCorrelationStore::new(db)
                 .record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await
             {
