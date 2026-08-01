@@ -14,7 +14,7 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(25);
 
 /// The bounded backoff schedule: attempt 1 => 25ms, then doubles until the
 /// per-worker `shift_cap` or the absolute [`MAX_BACKOFF`] ceiling.
-pub(crate) fn replay_backoff(attempt: u32, shift_cap: u32) -> Duration {
+pub fn replay_backoff(attempt: u32, shift_cap: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(shift_cap);
     let millis = INITIAL_BACKOFF
         .as_millis()

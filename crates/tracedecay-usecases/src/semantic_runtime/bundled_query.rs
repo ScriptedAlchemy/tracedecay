@@ -10,17 +10,19 @@ use tracedecay_search_eval::{
 };
 
 const QUERY_PROFILE_ID: &str = "query-fallback";
+// Repo-root relative: this module moved from `src/application/semantic_runtime/`
+// into `crates/tracedecay-usecases/src/semantic_runtime/`, one directory deeper.
 const QUERY_WORKLOAD_JSON: &str = include_str!(
-    "../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
+    "../../../../tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
 );
 const QUERY_REPORT_JSON: &str =
-    include_str!("../../../benchmarks/search-quality/query-fallback-report-v1.json");
+    include_str!("../../../../benchmarks/search-quality/query-fallback-report-v1.json");
 
 /// Reconstruct the shipped exact/lexical/graph profile from the byte-pinned
 /// evaluator workload and its passing direct report. The report is rechecked
 /// by `PassingRetrievalEvaluationV1`; no caller-supplied pass label or profile
 /// material enters this path.
-pub(crate) fn bundled_query_authority() -> Result<
+pub fn bundled_query_authority() -> Result<
     (
         DirectEvaluationReportV1,
         AcceptedRetrievalProfileV1,

@@ -34,19 +34,19 @@ fn canonical_observatory_value(
     serde_json::to_value(model)
 }
 
-pub(crate) fn observatory_cli_value(
+pub fn observatory_cli_value(
     model: &ObservatoryReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_observatory_value(model)
 }
 
-pub(crate) fn observatory_mcp_value(
+pub fn observatory_mcp_value(
     model: &ObservatoryReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_observatory_value(model)
 }
 
-pub(crate) fn observatory_http_value(
+pub fn observatory_http_value(
     model: &ObservatoryReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_observatory_value(model)
@@ -54,7 +54,7 @@ pub(crate) fn observatory_http_value(
 
 /// Bounded public JSON export. It is the same canonical model as interactive
 /// surfaces, including absent values, exact denominator, and coverage state.
-pub(crate) fn observatory_export_bytes(
+pub fn observatory_export_bytes(
     model: &ObservatoryReadModelV1,
 ) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(model)
@@ -64,25 +64,25 @@ fn canonical_costs_value(model: &CostsReadModelV1) -> Result<serde_json::Value, 
     serde_json::to_value(model)
 }
 
-pub(crate) fn costs_cli_value(
+pub fn costs_cli_value(
     model: &CostsReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 
-pub(crate) fn costs_mcp_value(
+pub fn costs_mcp_value(
     model: &CostsReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 
-pub(crate) fn costs_http_value(
+pub fn costs_http_value(
     model: &CostsReadModelV1,
 ) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 
-pub(crate) fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, serde_json::Error> {
+pub fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(model)
 }
 
@@ -90,7 +90,7 @@ pub(crate) fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, se
 /// The complete versioned envelope is retained as JSON while indexed columns
 /// provide bounded scope/kind/time queries.
 #[derive(Clone, Copy)]
-pub(crate) struct RegisteredObservabilityPortV1<'a> {
+pub struct RegisteredObservabilityPortV1<'a> {
     db: &'a RegisteredGlobalDb,
 }
 
@@ -420,7 +420,7 @@ fn measurement(
     }
 }
 
-pub(crate) fn observatory_unavailable_read_model(
+pub fn observatory_unavailable_read_model(
     scope_ref: Option<&str>,
     since_seconds: i64,
     reason: &str,
@@ -606,7 +606,7 @@ pub(crate) async fn observatory_read_model(
 /// Adds Plan 37 feedback-system quality measurements to the canonical
 /// Observatory model. Adapters call this composer instead of re-deriving
 /// values, denominators, coverage, or unavailable states.
-pub(crate) fn attach_feedback_system_quality(
+pub fn attach_feedback_system_quality(
     read_model: &mut ObservatoryReadModelV1,
     feedback: Option<&FeedbackObservationReadModelV1>,
     unavailable_reason: Option<&str>,
@@ -776,7 +776,7 @@ const fn feedback_unavailable_reason(
     }
 }
 
-pub(crate) fn costs_unavailable_read_model(
+pub fn costs_unavailable_read_model(
     scope_ref: Option<&str>,
     since_seconds: i64,
     reason: &str,

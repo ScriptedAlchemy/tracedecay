@@ -19,7 +19,7 @@ const MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1: usize = 1024 * 1024;
 /// commit. Repository identity comes from the fixed REST route, not response
 /// prose or the caller's current branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GitHubExactCommitPullRequestV1 {
+pub struct GitHubExactCommitPullRequestV1 {
     pub(crate) target: GitHubRepositoryTargetV1,
     pub(crate) base_commit_id: CommitId,
     pub(crate) head_commit_id: CommitId,

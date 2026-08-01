@@ -30,7 +30,7 @@ use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
 
 #[derive(Debug, Error)]
-pub(crate) enum RuntimeExternalSourceErrorV1 {
+pub enum RuntimeExternalSourceErrorV1 {
     #[error("external source admission failed: {0}")]
     Admission(#[from] SourceCaptureAdmissionErrorV1),
     #[error("external source commit is invalid: {0}")]
@@ -56,13 +56,13 @@ pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
 }
 
 #[derive(Clone)]
-pub(crate) struct RuntimeExternalSourceStore {
+pub struct RuntimeExternalSourceStore {
     runtime: StoreRuntimeHandle,
     authority: tracedecay_runtime_core::db::DatabaseAuthority,
 }
 
 impl RuntimeExternalSourceStore {
-    pub(crate) fn new(
+    pub fn new(
         runtime: StoreRuntimeHandle,
         authority: tracedecay_runtime_core::db::DatabaseAuthority,
     ) -> Result<Self, RuntimeExternalSourceErrorV1> {

@@ -5566,6 +5566,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracedecay-usecases",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -6071,6 +6072,46 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+]
+
+[[package]]
+name = "tracedecay-usecases"
+version = "0.1.0"
+dependencies = [
+ "cap-std",
+ "ignore",
+ "rusqlite",
+ "same-file",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "static_assertions",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-capture",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-hooks",
+ "tracedecay-lsp",
+ "tracedecay-policy",
+ "tracedecay-query",
+ "tracedecay-runtime-core",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-search-eval",
+ "tracedecay-semantic",
+ "tracedecay-sessions",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "ureq",
+ "url",
+ "zeroize",
 ]
 
 [[package]]

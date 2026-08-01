@@ -35,7 +35,7 @@ pub(crate) struct HostAdmissionRuntime {
 }
 
 impl HostAdmissionRuntime {
-    pub(crate) fn open_for_database(
+    pub fn open_for_database(
         database_path: &Path,
     ) -> Result<(Self, SpoolOpenReport), HostAdmissionOutcome> {
         let parent = database_path
@@ -51,7 +51,7 @@ impl HostAdmissionRuntime {
         )
     }
 
-    pub(crate) fn open(
+    pub fn open(
         dir: impl Into<PathBuf>,
         bounds: SpoolBounds,
     ) -> Result<(Self, SpoolOpenReport), HostAdmissionOutcome> {

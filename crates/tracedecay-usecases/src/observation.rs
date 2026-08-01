@@ -23,7 +23,7 @@ use tracedecay_runtime_core::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
 };
-use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 /// Cloneable, operation-local cancellation shared by application adapters.
 #[derive(Clone, Debug, Default)]
@@ -363,7 +363,7 @@ where
                         "observation-capture.v1",
                     )?;
                     let repository_provenance = repository_provenance.map_or_else(
-                        crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
+                        tracedecay_sessions::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
                         |context| {
                             context.capture_after_sanitization(
                                 &observation,

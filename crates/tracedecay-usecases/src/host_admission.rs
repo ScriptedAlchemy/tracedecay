@@ -32,7 +32,7 @@ use crate::observation::{
 };
 use crate::global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::privacy::RecordSanitizerV1;
-use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::store::observation::GlobalDbObservationStore;
 
 mod disposition;
@@ -51,7 +51,7 @@ pub(crate) use durability::{DirectorySyncPolicy, sync_directory};
 pub(crate) use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
 
 pub(crate) use runtime::HostAdmissionRuntime;
-pub(crate) type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
+pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
 
 pub(crate) struct HostAdmissionBroker {
     runtime: Arc<Mutex<HostAdmissionRuntime>>,
@@ -66,7 +66,7 @@ pub(crate) struct HostAdmissionReplay<'a> {
 }
 
 impl HostAdmissionBroker {
-    pub(crate) fn new(runtime: HostAdmissionRuntime) -> Self {
+    pub fn new(runtime: HostAdmissionRuntime) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
             replay: tokio::sync::Mutex::new(()),

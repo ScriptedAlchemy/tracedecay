@@ -25,9 +25,10 @@ use super::{
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
-use crate::git_intelligence::{
-    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, NativeGitIntelligence,
-};
+use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
+// SEAM: the native `git` spawn adapter is still root-owned
+// (`src/git_intelligence.rs`). See `SEAMS.md`.
+use crate::git_intelligence::NativeGitIntelligence;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";

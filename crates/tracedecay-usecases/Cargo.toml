@@ -4,6 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters"
+# PACKAGING SEAM: `semantic_runtime::bundled_query` byte-pins the shipped query
+# profile with `include_str!` against two repo-root fixtures that live outside
+# this package. `cargo check` resolves them; `cargo package` will not. See
+# SEAMS.md — the fixtures must be vendored under `/src` or produced by a build
+# script before this crate can be published.
 include = ["/src/**"]
 
 [features]
@@ -16,7 +21,6 @@ semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
 test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
-    "tracedecay-migrate/test-transport",
 ]
 
 [dependencies]
@@ -29,6 +33,7 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
+ureq = { version = "3", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
@@ -42,7 +47,6 @@ tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", 
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
-tracedecay-migrate = { path = "../tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }

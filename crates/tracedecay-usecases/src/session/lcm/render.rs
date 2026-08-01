@@ -21,7 +21,7 @@ pub(crate) enum CanonicalLcmSourceHydrationError {
     InvalidContentState,
 }
 
-pub(crate) fn apply_canonical_content(
+pub fn apply_canonical_content(
     mut expansion: LcmExpandResponse,
     slice: LcmContentSlice,
     canonical_content: &str,
