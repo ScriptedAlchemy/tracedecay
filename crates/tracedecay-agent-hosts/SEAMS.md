@@ -172,10 +172,15 @@ Until each row lands, the definition is duplicated in both crates.
 
 | Moved here | Root shim to write |
 |---|---|
-| `ports::context::{CancellationToken, MonotonicDeadline}` | `src/application/context.rs` re-exports (a cancellation token only propagates cancellation if both sides name one type) |
-| `ports::configuration::ConfigurationCurrentStateV1` | `src/application/configuration/ports.rs` re-exports |
 | `analytics` (whole module) | `src/analytics.rs` becomes `pub use tracedecay_agent_hosts::analytics::*;` |
 | `agents::cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER` | `src/serve.rs` re-exports |
+
+### Canonical compatibility shims
+
+| Historical path retained here | Canonical owner |
+|---|---|
+| `ports::context::{CancellationToken, MonotonicDeadline}` | `tracedecay_runtime_core::cancellation` |
+| `ports::configuration::ConfigurationCurrentStateV1` | `tracedecay_usecases::configuration` |
 
 ### Conversions at the boundary
 

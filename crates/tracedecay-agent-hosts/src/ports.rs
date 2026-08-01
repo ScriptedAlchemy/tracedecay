@@ -7,12 +7,12 @@
 //! become a dependency edge — they sit *above* this crate — so each is
 //! expressed here instead.
 //!
-//! Two shapes appear below, and the choice between them is not stylistic:
+//! Three shapes appear below, and the choice between them is not stylistic:
 //!
-//! - **Downward moves.** Pure value types and pure functions whose identity
-//!   must be shared across the boundary (a cancellation token only propagates
-//!   cancellation if both sides hold the *same* type) are defined here and
-//!   re-exported by the root crate. This is the same shape as `agents` and
+//! - **Canonical re-exports.** Value types already owned by a lower canonical
+//!   crate remain available through this crate's historical port path.
+//! - **Downward moves.** Pure value types and pure functions still owned here
+//!   are re-exported by the root crate. This is the same shape as `agents` and
 //!   `automation` themselves, which the root re-exports from this crate.
 //! - **Registered ports.** Behaviour backed by root-owned runtime is a
 //!   function pointer or trait object the root registers at startup, following

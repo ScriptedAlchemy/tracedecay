@@ -1106,7 +1106,7 @@ mod tests {
         let capability = CapabilityDigest::new([0x11; 32]);
         let policy = PolicyDigest::new([0x22; 32]);
         let configuration = ConfigurationDigest::new([0x33; 32]);
-        let cancellation = CancellationToken::for_application_request(&request_id);
+        let cancellation = CancellationToken::for_application_request(request_id.as_str());
         let budgets = RequestBudgets::new(128, AUTOMATION_SESSION_MAX_BYTES, 10_000).unwrap();
         let grant = CapabilityGrantSnapshot::new(
             CapabilityGrantId::new("grant.automation.session-evidence.test").unwrap(),
