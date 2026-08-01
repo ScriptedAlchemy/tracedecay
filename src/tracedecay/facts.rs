@@ -1,30 +1,25 @@
 //! Session-memory (holographic fact store) surface of [`TraceDecay`].
 
-use crate::application::memory::{
-    MemoryApplication, MemoryApplicationError, MemoryOperationContext, V1UpdateFactOutcome,
-};
+use crate::application::memory::{MemoryApplication, MemoryOperationContext, V1UpdateFactOutcome};
+// The shared resolvers live in `tracedecay_usecases::memory` (the crate that
+// owns `MemoryApplication`/`MemoryApplicationError`) rather than in
+// `tracedecay-runtime-core` — that crate is a *dependency* of
+// `tracedecay-usecases`, so hosting these there would require a circular
+// crate dependency. Both this module and
+// `tracedecay-dashboard-api::tracedecay::facts` delegate to the same
+// functions instead of keeping independent copies.
+pub(crate) use crate::application::memory::{memory_application_error, memory_application_for_db};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{
     AddFactOutcome, AddFactRequest, FactRecord, FactSearchResult, FeedbackRequest, FeedbackResult,
     MemoryCategory, MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
-use crate::store::memory::{DatabaseFactStore, ProjectFactStore, ProjectMemoryDbHandle};
+use crate::store::memory::{ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::TraceDecay;
 
 const MAX_FACT_HISTORY_LIMIT: usize = 1_000;
-
-fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
-    TraceDecayError::database_operation("memory application", error)
-}
-
-pub(crate) fn memory_application_for_db(
-    owner: FactOwnerV1,
-    db: &crate::db::Database,
-) -> Result<MemoryApplication<DatabaseFactStore<'_>>> {
-    MemoryApplication::new(owner, DatabaseFactStore::new(db)).map_err(memory_application_error)
-}
 
 fn project_memory_owner_from_layout_id(project_id: Option<&str>) -> Result<FactOwnerV1> {
     let project_id = project_id.ok_or_else(|| TraceDecayError::Config {
