@@ -2866,12 +2866,10 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
             legal_actions: vec![LegalAction::ContactAdministrator],
         },
         // Genuinely transient: the resume-token authority could not answer.
-        OperationEventError::ResumeUnavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "operation_event.unavailable".to_owned(),
-                message: "The operation-event service is unavailable".to_owned(),
-            })
-        }
+        OperationEventError::ResumeUnavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "operation_event.unavailable".to_owned(),
+            message: "The operation-event service is unavailable".to_owned(),
+        }),
     };
     let Ok(schema_id) = SchemaId::new("schema.tracedecay.operation-event.problem.v1") else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
