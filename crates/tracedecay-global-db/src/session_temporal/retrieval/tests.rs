@@ -9,7 +9,7 @@ use super::cursors::*;
 use super::queries::*;
 use super::records::*;
 use super::*;
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue,
 };

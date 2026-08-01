@@ -797,7 +797,7 @@ mod tests {
 
     use super::*;
     use crate::ParseOffset;
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
         SessionRecord {

@@ -900,7 +900,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     #[tokio::test]
     async fn registered_metadata_rendering_matches_the_canonical_fixture() {
