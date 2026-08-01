@@ -205,6 +205,34 @@ async fn run_startup_session_catch_up_with_home(
     }
 }
 
+/// Shared compare-and-swap cooldown gate for the lazy staleness check,
+/// background read refresh, and automation-notice check below. Each
+/// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
+/// single-flights concurrent callers off that stamp so at most one
+/// caller per window proceeds.
+///
+/// Note: call sites are inconsistent about additionally special-casing
+/// a `0` (never-checked) stamp before calling `try_claim` — some do,
+/// some don't. That inconsistency predates this extraction and is
+/// preserved as-is here rather than harmonized.
+struct CooldownGate;
+
+impl CooldownGate {
+    /// Returns `true` iff at least `window_secs` have elapsed since
+    /// `atomic`'s last stamp and this call won the race to advance it
+    /// to `now`. The loser of a race bails so at most one caller
+    /// within each window proceeds.
+    fn try_claim(&self, atomic: &AtomicI64, now: i64, window_secs: i64) -> bool {
+        let previous = atomic.load(Ordering::Acquire);
+        if now.saturating_sub(previous) < window_secs {
+            return false;
+        }
+        atomic
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
 impl McpServer {
     pub(crate) fn project_server_response_lifecycle(&self) -> ProjectServerResponseLifecycle {
         self.project_server_lifecycle.clone()
@@ -528,14 +556,7 @@ impl McpServer {
             return;
         }
 
-        if now.saturating_sub(previous) < 30 {
-            return;
-        }
-        if self
-            .last_staleness_check_at
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        if !CooldownGate.try_claim(&self.last_staleness_check_at, now, 30) {
             return;
         }
 
@@ -594,11 +615,7 @@ impl McpServer {
             return;
         }
         // Reserve the cooldown slot. If another read call won the race, bail.
-        if self
-            .last_background_refresh_at
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        if !CooldownGate.try_claim(&self.last_background_refresh_at, now, cooldown) {
             return;
         }
         // Reserve the single-flight slot. If a refresh is already running
@@ -666,15 +683,7 @@ impl McpServer {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let previous = self.last_automation_notice_check_at.load(Ordering::Acquire);
-        if now.saturating_sub(previous) < 60 {
-            return None;
-        }
-        if self
-            .last_automation_notice_check_at
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        if !CooldownGate.try_claim(&self.last_automation_notice_check_at, now, 60) {
             return None;
         }
         let profile_root = crate::storage::default_profile_root().ok()?;
