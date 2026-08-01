@@ -264,8 +264,6 @@ use wire_io::{
 };
 
 pub(crate) mod transport;
-#[cfg(test)]
-pub(crate) use crate::daemon_contract::DaemonInvocationProblem;
 #[cfg(all(unix, test))]
 pub(crate) use crate::daemon_contract::{DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION};
 /// The wire contract now lives in `crate::daemon_contract`, outside this module
