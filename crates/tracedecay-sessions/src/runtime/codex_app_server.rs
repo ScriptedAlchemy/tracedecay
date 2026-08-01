@@ -275,6 +275,7 @@ fn run_prompt_with_optional_cancellation(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_codex_protocol(
     child: &mut ChildGuard,
     line_rx: &mpsc::Receiver<std::io::Result<String>>,

@@ -380,6 +380,7 @@ async fn scoped_row_count(
 /// single session. In [`RetentionMode::DryRun`] nothing is mutated and each
 /// phase reports the candidate count and bytes that *would* be reclaimed.
 /// Apply mode requires `authorize` to admit each mutating intent.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_session_retention_authorized(
     conn: &Connection,
     storage_root: &Path,
@@ -544,6 +545,7 @@ struct DropRow {
     content_len: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_drop_pass(
     conn: &Connection,
     provider: &str,
@@ -824,6 +826,7 @@ async fn offload_one(
     Ok(byte_len)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_dedupe_pass(
     conn: &Connection,
     provider: &str,

@@ -249,7 +249,7 @@ impl TranscriptScopeMatcher {
     /// otherwise — the shape every provider source carries as an
     /// `Option<Vec<PathBuf>>` user scope beside its project root.
     pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
-        registered_roots.map_or_else(|| Self::project(project_root), |roots| Self::profile(roots))
+        registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
     }
 
     /// True when a record with this working directory belongs to the scope.
