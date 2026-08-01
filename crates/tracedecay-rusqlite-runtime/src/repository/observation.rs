@@ -378,7 +378,8 @@ type EncodedObservationRow = (
 /// append their own `WHERE`/`ORDER BY`/`LIMIT` clauses; the column list and its
 /// order are fixed here because [`encoded_observation_row`] reads them
 /// positionally.
-const OBSERVATION_ROW_PROJECTION: &str = "SELECT observation.sequence, observation.observation_json,
+const OBSERVATION_ROW_PROJECTION: &str =
+    "SELECT observation.sequence, observation.observation_json,
             observation.committed_cursor_json, anchor.anchor_json,
             anchor.projection_generation, repository.availability_json,
             repository.capture_json, repository_anchor.anchor_json,

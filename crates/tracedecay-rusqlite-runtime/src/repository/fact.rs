@@ -12,8 +12,8 @@ use tracedecay_store::{
 };
 
 use super::support::{
-    Column, ColumnValue, decode, encode, idempotent_insert, insert_row, invalid, stored_row_matches,
-    usize_to_i64,
+    Column, ColumnValue, decode, encode, idempotent_insert, insert_row, invalid,
+    stored_row_matches, usize_to_i64,
 };
 
 #[derive(Clone, Default)]
@@ -460,10 +460,9 @@ fn assertion_children_match(
            AND owner_kind = ?3 AND project_id = ?4 ORDER BY ordinal",
     )?;
     let stored_supersession = supersession
-        .query_map(
-            params_from_iter(persisted.scope_bindings()),
-            |row| row.get::<_, String>(0),
-        )?
+        .query_map(params_from_iter(persisted.scope_bindings()), |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if stored_supersession != persisted.supersession {
         return Ok(false);
