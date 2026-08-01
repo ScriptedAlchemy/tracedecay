@@ -388,8 +388,21 @@ pub(super) async fn derive_retained_projection_relations(
         let envelope: CanonicalObservationEnvelopeV1 =
             serde_json::from_value(observation.payload().clone())
                 .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-        if let Some(parent_message_id) = envelope.relations().parent_message_id()
-            && let Some(parent_occurrence_id) = parents.resolve(parent_message_id.as_str())
+        // A parent-message relation is conversation threading, not evidence of a
+        // copy: Claude's `parentUuid`, and every other producer of
+        // `parent_message_id`, points at the message this one *replies to*. Only
+        // a re-emission of the same logical message is a logical copy, so the
+        // derived copy edge is restricted to occurrences whose own logical
+        // message id is the parent link. Treating every reply as a copy makes
+        // non-forensic resolution collapse the reply into its parent, erasing it
+        // from every current-mode retrieval surface while forensic reads (e.g.
+        // `lcm_load_session`) still show it.
+        if let Some(parent_message_id) = envelope.relations().parent_message_id().filter(|parent| {
+            occurrence
+                .message_id
+                .as_ref()
+                .is_some_and(|message_id| message_id.as_str() == parent.as_str())
+        }) && let Some(parent_occurrence_id) = parents.resolve(parent_message_id.as_str())
         {
             let key = (
                 occurrence.occurrence_id.as_str().to_owned(),

@@ -519,6 +519,49 @@ impl HostAdmissionTestRuntimeV1 {
             .await)
     }
 
+    /// Live `lcm_raw_messages` store ids for one provider session, in store order.
+    #[doc(hidden)]
+    pub async fn lcm_raw_message_store_ids_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+    ) -> crate::errors::Result<Vec<i64>> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id FROM lcm_raw_messages
+                 WHERE provider = ?1 AND session_id = ?2
+                 ORDER BY store_id",
+                crate::db::engine::params![provider, session_id],
+            )
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "query registered LCM raw message store ids".to_owned(),
+                message: error.to_string(),
+            })?;
+        let mut store_ids = Vec::new();
+        while let Some(row) =
+            rows.next()
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
+                    operation: "read registered LCM raw message store ids".to_owned(),
+                    message: error.to_string(),
+                })?
+        {
+            store_ids.push(row.get::<i64>(0).map_err(|error| {
+                crate::errors::TraceDecayError::Database {
+                    operation: "decode registered LCM raw message store id".to_owned(),
+                    message: error.to_string(),
+                }
+            })?);
+        }
+        Ok(store_ids)
+    }
+
     #[doc(hidden)]
     pub async fn project_parse_offset_by_suffix_for_test(
         &self,
