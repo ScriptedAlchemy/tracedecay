@@ -99,7 +99,7 @@ use session_reflector::{auto_apply_session_fact_proposals, validate_session_fact
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
 #[cfg(unix)]
-pub(crate) use retrieval::registered_project_automation_retrieval;
+pub use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
@@ -154,7 +154,7 @@ pub struct UserSessionAutomationRun {
     pub skill_writer: SkillWriterAutomationRun,
 }
 
-pub(crate) async fn run_user_session_automation_with_backend(
+pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
     session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: &AutomationConfig,

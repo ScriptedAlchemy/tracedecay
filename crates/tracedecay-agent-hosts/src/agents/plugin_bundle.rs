@@ -108,7 +108,7 @@ macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {
         PluginFile {
             relative: $relative,
-            contents: include_str!(concat!("../../plugin/", $source)),
+            contents: include_str!(concat!("../../../../plugin/", $source)),
         }
     };
 }
@@ -375,7 +375,7 @@ pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
 pub fn opencode_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
     vec![(
         "tracedecay-mcp.ts",
-        include_str!("../../plugin/opencode/tracedecay-mcp.ts"),
+        include_str!("../../../../plugin/opencode/tracedecay-mcp.ts"),
     )]
 }
 

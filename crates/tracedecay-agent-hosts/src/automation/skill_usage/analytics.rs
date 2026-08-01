@@ -53,7 +53,7 @@ pub async fn ingest_analytics_events(
     Ok(touched)
 }
 
-pub(crate) async fn ingest_project_analytics_events(
+pub async fn ingest_project_analytics_events(
     profile_root: &Path,
     project_root: &Path,
     global_db: Option<&RegisteredGlobalDb>,
@@ -120,7 +120,7 @@ fn analytics_import_key(
     )
 }
 
-pub(crate) fn analytics_import_key_for_request(
+pub fn analytics_import_key_for_request(
     project_id: &str,
     provider: &str,
     request_id: &str,

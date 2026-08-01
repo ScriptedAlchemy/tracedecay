@@ -646,7 +646,7 @@ pub(crate) async fn registered_profile_automation_retrieval(
     }))
 }
 
-pub(crate) async fn registered_project_automation_retrieval(
+pub async fn registered_project_automation_retrieval(
     database: Arc<RegisteredGlobalDb>,
     profile_identity: &LocalProfileIdentityAuthorityV1,
     project_id: &ProjectId,
