@@ -28,6 +28,28 @@ pub fn is_canonical_text_within(value: &str, max_bytes: usize) -> bool {
     value.len() <= max_bytes && is_canonical_text(value)
 }
 
+/// Exactly `length` characters of lowercase hex.
+///
+/// The digest encodings in these contracts are always lowercase; an uppercase
+/// or mixed-case digest is not a different spelling of the same value, it is a
+/// rejected one.
+#[must_use]
+pub fn is_lowercase_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// An algorithm tag such as `"sha256:"` followed by lowercase hex of exactly
+/// `length` characters. The tag must include its separator.
+#[must_use]
+pub fn is_tagged_lowercase_hex(value: &str, tag: &str, length: usize) -> bool {
+    value
+        .strip_prefix(tag)
+        .is_some_and(|encoded| is_lowercase_hex(encoded, length))
+}
+
 /// Canonical bounded string that reports an empty value distinctly from a
 /// non-canonical one.
 ///
@@ -194,6 +216,42 @@ mod tests {
         for value in ["", " ", "\t", "   \n "] {
             assert!(!is_canonical_text(value));
         }
+    }
+
+    /// The hex predicate is the exact conjunction the per-module copies
+    /// spelled out, including the lowercase-only byte range.
+    #[test]
+    fn hex_predicate_matches_the_inlined_conjunction() {
+        let hex64 = "a".repeat(64);
+        for value in [
+            "",
+            hex64.as_str(),
+            &"A".repeat(64),
+            &"f".repeat(64),
+            &"g".repeat(64),
+            &"0".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+        ] {
+            let inlined = value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            assert_eq!(
+                is_lowercase_hex(value, 64),
+                inlined,
+                "hex predicate diverged for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tagged_hex_requires_the_exact_tag() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert!(is_tagged_lowercase_hex(&digest, "sha256:", 64));
+        assert!(!is_tagged_lowercase_hex(&digest, "blake3:", 64));
+        assert!(!is_tagged_lowercase_hex(&"a".repeat(64), "sha256:", 64));
+        assert!(!is_tagged_lowercase_hex(&digest, "sha256:", 128));
     }
 
     #[test]

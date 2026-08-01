@@ -18,15 +18,15 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use crate::canonical_text::{
+    CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within, validated_string_newtype,
+};
 use crate::code_intelligence::{
     CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
 };
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
-use crate::canonical_text::{
-    CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within, validated_string_newtype,
-};
 use crate::research::{DomainError, canonical_sha256};
 use crate::session::TemporalModeV1;
 
@@ -102,12 +102,7 @@ digest_id!(
 pub struct QueryMac(String);
 
 fn validate_query_mac(value: &str) -> Result<(), RetrievalContractError> {
-    let valid = value.strip_prefix("hmac-sha256:").is_some_and(|encoded| {
-        encoded.len() == 64
-            && encoded
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
+    let valid = crate::canonical_text::is_tagged_lowercase_hex(value, "hmac-sha256:", 64);
     if !valid {
         return Err(RetrievalContractError::InvalidIdentity { field: "QueryMac" });
     }
