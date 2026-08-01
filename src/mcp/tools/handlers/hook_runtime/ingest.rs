@@ -15,7 +15,11 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use super::super::SessionAuthorities;
 
 use super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
-use super::{required_project_db, required_str, required_user_db};
+use super::{required_project_db, required_str};
+
+mod kernels;
+
+use kernels::{TranscriptCaptureContext, TranscriptCaptureOutcome, transcript_capture_kernel};
 
 fn host_admission_facade<'a>(
     cg: Option<&TraceDecay>,
@@ -404,162 +408,34 @@ pub(super) async fn ingest_transcript(
         }
         _ => {}
     }
-    let mut claude_observation_stats = None;
-    let mut snapshot_capture = None;
-    let mut codex_source_deferred = false;
     let cancellation = ObservationCancellation::default();
-    let messages_upserted = match (provider, user_scope) {
-        ("claude", true) => {
-            let profile_root =
-                profile_root.ok_or_else(|| config_error("missing client profile"))?;
-            let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let session_id = required_str(args, "session_id")?.to_string();
-            required_user_db(session_authorities)?;
-            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
-            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
-                .await
-                .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            let stats = crate::sessions::claude_observation::ingest_user_sessions_with_admission(
-                profile_root,
-                Some(session_id),
-                roots,
-                &facade,
-                Some(
-                    max_new_bytes
-                        .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
-                ),
-                cancellation.clone(),
-            )
-            .await
-            .map_err(|error| map_claude_observation_ingest_error(&error))?;
-            let messages_upserted = stats.transcript.messages_upserted;
-            claude_observation_stats = Some(stats);
-            messages_upserted
-        }
-        ("codex", true) => {
-            let profile_root =
-                profile_root.ok_or_else(|| config_error("missing client profile"))?;
-            let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let session_id = required_str(args, "session_id")?.to_string();
-            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
-            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
-                .await
-                .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::try_ingest_user_codex_sessions_with_db_and_admission(
-                profile_root,
-                Some(session_id),
-                roots,
-                &facade,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?
-            .messages_upserted
-        }
-        ("cursor", true) => {
-            profile_root.ok_or_else(|| config_error("missing client profile"))?;
-            let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let event_json = required_str(args, "event_json")?;
-            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
-            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
-                .await
-                .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
-                event_json,
-                &facade,
-                max_new_bytes,
-                &roots,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?
-            .messages_upserted
-        }
-        ("codex", false) => {
-            let cg =
-                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
-            let source = crate::sessions::codex::CodexSource::new()
-                .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
-            let project_id = project_observation_id(cg)?;
-            let scope = ObservationScopeV1::Project {
-                project_id: project_id.clone(),
-            };
-            codex_source_deferred = admit_codex_project_rollouts(
-                &facade,
-                &source,
-                cg.project_root(),
-                project_id,
-                max_new_bytes,
-                &cancellation,
-            )
-            .await?;
-            drain_host_observation_projections(&facade, &scope, &cancellation).await?
-        }
-        ("cursor", false) => {
-            let cg =
-                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
-            let event_json = required_str(args, "event_json")?;
-            crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
-                event_json,
-                project_observation_id(cg)?,
-                &facade,
-                max_new_bytes,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?
-            .messages_upserted
-        }
-        ("kiro", true) => {
-            let profile_root =
-                profile_root.ok_or_else(|| config_error("missing client profile"))?;
-            let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let source = crate::sessions::kiro::KiroSource::new()
-                .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
-            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
-            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
-                .await
-                .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            let source = source.for_user_scope(roots);
-            let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
-                &facade,
-                &source,
-                profile_root,
-                ObservationScopeV1::Profile,
-                max_new_bytes,
-                &cancellation,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
-            snapshot_capture = Some(capture);
-            drain_host_observation_projections(&facade, &ObservationScopeV1::Profile, &cancellation)
-                .await?
-        }
-        ("kiro", false) => {
-            let cg =
-                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
-            let source = crate::sessions::kiro::KiroSource::new()
-                .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
-            let project_id = project_observation_id(cg)?;
-            let scope = ObservationScopeV1::Project {
-                project_id: project_id.clone(),
-            };
-            let capture = crate::sessions::kiro::capture_kiro_snapshot_observations(
-                &facade,
-                &source,
-                cg.project_root(),
-                scope.clone(),
-                max_new_bytes,
-                &cancellation,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
-            snapshot_capture = Some(capture);
-            drain_host_observation_projections(&facade, &scope, &cancellation).await?
-        }
-        _ => {
-            return Err(config_error(format!(
-                "unsupported transcript route: provider={provider} user_scope={user_scope}"
-            )));
-        }
-    };
+    // Unregistered routes are reported with the same typed `unknown_provider`
+    // admission status the probe uses, not a generic configuration error.
+    let kernel = transcript_capture_kernel(provider, user_scope).ok_or_else(|| {
+        TraceDecayError::hook_runtime(
+            "unknown_provider",
+            false,
+            "transcript provider is unsupported",
+        )
+    })?;
+    let capture = kernel
+        .capture(TranscriptCaptureContext {
+            cg,
+            args,
+            profile_root,
+            global_db,
+            session_authorities,
+            facade: &facade,
+            max_new_bytes,
+            cancellation: &cancellation,
+        })
+        .await?;
+    let TranscriptCaptureOutcome {
+        messages_upserted,
+        snapshot: snapshot_capture,
+        claude_observation: claude_observation_stats,
+        source_deferred,
+    } = capture;
     let authority_changed = messages_upserted > 0
         || snapshot_capture
             .as_ref()
@@ -571,7 +447,7 @@ pub(super) async fn ingest_transcript(
         && claude_observation_stats
             .as_ref()
             .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
-    let deferred_by_byte_cap = codex_source_deferred
+    let deferred_by_byte_cap = source_deferred
         || snapshot_capture
             .as_ref()
             .is_some_and(|capture| capture.deferred_by_byte_cap);
