@@ -112,7 +112,6 @@ pub mod runtime_identity;
 pub mod runtime_telemetry;
 pub mod search_eval;
 mod semantic_code;
-pub mod serde_util;
 pub mod serve;
 pub mod sessions;
 mod shell;
@@ -127,6 +126,4 @@ pub mod types;
 pub mod upgrade;
 pub mod user_config;
 pub mod version;
-#[cfg(windows)]
-mod windows_file;
 pub mod worktree;
