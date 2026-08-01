@@ -610,6 +610,40 @@ fn preview_canonical_component_set(
     .map_err(|error| host_bundle_error_for_agent(agent_id, error))
 }
 
+/// Recover this host's outstanding component-set journal before a confirmed
+/// apply mutates anything.
+///
+/// `HostComponentSetTransactionV1::execute` already recovers first, but the
+/// preview/`execute_confirmed` pair used by every non-interactive refresh did
+/// not: a completed rollback intentionally leaves its journal behind as an
+/// explicit reconciliation boundary, and the very next preview then refuses
+/// with `RecoveryRequired`. Without this, a single failed apply wedges the
+/// refresh loop until an operator runs `tracedecay host-bundle recover` by
+/// hand. Recovery is bound to the *journal's* own operation, exactly like the
+/// recover command, because the registration backup only validates against the
+/// operation that wrote it.
+fn recover_pending_component_set_journal(
+    agent_id: &str,
+    host: tracedecay::agents::host_bundle_v2::HostKindV1,
+    writer: &mut tracedecay::agents::host_bundle_v2::HostBundleWriterV1,
+    build_registration: impl FnOnce(
+        tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
+    ) -> tracedecay::errors::Result<
+        CompatibilityAgentRegistrationDelegate,
+    >,
+) -> tracedecay::errors::Result<()> {
+    let Some(operation) = writer
+        .pending_component_set_journal_operation(host)
+        .map_err(host_bundle_error)?
+    else {
+        return Ok(());
+    };
+    let mut registration = build_registration(operation)?;
+    tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(writer)
+        .recover_host(host, &mut registration)
+        .map_err(|error| host_bundle_error_for_agent(agent_id, error))
+}
+
 fn apply_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -651,6 +685,20 @@ fn apply_canonical_component_set_with_tracedecay_bin(
             lifecycle_root,
         )
         .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
+    recover_pending_component_set_journal(
+        agent_id,
+        component_set.component_set.host,
+        &mut writer,
+        |operation| {
+            CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
+                agent_id,
+                home,
+                lifecycle_root,
+                operation,
+                tracedecay_bin.to_string(),
+            )
+        },
+    )?;
     let mut transaction =
         tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
     let mut registration = CompatibilityAgentRegistrationDelegate::new_with_tracedecay_bin(
@@ -771,6 +819,20 @@ fn apply_project_local_component_set(
             &lifecycle_root,
         )
         .map_err(host_bundle_error)?;
+    recover_pending_component_set_journal(
+        agent_id,
+        component_set.component_set.host,
+        &mut writer,
+        |operation| {
+            CompatibilityAgentRegistrationDelegate::new_project_local(
+                agent_id,
+                home,
+                project_path,
+                &lifecycle_root,
+                operation,
+            )
+        },
+    )?;
     let mut registration = CompatibilityAgentRegistrationDelegate::new_project_local(
         agent_id,
         home,
@@ -3968,11 +4030,18 @@ mod tests {
             hermes.component_set.components[0].manifest.component,
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
+        // Kiro's supported route is its MCP registration alone; the degraded
+        // hook route lives in Core and stays out of the default set.
         let kiro = canonical_host_component_set("kiro", None, 0)
-            .expect("Kiro compatibility lookup remains valid");
-        assert!(
-            kiro.is_none(),
-            "a degraded hook route must not become a supported component set"
+            .unwrap()
+            .expect("Kiro's MCP registration is a supported first-party route");
+        assert_eq!(
+            kiro.component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>(),
+            vec![tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp]
         );
         assert!(
             canonical_host_component_set(
@@ -4505,6 +4574,238 @@ mod tests {
         }
     }
 
+    /// Kiro's canonical component set owns `~/.kiro/settings/mcp.json` as a
+    /// managed artifact, and the same path is Kiro's native MCP registration
+    /// surface. The non-interactive apply must still converge: the transaction's
+    /// own artifact write is not third-party registration drift.
+    #[tokio::test]
+    async fn kiro_context_mcp_apply_converges_without_rollback() {
+        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let tracedecay_bin = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+
+        for existing in [
+            None,
+            Some(br#"{"mcpServers":{"other":{"command":"other","args":[]}}}"#.to_vec()),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let lifecycle = tempfile::tempdir().unwrap();
+            let mcp_path = home.path().join(".kiro/settings/mcp.json");
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            if let Some(bytes) = &existing {
+                std::fs::write(&mcp_path, bytes).unwrap();
+            }
+            let component_set =
+                canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, &tracedecay_bin)
+                    .unwrap()
+                    .unwrap();
+
+            for operation in [
+                HostBundleCliOperation::Install,
+                HostBundleCliOperation::Update,
+                HostBundleCliOperation::Repair,
+            ] {
+                apply_canonical_component_set_with_tracedecay_bin(
+                    "kiro",
+                    operation,
+                    &component_set,
+                    &options,
+                    home.path(),
+                    lifecycle.path(),
+                    &tracedecay_bin,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "kiro {operation:?} apply must converge (existing: {existing:?}): {error}"
+                    )
+                });
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+                assert_eq!(
+                    config["mcpServers"]["tracedecay"]["command"],
+                    tracedecay_bin
+                );
+                // The shared MCP document is merged, never replaced: a
+                // third-party server the operator registered survives.
+                if existing.is_some() {
+                    assert_eq!(config["mcpServers"]["other"]["command"], "other");
+                }
+                // No lifecycle journal may be left behind by a converged apply.
+                assert!(
+                    tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                        home.path(),
+                        lifecycle.path(),
+                    )
+                    .unwrap()
+                    .pending_component_set_journal_operation(
+                        component_set.component_set.host
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+
+            apply_canonical_component_set_with_tracedecay_bin(
+                "kiro",
+                HostBundleCliOperation::Uninstall,
+                &component_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+                &tracedecay_bin,
+            )
+            .unwrap();
+            match &existing {
+                // Deregistration is a merge too: the operator's own server
+                // outlives the uninstall.
+                Some(_) => {
+                    let config: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+                    assert!(config["mcpServers"].get("tracedecay").is_none());
+                    assert_eq!(config["mcpServers"]["other"]["command"], "other");
+                }
+                // Nothing but TraceDecay was ever registered, so Kiro's editor
+                // retires the document it created.
+                None => assert!(!mcp_path.exists()),
+            }
+        }
+    }
+
+    /// A component set's managed artifacts and its native registration surface
+    /// are two writers. The transaction writes its artifacts *after* the
+    /// adapter confirms a registration revision and *before* it applies, so an
+    /// artifact write that moves that revision makes the adapter's recheck read
+    /// TraceDecay's own bytes as third-party drift: every apply then rolls back
+    /// with `StalePreview`. Kiro's set owned `settings/mcp.json` through both
+    /// paths and was self-invalidating exactly that way.
+    #[test]
+    fn kiro_artifact_writes_never_invalidate_the_confirmed_revision() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set("kiro", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let registration = CompatibilityAgentRegistrationDelegate::new(
+            "kiro",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        let confirmed = registration
+            .current_revision(&component_set.component_set, &request)
+            .unwrap();
+
+        for component in &component_set.component_set.components {
+            for asset in &component.contents {
+                let deployed = home.path().join(&asset.relative_path);
+                std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+                std::fs::write(&deployed, &asset.bytes).unwrap();
+            }
+        }
+
+        assert_eq!(
+            registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap(),
+            confirmed,
+            "deploying Kiro's own managed artifacts moved the registration revision it \
+             just confirmed"
+        );
+    }
+
+    /// A rolled-back apply intentionally leaves its journal behind as an
+    /// explicit reconciliation boundary. The non-interactive refresh must
+    /// recover it before its next attempt instead of wedging until an operator
+    /// runs `tracedecay host-bundle recover` by hand.
+    #[cfg(feature = "test-transport")]
+    #[tokio::test]
+    async fn a_wedged_kiro_journal_is_recovered_by_the_next_apply() {
+        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let tracedecay_bin = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let mcp_path = home.path().join(".kiro/settings/mcp.json");
+        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mcp_path,
+            br#"{"mcpServers":{"other":{"command":"other"}}}"#,
+        )
+        .unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, &tracedecay_bin)
+                .unwrap()
+                .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+        let pending_journal = || {
+            tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap()
+            .pending_component_set_journal_operation(component_set.component_set.host)
+            .unwrap()
+        };
+
+        // Fail the transaction after registration has already been applied, so
+        // it rolls back and leaves the journal exactly as the live defect did.
+        let failure = EnvVarGuard::set("TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY", "1");
+        apply_canonical_component_set_with_tracedecay_bin(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            &tracedecay_bin,
+        )
+        .unwrap_err();
+        drop(failure);
+        assert!(
+            pending_journal().is_some(),
+            "the failed apply must leave its reconciliation boundary behind"
+        );
+
+        apply_canonical_component_set_with_tracedecay_bin(
+            "kiro",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            &tracedecay_bin,
+        )
+        .expect("the next apply must recover the wedged journal before mutating");
+        assert!(pending_journal().is_none());
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["tracedecay"]["command"],
+            tracedecay_bin
+        );
+        assert_eq!(config["mcpServers"]["other"]["command"], "other");
+    }
+
     #[test]
     fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
         let home = tempfile::tempdir().unwrap();
@@ -4686,12 +4987,21 @@ mod tests {
         );
     }
 
+    /// Kiro's supported route is its MCP registration alone. Core carries the
+    /// degraded hook route and stays out of the canonical default set.
     #[test]
     fn kiro_canonical_component_set_refuses_degraded_hook_route() {
-        assert!(
-            canonical_host_component_set("kiro", None, 0)
-                .unwrap()
-                .is_none()
+        let default_set = canonical_host_component_set("kiro", None, 0)
+            .unwrap()
+            .expect("Kiro's MCP registration is a supported first-party route");
+        assert_eq!(
+            default_set
+                .component_set
+                .components
+                .iter()
+                .map(|component| component.manifest.component)
+                .collect::<Vec<_>>(),
+            vec![tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp]
         );
         assert!(
             canonical_host_component_set(
