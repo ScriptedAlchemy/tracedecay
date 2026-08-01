@@ -33,7 +33,7 @@ use crate::runtime::jsonl_observation_admission::{
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    title_from_messages, TranscriptScopeMatcher,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -96,14 +96,12 @@ impl VibeSource {
 
     fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
         let meta = read_meta(&path.parent()?.join("meta.json"))?;
-        if let Some(roots) = &self.user_registered_roots {
-            if roots
-                .iter()
-                .any(|root| path_belongs_to_project(&meta.working_directory, root))
-            {
-                return None;
-            }
-        } else if !path_belongs_to_project(&meta.working_directory, project_root) {
+        if !TranscriptScopeMatcher::for_scope(
+            project_root,
+            self.user_registered_roots.as_deref(),
+        )
+        .accepts(Some(&meta.working_directory))
+        {
             return None;
         }
         Some(meta)

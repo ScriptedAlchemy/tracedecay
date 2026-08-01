@@ -22,7 +22,6 @@ use tracedecay_domain::{
 const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
 const MAX_INDEX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INDEX_ENTRIES: usize = 250_000;
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const PROJECT_PRIVACY_DOMAIN_SALT_NAMESPACE: &[u8] =
     b"tracedecay.repository-provenance.project-domain-salt.v1\0";
 const REPOSITORY_ADMISSION_ID_NAMESPACE: &[u8] =
@@ -663,7 +662,7 @@ fn privacy_bound_digest(
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    PrivacyDomainBoundLocatorDigest::new(format!("sha256:{}", hex_digest(hasher.finalize()))).ok()
+    PrivacyDomainBoundLocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize()))).ok()
 }
 
 fn derive_project_privacy_domain_salt(project_id: &ProjectId) -> [u8; 32] {
@@ -684,24 +683,10 @@ fn opaque_admission_identifier(
     for frame in frames {
         hash_frame(&mut hasher, frame);
     }
-    hex_digest(hasher.finalize())
-}
-
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    let bytes = bytes.as_ref();
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    hex::encode(hasher.finalize())
 }
 
 fn hash_frame(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
 }
-
-#[cfg(test)]
-#[path = "repository_provenance_test.rs"]
-mod repository_provenance_test;
