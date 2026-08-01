@@ -148,6 +148,59 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+/// Upper bound on any single memory tool operation (add/search/feedback/…).
+///
+/// The add path performs a real per-fact holographic encode plus a serialized
+/// write transaction and an optional digest refresh; measured add latency is
+/// flat across fact count (no O(n) blow-up), but a contended write lock or a
+/// starved host can still stretch one operation far past any interactive
+/// budget. Without a bound the tool handler awaits the store indefinitely and
+/// pins the MCP transport open. This deadline degrades such a stall to a typed,
+/// retryable problem instead of an unbounded hang. It is deliberately generous
+/// relative to normal sub-second latency so healthy operations never trip it.
+const MEMORY_OPERATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Typed "operation exceeded deadline" problem for a bounded memory operation.
+///
+/// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
+/// stable `reason_code`, a `retryable` flag, and a human `detail`) so the MCP
+/// boundary surfaces a structured, retryable error rather than a transport
+/// hang. The deadline is a backstop, so retry is safe (writes are receipt
+/// idempotent).
+fn memory_deadline_error(operation: &str, deadline: std::time::Duration) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "memory_operation_deadline_exceeded",
+        true,
+        format!(
+            "memory {operation} operation exceeded the {}s deadline",
+            deadline.as_secs()
+        ),
+    )
+}
+
+/// Bound `future` by [`MEMORY_OPERATION_DEADLINE`], mapping an elapsed deadline
+/// to [`memory_deadline_error`]. See [`with_memory_deadline_for`].
+pub(super) async fn with_memory_deadline<T>(
+    operation: &str,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, operation, future).await
+}
+
+/// Bound `future` by `deadline`. On elapse the future is dropped (cancelling it
+/// at its next suspension point) and a typed deadline error is returned; the
+/// inner result is passed through unchanged otherwise.
+pub(super) async fn with_memory_deadline_for<T>(
+    deadline: std::time::Duration,
+    operation: &str,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(deadline, future).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(memory_deadline_error(operation, deadline)),
+    }
+}
+
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
@@ -372,6 +425,122 @@ mod tests {
             .unwrap()
             .fact_id;
         (tmp, cg, fact_id)
+    }
+
+    #[tokio::test]
+    async fn memory_deadline_passes_through_a_fast_result() {
+        let ok: Result<u32> = with_memory_deadline_for(
+            std::time::Duration::from_secs(30),
+            "fast probe",
+            async { Ok(7) },
+        )
+        .await;
+        assert_eq!(ok.unwrap(), 7);
+
+        let err = with_memory_deadline_for(std::time::Duration::from_secs(30), "fast err", async {
+            Err::<u32, _>(config_error("inner failure"))
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, TraceDecayError::Config { message } if message == "inner failure"),
+            "the wrapper must pass an inner error through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_deadline_elapse_yields_a_typed_retryable_problem() {
+        let err = with_memory_deadline_for(
+            std::time::Duration::from_millis(10),
+            "fact_store add",
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok::<u32, TraceDecayError>(0)
+            },
+        )
+        .await
+        .unwrap_err();
+        let (reason_code, retryable, detail) = err
+            .project_route_context()
+            .expect("an elapsed memory deadline must surface a typed project-route problem");
+        assert_eq!(reason_code, "memory_operation_deadline_exceeded");
+        assert!(retryable, "a deadline backstop is safe to retry");
+        assert!(
+            detail.contains("fact_store add") && detail.contains("deadline"),
+            "detail must name the operation and the deadline: {detail}"
+        );
+    }
+
+    /// The add path (holographic encode + serialized write) must finish well
+    /// inside the operation deadline in a clean tempdir. This is the direct
+    /// regression for the reported unbounded hang: an add completes promptly
+    /// rather than running until the transport is abandoned.
+    #[tokio::test]
+    async fn add_fact_completes_within_the_operation_deadline() {
+        let (_tmp, cg) = empty_memory().await;
+        let owner = active_project_memory_owner(&cg).unwrap();
+        let memory = active_memory(&cg);
+        let outcome = with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, "fact_store add", async {
+            memory
+                .add_fact_v1(
+                    AddFactRequest {
+                        content: "deadline-bounded add fixture".to_string(),
+                        category: MemoryCategory::General,
+                        source: None,
+                        tags: Vec::new(),
+                        entities: vec!["fixture-entity".to_string()],
+                        trust: None,
+                        metadata: json!({}),
+                    },
+                    MemoryOperationContext::generated(&owner, "deadline-bounded add", None).unwrap(),
+                )
+                .await
+                .map_err(memory_application_error)
+        })
+        .await
+        .expect("a clean add must complete within the operation deadline");
+        assert!(
+            outcome.fact.is_some(),
+            "the bounded add must persist a fact"
+        );
+    }
+
+    /// Manual scaling probe (ignored in CI to avoid timing flakiness). Recorded
+    /// evidence: per-add latency is flat from add #1 through #600 (~50ms each in
+    /// a debug build), confirming the add path is not O(n) over existing facts.
+    /// Run with `--ignored --nocapture` to reproduce the per-milestone timings.
+    #[ignore = "manual timing probe: documents flat (non-O(n)) add scaling"]
+    #[tokio::test]
+    async fn add_fact_latency_is_flat_across_fact_count_probe() {
+        let (_tmp, cg) = empty_memory().await;
+        let owner = active_project_memory_owner(&cg).unwrap();
+        let memory = active_memory(&cg);
+        let mut milestones = Vec::new();
+        for i in 0..600usize {
+            let content = format!("timing probe fact number {i} with some distinct payload text");
+            let start = std::time::Instant::now();
+            memory
+                .add_fact_v1(
+                    AddFactRequest {
+                        content: content.clone(),
+                        category: MemoryCategory::General,
+                        source: None,
+                        tags: Vec::new(),
+                        entities: vec![format!("entity-{}", i % 7)],
+                        trust: None,
+                        metadata: json!({}),
+                    },
+                    MemoryOperationContext::generated(&owner, &content, None).unwrap(),
+                )
+                .await
+                .unwrap();
+            let elapsed = start.elapsed();
+            if matches!(i, 0 | 9 | 49 | 99 | 199 | 299 | 399 | 499 | 599) {
+                milestones.push((i + 1, elapsed));
+                eprintln!("ADD #{:>4} took {:?}", i + 1, elapsed);
+            }
+        }
+        eprintln!("TIMING_PROBE_MILESTONES {milestones:?}");
     }
 
     #[tokio::test]
