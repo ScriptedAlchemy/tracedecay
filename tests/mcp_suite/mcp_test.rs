@@ -157,10 +157,19 @@ fn test_write_and_exec_tools_are_not_read_only() {
         "tracedecay_ast_grep_rewrite",
         "tracedecay_lcm_doctor",
     ];
+    // The only entry allowed to be missing: it is registered just when
+    // ast-grep is on PATH. Skipping any other name would let a renamed or
+    // dropped mutating tool pass this gate without ever being checked.
+    const PATH_CONDITIONAL: &str = "tracedecay_ast_grep_rewrite";
     let tools = get_tool_definitions();
     for name in write_or_exec {
         let Some(tool) = tools.iter().find(|t| t.name == name) else {
-            // ast_grep_rewrite is registered only when ast-grep is on PATH.
+            assert_eq!(
+                name, PATH_CONDITIONAL,
+                "write/exec tool '{name}' is no longer in the catalog; the \
+                 readOnlyHint gate would silently skip it. Re-point this list \
+                 at the tool's current name instead of dropping the coverage."
+            );
             continue;
         };
         let annotations = tool
