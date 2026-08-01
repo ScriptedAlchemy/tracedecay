@@ -112,6 +112,7 @@ impl SanitizationEvidenceAnchorV1 {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn structural_location(&self) -> &str {
         &self.structural_location
     }
@@ -281,10 +282,12 @@ impl SanitizationFindingV1 {
         self.detector
     }
 
+    #[cfg(test)]
     pub(crate) fn detector_origin(&self) -> SanitizationDetectorOriginV1 {
         self.detector_origin
     }
 
+    #[cfg(test)]
     pub(crate) fn detector_revision(&self) -> SanitizationDetectorRevisionV1 {
         self.detector_revision
     }
@@ -301,6 +304,7 @@ impl SanitizationFindingV1 {
         self.action
     }
 
+    #[cfg(test)]
     pub(crate) fn remediation_class(&self) -> SanitizationRemediationClassV1 {
         self.remediation_class
     }
@@ -309,6 +313,7 @@ impl SanitizationFindingV1 {
         &self.evidence_anchors
     }
 
+    #[cfg(test)]
     pub(crate) fn scanned_coverage(&self) -> SanitizationScannedCoverageV1 {
         self.scanned_coverage
     }
