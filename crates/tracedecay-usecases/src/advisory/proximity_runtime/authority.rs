@@ -25,11 +25,12 @@ use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
     CanonicalProximityEvidenceV1,
 };
-use crate::global_db::RegisteredGlobalDb;
+use crate::store::GlobalDbObservationStore;
+use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::git_correlation::{
     GitRefFilter, SessionsForQuery, normalize_worktree, sessions_for,
 };
-use crate::tracedecay::TraceDecay;
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
 const MAX_ACTIVITY_ROWS_PER_SESSION_V1: usize = 64;
@@ -234,7 +235,10 @@ impl ProductionProximityEvidenceAuthorityV1 {
             }
         }
 
-        let observation_store = self.sessions.observation_store();
+        let observation_store = GlobalDbObservationStore::with_runtime(
+            self.sessions.runtime(),
+            self.sessions.authority(),
+        );
         let checkpoint = observation_store.projection_checkpoint().await.ok()?;
         let after_sequence = checkpoint
             .last_sequence()
@@ -292,7 +296,8 @@ impl ProductionProximityEvidenceAuthorityV1 {
                     let record = self.graph.db().get_file(path).await;
                     match (source, record) {
                         (Ok(source), Ok(Some(record)))
-                            if tracedecay_runtime_core::sync::content_hash(&source) == record.content_hash =>
+                            if tracedecay_runtime_core::sync::content_hash(&source)
+                                == record.content_hash =>
                         {
                             verified_graph_paths.insert(path.clone(), record.content_hash);
                         }
@@ -620,7 +625,8 @@ async fn graph_relation(
             return (None, true);
         };
         if edges.iter().any(|edge| {
-            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls && right_ids.contains(edge.target.as_str())
+            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls
+                && right_ids.contains(edge.target.as_str())
         }) {
             return (
                 Some(GraphRelation {
@@ -637,7 +643,8 @@ async fn graph_relation(
             return (None, true);
         };
         if edges.iter().any(|edge| {
-            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls && left_ids.contains(edge.target.as_str())
+            edge.kind == tracedecay_runtime_core::types::EdgeKind::Calls
+                && left_ids.contains(edge.target.as_str())
         }) {
             return (
                 Some(GraphRelation {
@@ -921,8 +928,8 @@ fn project_relative_path(worktree_root: &Path, value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::types::{NodeKind, Visibility};
     use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_runtime_core::types::{NodeKind, Visibility};
 
     fn scope() -> FeedbackScopeV1 {
         FeedbackScopeV1 {

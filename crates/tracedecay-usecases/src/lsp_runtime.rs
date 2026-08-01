@@ -56,28 +56,27 @@ use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curat
 use tracedecay_store::DiagnosticStore as _;
 use url::Url;
 
+use crate::diagnostics_store::DiagnosticsStore;
 use crate::feedback::concrete::{
     ConcretePr12FeedbackOwner, Pr12FeedbackRuntime, ProjectFeedbackStore,
 };
 use crate::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
+pub(crate) use crate::lsp_support::{
+    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
+    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
+};
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunSnapshot, ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
     operation_event_authority,
 };
-pub(crate) use crate::daemon::{
-    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
-    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
-};
-use tracedecay_runtime_core::db::Database;
-use crate::diagnostics_store::DiagnosticsStore;
-use crate::mcp::response_handles::{
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use crate::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-pub(crate) use crate::{graph_semantic_capabilities, production_semantic_authorities};
+use tracedecay_runtime_core::db::Database;
 
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
@@ -3005,9 +3004,7 @@ mod projection_tests {
         LspFeedbackProjectionScope, ProjectionChangeQueue, bind_test_run_document_content,
         feedback_content_is_current, finding_item, test_run_projection,
     };
-    use crate::operation_stream::{
-        ManagedTestRunResult, ManagedTestRunSnapshot, OperationId,
-    };
+    use crate::operation_stream::{ManagedTestRunResult, ManagedTestRunSnapshot, OperationId};
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
         FeedbackContentIdentityV1, FeedbackDiagnosticClassificationV1, FeedbackFindingId,

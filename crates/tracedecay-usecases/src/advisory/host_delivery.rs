@@ -20,16 +20,16 @@ use tracedecay_hooks::{
 };
 use tracedecay_lsp::DaemonLspProviderBundle;
 
-use crate::agents::host_bundle_v2::{
-    HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostKindV1,
-    HostRegistrationRouteV1, stock_host_capabilities, stock_host_registration_evidence,
-};
 use crate::feedback::concrete::{ConcretePr12FeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26HookScoutPhaseV1,
 };
 use crate::lsp_runtime::DaemonLspSessionFactory;
+use tracedecay_host_integration::{
+    HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostKindV1,
+    HostRegistrationRouteV1, stock_host_capabilities, stock_host_registration_evidence,
+};
 
 use super::runtime::{
     Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1,

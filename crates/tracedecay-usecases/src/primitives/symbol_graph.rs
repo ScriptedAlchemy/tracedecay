@@ -202,7 +202,7 @@ where
         Box::pin(async move {
             let records = match &request.selector {
                 ImplementationSelector::Trait { name } => {
-                    match trait_implementations(&self.graph, name, &request.scope).await {
+                    match trait_implementations(self.graph.as_ref(), name, &request.scope).await {
                         Ok(records) => records,
                         Err(()) => return failed(context, "trait implementation lookup failed"),
                     }

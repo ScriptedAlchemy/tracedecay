@@ -17,7 +17,7 @@ use tracedecay_store::{
     RuntimeSubmitOutcomeV1, StoreRuntimeBindingV1, StoreShardScopeV1,
 };
 
-use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeRetrievalAnchorStore {

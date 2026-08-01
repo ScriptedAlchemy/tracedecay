@@ -30,10 +30,10 @@ use crate::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     ObservationApplication, ObservationApplicationError, ObservationCancellation,
 };
-use crate::global_db::RegisteredGlobalDb;
+use crate::store::observation::GlobalDbObservationStore;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::privacy::RecordSanitizerV1;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
-use crate::store::observation::GlobalDbObservationStore;
 
 mod disposition;
 mod durability;
@@ -716,8 +716,11 @@ impl<'a> HostAdmissionFacade<'a> {
             .registered_database(HostAdmissionScope::Project)
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?;
-        database
-            .evidence_assembly_store()?
+        crate::evidence_assembly::RuntimeEvidenceAssemblyStore::new(
+            database.binding().shard_id.profile_id.clone(),
+            database.runtime().clone(),
+            database.authority().clone(),
+        )?
             .resolve_anchor(context, owner, anchor_id)
             .await
     }
@@ -765,7 +768,7 @@ impl<'a> HostAdmissionFacade<'a> {
         &self,
         scope: &ObservationScopeV1,
         path: &str,
-    ) -> Result<Option<crate::global_db::ParseOffset>, HostAdmissionOutcome> {
+    ) -> Result<Option<tracedecay_global_db::ParseOffset>, HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let database = self
             .authorities
@@ -784,7 +787,7 @@ impl<'a> HostAdmissionFacade<'a> {
         &self,
         scope: &ObservationScopeV1,
         path: &str,
-        offset: crate::global_db::ParseOffset,
+        offset: tracedecay_global_db::ParseOffset,
     ) -> Result<(), HostAdmissionOutcome> {
         self.authorities.validate_scope(scope)?;
         let database = self
@@ -839,8 +842,10 @@ impl<'a> HostAdmissionFacade<'a> {
             .await
             .map_err(|error| classify_error(&error))?;
         if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
-            database
-                .external_source_store()
+            crate::external_source_store::RuntimeExternalSourceStore::new(
+                database.runtime().clone(),
+                database.authority().clone(),
+            )
                 .map_err(|error| {
                     tracing::warn!(%error, "registered external-source adapter is unavailable");
                     HostAdmissionOutcome::registered_authority_unavailable()
@@ -946,7 +951,10 @@ impl<'a> HostAdmissionFacade<'a> {
         scope: HostAdmissionScope,
     ) -> Result<GlobalDbObservationStore<'a>, HostAdmissionOutcome> {
         match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(database.observation_store()),
+            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
+                database.runtime(),
+                database.authority(),
+            )),
             None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
         }
     }
@@ -979,7 +987,10 @@ impl<'a> HostAdmissionFacade<'a> {
             return Err(probe);
         }
         match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(database.observation_store()),
+            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
+                database.runtime(),
+                database.authority(),
+            )),
             None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
         }
     }
@@ -1053,6 +1064,7 @@ pub enum LcmLineageFaultForTest {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LcmLineageCountsForTest {
     pub active_generations: i64,
@@ -1064,6 +1076,7 @@ pub struct LcmLineageCountsForTest {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcmExternalPayloadManifestTestRecord {
     pub payload_ref: String,
@@ -1081,6 +1094,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 /// registry, and actor-time database authority used by the daemon. It exposes
 /// neither raw admission authorities nor registered database handles.
 #[doc(hidden)]
+#[cfg(test)]
 #[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
@@ -1096,6 +1110,7 @@ pub struct HostAdmissionTestRuntimeV1 {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
@@ -1199,12 +1214,12 @@ fn session_domain_digest_error(
 /// instead of the bare runtime makes a profile-scoped runtime unrepresentable
 /// at those seams, so the mismatch is a compile error at the call site rather
 /// than a panic deep inside construction.
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ProjectScopedTestRuntimeV1(Arc<HostAdmissionTestRuntimeV1>);
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl ProjectScopedTestRuntimeV1 {
     /// Checked promotion for runtimes whose scope is not known statically,
     /// such as one recovered from an already-open graph.
@@ -1229,7 +1244,7 @@ impl ProjectScopedTestRuntimeV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     type Target = HostAdmissionTestRuntimeV1;
 
@@ -1239,6 +1254,7 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
 }
 
 #[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
+#[cfg(test)]
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
@@ -1886,7 +1902,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project: Option<&str>,
         since: i64,
-    ) -> crate::global_db::SavingsTotal {
+    ) -> tracedecay_global_db::SavingsTotal {
         self.profile_database.sum_savings(project, since).await
     }
 
@@ -1895,7 +1911,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project: Option<&str>,
         since: i64,
-    ) -> Vec<crate::global_db::SavingsDay> {
+    ) -> Vec<tracedecay_global_db::SavingsDay> {
         self.profile_database.savings_history(project, since).await
     }
 
@@ -1950,7 +1966,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn append_profile_analytics_event_for_test(
         &self,
-        event: &crate::global_db::AnalyticsEventInsert,
+        event: &tracedecay_global_db::AnalyticsEventInsert,
     ) -> tracedecay_runtime_core::errors::Result<i64> {
         self.append_analytics_event_for_test(HostAdmissionScope::Profile, event)
             .await
@@ -1960,7 +1976,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn append_analytics_event_for_test(
         &self,
         scope: HostAdmissionScope,
-        event: &crate::global_db::AnalyticsEventInsert,
+        event: &tracedecay_global_db::AnalyticsEventInsert,
     ) -> tracedecay_runtime_core::errors::Result<i64> {
         let database = match scope {
             HostAdmissionScope::Project => self.project_database_for_test()?,
@@ -1978,7 +1994,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn append_profile_analytics_events_for_test(
         &self,
-        events: &[crate::global_db::AnalyticsEventInsert],
+        events: &[tracedecay_global_db::AnalyticsEventInsert],
     ) -> tracedecay_runtime_core::errors::Result<Vec<i64>> {
         self.append_analytics_events_for_test(HostAdmissionScope::Profile, events)
             .await
@@ -1988,7 +2004,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn append_analytics_events_for_test(
         &self,
         scope: HostAdmissionScope,
-        events: &[crate::global_db::AnalyticsEventInsert],
+        events: &[tracedecay_global_db::AnalyticsEventInsert],
     ) -> tracedecay_runtime_core::errors::Result<Vec<i64>> {
         let database = match scope {
             HostAdmissionScope::Project => self.project_database_for_test()?,
@@ -2016,8 +2032,8 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn query_profile_analytics_events_for_test(
         &self,
-        query: &crate::global_db::AnalyticsEventQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<crate::global_db::AnalyticsEventRecord>> {
+        query: &tracedecay_global_db::AnalyticsEventQuery,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
         self.profile_database
             .query_analytics_events(query)
             .await
@@ -2099,7 +2115,7 @@ impl HostAdmissionTestRuntimeV1 {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Option<crate::global_db::CodeProjectRecord> {
+    ) -> Option<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .upsert_code_project(
                 project_id,
@@ -2116,7 +2132,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         alias_path: &Path,
         project_id: &str,
-    ) -> Option<crate::global_db::ProjectAliasRecord> {
+    ) -> Option<tracedecay_global_db::ProjectAliasRecord> {
         self.profile_database
             .upsert_project_alias(alias_path, project_id)
             .await
@@ -2145,24 +2161,24 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn upsert_store_instance(
         &self,
-        upsert: crate::global_db::StoreInstanceUpsert,
-    ) -> Option<crate::global_db::StoreInstanceRecord> {
+        upsert: tracedecay_global_db::StoreInstanceUpsert,
+    ) -> Option<tracedecay_global_db::StoreInstanceRecord> {
         self.profile_database.upsert_store_instance(upsert).await
     }
 
     #[doc(hidden)]
     pub async fn upsert_graph_scope(
         &self,
-        upsert: crate::global_db::GraphScopeUpsert,
-    ) -> Option<crate::global_db::GraphScopeRecord> {
+        upsert: tracedecay_global_db::GraphScopeUpsert,
+    ) -> Option<tracedecay_global_db::GraphScopeRecord> {
         self.profile_database.upsert_graph_scope(upsert).await
     }
 
     #[doc(hidden)]
     pub async fn upsert_store_artifact(
         &self,
-        upsert: crate::global_db::StoreArtifactUpsert,
-    ) -> Option<crate::global_db::StoreArtifactRecord> {
+        upsert: tracedecay_global_db::StoreArtifactUpsert,
+    ) -> Option<tracedecay_global_db::StoreArtifactRecord> {
         self.profile_database.upsert_store_artifact(upsert).await
     }
 
@@ -2177,21 +2193,21 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn get_code_project(
         &self,
         project_id: &str,
-    ) -> Option<crate::global_db::CodeProjectRecord> {
+    ) -> Option<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database.get_code_project(project_id).await
     }
 
     #[doc(hidden)]
     pub async fn plan_registry_reap(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::project_registry::RegistryReapPlan> {
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_global_db::RegistryReapPlan> {
         self.profile_database.plan_registry_reap().await
     }
 
     #[doc(hidden)]
     pub async fn apply_registry_reap(
         &self,
-        plan: &tracedecay_runtime_core::project_registry::RegistryReapPlan,
+        plan: &tracedecay_global_db::RegistryReapPlan,
     ) -> tracedecay_runtime_core::errors::Result<usize> {
         self.profile_database.apply_registry_reap(plan).await
     }
@@ -2200,7 +2216,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn list_code_projects(
         &self,
         limit: usize,
-    ) -> Vec<crate::global_db::CodeProjectRecord> {
+    ) -> Vec<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .list_code_projects(limit)
             .await
@@ -2212,7 +2228,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         query: &str,
         limit: usize,
-    ) -> Vec<crate::global_db::CodeProjectRecord> {
+    ) -> Vec<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .search_code_projects(query, limit)
             .await
@@ -2222,7 +2238,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_registry_context_by_id(
         &self,
         project_id: &str,
-    ) -> Option<crate::global_db::ProjectRegistryContext> {
+    ) -> Option<tracedecay_global_db::ProjectRegistryContext> {
         self.profile_database
             .project_registry_context_by_id(project_id)
             .await
@@ -2234,7 +2250,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_registry_context_by_alias(
         &self,
         alias_path: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
         self.profile_database
             .project_registry_context_by_alias(alias_path)
             .await
@@ -2245,7 +2261,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
         self.profile_database
             .project_registry_context_by_identity(project_root, git_common_dir)
             .await
@@ -2255,7 +2271,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_project_store_by_alias(
         &self,
         alias_path: &Path,
-    ) -> Option<crate::global_db::ProjectStoreResolution> {
+    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
         self.profile_database
             .resolve_project_store_by_alias(alias_path)
             .await
@@ -2266,7 +2282,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ProjectStoreResolution>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectStoreResolution>> {
         self.profile_database
             .resolve_project_store_by_identity(project_root, git_common_dir)
             .await
@@ -2276,7 +2292,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn resolve_unique_project_store_by_git_remote(
         &self,
         git_remote_url: &str,
-    ) -> Option<crate::global_db::ProjectStoreResolution> {
+    ) -> Option<tracedecay_global_db::ProjectStoreResolution> {
         self.profile_database
             .resolve_unique_project_store_by_git_remote(git_remote_url)
             .await
@@ -2287,8 +2303,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
     ) -> Result<
-        crate::global_db::ProjectObservationStoreResolution,
-        crate::global_db::ProjectObservationStoreError,
+        tracedecay_global_db::ProjectObservationStoreResolution,
+        tracedecay_global_db::ProjectObservationStoreError,
     > {
         self.profile_database
             .resolve_project_observation_store(project_root)
@@ -2647,7 +2663,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn project_configuration_control_store_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
-        crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore,
+        tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore,
     > {
         let database = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
@@ -2656,7 +2672,7 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         Ok(
-            crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(database),
+            tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(database),
         )
     }
 
@@ -2768,7 +2784,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         path: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ParseOffset>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         Ok(self
             .session_database_for_test(scope)?
             .get_parse_offset(path)
@@ -2780,7 +2796,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         path: &str,
-        offset: crate::global_db::ParseOffset,
+        offset: tracedecay_global_db::ParseOffset,
     ) -> tracedecay_runtime_core::errors::Result<()> {
         self.session_database_for_test(scope)?
             .set_parse_offset(path, offset)
@@ -2818,7 +2834,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         provider: Option<&str>,
-    ) -> tracedecay_runtime_core::errors::Result<crate::global_db::SessionIngestHealth> {
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_global_db::SessionIngestHealth> {
         let database = self.session_database_for_test(scope)?;
         database
             .session_ingest_health_for_provider(provider)
@@ -3466,7 +3482,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn set_project_parse_offset_for_test(
         &self,
         path: &str,
-        offset: crate::global_db::ParseOffset,
+        offset: tracedecay_global_db::ParseOffset,
     ) -> tracedecay_runtime_core::errors::Result<()> {
         self.project_database_for_test()?
             .advance_parse_offset_result(path, offset)
@@ -3515,7 +3531,7 @@ impl HostAdmissionTestRuntimeV1 {
                 &session,
                 std::slice::from_ref(message),
                 &source,
-                crate::global_db::ParseOffset::default(),
+                tracedecay_global_db::ParseOffset::default(),
             )
             .await)
     }
@@ -3747,7 +3763,7 @@ impl HostAdmissionTestRuntimeV1 {
         session: &tracedecay_sessions::runtime::SessionRecord,
         messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
         source: &str,
-        offset: crate::global_db::ParseOffset,
+        offset: tracedecay_global_db::ParseOffset,
     ) -> tracedecay_runtime_core::errors::Result<Vec<i64>> {
         let database = self.session_database_for_test(scope)?;
         if !database
@@ -3894,7 +3910,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let publisher =
-            crate::global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
+            tracedecay_global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
                 &transaction,
             );
         let summary = tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft).await?;
@@ -4050,7 +4066,7 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
-        let receipt = crate::global_db::session_temporal_operations::publish_immutable_summary(
+        let receipt = tracedecay_global_db::session_temporal_operations::publish_immutable_summary(
             &transaction,
             publication,
         )
@@ -4801,7 +4817,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         session_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<crate::global_db::PendingCodexCompactionSummary>, tracedecay_sessions::runtime::lcm::LcmError>
+    ) -> Result<Vec<tracedecay_global_db::PendingCodexCompactionSummary>, tracedecay_sessions::runtime::lcm::LcmError>
     {
         self.primary_session_database_for_test()
             .pending_codex_compaction_summary_requests(session_id, limit)
@@ -5082,7 +5098,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_parse_offset_for_test(
         &self,
         path: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ParseOffset>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         Ok(self
             .project_database_for_test()?
             .get_parse_offset(path)
@@ -5175,7 +5191,7 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn run_git_backfill_for_test(
         &self,
-        analytics_events: &[crate::global_db::AnalyticsEventRecord],
+        analytics_events: &[tracedecay_global_db::AnalyticsEventRecord],
         git: &dyn tracedecay_sessions::runtime::git_correlation::GitReflogSource,
         options: &tracedecay_sessions::runtime::git_correlation::BackfillOptions,
     ) -> Result<
@@ -5284,7 +5300,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_parse_offset_by_suffix_for_test(
         &self,
         suffix: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<crate::global_db::ParseOffset>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ParseOffset>> {
         let snapshot = self
             .project_database_for_test()?
             .read_snapshot()
@@ -5325,7 +5341,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: error.to_string(),
                 })
         };
-        Ok(Some(crate::global_db::ParseOffset {
+        Ok(Some(tracedecay_global_db::ParseOffset {
             byte_offset: decode(0)?,
             mtime: decode(1)?,
             file_id: decode(2)?,

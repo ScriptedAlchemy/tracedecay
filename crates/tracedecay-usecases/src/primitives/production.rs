@@ -48,28 +48,28 @@ use super::runtime::{
     SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
     StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
 };
+use super::support::{
+    ScanResult, affected_test_proximity, build_matcher, collect_affected_test_files,
+    rank_affected_tests, scan_tree,
+};
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::{
+    DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
+};
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
+use crate::tracedecay::TraceDecay;
 use tracedecay_code_index::provider::{
     GenerationProviderCoverageV1, GenerationProviderReadV1, GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
-use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
-use crate::diagnostics_query::{
-    DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
-};
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::session_temporal::GlobalDbCursorKeyProvider;
-use crate::mcp::tools::handlers::git::{
-    affected_test_proximity, collect_affected_test_files, rank_affected_tests,
-};
-use crate::mcp::tools::handlers::grep::{ScanResult, build_matcher, scan_tree};
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::types::{Node, Visibility};
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
@@ -383,17 +383,6 @@ fn now_observed() -> UtcMicros {
     UtcMicros(micros)
 }
 
-fn tool_json_payload(tool: &crate::mcp::tools::ToolResult) -> Option<serde_json::Value> {
-    let text = tool
-        .value
-        .get("content")
-        .and_then(|content| content.as_array())
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("text"))
-        .and_then(|value| value.as_str())?;
-    serde_json::from_str(text).ok()
-}
-
 pub struct TraceDecayLexicalGrepAuthorityV1 {
     graph: Arc<TraceDecay>,
 }
@@ -533,22 +522,7 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
                     "compatibility cursor unsupported".to_owned(),
                 ));
             }
-            let args = serde_json::json!({
-                "path": request.path,
-                "min_lines": request.min_lines,
-                "max_pairs": request.max_pairs,
-                "similarity_threshold": request.similarity_threshold,
-                "include_naming_only": request.include_naming_only,
-                "include_generated_paths": request.include_generated_paths,
-                "format": "json",
-            });
-            let result = crate::mcp::tools::handlers::redundancy::handle_redundancy(
-                self.graph.as_ref(),
-                args,
-                context.scope_prefix,
-            )
-            .await;
-            let Ok(tool) = result else {
+            let Ok(result) = self.graph.redundancy(request, context.scope_prefix).await else {
                 return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
                     "redundancy authority failed".to_owned(),
                 ));
@@ -556,16 +530,6 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
             if context.request.cancellation().is_cancelled() {
                 return PrimitiveOutcomeV1::Cancelled;
             }
-            let Some(payload) = tool_json_payload(&tool) else {
-                return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                    "redundancy payload was not structured JSON".to_owned(),
-                ));
-            };
-            let Ok(result) = serde_json::from_value::<RedundancyResultV1>(payload) else {
-                return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                    "redundancy payload failed typed decode".to_owned(),
-                ));
-            };
             let returned = result.pair_count;
             let scanned = result.scanned;
             let page = PrimitivePageV1 {
@@ -634,7 +598,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 let tests: Vec<TestReferenceV1> = callers
                     .into_iter()
                     .filter(|(n, _)| {
-                        crate::tracedecay::is_test_file(&n.file_path)
+                        tracedecay_code_index::is_test_file(&n.file_path)
                             || test_annotated.contains(&n.id)
                     })
                     .map(|(n, _)| {
@@ -1026,7 +990,12 @@ fn update_storage_status_history(
                 .ok()?;
             let temp =
                 history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
-            tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
+            tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(
+                history_path,
+                &temp,
+                &bytes,
+            )
+            .ok()
         })
         .is_some();
     let coverage = if !persisted {
@@ -1308,13 +1277,14 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a HealthDeltaRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
         Box::pin(async move {
-            match crate::mcp::tools::handlers::health::compute_health_delta_result(
-                &self.graph,
-                self.observation_database.as_ref(),
-                request.before_cursor.as_deref(),
-                request.path_prefix.as_deref(),
-            )
-            .await
+            match self
+                .graph
+                .health_delta(
+                    self.observation_database.as_ref(),
+                    request.before_cursor.as_deref(),
+                    request.path_prefix.as_deref(),
+                )
+                .await
             {
                 Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
                 Err(_) => failed(EvidenceDomain::Operational, now_observed()),
@@ -1711,7 +1681,7 @@ pub struct TraceDecayAffectedTestsPortV1 {
 
 impl TraceDecayAffectedTestsPortV1 {
     pub fn new(graph: Arc<TraceDecay>, generation: CodeGenerationId) -> Self {
-        Self::from_binding(project_id_for_graph(&graph), generation, None)
+        Self::from_binding(project_id_for_graph(graph.as_ref()), generation, None)
     }
 
     pub fn with_generation_attribution(
@@ -1719,7 +1689,11 @@ impl TraceDecayAffectedTestsPortV1 {
         generation: CodeGenerationId,
         attribution: Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>,
     ) -> Self {
-        Self::from_binding(project_id_for_graph(&graph), generation, Some(attribution))
+        Self::from_binding(
+            project_id_for_graph(graph.as_ref()),
+            generation,
+            Some(attribution),
+        )
     }
 
     fn from_binding(
@@ -1777,7 +1751,9 @@ const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
 /// runtime cannot serve reports that it could not be sampled, never an absent
 /// or zero line that would read as "no table holds any bytes".
 #[cfg(test)]
-fn largest_table_details(tables: tracedecay_runtime_core::errors::Result<Vec<(String, u64)>>) -> Vec<String> {
+fn largest_table_details(
+    tables: tracedecay_runtime_core::errors::Result<Vec<(String, u64)>>,
+) -> Vec<String> {
     let mut tables = match tables {
         Ok(tables) => tables,
         Err(error) => return vec![format!("table sizes could not be sampled: {error}")],
@@ -1806,7 +1782,7 @@ fn largest_table_details(tables: tracedecay_runtime_core::errors::Result<Vec<(St
 
 fn project_id_for_graph(graph: &TraceDecay) -> Option<ProjectId> {
     graph
-        .hook_store_layout()
+        .store_layout()
         .identity
         .project_id
         .as_ref()
@@ -2278,11 +2254,12 @@ pub fn locator_digest_for_project(
     // Bind that authority to their canonical Git common directory, while
     // independent clones retain distinct locators. Non-Git projects fall back
     // to their canonical root.
-    let repository_locator = tracedecay_runtime_core::worktree::git_common_dir(project_root).unwrap_or_else(|| {
-        project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf())
-    });
+    let repository_locator = tracedecay_runtime_core::worktree::git_common_dir(project_root)
+        .unwrap_or_else(|| {
+            project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.to_path_buf())
+        });
     canonical_sha256(&(
         "tracedecay.project-open.repository-locator.v2",
         repository_locator.to_string_lossy().as_ref(),
@@ -2415,10 +2392,12 @@ mod storage_table_detail_tests {
 
     #[test]
     fn an_unsampled_store_says_so_instead_of_reporting_no_bytes() {
-        let details = largest_table_details(Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
-            message: "reader lease timed out".to_owned(),
-            operation: "sample graph-store table sizes".to_owned(),
-        }));
+        let details = largest_table_details(Err(
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                message: "reader lease timed out".to_owned(),
+                operation: "sample graph-store table sizes".to_owned(),
+            },
+        ));
 
         assert_eq!(details.len(), 1);
         assert!(

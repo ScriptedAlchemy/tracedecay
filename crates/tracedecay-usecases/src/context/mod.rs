@@ -1,8 +1,17 @@
+//! Request-context value types, plus the source-read helpers moved down from
+//! the root binary's `src/context/{read_modes,source_read}.rs` (their only
+//! consumer is `primitives::concrete` in this crate). See SEAMS.md.
+
+mod read_cache;
+pub mod read_modes;
+pub mod source_read;
+
 use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+use sha2::{Digest, Sha256};
+use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
 
 macro_rules! string_id {
     ($($name:ident),+ $(,)?) => {
@@ -473,9 +482,21 @@ pub fn resolve_registered_root_scope(
             }
             requested_root
         };
-    let scope =
-        crate::daemon::project_open_owners::resolved_scope_for_project(&scope_root, project_id)
-            .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
+    let repository_id = repository_id_for_root(&scope_root)?;
+    let worktree_id = WorktreeId::new(format!(
+        "worktree.daemon.{}",
+        hex::encode(Sha256::digest(scope_root.to_string_lossy().as_bytes()))
+    ))
+    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
+    let reference = tracedecay_runtime_core::branch::current_branch(&scope_root)
+        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
+    let scope = tracedecay_application::ResolvedScope::new(
+        project_id.clone(),
+        repository_id,
+        worktree_id,
+        reference,
+    )
+    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
     // A scope whose digest does not match its fields is stale or tampered and
     // must never cross the boundary.
     scope
@@ -487,8 +508,13 @@ pub fn resolve_registered_root_scope(
 fn repository_id_for_root(
     root: &Path,
 ) -> Result<tracedecay_domain::RepositoryId, ApplicationScopeError> {
-    crate::daemon::code_index_scheduler::identity::repository_id_for(root)
-        .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))
+    let common = tracedecay_runtime_core::worktree::git_common_dir(root)
+        .unwrap_or_else(|| root.to_path_buf());
+    RepositoryId::new(format!(
+        "repository.daemon.{}",
+        hex::encode(Sha256::digest(common.to_string_lossy().as_bytes()))
+    ))
+    .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))
 }
 
 /// The explicit failure states when the root orchestration context crosses
