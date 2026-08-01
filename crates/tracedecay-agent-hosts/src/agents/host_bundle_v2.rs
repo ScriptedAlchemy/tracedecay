@@ -818,6 +818,24 @@ pub trait HostComponentSetRegistrationV1 {
         Ok(())
     }
 
+    /// Absolute host paths this transaction will write itself, declared before
+    /// any mutation runs.
+    ///
+    /// A host may register itself through a file that is also one of this
+    /// component set's managed artifacts, in which case the adapter's own
+    /// registration revision changes as a direct consequence of the
+    /// transaction's declared write. Adapters use this set to tell their own
+    /// writes apart from a foreign edit; every path outside it stays under
+    /// full drift protection.
+    fn declare_artifact_writes(
+        &mut self,
+        _component_set: &HostComponentSetV1,
+        _request: &HostComponentSetExecutionRequestV1,
+        _paths: &[PathBuf],
+    ) -> Result<(), HostBundleError> {
+        Ok(())
+    }
+
     fn preflight(
         &mut self,
         _component_set: &HostComponentSetV1,
@@ -961,17 +979,13 @@ impl<'a> HostComponentSetTransactionV1<'a> {
                 .then_some(receipt)
                 .ok_or(HostBundleError::StalePreview);
         }
-        let current = match self.preview(component_set, request, verifier, registration) {
-            Ok(current) => current,
-            Err(
-                HostBundleError::OwnershipConflict
-                | HostBundleError::InvalidObservedState
-                | HostBundleError::ArtifactContentMismatch
-                | HostBundleError::WrongTarget
-                | HostBundleError::CatalogMismatch,
-            ) => return Err(HostBundleError::StalePreview),
-            Err(error) => return Err(error),
-        };
+        // The re-preview reports why this plan can no longer be applied.
+        // `StalePreview` is reserved for genuine drift between the confirmed
+        // preview and what is observed now (checked below); a typed refusal
+        // such as an ownership conflict or a catalog mismatch is a standing
+        // condition that retrying cannot clear, and laundering it into
+        // "stale, retry" hides the only diagnostic the operator has.
+        let current = self.preview(component_set, request, verifier, registration)?;
         if current.operation_id != preview.operation_id
             || current.plan_digest != preview.plan_digest
             || current.base_registration_revision != preview.base_registration_revision
@@ -2688,6 +2702,15 @@ impl HostBundleWriterV1 {
         }
 
         let prepared = self.preflight_component_set(component_set, request, verifier)?;
+        // Declare the exact write set before any adapter observes state, so a
+        // registration surface that is also one of these artifacts can tell
+        // this transaction's own write apart from a foreign edit.
+        let declared_writes = prepared
+            .iter()
+            .flat_map(|component| component.plan.mutations.iter())
+            .map(|mutation| self.root_path.join(&mutation.relative_path))
+            .collect::<Vec<_>>();
+        registration.declare_artifact_writes(component_set, request, &declared_writes)?;
         registration.preflight(component_set, request)?;
 
         let mut journal = HostComponentSetJournalV1 {
@@ -6082,6 +6105,9 @@ mod tests {
 
         std::fs::create_dir_all(root.path().join("plugins")).unwrap();
         std::fs::write(root.path().join("plugins/core.json"), b"external").unwrap();
+        // Somebody else owns the bytes on this artifact path. That is a
+        // standing refusal, not preview staleness: retrying cannot clear it,
+        // so it must be reported as the ownership conflict it is.
         assert_eq!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &component_set,
@@ -6090,7 +6116,7 @@ mod tests {
                 &verifier,
                 &mut registration,
             ),
-            Err(HostBundleError::StalePreview)
+            Err(HostBundleError::OwnershipConflict)
         );
         assert_eq!(
             std::fs::read(root.path().join("plugins/core.json")).unwrap(),
