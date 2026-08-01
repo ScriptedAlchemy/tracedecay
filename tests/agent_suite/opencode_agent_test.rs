@@ -30,12 +30,15 @@ fn opencode_config_path(home: &Path) -> std::path::PathBuf {
 }
 
 fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
-    // Mirrors the logic: if .config/opencode exists, use it
+    // Mirrors the production resolver: only the legacy prompt *file* (with no
+    // modern one beside it) keeps rules at `~/AGENTS.md`. Directory existence is
+    // deliberately not consulted — managed artifacts create it mid-transaction.
     let modern = home.join(".config/opencode/AGENTS.md");
-    if modern.exists() || home.join(".config/opencode").exists() {
-        return modern;
+    let legacy = home.join("AGENTS.md");
+    if !modern.is_file() && legacy.is_file() {
+        return legacy;
     }
-    home.join("AGENTS.md")
+    modern
 }
 
 // ===========================================================================
@@ -145,6 +148,62 @@ fn test_install_idempotent_opencode_json() {
     let mcp = config["mcp"].as_object().unwrap();
     let ts_count = mcp.keys().filter(|k| *k == "tracedecay").count();
     assert_eq!(ts_count, 1, "tracedecay should appear exactly once");
+}
+
+/// The prompt path is part of OpenCode's hashed registration path list, and a
+/// component-set transaction creates `~/.config/opencode` itself when it
+/// deploys the managed plugin, agents, commands, and skills. Resolving the
+/// prompt against that directory therefore moved the path list between preview
+/// confirmation and apply, so every apply rolled back with `StalePreview`.
+#[test]
+fn creating_the_opencode_config_dir_never_moves_the_registration_paths() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+
+    let before = OpenCodeIntegration.host_registration_paths(home);
+    std::fs::create_dir_all(home.join(".config/opencode/plugins")).unwrap();
+    std::fs::write(home.join(".config/opencode/plugins/tracedecay.ts"), "// x").unwrap();
+
+    assert_eq!(
+        OpenCodeIntegration.host_registration_paths(home),
+        before,
+        "deploying managed artifacts must not move OpenCode's registration paths"
+    );
+    assert!(
+        before.contains(&home.join(".config/opencode/AGENTS.md")),
+        "a home with no legacy AGENTS.md resolves to the config-dir prompt: {before:?}"
+    );
+}
+
+/// Rules that already live in a legacy `~/AGENTS.md` stay there; the resolver
+/// must never silently relocate an existing user prompt file.
+#[test]
+fn a_legacy_home_agents_md_keeps_owning_the_prompt_rules() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let _agent_env = crate::common::AgentEnvLock::pin(home);
+    std::fs::write(home.join("AGENTS.md"), "## My Custom Rules\n").unwrap();
+
+    assert!(
+        OpenCodeIntegration
+            .host_registration_paths(home)
+            .contains(&home.join("AGENTS.md")),
+        "the legacy prompt file must remain the resolved prompt path"
+    );
+
+    let ctx = make_ctx(home);
+    OpenCodeIntegration.install(&ctx).unwrap();
+
+    let legacy = std::fs::read_to_string(home.join("AGENTS.md")).unwrap();
+    assert!(
+        legacy.contains("My Custom Rules") && legacy.contains("Prefer tracedecay MCP tools"),
+        "rules belong in the legacy file the user already keeps"
+    );
+    assert!(
+        !home.join(".config/opencode/AGENTS.md").exists(),
+        "install must not relocate the prompt rules into the config dir"
+    );
 }
 
 #[test]
