@@ -148,8 +148,8 @@ impl HostAdmissionTestRuntimeV1 {
             .map(RegisteredGlobalDb::db_path)
     }
 
-    #[doc(hidden)]
-    pub fn registered_database_arc(
+    #[cfg(test)]
+    pub(crate) fn registered_database_arc(
         &self,
         scope: HostAdmissionScope,
     ) -> Option<Arc<RegisteredGlobalDb>> {
@@ -159,8 +159,8 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
-    #[doc(hidden)]
-    pub async fn read_snapshot(
+    #[cfg(test)]
+    pub(crate) async fn read_snapshot(
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::db::engine::Result<
@@ -253,8 +253,10 @@ impl HostAdmissionTestRuntimeV1 {
         store.replay_observations(request).await
     }
 
-    #[doc(hidden)]
-    pub fn project_observation_database_arc_for_test(&self) -> Result<Arc<RegisteredGlobalDb>> {
+    #[cfg(test)]
+    pub(crate) fn project_observation_database_arc_for_test(
+        &self,
+    ) -> Result<Arc<RegisteredGlobalDb>> {
         self.project_registered
             .clone()
             .ok_or_else(|| TraceDecayError::Database {
@@ -296,18 +298,33 @@ impl HostAdmissionTestRuntimeV1 {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
-            .await?;
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "open session-temporal fixture count snapshot".to_owned(),
+                message: error.to_string(),
+            })?;
         let mut rows = snapshot
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-            .await?;
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "query session-temporal fixture count".to_owned(),
+                message: error.to_string(),
+            })?;
         let row = rows
             .next()
-            .await?
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "read session-temporal fixture count".to_owned(),
+                message: error.to_string(),
+            })?
             .ok_or_else(|| TraceDecayError::Database {
                 operation: "read session-temporal fixture count".to_owned(),
                 message: "count query returned no row".to_owned(),
             })?;
-        row.get(0).map_err(Into::into)
+        row.get(0).map_err(|error| TraceDecayError::Database {
+            operation: "decode session-temporal fixture count".to_owned(),
+            message: error.to_string(),
+        })
     }
 
     #[cfg(test)]
