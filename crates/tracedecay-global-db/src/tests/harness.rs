@@ -95,6 +95,12 @@ impl RegisteredGlobalDbTestRuntime {
         Arc::clone(&self.profile_registered)
     }
 
+    pub async fn remount_profile_database_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+        open_registered_test_database(self.profile_registered.db_path()).await
+    }
+
     pub fn project_database(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
         self.project_registered.as_deref().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {

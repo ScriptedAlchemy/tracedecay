@@ -467,13 +467,10 @@ mod tests {
     use crate::edit::test_support::*;
 
     use crate::edit::digest::{planned_source_edit_state_digest, source_edit_recovery_digest};
-    use crate::edit::reconcile_source_edit_effect_unknown_with_control;
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
     use tracedecay_application::source_edit::EditResult;
-    use tracedecay_application::{CancellationSignal, CancellationStage, Deadline};
+    use tracedecay_application::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
     #[test]
