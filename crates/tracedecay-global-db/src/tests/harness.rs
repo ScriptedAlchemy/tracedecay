@@ -199,8 +199,6 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         kind: SessionTemporalFixtureCountV1,
     ) -> tracedecay_runtime_core::errors::Result<i64> {
-        use tracedecay_runtime_core::db::engine::QueryExecutor;
-
         let table = match kind {
             SessionTemporalFixtureCountV1::ProjectionReceipts => {
                 "session_temporal_projection_receipts"
@@ -233,8 +231,6 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: &tracedecay_domain::SessionId,
     ) -> tracedecay_runtime_core::errors::Result<Option<(i64, tracedecay_domain::TemporalValidityV1)>>
     {
-        use tracedecay_runtime_core::db::engine::QueryExecutor;
-
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -285,8 +281,6 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
     ) -> tracedecay_runtime_core::errors::Result<()> {
-        use tracedecay_runtime_core::db::engine::Executor;
-
         let database = self.session_database_for_test(scope)?;
         let session = tracedecay_sessions::runtime::SessionRecord {
             provider: "codex".to_owned(),
