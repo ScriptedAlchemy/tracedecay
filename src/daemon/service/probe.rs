@@ -83,21 +83,19 @@ impl std::fmt::Display for DaemonProtocolState {
 
 #[cfg(unix)]
 pub(super) fn daemon_protocol_state(socket_path: &Path) -> DaemonProtocolState {
-    match query_daemon_identity(socket_path) {
-        Ok((name, version))
-            if name.as_deref() == Some("tracedecay")
-                && version.as_deref() == Some(crate::version::build_version()) =>
-        {
-            DaemonProtocolState::Ready
-        }
-        Ok((name, version)) => DaemonProtocolState::IdentityMismatch { name, version },
-        Err(error) => DaemonProtocolState::Unresponsive(error.to_string()),
-    }
+    daemon_protocol_state_with_timeout(socket_path, std::time::Duration::from_secs(10))
 }
 
 #[cfg(not(unix))]
 pub(super) fn daemon_protocol_state(transport_hint: &Path) -> DaemonProtocolState {
-    match query_daemon_identity(transport_hint) {
+    daemon_protocol_state_with_timeout(transport_hint, std::time::Duration::from_secs(10))
+}
+
+pub(super) fn daemon_protocol_state_with_timeout(
+    transport_hint: &Path,
+    timeout: std::time::Duration,
+) -> DaemonProtocolState {
+    match query_daemon_identity(transport_hint, timeout) {
         Ok((name, version))
             if name.as_deref() == Some("tracedecay")
                 && version.as_deref() == Some(crate::version::build_version()) =>
@@ -110,28 +108,31 @@ pub(super) fn daemon_protocol_state(transport_hint: &Path) -> DaemonProtocolStat
 }
 
 #[cfg(unix)]
-fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<String>)> {
+fn query_daemon_identity(
+    socket_path: &Path,
+    probe_timeout: std::time::Duration,
+) -> Result<(Option<String>, Option<String>)> {
     // The first initialize after a restart can sit behind startup recovery
     // on the daemon side; a sub-second read deadline misclassifies a busy,
     // healthy daemon as unresponsive.
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
     let connection = super::super::client_connection(socket_path)?;
     let mut stream = StdUnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
-    stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
-    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), PROBE_TIMEOUT)
+    stream.set_read_timeout(Some(probe_timeout))?;
+    stream.set_write_timeout(Some(probe_timeout))?;
+    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), probe_timeout)
 }
 
 #[cfg(not(unix))]
-fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<String>)> {
-    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+fn query_daemon_identity(
+    socket_path: &Path,
+    probe_timeout: std::time::Duration,
+) -> Result<(Option<String>, Option<String>)> {
     let (address, auth_token) =
         current_loopback_authority(socket_path)?.ok_or_else(missing_loopback_authority)?;
-    let stream = StdTcpStream::connect_timeout(&address, PROBE_TIMEOUT)?;
-    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
-    stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
-    query_daemon_identity_stream(stream, Some(&auth_token), PROBE_TIMEOUT)
+    let stream = StdTcpStream::connect_timeout(&address, probe_timeout)?;
+    stream.set_read_timeout(Some(probe_timeout))?;
+    stream.set_write_timeout(Some(probe_timeout))?;
+    query_daemon_identity_stream(stream, Some(&auth_token), probe_timeout)
 }
 
 fn query_daemon_identity_stream(
