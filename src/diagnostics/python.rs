@@ -20,7 +20,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file};
+use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
 use crate::errors::Result;
 
 pub struct PyrightDriver;
@@ -75,7 +75,7 @@ pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic
     parsed
         .general_diagnostics
         .into_iter()
-        .filter(|d| matches_severity(&d.severity))
+        .filter(|d| is_diagnostic_level(&d.severity))
         .map(|d| {
             let file = canonicalise_file(&d.file, project_root);
             // pyright lines are 0-based; normalise to 1-based.
@@ -92,10 +92,6 @@ pub fn parse_pyright_output(stdout: &str, project_root: &Path) -> Vec<Diagnostic
             }
         })
         .collect()
-}
-
-fn matches_severity(severity: &str) -> bool {
-    matches!(severity, "error" | "warning")
 }
 
 #[derive(Debug, Deserialize)]
