@@ -1,13 +1,18 @@
 use crate::support::*;
-use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
+use serde_json::Value;
+use serde_json::json;
+#[cfg(feature = "test-transport")]
 use std::fs;
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tempfile::TempDir;
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+#[cfg(feature = "test-transport")]
 use tracedecay::sessions::SessionRecord;
 
 // ---------------------------------------------------------------------------
@@ -65,6 +70,7 @@ async fn status_can_omit_verbose_branch_diagnostics() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
     let (cg, _env, dir) = setup_empty_project().await;
@@ -117,6 +123,7 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
     assert!(!text.contains("tracedecay doctor --agent cursor"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
     let (cg, _env, dir) = setup_empty_project().await;
@@ -177,6 +184,7 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn status_without_retained_session_authority_fails_closed() {
     let (cg, _env, _dir) = setup_empty_project().await;

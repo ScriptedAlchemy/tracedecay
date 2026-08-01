@@ -10,6 +10,7 @@ use std::path::Path;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::get_tool_definitions;
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _env, _dir) = setup_empty_project().await;

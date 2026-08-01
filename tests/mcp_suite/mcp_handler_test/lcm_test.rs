@@ -7,16 +7,20 @@ use std::fs;
 use std::path::Path;
 #[cfg(feature = "test-transport")]
 use std::time::Duration;
+#[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
+#[cfg(feature = "test-transport")]
 use tracedecay::sessions::lcm::{
     LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef, LcmSummaryNodeDraft,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
@@ -99,6 +103,7 @@ async fn lcm_project_path_selector_is_rejected_before_dispatch() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -197,6 +202,7 @@ async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mu
     assert!(!text.contains("valuable payload to preserve"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_clean_apply_is_denied_by_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -417,6 +423,7 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
     assert!(!text.contains("valuable payload to preserve"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -465,6 +472,7 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
     assert!(!text.contains("orphan body that must not be returned"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -622,6 +630,7 @@ async fn lcm_doctor_gc_apply_is_denied_by_default() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -680,6 +689,7 @@ async fn lcm_doctor_counts_nested_externalized_payload_refs_as_referenced() {
     close_test_graph(cg).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -728,6 +738,7 @@ async fn lcm_doctor_ignores_plain_text_ref_tokens_as_placeholders() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_files() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -783,6 +794,7 @@ async fn lcm_doctor_scoped_payload_diagnostics_ignore_other_session_payload_file
     assert!(!extract_text(&result.value).contains(&other_payload_ref));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_reports_scoped_fts_rebuild_when_other_session_matches_probe_term() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -980,6 +992,7 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1067,6 +1080,7 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_retention_reports_candidates_without_deleting() {
     let dir = test_temp_dir();
@@ -1221,6 +1235,7 @@ async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
     assert_eq!(metadata["storage_scope"], "user");
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let dir = test_temp_dir();
@@ -1682,6 +1697,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1848,6 +1864,7 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
     assert_eq!(payload["replay_messages_compacted_for_mcp"], true);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1909,6 +1926,7 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
     assert_eq!(preflight_payload["reason"], "compression_boundary_cooldown");
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1982,6 +2000,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     assert!(!text.contains("MCP_STATUS_SECRET_PAYLOAD"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_status_reports_lifecycle_fields_from_active_project() {
     let dir = test_temp_dir();
@@ -2190,6 +2209,7 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2294,6 +2314,7 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_grep_accepts_string_timestamp_filters() {
     let dir = test_temp_dir();
@@ -2358,6 +2379,7 @@ async fn lcm_grep_accepts_string_timestamp_filters() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_grep_accepts_relative_time_filters() {
     let dir = test_temp_dir();
@@ -2441,6 +2463,7 @@ async fn lcm_grep_rejects_invalid_scope_without_searching_all_sessions() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_args() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2477,6 +2500,7 @@ async fn lcm_load_session_rejects_fractional_negative_and_wrong_type_numeric_arg
     }
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_load_session_accepts_valid_integer_args() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2525,6 +2549,7 @@ async fn lcm_load_session_accepts_valid_integer_args() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_large_json_response_stays_parseable_after_truncation() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3427,6 +3452,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3515,6 +3541,7 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3580,6 +3607,7 @@ async fn lcm_status_reports_dag_store_and_config_diagnostics_over_mcp() {
     assert_eq!(lcm["config"]["compression_boundary_cooldown_seconds"], 60);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_status_all_provider_aggregates_provider_counts() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3620,6 +3648,7 @@ async fn lcm_status_all_provider_aggregates_provider_counts() {
     assert_eq!(payload["lcm"]["store"]["estimated_tokens"], 5);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_status_all_provider_counts_payload_health_once() {
     let (cg, _env, _dir) = setup_empty_project().await;

@@ -160,7 +160,7 @@ impl TraceDecay {
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: self.test_runtime_guard.clone(),
             standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
         };
@@ -281,7 +281,7 @@ impl TraceDecay {
         expected_data_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-transport"))]
         let _test_runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
 
         let profile_root = open_options.resolved_profile_root()?;
@@ -432,7 +432,7 @@ impl TraceDecay {
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-transport"))]
         {
             let open_options = Self::standalone_test_open_options(project_root, open_options);
             let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
@@ -442,7 +442,7 @@ impl TraceDecay {
             graph.test_runtime_guard = Some(runtime);
             Ok(graph)
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-transport")))]
         {
             let maintenance =
                 Self::standalone_maintenance_scope(&open_options, "direct branch open")?;
@@ -610,7 +610,7 @@ impl TraceDecay {
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
         })
