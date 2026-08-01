@@ -26,7 +26,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Touchpoints:
   - `src/config.rs`
   - `src/global_db.rs`
-  - `src/dashboard/savings_pricing.rs`
+  - `crates/tracedecay-dashboard-api/src/savings_pricing.rs`
   - any shared logging/warning utility chosen by the implementer
 - Why: the policy requires concise warnings when legacy `TRACEDECAY_*` spellings are honored, but current fallback helpers (`brand_env`, `env_with_legacy`) silently accept old names.
 - Done when:
@@ -38,7 +38,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 - Area: warning messages
 - Touchpoints:
   - `src/config.rs` (`brand_env`)
-  - consumers in `src/hooks.rs`, `src/tracedecay.rs`, `src/global_db.rs`
+  - consumers in `src/hooks/mod.rs`, `src/tracedecay.rs`, `src/global_db.rs`
 - Why: most legacy env compatibility flows through `brand_env`, so this is the highest-leverage place to enforce Category C behavior.
 - Done when:
   - old-only env usage warns once
@@ -48,7 +48,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 ### W-03: Add warnings for savings-pricing legacy env fallbacks
 - Area: warning messages
 - Touchpoints:
-  - `src/dashboard/savings_pricing.rs`
+  - `crates/tracedecay-dashboard-api/src/savings_pricing.rs`
 - Why: pricing uses its own `env_with_legacy` helper instead of `brand_env`, so it will miss any shared warning work unless updated separately.
 - Done when:
   - `TRACEDECAY_OFFLINE` and `TRACEDECAY_MODEL_PRICES_PATH` behave like other Category C fallbacks
@@ -72,9 +72,8 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 ### M-01: Verify one-time migration of legacy Hermes-local stores
 - Area: storage migration and generated-config cleanup
 - Touchpoints:
-  - `src/agents/hermes/profile_config.rs`
-  - `src/agents/hermes/tracedecay_migration.rs`
-  - `src/agents/hermes/lifecycle.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/hermes/profile_config.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/hermes/lifecycle.rs`
 - Why: a historical project pin can prove where legacy Hermes-local data
   belongs, but must never survive as runtime routing state.
 - Done when:
@@ -86,7 +85,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 ### M-02: Verify Hermes plugin/memory/context alias rewrites
 - Area: env/config alias handling
 - Touchpoints:
-  - `src/agents/hermes/profile_config.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/hermes/profile_config.rs`
 - Why: `plugins: ["tracedecay"]`, `provider: tracedecay`, and `engine: tracedecay` are all Category B aliases that should be rewritten to canonical `tracedecay` behavior.
 - Done when:
   - enable/disable flows handle both old and new spellings predictably
@@ -96,11 +95,11 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 ### M-03: Audit agent integrations for missing legacy cleanup coverage
 - Area: migration helpers
 - Touchpoints:
-  - `src/agents/codex.rs`
-  - `src/agents/claude.rs`
-  - `src/agents/antigravity.rs`
-  - `src/agents/copilot.rs`
-  - `src/agents/{cline,gemini,kilo,kimi,kiro,opencode,roo_code,vibe,zed}.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/codex.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/claude.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/antigravity.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/copilot.rs`
+  - `crates/tracedecay-agent-hosts/src/agents/{cline,gemini,kilo,kimi,kiro,opencode,roo_code,vibe,zed}.rs`
   - `tests/agent_test.rs`
   - `tests/claude_agent_test.rs`
 - Why: the audit found strong legacy-specific tests for Cursor and Hermes, but weaker or unclear coverage for other integrations that also claim to remove `tracedecay` artifacts.
@@ -163,7 +162,7 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 ### T-01: Add direct tests for legacy env warning behavior
 - Area: tests
 - Touchpoints:
-  - tests adjacent to `src/config.rs`, `src/global_db.rs`, `src/dashboard/savings_pricing.rs`, `src/main.rs`
+  - tests adjacent to `src/config.rs`, `src/global_db.rs`, `crates/tracedecay-dashboard-api/src/savings_pricing.rs`, `src/main.rs`
 - Why: the policy requires old-only, new-only, and both-set precedence coverage once warnings exist.
 - Done when:
   - tests cover old-only, new-only, both-set, and warning/no-warning cases

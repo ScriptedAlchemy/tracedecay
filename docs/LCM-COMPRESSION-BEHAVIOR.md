@@ -1,6 +1,6 @@
 # LCM compression behavior map
 
-This note characterizes `src/sessions/lcm/compression.rs` as of the current seam-extraction workstream. It is intentionally implementation-facing: follow-on refactors should preserve the externally visible responses, replay ordering, and database invariants listed here before splitting `compress_in_transaction` into smaller seams.
+This note characterizes `crates/tracedecay-sessions/src/runtime/lcm/compression.rs` as of the current seam-extraction workstream. It is intentionally implementation-facing: follow-on refactors should preserve the externally visible responses, replay ordering, and database invariants listed here before splitting `compress_in_transaction` into smaller seams.
 
 ## Entry points and transaction boundaries
 

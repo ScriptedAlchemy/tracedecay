@@ -1,7 +1,7 @@
 # Production unwrap/panic triage
 
-Scope: `src/upgrade.rs`, `src/agents/mod.rs`, `src/agents/claude.rs`, `src/global.rs`,
-`src/sessions/source.rs` — the high-density files flagged by unsafe-pattern discovery —
+Scope: `src/upgrade.rs`, `crates/tracedecay-agent-hosts/src/agents/mod.rs`, `crates/tracedecay-agent-hosts/src/agents/claude.rs`, `src/global.rs`,
+`crates/tracedecay-sessions/src/runtime/source.rs` — the high-density files flagged by unsafe-pattern discovery —
 plus a broad production sweep of `src/` to catch user-facing failure paths elsewhere.
 
 Method: line-level review of every `.unwrap()` / `.expect(` / `panic!` / `todo!` /
@@ -18,10 +18,10 @@ early returns.
 | File | Test-module boundary | Production region | Status |
 |---|---|---|---|
 | `src/upgrade.rs` | `#[cfg(test)] mod tests` @ 707 | 1–706 | clean — `install_binary` `?`-propagates, brew best-effort paths warn |
-| `src/agents/mod.rs` | 6 inline `#[cfg(test)]` submodules (1024, 1541, 1711, 1792, 2113, 2135) | gaps between them | clean — all clusters (`migrate_tests`, `git_hook_tests`, `safe_config_tests`, `local_install_safety_tests`) are test-only |
-| `src/agents/claude.rs` | `#[cfg(test)] mod tests` @ 1369 | 1–1368 | clean |
+| `crates/tracedecay-agent-hosts/src/agents/mod.rs` | 6 inline `#[cfg(test)]` submodules (1024, 1541, 1711, 1792, 2113, 2135) | gaps between them | clean — all clusters (`migrate_tests`, `git_hook_tests`, `safe_config_tests`, `local_install_safety_tests`) are test-only |
+| `crates/tracedecay-agent-hosts/src/agents/claude.rs` | `#[cfg(test)] mod tests` @ 1369 | 1–1368 | clean |
 | `src/global.rs` | `#[cfg(test)]` @ 384 | 1–383 | clean — token-count read failure now emits contextual stderr + early return; future timestamps clamped |
-| `src/sessions/source.rs` | `#[cfg(test)] mod tests` @ 577 | 1–576 | clean — missing/invalid inputs fail open with `tracing::debug!` context |
+| `crates/tracedecay-sessions/src/runtime/source.rs` | `#[cfg(test)] mod tests` @ 577 | 1–576 | clean — missing/invalid inputs fail open with `tracing::debug!` context |
 
 Verification: `cargo check --lib --bins` passes (0 new warnings); 91 tests pass across the
 five files' modules (`upgrade::`, `sessions::source::`, `agents::{safe_config,local_install_safety,...}_tests`,

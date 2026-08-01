@@ -40,7 +40,7 @@ Blocker-labeled findings: 10. Total findings: ~90 across 16 slices.
    → gate behind `#[cfg(any(test, feature = "test-support"))]` in its own file.
 
 2. **`verify_sqlite_integrity` performs no integrity check.**
-   `src/migrate/manifest.rs:1525` only opens read-only and closes — no `PRAGMA quick_check`/
+   `crates/tracedecay-migrate/src/manifest.rs:1525` only opens read-only and closes — no `PRAGMA quick_check`/
    `integrity_check`, reads no rows. It replaced code that did run quick_check + per-row
    checksums. Every migration snapshot is now "verified" purely by being openable; a
    header-valid but truncated/corrupt DB passes. → restore the pragma, or rename to
@@ -53,7 +53,7 @@ Blocker-labeled findings: 10. Total findings: ~90 across 16 slices.
    disappears by construction.
 
 4. **Silent identity resolution on the admission path can mint a second project shard.**
-   `src/global_db/project_registry.rs:926` (`.ok().flatten()?`) is still wired into
+   `crates/tracedecay-global-db/src/project_registry.rs:926` (`.ok().flatten()?`) is still wired into
    `host_admission.rs:1157`, `mcp/server/hook_dispatch.rs:25`, `daemon/core_proxy.rs:197`,
    even though fail-closed `try_*` variants were added *specifically* to stop transient DB
    errors from being read as "project not found." → route admission through the `Result`
@@ -122,7 +122,7 @@ behavior change, and it's the single biggest maintainability win available.
    and both matches deleted, and `transcript_backfill.rs`'s third per-provider parser
    (`derive_timestamp`/`derive_usage`, which will drift from live ingest) folds in too.
 
-3. **Per-host registration** (`src/agents/{claude,cursor,kimi,...}.rs`): the
+3. **Per-host registration** (`crates/tracedecay-agent-hosts/src/agents/{claude,cursor,kimi,...}.rs`): the
    read→parse→identity→pointer→state pipeline is copy-pasted across ~10 host files, bypassing
    the `HostBundleRegistrationInspectorV1` the branch already ships. → one declarative
    descriptor per host driving the existing inspector; deletes ~8 near-identical bodies.

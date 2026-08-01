@@ -7,7 +7,7 @@ the current TraceDecay worktree after dashboard automation work landed.
 
 This audit compares Hermes's self-improvement machinery (background review,
 memory writing, skill writing, curator, cron) against TraceDecay's automation
-subsystem (`src/automation/*`, daemon scheduler, dashboard `/api/automation/*`)
+subsystem (`crates/tracedecay-agent-hosts/src/automation/*`, daemon scheduler, dashboard `/api/automation/*`)
 and produces a prioritized gap-closure plan. Companion docs:
 `SELF-IMPROVING-LOOPS-CONTRACTS.md` (contracts), `MEMORY-CURATION-AUTONOMY.md`
 (curation runbook).
@@ -155,7 +155,7 @@ curator's conservative invariants.
 
 ## 2. How TraceDecay does it
 
-### 2.1 Scheduler and lifecycle (`src/automation/scheduler.rs`, `lifecycle.rs`, `src/daemon.rs`)
+### 2.1 Scheduler and lifecycle (`crates/tracedecay-agent-hosts/src/automation/scheduler.rs`, `lifecycle.rs`, `src/daemon.rs`)
 
 - The daemon runs one `run_automation_scheduler_loop` per project
   (`src/daemon.rs:1228`), ticking every `scheduler_tick_secs` (default 60).
@@ -227,16 +227,16 @@ output for broader improvement work and preserves the configured apply policy.
 - Lifecycle: `pending_approval → active → disabled/archived`, pinned flag,
   checksums, provenance, staged updates with `approve`/`discard-update`.
   Dashboard endpoints cover the full lifecycle
-  (`src/dashboard/automation_skills_api.rs`, routes in
-  `src/dashboard/mod.rs:483-559`).
+  (`crates/tracedecay-dashboard-api/src/automation_skills_api.rs`, routes in
+  `src/dashboard.rs:483-559`).
 - Distribution is **export-based**: active skills are rendered into a native
   overlay (`skills/agent-managed/` under the Cursor/Codex plugin root) or a
   compact prompt index + `tracedecay_skill_view` MCP serving for prompt-only
   hosts (Claude Code, OpenCode, Kimi, Kiro). Hermes is host-owned and
   explicitly excluded as a target.
 - **Gap in the loop**: export runs only during `tracedecay install` /
-  `update-plugin` / agent install paths (`src/agents/cursor.rs:397`,
-  `src/agents/codex.rs:508-534`, `src/agents/kiro.rs:367`,
+  `update-plugin` / agent install paths (`crates/tracedecay-agent-hosts/src/agents/cursor.rs:397`,
+  `crates/tracedecay-agent-hosts/src/agents/codex.rs:508-534`, `crates/tracedecay-agent-hosts/src/agents/kiro.rs:367`,
   `src/automation_cli.rs:365`). The dashboard `approve` handler
   (`automation_skills_api.rs:167`) flips state but does **not** re-export, so
   an approved skill does not reach any agent until the next install/update.
@@ -299,16 +299,16 @@ property intact — they are orthogonal to manual approval modes.
 
 | P | Rec | What to do | Where it lands |
 |---|-----|-----------|----------------|
-| **P0** | **R1. Export approved skills immediately** | On approve (and disable/archive of an active skill), re-run the overlay/prompt-index export for every configured target, so dashboard approval actually deploys. Record export results on the skill payload. | `src/dashboard/automation_skills_api.rs:167` (`approve`), `src/automation/managed_skills.rs:431` (`approve_managed_skill`), reuse `src/automation/skill_targets.rs::install_managed_skills`; target list from `default_managed_skill_targets` + agent detection in `src/agents/mod.rs:55` |
-| **P0** | **R2. Port the Hermes editorial policy into the prompts** | Rewrite `build_skill_writer_prompt` / `build_session_reflector_prompt` with: patch-over-create preference ladder, class-level naming rule, frustration-as-first-class-signal, and the do-NOT-capture list (env failures, negative tool claims, transients, one-off narratives). Bump `prompt_version` to `:v2` so ledger/input hashes distinguish eras. | `src/automation/runner.rs:741-753`, `src/automation/backend.rs:220-226`; source text to adapt: `hermes-agent/agent/background_review.py:45-233` |
-| **P1** | **R3. Activity-coupled triggering** | Add `AutomationTrigger::SessionActivity`: have session-ingestion (hooks / LCM ingest) mark "new evidence since last run" per task, and let the scheduler tick run reflector/skill_writer when new sessions landed — instead of (or in addition to) the blind interval. Redefine `min_idle_secs` to measure time since the **last LCM ingestion/session activity** (true idle, matching the contracts doc's wording), not time since the task's own last run. | `src/automation/scheduler.rs:203-208` (`schedule_decision`), `src/automation/run_ledger.rs` (`AutomationTrigger`), `src/daemon.rs:1228` (`run_automation_scheduler_loop`); activity timestamps available from the LCM sessions DB used in `runner.rs::automation_lcm_db_path` |
-| **P1** | **R4. Session-replay evidence, not just keyword grep** | For the reflector and skill writer, add a "recent completed sessions" evidence mode: pull the last N sessions' turn-ordered slices (or LCM summary DAG nodes) rather than only grep hits on fixed queries. Keep the grep as a secondary recall channel. The `session_id` option already exists on `SessionReflectorAutomationOptions` — drive it from recently-completed sessions. | `src/automation/runner.rs:170-260` and `:574-700` (evidence builders), `src/sessions/lcm` replay/summary APIs; keep `evidence_hash` semantics intact |
+| **P0** | **R1. Export approved skills immediately** | On approve (and disable/archive of an active skill), re-run the overlay/prompt-index export for every configured target, so dashboard approval actually deploys. Record export results on the skill payload. | `crates/tracedecay-dashboard-api/src/automation_skills_api.rs:167` (`approve`), `crates/tracedecay-agent-hosts/src/automation/managed_skills.rs:431` (`approve_managed_skill`), reuse `crates/tracedecay-agent-hosts/src/automation/skill_targets.rs::install_managed_skills`; target list from `default_managed_skill_targets` + agent detection in `crates/tracedecay-agent-hosts/src/agents/mod.rs:55` |
+| **P0** | **R2. Port the Hermes editorial policy into the prompts** | Rewrite `build_skill_writer_prompt` / `build_session_reflector_prompt` with: patch-over-create preference ladder, class-level naming rule, frustration-as-first-class-signal, and the do-NOT-capture list (env failures, negative tool claims, transients, one-off narratives). Bump `prompt_version` to `:v2` so ledger/input hashes distinguish eras. | `crates/tracedecay-agent-hosts/src/automation/runner.rs:741-753`, `crates/tracedecay-agent-hosts/src/automation/backend.rs:220-226`; source text to adapt: `hermes-agent/agent/background_review.py:45-233` |
+| **P1** | **R3. Activity-coupled triggering** | Add `AutomationTrigger::SessionActivity`: have session-ingestion (hooks / LCM ingest) mark "new evidence since last run" per task, and let the scheduler tick run reflector/skill_writer when new sessions landed — instead of (or in addition to) the blind interval. Redefine `min_idle_secs` to measure time since the **last LCM ingestion/session activity** (true idle, matching the contracts doc's wording), not time since the task's own last run. | `crates/tracedecay-agent-hosts/src/automation/scheduler.rs:203-208` (`schedule_decision`), `crates/tracedecay-agent-hosts/src/automation/run_ledger.rs` (`AutomationTrigger`), `src/daemon.rs:1228` (`run_automation_scheduler_loop`); activity timestamps available from the LCM sessions DB used in `runner.rs::automation_lcm_db_path` |
+| **P1** | **R4. Session-replay evidence, not just keyword grep** | For the reflector and skill writer, add a "recent completed sessions" evidence mode: pull the last N sessions' turn-ordered slices (or LCM summary DAG nodes) rather than only grep hits on fixed queries. Keep the grep as a secondary recall channel. The `session_id` option already exists on `SessionReflectorAutomationOptions` — drive it from recently-completed sessions. | `crates/tracedecay-agent-hosts/src/automation/runner.rs:170-260` and `:574-700` (evidence builders), `src/sessions/lcm` replay/summary APIs; keep `evidence_hash` semantics intact |
 | **P1** | **R5. Surface loop results to the user in-session** | Emit a compact result line ("skill draft 'x' staged; 2 fact updates applied; 1 validation warning") through channels agents already see: an MCP notification / next-tool-response nudge (the hint infrastructure exists), plus a dashboard badge count. This is Hermes's "💾 Self-improvement review" moment and drives inspection of outcomes and telemetry. | `src/daemon.rs:431-530` (scheduler task logging), MCP server hint/nudge path in `src/mcp/server.rs`; dashboard: fact automation counts already derivable from `fact_proposals.rs` + `managed_skills.rs::list_managed_skills` |
-| **P2** | **R6. Managed-skill consolidation pass (curator parity)** | Add an overlap/consolidation review to skill_writer evidence (pairwise similarity of managed skill bodies/titles) and allow an explicit `merge`/`archive` recommendation kind that stages — never auto-applies — consolidations. Honor pinned exactly as Hermes curator does; keep "archive not delete". | New logic beside `src/automation/skill_usage/recommendations.rs`; proposal handling in `src/automation/skill_writer.rs::validate_and_apply_skill_proposals`; similarity helpers exist in the memory/dedup stack |
-| **P2** | **R7. Combined reflector+skill pass option** | When both tasks are due in the same tick, run one combined backend call with shared evidence (Hermes `_COMBINED_REVIEW_PROMPT` pattern) returning `{facts:[], skills:[]}`. Halves backend cost and gives the model cross-signal (a correction often yields both a fact and a skill patch). | `src/automation/runner.rs` (new entry point), `src/automation/backend.rs` (new `AgentTaskKind::CombinedReview` contract), scheduler dispatch in `src/daemon.rs` |
-| **P2** | **R8. Deliver curated memory into host prompts** | Close the loop's consumption side: export a bounded, trust-ranked "durable facts" snapshot (Hermes MEMORY.md analogue) into the same overlay/prompt-index channel skills already use, so approved facts inform sessions without an MCP recall call. Char-budgeted and injection-scanned like Hermes's frozen snapshot. | New exporter beside `src/automation/skill_targets.rs`; fact selection from `src/memory/store.rs` (trust + category filters); wire into `src/agents/{cursor,codex}.rs` install paths |
-| **P3** | **R9. User-defined scheduled jobs** | Generalize the scheduler beyond the 3 fixed tasks: a job record (prompt, schedule incl. cron exprs, attached managed skills, optional pre-run command, delivery to file/webhook) executed via the same backend + ledger + artifact machinery. This is Hermes cron parity scoped to TraceDecay's infra; delivery targets can start with local file + webhook only. | New `src/automation/jobs.rs` + schedule extension in `src/automation/scheduler.rs:251` (`parse_schedule`); dashboard CRUD beside `src/dashboard/automation_config_api.rs`; reference design: `hermes-agent/cron/jobs.py:523` |
-| **P3** | **R10. Outcome feedback for applied changes** | Track post-approval outcomes: does an approved skill's use_count rise? Are applied facts later recalled/marked helpful, or corrected/deleted? Feed these into `feedback`/`generated_evals` artifact payloads so the chain measures real quality, and into stale scoring. | `src/automation/skill_usage.rs` (already ingests analytics), `src/automation/artifact_payloads.rs` (`feedback_payload`), memory recall-feedback hooks in `src/memory` |
+| **P2** | **R6. Managed-skill consolidation pass (curator parity)** | Add an overlap/consolidation review to skill_writer evidence (pairwise similarity of managed skill bodies/titles) and allow an explicit `merge`/`archive` recommendation kind that stages — never auto-applies — consolidations. Honor pinned exactly as Hermes curator does; keep "archive not delete". | New logic beside `crates/tracedecay-agent-hosts/src/automation/skill_usage/recommendations.rs`; proposal handling in `crates/tracedecay-agent-hosts/src/automation/skill_writer.rs::validate_and_apply_skill_proposals`; similarity helpers exist in the memory/dedup stack |
+| **P2** | **R7. Combined reflector+skill pass option** | When both tasks are due in the same tick, run one combined backend call with shared evidence (Hermes `_COMBINED_REVIEW_PROMPT` pattern) returning `{facts:[], skills:[]}`. Halves backend cost and gives the model cross-signal (a correction often yields both a fact and a skill patch). | `crates/tracedecay-agent-hosts/src/automation/runner.rs` (new entry point), `crates/tracedecay-agent-hosts/src/automation/backend.rs` (new `AgentTaskKind::CombinedReview` contract), scheduler dispatch in `src/daemon.rs` |
+| **P2** | **R8. Deliver curated memory into host prompts** | Close the loop's consumption side: export a bounded, trust-ranked "durable facts" snapshot (Hermes MEMORY.md analogue) into the same overlay/prompt-index channel skills already use, so approved facts inform sessions without an MCP recall call. Char-budgeted and injection-scanned like Hermes's frozen snapshot. | New exporter beside `crates/tracedecay-agent-hosts/src/automation/skill_targets.rs`; fact selection from `crates/tracedecay-runtime-core/src/memory/store.rs` (trust + category filters); wire into `crates/tracedecay-agent-hosts/src/agents/{cursor,codex}.rs` install paths |
+| **P3** | **R9. User-defined scheduled jobs** | Generalize the scheduler beyond the 3 fixed tasks: a job record (prompt, schedule incl. cron exprs, attached managed skills, optional pre-run command, delivery to file/webhook) executed via the same backend + ledger + artifact machinery. This is Hermes cron parity scoped to TraceDecay's infra; delivery targets can start with local file + webhook only. | New `crates/tracedecay-agent-hosts/src/automation/jobs.rs` + schedule extension in `crates/tracedecay-agent-hosts/src/automation/scheduler.rs:251` (`parse_schedule`); dashboard CRUD beside `crates/tracedecay-dashboard-api/src/automation_config_api.rs`; reference design: `hermes-agent/cron/jobs.py:523` |
+| **P3** | **R10. Outcome feedback for applied changes** | Track post-approval outcomes: does an approved skill's use_count rise? Are applied facts later recalled/marked helpful, or corrected/deleted? Feed these into `feedback`/`generated_evals` artifact payloads so the chain measures real quality, and into stale scoring. | `crates/tracedecay-agent-hosts/src/automation/skill_usage.rs` (already ingests analytics), `crates/tracedecay-agent-hosts/src/automation/artifact_payloads.rs` (`feedback_payload`), memory recall-feedback hooks in `src/memory` |
 
 Deliberately **not** recommended: copying Hermes's write-freely default
 (`write_approval=false`) or its flat-file memory. TraceDecay's
@@ -332,13 +332,13 @@ Hermes (`~/projects/hermes-agent`):
 
 TraceDecay (`~/projects/tracedecay`):
 
-- `src/automation/{scheduler,lifecycle,run_ledger}.rs` — gates, locks, ledger
-- `src/automation/{runner,memory_curator,session_reflector,skill_writer}.rs` — the three tasks
-- `src/automation/backend.rs` — codex_app_server backend, contracts, error classes
-- `src/automation/{artifacts,artifact_payloads,artifact_policy}.rs` — artifact chain
-- `src/automation/{managed_skills,managed_skill_model,skill_targets,skill_usage}.rs` — skill store + export
-- `src/automation/fact_proposals.rs` — fact apply-policy staging
-- `src/automation/hermes_*.rs` — read-only Hermes bridge
+- `crates/tracedecay-agent-hosts/src/automation/{scheduler,lifecycle,run_ledger}.rs` — gates, locks, ledger
+- `crates/tracedecay-agent-hosts/src/automation/{runner,memory_curator,session_reflector,skill_writer}.rs` — the three tasks
+- `crates/tracedecay-agent-hosts/src/automation/backend.rs` — codex_app_server backend, contracts, error classes
+- `crates/tracedecay-agent-hosts/src/automation/{artifacts,artifact_payloads,artifact_policy}.rs` — artifact chain
+- `crates/tracedecay-agent-hosts/src/automation/{managed_skills,managed_skill_model,skill_targets,skill_usage}.rs` — skill store + export
+- `crates/tracedecay-agent-hosts/src/automation/fact_proposals.rs` — fact apply-policy staging
+- `crates/tracedecay-agent-hosts/src/automation/hermes_*.rs` — read-only Hermes bridge
 - `src/daemon.rs:1055-1300` — per-project scheduler loops
-- `src/dashboard/automation_*_api.rs`, `src/dashboard/mod.rs:417-559` — `/api/automation/*`
+- `src/dashboard/automation_*_api.rs`, `src/dashboard.rs:417-559` — `/api/automation/*`
 - `docs/SELF-IMPROVING-LOOPS-CONTRACTS.md`, `docs/MEMORY-CURATION-AUTONOMY.md` — contracts

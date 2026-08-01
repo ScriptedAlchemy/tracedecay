@@ -29,7 +29,7 @@
 **Files:**
 - Modify: `src/doctor.rs`
 - Modify: `src/mcp/response_handles.rs`
-- Modify: `src/migrate/inventory.rs`
+- Modify: `crates/tracedecay-migrate/src/inventory.rs`
 - Test: `tests/cli_non_interactive_test.rs`
 - Test: `tests/mcp_handler_test.rs`
 
@@ -42,9 +42,9 @@
 
 **Files:**
 - Modify: `src/analytics.rs`
-- Modify: `src/hooks.rs`
+- Modify: `src/hooks/mod.rs`
 - Modify: `src/hooks/tool_hints.rs`
-- Modify: `src/automation/skill_usage/analytics.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/automation/skill_usage/analytics.rs`
 - Test: `tests/skill_usage_test.rs`
 - Test: `tests/hooks_test.rs`
 
@@ -57,9 +57,9 @@
 ### Task 4: Project Memory Curation Automation
 
 **Files:**
-- Modify: `src/automation/memory_curator.rs`
-- Modify: `src/automation/fact_proposals.rs`
-- Modify: `src/automation/runner.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/automation/memory_curator.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/automation/fact_proposals.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/automation/runner.rs`
 - Test: `tests/automation_memory_curator_runner_test.rs`
 - Test: `tests/memory_test.rs`
 
@@ -71,8 +71,8 @@
 ### Task 5: Transcript Audit Scoping And Cursor Health
 
 **Files:**
-- Modify: `src/sessions/lcm/query.rs`
-- Modify: `src/agents/cursor.rs`
+- Modify: `crates/tracedecay-sessions/src/runtime/lcm/query.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/agents/cursor.rs`
 - Modify: `src/doctor.rs`
 - Test: `tests/session_lcm_query_test.rs`
 - Test: `tests/cursor_transcript_ingest_test.rs`
@@ -88,7 +88,7 @@
 **Files:**
 - Modify: `src/daemon.rs`
 - Modify: `src/runtime_telemetry.rs`
-- Modify: `src/automation/scheduler.rs`
+- Modify: `crates/tracedecay-agent-hosts/src/automation/scheduler.rs`
 - Modify: `src/cli.rs`
 - Test: `tests/tool_daemon_test.rs`
 - Test: `tests/automation_scheduler_test.rs`
