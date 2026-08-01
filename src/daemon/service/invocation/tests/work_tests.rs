@@ -395,6 +395,10 @@ for line in sys.stdin:
     .expect("resolved scope");
     let grant_digest =
         ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
+    // `execute_canonical_workflow` only admits a definition whose pinned policy
+    // digest is the digest the capability grant was issued under, so the
+    // definition below must pin this exact grant digest.
+    let pinned_policy_digest = grant_digest.clone();
     let capabilities = tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
         .iter()
         .chain(tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1.iter())
@@ -498,8 +502,11 @@ for line in sys.stdin:
             ],
             fan_out: Some(tracedecay_domain::WorkflowFanOutV1 { max_width: 2 }),
         }],
-        digest('d'),
-        digest('f'),
+        pinned_policy_digest,
+        // `prepare_workflow_fan_out` requires the provider configuration digest
+        // to equal the definition's pinned configuration digest, and the Work
+        // runtime requires both to equal its registered configuration digest.
+        configuration_digest.clone(),
         digest('c'),
     )
     .expect("definition");
@@ -568,7 +575,9 @@ for line in sys.stdin:
             .expect("provider route"),
             backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
             model: "gpt-workflow-fixture".to_owned(),
-            configuration_digest: digest('f'),
+            // The Work runtime rejects any child envelope whose configuration
+            // digest differs from the one the runtime was registered with.
+            configuration_digest: configuration_digest.clone(),
             reference: None,
             commit: tracedecay_domain::CommitId::new("0123456789abcdef0123456789abcdef01234567")
                 .expect("commit"),
