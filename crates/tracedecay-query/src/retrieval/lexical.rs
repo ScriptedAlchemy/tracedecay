@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest,
     EphemeralSanitizedQueryViewV1, FixedPointScore, RetrievalBudget, RetrievalError,
@@ -19,14 +18,23 @@ use tracedecay_domain::{
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, LexicalPostingReadPort, RetrievalPortError,
-    contract_error,
+    CodeCandidateBindingV1, CompactCandidateLane, LaneBoundEvidence, LaneEvidenceRejections,
+    LexicalPostingReadPort, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
+    contract_error, lane_bound_evidence,
 };
 
 mod projection;
 
 pub use self::projection::{
     CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1,
+};
+
+/// Wording the lexical lane uses when a port-emitted batch fails the shared
+/// candidate/evidence binding checks.
+const LEXICAL_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
+    foreign_candidate: "the lexical lane cannot emit exact-tier or other-lane candidates",
+    missing_evidence: "lexical lane evidence is missing for a returned occurrence",
+    unaddressed_binding: "lexical lane binding does not address its candidate",
 };
 
 /// Hard bound on character-level typo expansions selected for one request.
@@ -177,6 +185,12 @@ pub struct LexicalLaneEvidence {
     pub matched_phrases: Vec<String>,
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
+}
+
+impl LaneBoundEvidence for LexicalLaneEvidence {
+    fn binding(&self) -> &CodeCandidateBindingV1 {
+        &self.binding
+    }
 }
 
 /// The independently disableable lexical-lane retriever contract.
@@ -350,27 +364,9 @@ where
             Vec::with_capacity(batch.candidates.len());
         let mut excluded = 0_u64;
         for candidate in &batch.candidates {
-            if candidate.retriever != RetrieverKind::Lexical {
-                return Err(RetrievalPortError::Contract(
-                    "the lexical lane cannot emit exact-tier or other-lane candidates".to_owned(),
-                ));
-            }
-            let evidence = batch
-                .evidence_by_occurrence
-                .get(&candidate.source_occurrence_id)
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(
-                        "lexical lane evidence is missing for a returned occurrence".to_owned(),
-                    )
-                })?;
+            let evidence =
+                lane_bound_evidence(batch, candidate, RetrieverKind::Lexical, &LEXICAL_REJECTIONS)?;
             evidence.validate_against_validated_request(request)?;
-            if evidence.binding.candidate_anchor != candidate.anchor_id
-                || evidence.binding.source_occurrence != candidate.source_occurrence_id
-            {
-                return Err(RetrievalPortError::Contract(
-                    "lexical lane binding does not address its candidate".to_owned(),
-                ));
-            }
             let mut filtered = evidence.clone();
             filtered
                 .field_scores_micros
@@ -511,25 +507,12 @@ fn lexical_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],
 ) -> Result<CursorPayloadDigest, RetrievalPortError> {
-    let prefix: Vec<(String, String, u64)> = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.source_occurrence_id.as_str().to_owned(),
-                candidate.retriever_evidence_anchor.as_str().to_owned(),
-                candidate.raw_score.micros(),
-            )
-        })
-        .collect();
-    let bytes = serde_json::to_vec(&(
+    checkpoint_digest(&(
         "tracedecay.retrieval-lane-checkpoint.v1",
         RetrieverKind::Lexical.as_str(),
         generation.as_str(),
-        prefix,
+        candidate_checkpoint_prefix(candidates),
     ))
-    .map_err(contract_error)?;
-    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(contract_error)
 }
 
 #[cfg(test)]

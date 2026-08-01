@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
     CursorPayloadDigest, EmbeddingMetricV1, EmbeddingProjectionKeyV1,
@@ -20,7 +19,8 @@ use tracedecay_domain::{
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, contract_error,
+    CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, candidate_checkpoint_prefix,
+    checkpoint_digest, contract_error,
 };
 
 mod execution_authority;
@@ -625,17 +625,7 @@ fn semantic_checkpoint_digest(
         .snapshot
         .compute_digest()
         .map_err(contract_error)?;
-    let prefix = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.source_occurrence_id.as_str(),
-                candidate.retriever_evidence_anchor.as_str(),
-                candidate.raw_score.micros(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let bytes = serde_json::to_vec(&(
+    checkpoint_digest(&(
         SEMANTIC_CHECKPOINT_DOMAIN,
         RetrieverKind::Semantic.as_str(),
         scope_digest,
@@ -647,11 +637,8 @@ fn semantic_checkpoint_digest(
         request.projection.privacy_domain(),
         request.projection.privacy_key_epoch(),
         &request.capability_manifest_digest,
-        prefix,
+        candidate_checkpoint_prefix(candidates),
     ))
-    .map_err(contract_error)?;
-    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(contract_error)
 }
 
 fn deadline_exhausted<C: SemanticExecutionControl>(
