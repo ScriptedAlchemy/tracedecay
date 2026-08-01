@@ -133,61 +133,55 @@ fn source_kind_name(source_kind: LegacyConfigurationSourceKindV1) -> &'static st
 
 #[cfg(test)]
 impl ConfigurationMigrationStore for ConfigurationSqlStore<'_> {
-    fn receipt(
+    async fn receipt(
         &self,
         receipt_name: &'static str,
         source_snapshot_digest: &ManifestDigest,
-    ) -> impl Future<
-        Output = Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError>,
-    > + Send {
-        async move {
-            self.migration_receipt(receipt_name, source_snapshot_digest)
-                .await
-                .map_err(|error| ConfigurationMigrationError::Store(error.to_string()))
-        }
+    ) -> Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError> {
+        self.migration_receipt(receipt_name, source_snapshot_digest)
+            .await
+            .map_err(|error| ConfigurationMigrationError::Store(error.to_string()))
     }
 
-    fn commit_initial_migration(
+    async fn commit_initial_migration(
         &self,
         receipt: &ConfigurationMigrationReceiptV1,
         resolution: &ConfigurationResolutionV1,
         quarantine: &[ConfigurationMigrationQuarantineEntryV1],
-    ) -> impl Future<Output = Result<(), ConfigurationMigrationError>> + Send {
-        async move {
-            resolution
-                .snapshot
-                .validate()
-                .map_err(ConfigurationMigrationError::Domain)?;
-            if receipt.receipt_name != CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME
-                || receipt.initial_snapshot_id != resolution.snapshot.snapshot_id
-            {
-                return Err(ConfigurationMigrationError::Store(
-                    "migration receipt does not bind the initial snapshot".to_owned(),
-                ));
-            }
+    ) -> Result<(), ConfigurationMigrationError> {
+        resolution
+            .snapshot
+            .validate()
+            .map_err(ConfigurationMigrationError::Domain)?;
+        if receipt.receipt_name != CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME
+            || receipt.initial_snapshot_id != resolution.snapshot.snapshot_id
+        {
+            return Err(ConfigurationMigrationError::Store(
+                "migration receipt does not bind the initial snapshot".to_owned(),
+            ));
+        }
 
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| ConfigurationMigrationError::Store(error.to_string()))?;
+        let outcome = commit_initial_migration_transaction(
+            &transaction,
+            receipt,
+            resolution,
+            quarantine,
+            false,
+        )
+        .await;
+        match outcome {
+            Ok(()) => transaction
+                .commit()
                 .await
-                .map_err(|error| ConfigurationMigrationError::Store(error.to_string()))?;
-            let outcome = commit_initial_migration_transaction(
-                &transaction,
-                receipt,
-                resolution,
-                quarantine,
-                false,
-            )
-            .await;
-            match outcome {
-                Ok(()) => transaction
-                    .commit()
-                    .await
-                    .map_err(|error| ConfigurationMigrationError::Store(error.to_string())),
-                Err(error) => {
-                    let _ = transaction.rollback().await;
-                    Err(error)
-                }
+                .map_err(|error| ConfigurationMigrationError::Store(error.to_string())),
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
             }
         }
     }
