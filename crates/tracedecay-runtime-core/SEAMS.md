@@ -6,51 +6,104 @@ is an edge that crossed the new crate boundary. Resolved edges are recorded so
 the lead knows the mechanism; open edges are what the fix-to-green campaign
 still owes.
 
-Status at hand-off:
+Status:
 
 - `cargo check -p tracedecay-runtime-core` — **green**
-- `cargo check -p tracedecay-runtime-core --features test-transport` — 1 error (seam 1)
-- `cargo check -p tracedecay-runtime-core --tests` — 1 error (seam 1)
-- `cargo check -p tracedecay` — **1 error** (seam 8), everything else this move
-  touched is wired. This is only a measure of *this* mover's landing; other
-  movers land on top of it.
+- `cargo check -p tracedecay-runtime-core --features test-transport` — **green**
+  (was 1 error; seam 1 is closed)
+- `cargo check -p tracedecay-runtime-core --all-targets --features test-transport`
+  — only the pre-existing `db/retrieval_anchor_schema.rs`
+  `TestConnection: Executor` failures remain; everything under
+  `store_runtime/` compiles, tests included.
+- `cargo check -p tracedecay` — red from other movers' lanes, not from this
+  crate. This file only measures the kernel's own landing.
 
 ---
 
 ## Open seams
 
-### 1. Fixture store runtimes (the one remaining compile error)
+### 1. Fixture store runtimes — **CLOSED**
 
-`crates/tracedecay-runtime-core/src/db/connection.rs:29` still imports
-`crate::daemon::store_runtime::registry::{LifecycleShardRuntimePublisher,
-ProfileAuthorityPinResult, ResolvedStoreLocator, StoreRuntimeKey,
-StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
-StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
-StoreRuntimeResolver}` under `#[cfg(any(test, feature = "test-transport"))]`.
+Resolved by option (1) below: `src/daemon/store_runtime/` moved into
+`crate::store_runtime`, so `db/connection.rs`'s
+`#[cfg(any(test, feature = "test-transport"))]` fixture block now imports
+`crate::store_runtime::registry::{…}` and the `test-transport` build is green.
+The root keeps `src/daemon/store_runtime.rs` as a
+`pub(crate) use tracedecay_runtime_core::store_runtime::*;` shim, so every
+historical `crate::daemon::store_runtime::…` path still resolves.
 
-`Database::publish_fixture_runtime` builds a whole daemon registry inline
-(~120 lines) to hand `Database::publish_test_runtime` /
-`publish_maintenance_test_runtime` an attachment. Twenty-nine call sites across
-fourteen kernel test files depend on those constructors, so deleting or
-cfg-gating them would trade one compile error for fourteen dead test files.
-It was left intact deliberately.
+Recorded rationale, since the measurement is what justified the move: the tree
+referenced `crate::db` 59 times, `crate::storage` 14, `crate::memory` 3,
+`crate::sqlite_read_snapshot` 2, and `crate::runtime_identity`/`crate::errors`
+once each — against 25 genuine `crate::daemon` references, 24 of which were in
+`session_registry.rs` alone. `StoreRuntimeHandle` holds a
+`crate::db::DatabaseAuthority` and implements
+`tracedecay_rusqlite_runtime::RuntimeWriteAuthority` over it.
 
-Two ways out, in order of preference:
+What moved: `graph_metadata`, `registry` (+ `attachment`, `capacity`, `close`,
+`leases`, `open`, `ports`, `tests`), `resolver`, `rusqlite_parity`, `shard`,
+`telemetry` — 11.1K of the 12.9K lines. See seam 9 for the part that stayed.
 
-1. **Move `daemon/store_runtime/` into this crate.** It is already far more
-   coupled to the kernel than to the daemon: 53 references to `crate::db`,
-   14 to `crate::storage`, 2 to `crate::sqlite_read_snapshot`, 1 each to
-   `crate::runtime_identity` and `crate::errors` — against 34 to sibling
-   `crate::daemon` modules. `StoreRuntimeHandle` holds a
-   `crate::db::DatabaseAuthority` and implements
-   `tracedecay_rusqlite_runtime::RuntimeWriteAuthority` over it, so the
-   registry/kernel edge is a genuine cycle that only disappears when the
-   registry lands below the daemon. Doing this also retires seam 2.
-2. **Add a `FixtureStoreRuntimeFactory` port** next to `StoreRuntimeSource` in
-   `ports.rs`, move the registry-construction body to whichever crate owns the
-   registry, and register it. This compiles, but turns twenty-nine
-   compile-checked tests into runtime failures whenever a test process forgets
-   to register — hence the preference for (1).
+`store_runtime::rusqlite_parity` is `#![cfg(test)]` and speaks the parity
+helper's wire protocol, so `tracedecay-sqlite-parity-protocol` was added as a
+**dev-dependency**. It is a leaf crate (hex/serde/serde_json/sha2), so it adds
+no edge to the non-test crate graph.
+
+### 9. `session_registry` could not follow the registry down
+
+`src/daemon/store_runtime/session_registry.rs` (1.8K lines) stayed in the root
+and is declared as a submodule of the shim. Blockers, in order of severity:
+
+| Root reference | Count | Why it blocks the move |
+|---|---|---|
+| `global_db::RegisteredGlobalDb` | 3 (+ ~12 uses) | Held in the public surface: `profile_database()`, `profile_sessions()`, `mounted_session_databases()`, `project_sessions()` all return `Arc<RegisteredGlobalDb>`, and 15 root files consume them. `tracedecay-global-db` → `tracedecay-migrate` → `tracedecay-runtime-core`, so the kernel taking that edge is a **Cargo cycle**. A port would have to erase the type and force every root caller to downcast. |
+| `daemon::profile_identity::LocalProfileIdentityAuthorityV1` | 12 (10 test) | The registry stores it by value and `open()` takes it. `src/daemon/profile_identity.rs` is itself kernel-pure (`crate::{db, errors, storage}` only), so moving *it* down is the cheap unblock — but it is named by 15 root files, so it belongs to a separate pass. |
+| `daemon::log_daemon_event` | 4 | Production. Daemon event log; needs a port or a `tracing` repoint. |
+| `daemon::code_index_scheduler::identity::{IndexingIdentityV1, repository_id_for, worktree_id_for}` | 4 | Production. Also kernel-pure (`crate::worktree` only) — same class as `profile_identity`. |
+| `daemon::authority::{current_record, DaemonAuthority::acquire}` | 3 (2 test) | `current_record` is production, in `runtime_incarnation`. `src/daemon/authority.rs` is kernel-pure too (`crate::{db, errors, runtime_identity, storage}`). |
+| `daemon::transport::{DaemonEndpoint, default_loopback_endpoint}` | 2 | Test-only. |
+| `sessions::user_sessions_db_path` | 1 | Test-only; see seam 11. |
+
+**Recommended order for whoever closes this:** move `daemon/profile_identity`,
+`daemon/authority`, and `daemon/code_index_scheduler/identity` into the kernel
+first (all three are pure and their only kernel-external users are root shims),
+then port `log_daemon_event`, and only then decide whether `RegisteredGlobalDb`
+is worth erasing — it may be cheaper to wait for `tracedecay-global-db` to stop
+depending on `tracedecay-migrate`.
+
+### 10. `ports::registered_schema` needs registering (fails closed)
+
+`store_runtime/registry/ports.rs` initialises a freshly created profile- or
+session-scoped shard by installing the registered global/session schema. That
+schema is `tracedecay_global_db::ensure_registered_schema`, which the kernel
+cannot name (same cycle as seam 9), so it now goes through
+`ports::registered_schema`.
+
+Unlike `branch_admin_recovery`, this port **fails closed**: an unregistered
+installer refuses the open rather than publishing an uninitialised store. The
+root registers it from
+`daemon::store_runtime::register_registered_schema_installer()`, called at the
+top of `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor of the
+production registry.
+
+**Owed:** `tracedecay-migrate`'s `consolidate/runtime.rs` builds its own
+`StoreRuntimeRegistry` and never calls the root, so a migration that initialises
+a session-scoped artifact will hit the fail-closed error. It needs its own
+registration once that crate compiles. Kernel unit tests are unaffected: they
+use a fake `ShardRuntimePublisher` that never reaches `initialize_schema`.
+
+### 11. `USER_SESSIONS_DB_FILENAME` is restated in the kernel
+
+`store_runtime::resolver` needs the profile-scoped session filename, but it is
+owned by `tracedecay_sessions::runtime::ingest::user`, which the kernel cannot
+depend on. `store_runtime::profile_paths` restates the constant and the
+one-line join.
+
+The duplication is pinned rather than trusted: `src/daemon/store_runtime.rs`
+carries two `#[cfg(test)]` assertions that the kernel's value equals
+`crate::sessions::`'s, so a divergence fails the root suite. When
+`tracedecay-sessions` repoints at the kernel, it should re-export
+`profile_paths::USER_SESSIONS_DB_FILENAME` and the assertions can go.
 
 ### 8. `impl From<db::engine::Error> for LcmError` violates the orphan rule
 
@@ -73,39 +126,29 @@ because they touch the sessions mover's crate:
    and put the impl in `lcm/contracts.rs`. One line, but it hangs the whole
    kernel off the sessions crate's compile graph for a single conversion.
 
-### 2. `StoreRuntimeSource` port wiring (root side)
+### 2. `StoreRuntimeSource` port — **COLLAPSED**
 
-`crates/tracedecay-runtime-core/src/ports.rs` defines `StoreRuntimeSource` and
-`StoreRuntimeSourceHandle = Arc<dyn StoreRuntimeSource>`. The kernel now
-retains that trait object instead of the concrete
-`daemon::store_runtime::registry::StoreRuntimeHandle` at:
+The port existed only because the registry had stayed in the root. With seam 1
+closed, `StoreRuntimeHandle` is crate-local to the kernel, so the trait, the
+`StoreRuntimeFuture` alias, the `Arc<dyn …>` handle alias, and the ~130-line
+`impl` in `registry.rs` were all deleted. `db/connection.rs`,
+`db/connection/registry.rs`, `db/maintenance.rs`, and `store/memory/runtime.rs`
+now name the concrete `store_runtime::registry::StoreRuntimeHandle`.
 
-- `db/connection.rs` — `Database::publish_runtime`, `Database::retained_runtime`,
-  `DatabaseInner::_runtime`
-- `db/connection/registry.rs` — `DatabaseInner::publish`
-- `db/maintenance.rs` — `storage_page_counts`, `run_incremental_vacuum`
-- `store/memory/runtime.rs` — the fact-store read/write dispatch
+The four adapters the port had supplied became inherent methods on the handle:
+`canonical_path` (was `locator().path()`), `verified_locator` (was
+`locator().verified()`), `writer_present` (was
+`physical_snapshot().writer_present`), and `runtime_identity`. Everything else
+the kernel used was already inherent.
 
-**Done, not owed:** `impl StoreRuntimeSource for StoreRuntimeHandle` landed in
-`src/daemon/store_runtime/registry.rs`, and all nine `Database::publish_runtime`
-call sites (`daemon/store_runtime/session_registry.rs`,
-`migrate/consolidate/runtime.rs`, `application/evidence_assembly.rs`) now pass
-`Arc::new(runtime)`. The trait covers every method the kernel used: `opened_file_identity`, `canonical_path`
-(was `locator().path()`), `verified_locator` (was `locator().verified()`),
-`binding`, `schema_migrated`, `writer_present` (was
-`physical_snapshot().writer_present`), `validate_registered_read`,
-`telemetry_read_handle`, `authorized_migration_sql_handle`,
-`database_authority`, `storage_page_counts`,
-`run_bounded_incremental_compaction`, `run_checkpoint`, `snapshot_to`,
-`dispatch_submit_authorized`, `dispatch_read`, `runtime_identity`.
-
-`StoreRuntimeRegistryFailure` does not cross the boundary — every kernel call
-site only `Debug`-formats it, so the port returns `String`. Async methods
-return `ports::StoreRuntimeFuture<'_, T>` because the port is a trait object.
-
-Root callers of `Database::retained_runtime()` that want concrete
-`StoreRuntimeHandle` methods not on the port will need either a port method or
-a downcast.
+Consequences, all applied: `Database::publish_runtime` takes the handle by
+value, so the `Arc::new(runtime)` wraps were dropped at the six
+`session_registry.rs` sites and the one in `application/evidence_assembly.rs`.
+`tracedecay-migrate`'s two sites in `consolidate/runtime.rs` still wrap and are
+owed by that crate's owner (it is not compiling yet for unrelated reasons).
+Registry failures no longer have to cross as `String`, and root callers of
+`retained_runtime()` can reach every concrete method again — `publication()` and
+`runtime()`, which the port did not expose, were already being called.
 
 ### 3. `global_db` / `sessions` store adapters stayed in the root
 
@@ -185,12 +228,16 @@ re-exported across a crate boundary) and is re-exported at
 | `crate::global_db::{RegisteredGlobalDb, StoreInstanceRecord}` (storage.rs) | `try_classify_project_storage_with_registry` and `classify_registry_storage` lifted to the root `src/storage.rs` shim over a newly `pub` `classify_registry_storage_fields`. No trait object was needed. |
 | `include_str!("../tests/fixtures/redundancy_eval_labeled.json")` (redundancy.rs) | Repointed at `../../../tests/fixtures/…`; the fixture stays in the repo-root `tests/`. |
 | `impl MigrationSqlWriteAuthority for DatabaseAuthority` (src/global_db/registered.rs) | Moved into `runtime_core::db::access`. Both the trait (`tracedecay_rusqlite_runtime`) and the type (kernel) became foreign to the root, so the orphan rule allows it only beside `DatabaseAuthority`. |
+| `daemon::store_runtime::{graph_metadata, registry, resolver, rusqlite_parity, shard, telemetry}` | Moved into `runtime_core::store_runtime` (11.1K lines); root `src/daemon/store_runtime.rs` glob-re-exports. Closes seams 1 and 2. |
+| `branch::{sanitize_branch_name, detect_default_branch, resolve_branch_db_path}` | Moved into `runtime_core::branch`; root re-exports. All three are pure over `gix`, `branch::current_branch`, and `branch_meta::BranchMeta`. `tracedecay-migrate` consumes all three and could not reach the root. |
+| `config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment}` | Moved into `runtime_core::config`; root re-exports. Same reason — `tracedecay_migrate::inventory` prunes directories with it. |
+| `application::context::{CancellationToken, MonotonicDeadline}` | Moved into the new `runtime_core::cancellation`; `src/application/context.rs` re-exports. `store_runtime::rusqlite_parity` bounds every parity probe with them. `is_same_token` widened from `pub(crate)` to `pub` for `src/application/session/types.rs`. |
 
 ## Feature map
 
 | Root feature | Kernel | Notes |
 |---|---|---|
-| `test-transport` | forwarded to `tracedecay-runtime-core/test-transport`, which forwards to `tracedecay-rusqlite-runtime/test-transport` | 39 `cfg(feature = "test-transport")` sites in the moved files. Blocked by seam 1. |
+| `test-transport` | forwarded to `tracedecay-runtime-core/test-transport`, which forwards to `tracedecay-rusqlite-runtime/test-transport` | 39 `cfg(feature = "test-transport")` sites in the moved files. **Unblocked** — seam 1 is closed and the feature build is green. |
 | `production`, `lite`, `full`, `medium`, `lang-*`, `token-counting`, `semantic-fastembed`, `rusqlite-parity-helper` | not forwarded | No moved file references them. |
 
 Platform cfgs travel with the code: `cfg(windows)` (`lifecycle_lease`,
