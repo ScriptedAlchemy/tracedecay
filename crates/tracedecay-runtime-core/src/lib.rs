@@ -64,6 +64,7 @@ pub mod branch_meta;
 pub mod cancellation;
 pub mod config;
 pub mod db;
+pub mod durability;
 pub mod errors;
 pub mod git;
 pub mod lifecycle_lease;

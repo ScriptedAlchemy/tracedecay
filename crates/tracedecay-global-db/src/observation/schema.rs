@@ -105,7 +105,7 @@ async fn migrate_observation_schema(
 
     // This full-table rewrite is exactly the operation that interrupted a
     // real dogfood upgrade on a 15GB `sessions.db` and, before the
-    // `tracedecay_migrate::durability` model existed, failed the whole strict
+    // `tracedecay_runtime_core::durability` model existed, failed the whole strict
     // post-update because of it (see `crate::doctor::heal`'s module doc).
     // `observations` must stay classified `Recoverable` -- re-derivable by
     // re-running sanitization/projection over recoverable transcript
@@ -114,8 +114,8 @@ async fn migrate_observation_schema(
     // documents.
     debug_assert!(
         matches!(
-            tracedecay_migrate::durability::session_authority_table_class("observations"),
-            tracedecay_migrate::durability::StoreDurabilityClass::Recoverable
+            tracedecay_runtime_core::durability::session_authority_table_class("observations"),
+            tracedecay_runtime_core::durability::StoreDurabilityClass::Recoverable
         ),
         "the observations full-table rewrite must only ever run against a table \
          proven Recoverable by the upgrade durability model"

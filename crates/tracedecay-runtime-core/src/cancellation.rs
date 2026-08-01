@@ -58,15 +58,15 @@ impl CancellationToken {
     }
 
     /// Creates the live cancellation authority for an application request.
+    ///
+    /// Takes the request id as a plain string so the kernel carries no
+    /// dependency on the application contract crate.
     #[must_use]
-    pub fn for_application_request(request_id: &tracedecay_application::RequestId) -> Self {
+    pub fn for_application_request(request_id: &str) -> Self {
         static NEXT_TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let sequence = NEXT_TOKEN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         Self {
-            token_id: Some(Arc::from(format!(
-                "cancellation.{}.{sequence}",
-                request_id.as_str()
-            ))),
+            token_id: Some(Arc::from(format!("cancellation.{request_id}.{sequence}"))),
             ..Self::default()
         }
     }

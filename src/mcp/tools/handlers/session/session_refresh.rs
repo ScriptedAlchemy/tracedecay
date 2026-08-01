@@ -363,7 +363,7 @@ fn command_from_request(
         b"tracedecay.mcp.session-refresh.configuration.v1\0",
         &digest_material,
     ));
-    let cancellation = CancellationToken::for_application_request(&request_id);
+    let cancellation = CancellationToken::for_application_request(request_id.as_str());
     let budgets = RequestBudgets::new(
         REQUEST_MAX_RESULTS,
         REQUEST_MAX_BYTES,

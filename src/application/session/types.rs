@@ -711,7 +711,7 @@ mod tests {
         let capability = CapabilityDigest::new(capability_digest);
         let policy = PolicyDigest::new(policy_digest);
         let configuration = ConfigurationDigest::new(configuration_digest);
-        let cancellation = CancellationToken::for_application_request(&request_id);
+        let cancellation = CancellationToken::for_application_request(request_id.as_str());
         let budgets = RequestBudgets::new(64, 4096, 16).unwrap();
         let grant = CapabilityGrantSnapshot::new(
             CapabilityGrantId::new("grant.session.application").unwrap(),
@@ -1185,9 +1185,8 @@ mod tests {
     #[test]
     fn binding_rejects_cancellation_or_budget_substitution() {
         let context = context();
-        let fresh_cancellation = CancellationToken::for_application_request(
-            &RequestId::new(context.request_id().as_str()).unwrap(),
-        );
+        let fresh_cancellation =
+            CancellationToken::for_application_request(context.request_id().as_str());
         let wrong_cancellation = SessionRequestBinding::new(
             context.identity().clone(),
             context.capability_digest(),
