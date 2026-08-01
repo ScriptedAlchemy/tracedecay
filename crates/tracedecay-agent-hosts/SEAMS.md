@@ -137,7 +137,7 @@ it collapsed 125 of the 194 errors on its own. `crate::tracedecay` is a
 hand-written module carrying only the kernel's `current_timestamp`; the
 `TraceDecay` façade itself is a port row below.
 
-## Root wiring this crate now owes
+## Root wiring this crate still owes
 
 Everything below is **required before the root crate compiles against this
 one**. Registered ports degrade to a documented inert answer when unregistered,
@@ -146,10 +146,12 @@ correctly until they are wired.
 
 ### Registered ports (root calls `register` at startup)
 
+The MCP tool catalog and format-capable name ports are wired by
+`src/agents.rs::register_mcp_tool_catalog_ports`, which the product binary calls
+before command dispatch.
+
 | Port | Root registers | Inert answer if unwired |
 |---|---|---|
-| `ports::mcp_tools::register` | adapter over `mcp::tools::get_tool_definitions` | empty catalog → installers write no tool permissions |
-| `ports::mcp_tools::register_format_capable_names` | `mcp::tools::format_capable_tool_names` | empty list |
 | `ports::hook_runtime::register_daemon_tool_invoker` | `hooks::daemon_tool_json` | daemon reported unavailable |
 | `ports::hook_runtime::register_memory_injection_gate` | `hooks::memory_inject::memory_injection_enabled` | injection disabled |
 | `ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes` | `hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES` | `u64::MAX` → doctor stays silent |
