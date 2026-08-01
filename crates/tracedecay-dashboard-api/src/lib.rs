@@ -24,7 +24,12 @@
 pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_hooks as hooks;
 pub use tracedecay_usecases as application;
+pub use tracedecay_usecases::{
+    application_surface, config, git_query, graph, request_identity, user_config,
+};
+pub mod tracedecay;
 
+mod accounting;
 pub mod analytics_api;
 mod automation_config_api;
 mod automation_fact_proposals_api;
@@ -37,6 +42,7 @@ pub use automation_run_service::{
 };
 mod automation_scheduler_api;
 mod automation_skills_api;
+mod cloud;
 mod code_diagnostics_api;
 pub mod code_index_freshness_api;
 #[doc(hidden)]
@@ -76,6 +82,7 @@ mod memory_api;
 pub mod memory_curate;
 mod memory_service;
 pub mod project_graph;
+mod project_registry;
 mod projects;
 mod read_model;
 mod savings_api;
@@ -88,6 +95,7 @@ mod storage_telemetry_api;
 mod test_support;
 mod token_count;
 mod util;
+mod version;
 mod work_api;
 
 use std::future::Future;
@@ -314,17 +322,20 @@ pub struct DashboardState {
 /// daemon dashboard. Integration tests pass the typed host-admission runtime;
 /// raw database handles never cross the public test seam.
 pub struct DashboardHostAdmissionTestAuthorityV1 {
-    _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    _runtime: Arc<dyn Send + Sync>,
     project_sessions: Arc<RegisteredGlobalDb>,
     profile_database: Arc<RegisteredGlobalDb>,
 }
 
 impl DashboardHostAdmissionTestAuthorityV1 {
-    pub fn new(
-        runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    pub fn new<T>(
+        runtime: Arc<T>,
         profile_database: Arc<RegisteredGlobalDb>,
         project_sessions: Arc<RegisteredGlobalDb>,
-    ) -> Self {
+    ) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
         Self {
             _runtime: runtime,
             project_sessions,
