@@ -42,7 +42,6 @@ zeroize = "1.9.0"
 ignore = "0.4"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
-tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
