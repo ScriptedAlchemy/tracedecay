@@ -16,7 +16,7 @@ use super::{
 pub(super) fn open_lock_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
-        crate::windows_security::open_or_create_private_file(path)
+        crate::windows_security::open_or_create_private_lock_file(path)
             .map_err(|error| access_io_error("open lock", path, &error))
     }
 
@@ -107,7 +107,7 @@ pub(super) fn publish_record_atomically(
         drop(file);
         replace_file_atomically(temporary, destination, record_name)?;
         #[cfg(windows)]
-        crate::windows_security::restrict_file(destination).map_err(|error| {
+        crate::windows_security::validate_private_file(destination).map_err(|error| {
             access_io_error(
                 &format!("validate published {record_name}"),
                 destination,

@@ -12,33 +12,32 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS,
-    SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CopySid,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
     GetSecurityDescriptorControl, GetTokenInformation, InitializeSecurityDescriptor, IsValidAcl,
-    IsValidSecurityDescriptor, IsValidSid, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
-    TokenOwner, TokenUser,
+    IsValidSecurityDescriptor, IsValidSid, NO_INHERITANCE, OWNER_SECURITY_INFORMATION, PSID,
+    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+    SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+    SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_DATA, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, OPEN_ALWAYS,
-    OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
+    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-const SECURITY_ACCESS: u32 = READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES;
+const SECURITY_ACCESS: u32 = READ_CONTROL | FILE_READ_ATTRIBUTES;
 const SHARE_READ_WRITE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const SHARE_READ_WRITE_DELETE: u32 = SHARE_READ_WRITE | FILE_SHARE_DELETE;
 const SECURE_OPEN_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
 
 #[derive(Clone, Copy, Debug)]
@@ -63,9 +62,9 @@ impl PathKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct SecuritySnapshot {
-    owner_is_token_owner: bool,
+    owner_is_current_user: bool,
     dacl_is_protected: bool,
     ace_count: u32,
     ace_is_allowed: bool,
@@ -74,10 +73,13 @@ struct SecuritySnapshot {
     trustee_is_current_user: bool,
 }
 
-#[derive(PartialEq, Eq)]
-struct FileIdentity {
-    volume_serial_number: u64,
-    file_id: [u8; 16],
+#[derive(Debug)]
+struct AclSnapshot {
+    ace_count: u32,
+    ace_is_allowed: bool,
+    ace_mask: u32,
+    ace_inheritance: u8,
+    trustee_is_current_user: bool,
 }
 
 struct LocalAllocation(*mut c_void);
@@ -95,133 +97,14 @@ struct OwnedSid {
     storage: Vec<usize>,
 }
 
-struct ProcessSids {
-    user: OwnedSid,
-    owner: OwnedSid,
-}
-
 impl OwnedSid {
     fn as_psid(&self) -> PSID {
         self.storage.as_ptr().cast_mut().cast()
     }
 }
 
-/// Create every missing directory with a protected, inheritable current-user DACL.
-pub fn create_private_dir_all(path: &Path) -> io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => return restrict_directory(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(wrap_error("inspect private directory", path, error)),
-    }
-
-    let mut missing = Vec::<PathBuf>::new();
-    let mut current = path;
-    loop {
-        match std::fs::symlink_metadata(current) {
-            Ok(_) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                missing.push(current.to_path_buf());
-                current = current.parent().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "private directory path has no existing ancestor: '{}'",
-                            path.display()
-                        ),
-                    )
-                })?;
-            }
-            Err(error) => {
-                return Err(wrap_error(
-                    "inspect private directory ancestor",
-                    current,
-                    error,
-                ));
-            }
-        }
-    }
-
-    for directory in missing.iter().rev() {
-        create_private_directory(directory)?;
-        restrict_directory(directory)?;
-    }
-    Ok(())
-}
-
-/// Replace a directory DACL with one protected, inheritable current-user ACE.
-pub fn restrict_directory(path: &Path) -> io::Result<()> {
-    drop(open_and_secure(
-        path,
-        PathKind::Directory,
-        OPEN_EXISTING,
-        SECURITY_ACCESS,
-    )?);
-    Ok(())
-}
-
-/// Replace a regular-file DACL with one protected current-user ACE.
-pub fn restrict_file(path: &Path) -> io::Result<()> {
-    drop(open_and_secure(
-        path,
-        PathKind::File,
-        OPEN_EXISTING,
-        SECURITY_ACCESS,
-    )?);
-    Ok(())
-}
-
-/// Open an existing regular file only after securing and validating its DACL.
-pub fn open_private_file(path: &Path) -> io::Result<File> {
-    let security_handle = open_and_secure(path, PathKind::File, OPEN_EXISTING, SECURITY_ACCESS)?;
-    reopen_private_file(path, security_handle, FILE_GENERIC_READ)
-}
-
-/// Open or create a regular file, securing it before the caller can publish data.
-pub fn open_or_create_private_file(path: &Path) -> io::Result<File> {
-    let security_handle =
-        open_with_private_creation_acl(path, PathKind::File, OPEN_ALWAYS, SECURITY_ACCESS)?;
-    secure_handle(&security_handle, path, PathKind::File)?;
-    reopen_private_file(
-        path,
-        security_handle,
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-    )
-}
-
-/// Create a new empty regular file and secure it before returning the handle.
-pub fn create_private_file(path: &Path) -> io::Result<File> {
-    let file = open_with_private_creation_acl(
-        path,
-        PathKind::File,
-        CREATE_NEW,
-        SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-    )?;
-    if let Err(error) = secure_handle(&file, path, PathKind::File) {
-        drop(file);
-        let _ = std::fs::remove_file(path);
-        return Err(error);
-    }
-    Ok(file)
-}
-
-fn open_and_secure(path: &Path, kind: PathKind, disposition: u32, access: u32) -> io::Result<File> {
-    let file = open_handle(path, disposition, access, null())?;
-    secure_handle(&file, path, kind)?;
-    Ok(file)
-}
-
-fn open_with_private_creation_acl(
-    path: &Path,
-    kind: PathKind,
-    disposition: u32,
-    access: u32,
-) -> io::Result<File> {
-    with_private_security_attributes(path, kind, |attributes| {
-        open_handle(path, disposition, access, attributes)
-    })
-}
-
-fn create_private_directory(path: &Path) -> io::Result<()> {
+/// Create one private directory without changing any existing ancestor ACL.
+pub fn create_private_directory(path: &Path) -> io::Result<()> {
     with_private_security_attributes(path, PathKind::Directory, |attributes| {
         let absolute = absolute_security_path(path)?;
         let _ancestors = hold_directory_ancestors(&absolute)?;
@@ -236,6 +119,108 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
             return Ok(());
         }
         Err(wrap_error("create private Windows directory", path, error))
+    })?;
+    validate_private_directory(path)
+}
+
+/// Validate that a directory path and every existing ancestor are not reparse points.
+pub fn validate_directory_path(path: &Path) -> io::Result<()> {
+    let file = open_handle_with_share(
+        path,
+        OPEN_EXISTING,
+        FILE_READ_ATTRIBUTES,
+        null(),
+        SHARE_READ_WRITE_DELETE,
+    )?;
+    validate_file_kind(&file, path, PathKind::Directory)
+}
+
+/// Validate an exact protected, inheritable current-user directory ACL.
+pub fn validate_private_directory(path: &Path) -> io::Result<()> {
+    drop(open_and_validate(
+        path,
+        PathKind::Directory,
+        OPEN_EXISTING,
+        SECURITY_ACCESS,
+        SHARE_READ_WRITE,
+    )?);
+    Ok(())
+}
+
+/// Validate an exact protected current-user regular-file ACL.
+pub fn validate_private_file(path: &Path) -> io::Result<()> {
+    drop(open_and_validate(
+        path,
+        PathKind::File,
+        OPEN_EXISTING,
+        SECURITY_ACCESS,
+        SHARE_READ_WRITE_DELETE,
+    )?);
+    Ok(())
+}
+
+/// Open an existing regular file only after validating its exact ACL.
+pub fn open_private_file(path: &Path) -> io::Result<File> {
+    open_and_validate(
+        path,
+        PathKind::File,
+        OPEN_EXISTING,
+        SECURITY_ACCESS | FILE_GENERIC_READ,
+        SHARE_READ_WRITE_DELETE,
+    )
+}
+
+/// Open or create a private lock file with concurrent read-write sharing.
+pub fn open_or_create_private_lock_file(path: &Path) -> io::Result<File> {
+    let file = open_with_private_creation_acl(
+        path,
+        PathKind::File,
+        OPEN_ALWAYS,
+        SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        SHARE_READ_WRITE,
+    )?;
+    validate_private_handle(&file, path, PathKind::File)?;
+    Ok(file)
+}
+
+/// Create a new empty regular file with an exact private ACL.
+pub fn create_private_file(path: &Path) -> io::Result<File> {
+    let file = open_with_private_creation_acl(
+        path,
+        PathKind::File,
+        CREATE_NEW,
+        SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        FILE_SHARE_READ,
+    )?;
+    if let Err(error) = validate_private_handle(&file, path, PathKind::File) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(error);
+    }
+    Ok(file)
+}
+
+fn open_and_validate(
+    path: &Path,
+    kind: PathKind,
+    disposition: u32,
+    access: u32,
+    share_mode: u32,
+) -> io::Result<File> {
+    let file = open_handle_with_share(path, disposition, access, null(), share_mode)?;
+    validate_private_handle(&file, path, kind)?;
+    Ok(file)
+}
+
+fn open_with_private_creation_acl(
+    path: &Path,
+    kind: PathKind,
+    disposition: u32,
+    access: u32,
+    share_mode: u32,
+) -> io::Result<File> {
+    with_private_security_attributes(path, kind, |attributes| {
+        open_handle_with_share(path, disposition, access, attributes, share_mode)
     })
 }
 
@@ -244,9 +229,9 @@ fn with_private_security_attributes<T>(
     kind: PathKind,
     operation: impl FnOnce(*const SECURITY_ATTRIBUTES) -> io::Result<T>,
 ) -> io::Result<T> {
-    let process_sids = current_process_sids()
-        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
-    let acl = private_acl(&process_sids.user, kind.inheritance())
+    let current_user = current_user_sid()
+        .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
+    let acl = private_acl(&current_user, kind.inheritance())
         .map_err(|error| wrap_error("build private Windows creation DACL", path, error))?;
     let mut descriptor = SECURITY_DESCRIPTOR::default();
     // SAFETY: `descriptor` is writable storage for an absolute descriptor.
@@ -259,6 +244,17 @@ fn with_private_security_attributes<T>(
     {
         return Err(contextual_error(
             "initialize private Windows security descriptor",
+            path,
+        ));
+    }
+    // SAFETY: the descriptor is initialized and `current_user` remains valid
+    // for both descriptor assembly and the complete creation call.
+    if unsafe {
+        SetSecurityDescriptorOwner(addr_of_mut!(descriptor).cast(), current_user.as_psid(), 0)
+    } == 0
+    {
+        return Err(contextual_error(
+            "attach current Windows user as owner",
             path,
         ));
     }
@@ -291,74 +287,6 @@ fn with_private_security_attributes<T>(
         bInheritHandle: 0,
     };
     operation(&raw const attributes)
-}
-
-fn reopen_private_file(
-    path: &Path,
-    security_handle: File,
-    additional_access: u32,
-) -> io::Result<File> {
-    let expected = file_identity(&security_handle, path)?;
-    let share_mode = if additional_access & FILE_WRITE_DATA != 0 {
-        drop(security_handle);
-        SHARE_READ_WRITE
-    } else {
-        FILE_SHARE_READ
-    };
-    let file = open_handle_with_share(
-        path,
-        OPEN_EXISTING,
-        SECURITY_ACCESS | additional_access,
-        null(),
-        share_mode,
-    )?;
-    validate_file_kind(&file, path, PathKind::File)?;
-    let actual = file_identity(&file, path)?;
-    if expected != actual {
-        return Err(rejected(path, "file identity changed while securing it"));
-    }
-    let process_sids = current_process_sids()
-        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
-    validate_private_security(&file, path, PathKind::File, &process_sids)?;
-    Ok(file)
-}
-
-fn file_identity(file: &File, path: &Path) -> io::Result<FileIdentity> {
-    let mut information = MaybeUninit::<FILE_ID_INFO>::uninit();
-    // SAFETY: the output pointer is valid for the exact structure size and the
-    // file handle stays live for the duration of the call.
-    if unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileIdInfo,
-            information.as_mut_ptr().cast(),
-            size_of::<FILE_ID_INFO>() as u32,
-        )
-    } == 0
-    {
-        return Err(contextual_error("identify Windows file", path));
-    }
-    // SAFETY: a nonzero result initializes the complete output structure.
-    let information = unsafe { information.assume_init() };
-    Ok(FileIdentity {
-        volume_serial_number: information.VolumeSerialNumber,
-        file_id: information.FileId.Identifier,
-    })
-}
-
-fn open_handle(
-    path: &Path,
-    disposition: u32,
-    access: u32,
-    security_attributes: *const SECURITY_ATTRIBUTES,
-) -> io::Result<File> {
-    open_handle_with_share(
-        path,
-        disposition,
-        access,
-        security_attributes,
-        FILE_SHARE_READ,
-    )
 }
 
 fn open_handle_with_share(
@@ -455,36 +383,11 @@ fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
     Ok(encoded)
 }
 
-fn secure_handle(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
+fn validate_private_handle(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     validate_file_kind(file, path, kind)?;
-    let process_sids = current_process_sids()
-        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
-    validate_token_owner(file, path, &process_sids.owner)?;
-    let acl = private_acl(&process_sids.user, kind.inheritance())
-        .map_err(|error| wrap_error("build private Windows DACL", path, error))?;
-
-    // SAFETY: `file` owns a live file-system handle, `acl` remains allocated
-    // for the call, and null owner/group/SACL pointers match the information mask.
-    let status = unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            acl.0.cast(),
-            null(),
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(wrap_error(
-            "set private Windows DACL",
-            path,
-            io::Error::from_raw_os_error(status as i32),
-        ));
-    }
-
-    validate_private_security(file, path, kind, &process_sids)
+    let current_user = current_user_sid()
+        .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
+    validate_private_security(file, path, kind, &current_user)
 }
 
 fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
@@ -522,7 +425,7 @@ fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()
     Ok(())
 }
 
-fn current_process_sids() -> io::Result<ProcessSids> {
+fn current_user_sid() -> io::Result<OwnedSid> {
     let mut token = null_mut();
     // SAFETY: the process pseudo-handle is always valid and `token` is writable.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
@@ -537,16 +440,10 @@ fn current_process_sids() -> io::Result<ProcessSids> {
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
 
     let token_user = token_information(&token, TokenUser, size_of::<TOKEN_USER>())?;
-    let token_owner = token_information(&token, TokenOwner, size_of::<TOKEN_OWNER>())?;
     // SAFETY: `token_information` verified the returned structure sizes and
-    // keeps the aligned buffers live while their SID pointers are copied.
+    // keeps the aligned buffer live while its SID pointer is copied.
     let user = unsafe { (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    // SAFETY: see the preceding comment.
-    let owner = unsafe { (*token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner };
-    Ok(ProcessSids {
-        user: copy_sid(user, "user")?,
-        owner: copy_sid(owner, "owner")?,
-    })
+    copy_sid(user, "user")
 }
 
 fn token_information(
@@ -620,41 +517,6 @@ fn copy_sid(source: PSID, description: &str) -> io::Result<OwnedSid> {
     Ok(OwnedSid { storage })
 }
 
-fn validate_token_owner(file: &File, path: &Path, token_owner: &OwnedSid) -> io::Result<()> {
-    let mut owner = null_mut();
-    let mut descriptor = null_mut();
-    // SAFETY: output pointers are writable and the handle remains live.
-    let status = unsafe {
-        GetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION,
-            &raw mut owner,
-            null_mut(),
-            null_mut(),
-            null_mut(),
-            &raw mut descriptor,
-        )
-    };
-    let descriptor = LocalAllocation(descriptor);
-    if status != ERROR_SUCCESS {
-        return Err(wrap_error(
-            "read Windows owner",
-            path,
-            io::Error::from_raw_os_error(status as i32),
-        ));
-    }
-    // SAFETY: successful `GetSecurityInfo` returned an owner inside `descriptor`.
-    if descriptor.0.is_null()
-        || owner.is_null()
-        || unsafe { IsValidSid(owner) } == 0
-        || unsafe { EqualSid(owner, token_owner.as_psid()) } == 0
-    {
-        return Err(rejected(path, "owner is not the process token owner"));
-    }
-    Ok(())
-}
-
 fn private_acl(token_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAllocation> {
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: FILE_ALL_ACCESS,
@@ -679,23 +541,40 @@ fn private_acl(token_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAlloc
     if allocation.0.is_null() {
         return Err(io::Error::other("SetEntriesInAclW returned a null ACL"));
     }
+    let snapshot = inspect_acl(allocation.0.cast(), token_user)?;
+    if !acl_is_exact(&snapshot, inheritance) {
+        return Err(io::Error::other(format!(
+            "SetEntriesInAclW returned a non-private ACL: {snapshot:?}"
+        )));
+    }
     Ok(allocation)
+}
+
+fn acl_is_exact(snapshot: &AclSnapshot, inheritance: u32) -> bool {
+    snapshot.ace_count == 1
+        && snapshot.ace_is_allowed
+        && snapshot.ace_mask == FILE_ALL_ACCESS
+        && snapshot.ace_inheritance == inheritance as u8
+        && snapshot.trustee_is_current_user
 }
 
 fn validate_private_security(
     file: &File,
     path: &Path,
     kind: PathKind,
-    process_sids: &ProcessSids,
+    current_user: &OwnedSid,
 ) -> io::Result<()> {
-    let snapshot = security_snapshot(file, path, process_sids)?;
-    let valid = snapshot.owner_is_token_owner
+    let snapshot = security_snapshot(file, path, current_user)?;
+    let acl = AclSnapshot {
+        ace_count: snapshot.ace_count,
+        ace_is_allowed: snapshot.ace_is_allowed,
+        ace_mask: snapshot.ace_mask,
+        ace_inheritance: snapshot.ace_inheritance,
+        trustee_is_current_user: snapshot.trustee_is_current_user,
+    };
+    let valid = snapshot.owner_is_current_user
         && snapshot.dacl_is_protected
-        && snapshot.ace_count == 1
-        && snapshot.ace_is_allowed
-        && snapshot.ace_mask == FILE_ALL_ACCESS
-        && snapshot.ace_inheritance == kind.inheritance() as u8
-        && snapshot.trustee_is_current_user;
+        && acl_is_exact(&acl, kind.inheritance());
     if !valid {
         return Err(rejected(
             path,
@@ -708,7 +587,7 @@ fn validate_private_security(
 fn security_snapshot(
     file: &File,
     path: &Path,
-    process_sids: &ProcessSids,
+    current_user: &OwnedSid,
 ) -> io::Result<SecuritySnapshot> {
     let mut owner = null_mut();
     let mut dacl: *mut ACL = null_mut();
@@ -753,10 +632,26 @@ fn security_snapshot(
             path,
         ));
     }
-    if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
-        return Err(rejected(path, "Windows returned an invalid or null DACL"));
-    }
+    let acl = inspect_acl(dacl, current_user)
+        .map_err(|error| wrap_error("inspect private Windows DACL", path, error))?;
+    let owner_is_current_user = !owner.is_null()
+        && unsafe { IsValidSid(owner) } != 0
+        && unsafe { EqualSid(owner, current_user.as_psid()) } != 0;
+    Ok(SecuritySnapshot {
+        owner_is_current_user,
+        dacl_is_protected: control & SE_DACL_PROTECTED != 0,
+        ace_count: acl.ace_count,
+        ace_is_allowed: acl.ace_is_allowed,
+        ace_mask: acl.ace_mask,
+        ace_inheritance: acl.ace_inheritance,
+        trustee_is_current_user: acl.trustee_is_current_user,
+    })
+}
 
+fn inspect_acl(dacl: *mut ACL, current_user: &OwnedSid) -> io::Result<AclSnapshot> {
+    if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
+        return Err(io::Error::other("Windows returned an invalid or null DACL"));
+    }
     let mut size_information = MaybeUninit::<ACL_SIZE_INFORMATION>::uninit();
     // SAFETY: `dacl` is valid and the output buffer has the documented size.
     if unsafe {
@@ -768,17 +663,11 @@ fn security_snapshot(
         )
     } == 0
     {
-        return Err(contextual_error("inspect private Windows DACL", path));
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: a nonzero result initializes the complete output structure.
     let size_information = unsafe { size_information.assume_init() };
-
-    let owner_is_token_owner = !owner.is_null()
-        && unsafe { IsValidSid(owner) } != 0
-        && unsafe { EqualSid(owner, process_sids.owner.as_psid()) } != 0;
-    let mut snapshot = SecuritySnapshot {
-        owner_is_token_owner,
-        dacl_is_protected: control & SE_DACL_PROTECTED != 0,
+    let mut snapshot = AclSnapshot {
         ace_count: size_information.AceCount,
         ace_is_allowed: false,
         ace_mask: 0,
@@ -788,11 +677,10 @@ fn security_snapshot(
     if size_information.AceCount != 1 {
         return Ok(snapshot);
     }
-
     let mut raw_ace = null_mut();
     // SAFETY: `dacl` is valid, has one ACE, and `raw_ace` is writable.
     if unsafe { GetAce(dacl, 0, &raw mut raw_ace) } == 0 || raw_ace.is_null() {
-        return Err(contextual_error("read private Windows DACL ACE", path));
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: `GetAce` returned a pointer to an ACE with at least an ACE header.
     let header = unsafe { &*raw_ace.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
@@ -808,7 +696,7 @@ fn security_snapshot(
     let trustee = addr_of!(ace.SidStart).cast_mut().cast();
     // SAFETY: an access-allowed ACE stores its SID starting at `SidStart`.
     snapshot.trustee_is_current_user = unsafe { IsValidSid(trustee) } != 0
-        && unsafe { EqualSid(trustee, process_sids.user.as_psid()) } != 0;
+        && unsafe { EqualSid(trustee, current_user.as_psid()) } != 0;
     Ok(snapshot)
 }
 
@@ -839,25 +727,33 @@ fn rejected(path: &Path, reason: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-    use std::os::windows::fs::symlink_dir;
-    use windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD;
+    use std::io::{Read, Write};
+    use std::process::Command;
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
-        let file = open_handle(path, OPEN_EXISTING, SECURITY_ACCESS, null()).unwrap();
+        let file = open_handle_with_share(
+            path,
+            OPEN_EXISTING,
+            SECURITY_ACCESS,
+            null(),
+            SHARE_READ_WRITE_DELETE,
+        )
+        .unwrap();
         validate_file_kind(&file, path, kind).unwrap();
-        let process_sids = current_process_sids().unwrap();
-        security_snapshot(&file, path, &process_sids).unwrap()
+        let current_user = current_user_sid().unwrap();
+        security_snapshot(&file, path, &current_user).unwrap()
     }
 
     #[test]
     fn directory_acl_is_protected_current_user_only_and_inheritable() {
         let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private");
 
-        restrict_directory(temp.path()).unwrap();
+        create_private_directory(&path).unwrap();
 
-        let snapshot = snapshot(temp.path(), PathKind::Directory);
-        assert!(snapshot.owner_is_token_owner);
+        let snapshot = snapshot(&path, PathKind::Directory);
+        assert!(snapshot.owner_is_current_user);
         assert!(snapshot.dacl_is_protected);
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
@@ -870,24 +766,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_directory_chain_is_private_from_creation() {
+    fn private_directory_is_private_from_creation() {
         let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("private");
-        let nested = first.join("nested");
+        let private = temp.path().join("private");
 
-        create_private_dir_all(&nested).unwrap();
+        create_private_directory(&private).unwrap();
 
-        for path in [&first, &nested] {
-            let snapshot = snapshot(path, PathKind::Directory);
-            assert!(snapshot.owner_is_token_owner);
-            assert!(snapshot.dacl_is_protected);
-            assert_eq!(snapshot.ace_count, 1);
-            assert_eq!(
-                snapshot.ace_inheritance,
-                SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
-            );
-            assert!(snapshot.trustee_is_current_user);
-        }
+        let snapshot = snapshot(&private, PathKind::Directory);
+        assert!(snapshot.owner_is_current_user);
+        assert!(snapshot.dacl_is_protected);
+        assert_eq!(snapshot.ace_count, 1);
+        assert_eq!(
+            snapshot.ace_inheritance,
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT as u8
+        );
+        assert!(snapshot.trustee_is_current_user);
     }
 
     #[test]
@@ -898,7 +791,7 @@ mod tests {
         drop(create_private_file(&path).unwrap());
 
         let snapshot = snapshot(&path, PathKind::File);
-        assert!(snapshot.owner_is_token_owner);
+        assert!(snapshot.owner_is_current_user);
         assert!(snapshot.dacl_is_protected);
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
@@ -908,27 +801,71 @@ mod tests {
     }
 
     #[test]
-    fn existing_file_is_secured_before_contents_are_read() {
+    fn permissive_existing_file_is_rejected_without_acl_rewrite() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("legacy-secret");
         std::fs::write(&path, b"secret").unwrap();
+        let before = snapshot(&path, PathKind::File);
 
-        let mut file = open_private_file(&path).unwrap();
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents).unwrap();
+        let error = open_private_file(&path).unwrap_err();
 
-        assert_eq!(contents, b"secret");
-        let snapshot = snapshot(&path, PathKind::File);
-        assert!(snapshot.dacl_is_protected);
-        assert_eq!(snapshot.ace_count, 1);
-        assert!(snapshot.trustee_is_current_user);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(snapshot(&path, PathKind::File), before);
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn private_lock_handles_can_open_concurrently_for_read_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("lock");
+
+        let first = open_or_create_private_lock_file(&path).unwrap();
+        let second = open_or_create_private_lock_file(&path).unwrap();
+
+        drop((first, second));
+    }
+
+    #[test]
+    fn private_reader_allows_atomic_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("record");
+        let replacement = temp.path().join("replacement");
+        let mut original = create_private_file(&path).unwrap();
+        original.write_all(b"old").unwrap();
+        drop(original);
+        let mut reader = open_private_file(&path).unwrap();
+        let mut replacement_file = create_private_file(&replacement).unwrap();
+        replacement_file.write_all(b"new").unwrap();
+        drop(replacement_file);
+        let encoded_replacement = encode_path(&replacement).unwrap();
+        let encoded_path = encode_path(&path).unwrap();
+
+        // SAFETY: both paths are NUL-terminated and remain live for the call.
+        let replaced = unsafe {
+            MoveFileExW(
+                encoded_replacement.as_ptr(),
+                encoded_path.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING,
+            )
+        };
+
+        assert_ne!(
+            replaced,
+            0,
+            "replacement failed: {}",
+            io::Error::last_os_error()
+        );
+        let mut old_contents = Vec::new();
+        reader.read_to_end(&mut old_contents).unwrap();
+        assert_eq!(old_contents, b"old");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
     fn file_restriction_rejects_a_directory() {
         let temp = tempfile::tempdir().unwrap();
 
-        let error = restrict_file(temp.path()).unwrap_err();
+        let error = validate_private_file(temp.path()).unwrap_err();
 
         assert!(error.to_string().contains("expected a regular file"));
     }
@@ -940,18 +877,20 @@ mod tests {
         let nested = target.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let redirect = temp.path().join("redirect");
-        match symlink_dir(&target, &redirect) {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == io::ErrorKind::PermissionDenied
-                    || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD as i32) =>
-            {
-                return;
-            }
-            Err(error) => panic!("failed to create test directory symlink: {error}"),
-        }
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&redirect)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to create test junction: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-        let error = restrict_directory(&redirect.join("nested")).unwrap_err();
+        let error = validate_directory_path(&redirect.join("nested")).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("reparse points are not allowed"));
