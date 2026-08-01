@@ -63,4 +63,9 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(tracedecay_observation_fault_harness)",
+    # Gates the one db::coverage test that drives a real graph query; the
+    # `GraphQueryManager` it needs lives above this kernel.
+    "cfg(tracedecay_graph_query_tests)",
+] }
