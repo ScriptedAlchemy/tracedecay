@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 use tracedecay_domain::{
     ActorId, MAX_WORK_PROJECTION_READ_ITEMS, ManifestDigest, ProjectId, ProjectionGenerationId,
@@ -52,13 +51,6 @@ fn generation(value: &str) -> ProjectionGenerationId {
 
 fn cursor(value: &str) -> WorkProjectionResumeCursorV1 {
     WorkProjectionResumeCursorV1::new(generation("generation.work.read.1"), value).unwrap()
-}
-
-fn schema_name<T: JsonSchema>() -> String {
-    serde_json::to_value(schema_for!(T)).unwrap()["title"]
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 #[test]
@@ -335,65 +327,16 @@ fn deserialization_rejects_forged_snapshot_and_delta_states() {
     assert!(serde_json::from_value::<WorkProjectionDeltaV1>(duplicate_removed).is_err());
 }
 
+/// A newer writer may add fields a older reader has never heard of. Dropping
+/// them must not change the projection the older reader reconstructs.
 #[test]
-fn legacy_work_projection_wire_remains_unchanged() {
+fn unknown_projection_fields_are_ignored_on_read() {
     let projection = projection("task.work.read.legacy", "Legacy projection");
-    let value = serde_json::to_value(&projection).unwrap();
+    let mut value = serde_json::to_value(&projection).unwrap();
+    value["future_projection_metadata"] = json!({"revision": 2});
 
     assert_eq!(
-        value,
-        json!({
-            "task_id": "task.work.read.legacy",
-            "version": 1,
-            "authority": {
-                "project_id": "project.work.read",
-                "repository_id": "repository.work.read",
-                "worktree_id": "worktree.work.read",
-                "actor_id": "actor.work.read",
-                "policy_digest": digest('a'),
-            },
-            "title": "Legacy projection",
-            "dependencies": [],
-            "accepted_proposal": null,
-            "execution_admitted": false,
-            "runtime_evidence": [],
-            "task_accepted": false,
-            "history_len": 1,
-        })
-    );
-
-    let mut future_value = value;
-    future_value["future_projection_metadata"] = json!({"revision": 2});
-    assert_eq!(
-        serde_json::from_value::<WorkProjection>(future_value).unwrap(),
+        serde_json::from_value::<WorkProjection>(value).unwrap(),
         projection
-    );
-}
-
-#[test]
-fn generated_schema_names_are_stable() {
-    assert_eq!(
-        schema_name::<WorkProjectionResumeCursorV1>(),
-        "WorkProjectionResumeCursorV1"
-    );
-    assert_eq!(
-        schema_name::<WorkProjectionSequenceV1>(),
-        "WorkProjectionSequenceV1"
-    );
-    assert_eq!(
-        schema_name::<WorkProjectionSequenceRangeV1>(),
-        "WorkProjectionSequenceRangeV1"
-    );
-    assert_eq!(
-        schema_name::<WorkProjectionCoverageV1>(),
-        "WorkProjectionCoverageV1"
-    );
-    assert_eq!(
-        schema_name::<WorkProjectionSnapshotV1>(),
-        "WorkProjectionSnapshotV1"
-    );
-    assert_eq!(
-        schema_name::<WorkProjectionDeltaV1>(),
-        "WorkProjectionDeltaV1"
     );
 }

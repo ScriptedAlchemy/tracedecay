@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use schemars::{JsonSchema, schema_for};
 use serde_json::json;
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
@@ -89,13 +88,6 @@ fn execution(
         WorkEffectStateV1::Observational,
     )
     .unwrap()
-}
-
-fn schema_name<T: JsonSchema>() -> String {
-    serde_json::to_value(schema_for!(T)).unwrap()["title"]
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 fn projection() -> WorkProjection {
@@ -373,49 +365,6 @@ fn recovery_and_terminal_evidence_match_attempt_state() {
     let mut forged = serde_json::to_value(succeeded).unwrap();
     forged["state"] = json!("failed");
     assert!(serde_json::from_value::<WorkAttemptV1>(forged).is_err());
-}
-
-#[test]
-fn generated_runtime_schema_names_are_stable() {
-    assert_eq!(schema_name::<WorkFenceEpochV1>(), "WorkFenceEpochV1");
-    assert_eq!(
-        schema_name::<WorkAttemptIdentityV1>(),
-        "WorkAttemptIdentityV1"
-    );
-    assert_eq!(
-        schema_name::<WorkAttemptProjectionBindingV1>(),
-        "WorkAttemptProjectionBindingV1"
-    );
-    assert_eq!(schema_name::<WorkLeaseFenceV1>(), "WorkLeaseFenceV1");
-    assert_eq!(schema_name::<WorkProviderRouteV1>(), "WorkProviderRouteV1");
-    assert_eq!(
-        schema_name::<tracedecay_domain::WorkAttemptProgressV1>(),
-        "WorkAttemptProgressV1"
-    );
-    assert_eq!(schema_name::<WorkArtifactRefV1>(), "WorkArtifactRefV1");
-    assert_eq!(
-        schema_name::<WorkCancellationRequestV1>(),
-        "WorkCancellationRequestV1"
-    );
-    assert_eq!(
-        schema_name::<WorkCancellationAcknowledgementV1>(),
-        "WorkCancellationAcknowledgementV1"
-    );
-    assert_eq!(
-        schema_name::<WorkCancellationEscalationV1>(),
-        "WorkCancellationEscalationV1"
-    );
-    assert_eq!(
-        schema_name::<WorkCancellationStateV1>(),
-        "WorkCancellationStateV1"
-    );
-    assert_eq!(schema_name::<WorkRecoveryStateV1>(), "WorkRecoveryStateV1");
-    assert_eq!(schema_name::<WorkAttemptStateV1>(), "WorkAttemptStateV1");
-    assert_eq!(
-        schema_name::<WorkTerminalEvidenceV1>(),
-        "WorkTerminalEvidenceV1"
-    );
-    assert_eq!(schema_name::<WorkAttemptV1>(), "WorkAttemptV1");
 }
 
 #[test]

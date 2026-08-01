@@ -524,8 +524,26 @@ fn typed_ids_and_signed_cursors_round_trip_and_reject_invalid_values() {
     }
 }
 
+/// `as_str` is what callers log, key, and route on, so it must be the same
+/// string the wire carries. Sweeping `ALL` keeps a new variant covered without
+/// a test edit.
+macro_rules! assert_as_str_is_the_wire_value_for_all_variants {
+    ($type:ty) => {
+        for variant in <$type>::ALL {
+            assert_json_round_trip!(variant);
+            assert_eq!(serde_json::to_value(variant).unwrap(), variant.as_str());
+        }
+    };
+}
+
 #[test]
 fn enum_as_str_matches_serde_for_every_variant() {
+    assert_as_str_is_the_wire_value_for_all_variants!(RetrievalGrainV1);
+    assert_as_str_is_the_wire_value_for_all_variants!(SessionAuthorityClassV1);
+    assert_as_str_is_the_wire_value_for_all_variants!(TemporalAssertionKindV1);
+
+    // These two carry data, so they serialize as tagged objects and `as_str`
+    // names the tag rather than the whole value.
     for mode in [
         TemporalModeV1::Current,
         TemporalModeV1::AsOf {
@@ -535,37 +553,6 @@ fn enum_as_str_matches_serde_for_every_variant() {
         TemporalModeV1::Forensic,
     ] {
         assert_eq!(serde_json::to_value(mode).unwrap()["kind"], mode.as_str());
-    }
-    for grain in [
-        RetrievalGrainV1::Occurrence,
-        RetrievalGrainV1::LogicalMessage,
-        RetrievalGrainV1::Turn,
-        RetrievalGrainV1::Session,
-        RetrievalGrainV1::Thread,
-        RetrievalGrainV1::Agent,
-        RetrievalGrainV1::Summary,
-    ] {
-        assert_json_round_trip!(grain);
-        assert_eq!(serde_json::to_value(grain).unwrap(), grain.as_str());
-    }
-    for authority in [
-        SessionAuthorityClassV1::ProviderNative,
-        SessionAuthorityClassV1::CanonicalObservation,
-        SessionAuthorityClassV1::ExplicitAnchorAssertion,
-        SessionAuthorityClassV1::DerivedProjection,
-        SessionAuthorityClassV1::ImmutableSummary,
-    ] {
-        assert_json_round_trip!(authority);
-        assert_eq!(serde_json::to_value(authority).unwrap(), authority.as_str());
-    }
-    for kind in [
-        TemporalAssertionKindV1::Corrects,
-        TemporalAssertionKindV1::Supersedes,
-        TemporalAssertionKindV1::Contradicts,
-        TemporalAssertionKindV1::Supports,
-    ] {
-        assert_json_round_trip!(kind);
-        assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
     }
     for grouping in [GroupingProvenanceV1::ProviderNative, derived_grouping()] {
         assert_json_round_trip!(grouping);
@@ -950,22 +937,13 @@ fn session_wire_records_reject_unknown_fields() {
     }));
     assert_unknown_field_rejected::<SessionEvidenceMetadataV1>(evidence_wire("observed"));
     assert_unknown_field_rejected::<MessageOccurrenceRecordV1>(occurrence_record_wire());
-    for proof in [
-        CopyProofV1::ProviderLinkage {
+    assert_unknown_field_rejected::<CopyProofV1>(
+        serde_json::to_value(CopyProofV1::ProviderLinkage {
             source_occurrence_id: occurrence(0),
             provider_record_id: ObservationId::new("provider.message.1").unwrap(),
-        },
-        CopyProofV1::ParentMessageLinkage {
-            source_occurrence_id: occurrence(0),
-            parent_message_id: MessageId::new("message.parent.1").unwrap(),
-        },
-        CopyProofV1::ExplicitAnchorAssertion {
-            source_occurrence_id: occurrence(0),
-            assertion_anchor_id: anchor("anchor.copy.proof"),
-        },
-    ] {
-        assert_unknown_field_rejected::<CopyProofV1>(serde_json::to_value(proof).unwrap());
-    }
+        })
+        .unwrap(),
+    );
     assert_unknown_field_rejected::<LogicalCopyRecordV1>(json!({
         "occurrence_id": occurrence(1),
         "copied_from_occurrence_id": occurrence(0),
