@@ -39,7 +39,7 @@ use super::migration::{
 use super::schema::ConfigurationSchemaError;
 #[cfg(test)]
 use super::schema::ensure_configuration_schema;
-use crate::application::configuration::{
+use super::contracts::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationControlStore,
     ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
@@ -47,11 +47,11 @@ use crate::application::configuration::{
     CredentialWritePort, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
     WriteOnlyCredentialMutation,
 };
-use crate::config::registry::ConfigurationRegistry;
-use crate::config::resolver::{ConfigurationResolutionV1, registry_default_candidate};
+use super::registry::ConfigurationRegistry;
+use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 #[cfg(test)]
-use crate::db::engine::{Connection, TestConnection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use crate::RegisteredGlobalDb;
 
 mod audit;
@@ -67,7 +67,7 @@ pub enum ConfigurationStorageError {
     #[error("configuration schema error: {0}")]
     Schema(#[from] ConfigurationSchemaError),
     #[error("configuration storage error: {0}")]
-    Sql(#[from] crate::db::engine::Error),
+    Sql(#[from] tracedecay_runtime_core::db::engine::Error),
     #[error("configuration storage encoded invalid data: {0}")]
     Encoding(String),
 }
@@ -2616,7 +2616,7 @@ pub struct GlobalDbConfigurationControlStore<'db> {
 fn repair_pre_digest_semantic_configuration(
     encoded: &str,
 ) -> Result<Option<String>, ConfigurationError> {
-    if let Ok(current) = serde_json::from_str::<crate::config::SemanticConfig>(encoded) {
+    if let Ok(current) = serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(encoded) {
         current.validate().map_err(|_| {
             ConfigurationError::validation_message(
                 "semantic runtime configuration is invalid under the current schema",
@@ -2652,7 +2652,7 @@ fn repair_pre_digest_semantic_configuration(
     object.insert("active_profile".to_owned(), serde_json::Value::Null);
     object.insert("rollback_profile".to_owned(), serde_json::Value::Null);
     let repaired =
-        serde_json::from_value::<crate::config::SemanticConfig>(document).map_err(|_| {
+        serde_json::from_value::<crate::configuration::semantic::SemanticConfig>(document).map_err(|_| {
             ConfigurationError::validation_message(
                 "semantic runtime configuration cannot be repaired under the current schema",
             )
@@ -2737,7 +2737,7 @@ fn complete_snapshot_for_current_registry(
             );
         }
     }
-    let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
+    let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
         .map_err(ConfigurationError::validation)?;
     if let Some(ConfigurationValueV1::Text(encoded)) = effective_values.get_mut(&semantic_key)
         && let Some(repaired) = repair_pre_digest_semantic_configuration(encoded)?
@@ -4192,8 +4192,8 @@ impl ConfigurationMigrationStore for GlobalDbConfigurationControlStore<'_> {
 mod tests {
     use super::*;
     use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-    use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::resolve_configuration;
+    use crate::configuration::registry::ConfigurationRegistry;
+    use crate::configuration::resolver::resolve_configuration;
     use tracedecay_domain::configuration::{
         AccessRuleId, AuthorityRef, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
@@ -4247,10 +4247,10 @@ mod tests {
     fn forward_repair_disables_pre_digest_semantics_without_changing_install_intent() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let legacy = serde_json::json!({
-            "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+            "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
             "auto_download": true,
             "active_profile": {
                 "profile_id": "profile.semantic.legacy.v1",
@@ -4258,7 +4258,7 @@ mod tests {
                 "artifact_path": legacy_artifact_path
             },
             "rollback_profile": null,
-            "resources": crate::config::SemanticResourceCeilings::default()
+            "resources": tracedecay_semantic::SemanticResourceCeilings::default()
         });
         let mut effective_values = current.effective_values;
         let provenance = current.provenance;
@@ -4273,7 +4273,7 @@ mod tests {
             panic!("semantic setting must remain typed text");
         };
         assert!(
-            serde_json::from_str::<crate::config::SemanticConfig>(legacy_text).is_err(),
+            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(legacy_text).is_err(),
             "fixture must reproduce the pre-accepted-profile-digest snapshot"
         );
 
@@ -4285,16 +4285,16 @@ mod tests {
             panic!("semantic setting must remain typed text");
         };
         let semantic =
-            serde_json::from_str::<crate::config::SemanticConfig>(repaired_text).unwrap();
+            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(repaired_text).unwrap();
         semantic.validate().unwrap();
         assert_eq!(
             semantic.selected_model.as_deref(),
-            Some(crate::config::DEFAULT_FASTEMBED_MODEL_ID)
+            Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
         );
         assert!(semantic.auto_download);
         assert_eq!(
             semantic.resources,
-            crate::config::SemanticResourceCeilings::default()
+            tracedecay_semantic::SemanticResourceCeilings::default()
         );
         assert!(semantic.active_profile.is_none());
         assert!(semantic.rollback_profile.is_none());
@@ -4304,21 +4304,21 @@ mod tests {
     fn forward_repair_rejects_unrecognized_semantic_configuration() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let mut effective_values = current.effective_values;
         effective_values.insert(
             semantic_key,
             ConfigurationValueV1::Text(
                 serde_json::json!({
-                    "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+                    "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
                     "active_profile": {
                         "profile_id": "profile.semantic.legacy.v1",
                         "artifact_digest": "a".repeat(64),
                         "artifact_path": legacy_artifact_path
                     },
                     "rollback_profile": null,
-                    "resources": crate::config::SemanticResourceCeilings::default(),
+                    "resources": tracedecay_semantic::SemanticResourceCeilings::default(),
                     "x": true
                 })
                 .to_string(),
@@ -5196,7 +5196,7 @@ mod tests {
                 &WriteOnlyCredentialMutation {
                     expected_reference_id: None,
                     kind: CredentialKindV1::ApiToken,
-                    write_handle: crate::application::configuration::CredentialWriteHandleV1::new(
+                    write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(
                         handle,
                     )
                     .unwrap(),
@@ -5244,7 +5244,7 @@ mod tests {
                         expected_reference_id: Some(metadata.reference_id.clone()),
                         kind: CredentialKindV1::AccessToken,
                         write_handle:
-                            crate::application::configuration::CredentialWriteHandleV1::new(
+                            crate::configuration::contracts::CredentialWriteHandleV1::new(
                                 "opaque-credential-kind-mismatch",
                             )
                             .unwrap(),

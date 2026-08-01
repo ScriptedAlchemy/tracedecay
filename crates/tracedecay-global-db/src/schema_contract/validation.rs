@@ -1,4 +1,4 @@
-use crate::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
@@ -60,7 +60,7 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
-async fn validate_table(conn: &impl QueryExecutor, contract: &Table) -> crate::errors::Result<()> {
+async fn validate_table(conn: &impl QueryExecutor, contract: &Table) -> tracedecay_runtime_core::errors::Result<()> {
     let actual = read_columns(conn, contract.name).await?;
     if actual.len() != contract.columns.len() {
         return Err(global_db_operation_message(
@@ -176,7 +176,7 @@ fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
 pub async fn validate_observation_migration_source(
     conn: &impl QueryExecutor,
     has_legacy_idempotency: bool,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let Some(contract) = TABLES
         .iter()
         .find(|contract| contract.name == OBSERVATIONS_TABLE_NAME)
@@ -251,7 +251,7 @@ pub async fn validate_observation_migration_source(
 async fn validate_indexes_for_table(
     conn: &impl QueryExecutor,
     table: &str,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let actual = read_indexes(conn, table).await?;
     let expected = INDEXES
         .iter()
@@ -298,7 +298,7 @@ async fn validate_indexes_for_table(
 async fn validate_trigger(
     conn: &impl QueryExecutor,
     trigger: &super::invariants::Trigger,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT tbl_name, sql FROM sqlite_master
@@ -338,7 +338,7 @@ async fn validate_trigger(
 
 async fn validate_observation_autoincrement(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT EXISTS(
@@ -381,7 +381,7 @@ async fn validate_observation_autoincrement(
 async fn validate_tables_and_indexes(
     conn: &impl QueryExecutor,
     tables: &[Table],
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for contract in tables {
         validate_table(conn, contract).await?;
         validate_indexes_for_table(conn, contract.name).await?;
@@ -392,7 +392,7 @@ async fn validate_tables_and_indexes(
 async fn validate_named_tables_and_indexes(
     conn: &impl QueryExecutor,
     table_names: &[&str],
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for table_name in table_names {
         let contract = TABLES
             .iter()
@@ -411,7 +411,7 @@ async fn validate_named_tables_and_indexes(
 
 pub async fn validate_registry_schema_contract(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
 
@@ -421,7 +421,7 @@ pub async fn validate_registry_schema_contract(
 /// schema modules; this validator intentionally neither claims nor validates those domains.
 pub async fn validate_authority_schema_contract(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     validate_tables_and_indexes(conn, TABLES).await?;
     for invariant in super::invariants::INVARIANTS {
         for trigger in invariant.triggers {

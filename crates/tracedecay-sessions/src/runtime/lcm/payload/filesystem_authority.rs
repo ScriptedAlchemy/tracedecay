@@ -714,7 +714,7 @@ pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, 
 }
 
 #[cfg(not(windows))]
-pub fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
+pub(super) fn canonical_storage_root(storage_root: &Path) -> Result<PathBuf, LcmError> {
     let metadata =
         fs::symlink_metadata(storage_root).map_err(|err| LcmError::Io(err.to_string()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -1068,7 +1068,8 @@ unsafe extern "system" {
 }
 
 fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
-    tracedecay_runtime_core::storage::set_private_dir_permissions(path).map_err(|err| LcmError::Io(err.to_string()))
+    tracedecay_runtime_core::storage::set_private_dir_permissions(path)
+        .map_err(|err| LcmError::Io(err.to_string()))
 }
 
 #[cfg(all(test, windows))]

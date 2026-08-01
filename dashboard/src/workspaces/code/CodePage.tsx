@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState } from 'react';
+import { Suspense, lazy, useState, type ComponentProps } from 'react';
 import { ArrowLeft, Waypoints } from 'lucide-react';
 import {
   DataRow,
@@ -6,7 +6,7 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
@@ -27,6 +27,7 @@ import {
   type GraphNode,
   type GraphOverviewPayload,
   GraphOverviewPayloadSchema,
+  type GraphSearchPayload,
   GraphSearchPayloadSchema,
   type GraphSubgraphPayload,
   GraphSubgraphPayloadSchema,
@@ -219,60 +220,19 @@ export function CodePage() {
           // reach zero again.
           <div className="flex min-h-full flex-col md:h-full">
             <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
-              <LegacyBoundary
-                title="Code graph"
+              <GraphSlicePane
                 pending={subgraph.isPending}
                 result={subgraph.data}
-              >
-                {(payload) => {
-                  if (payload.nodes.length === 0) {
-                    // An answered read that returned no symbols, said as the
-                    // measurement it is. The slice route reports its own
-                    // failures with a non-2xx the boundary renders instead of
-                    // this, so reaching here means the graph holds nothing.
-                    return (
-                      <CenteredState
-                        title="No symbols are indexed for this project"
-                        kind="complete_zero_findings"
-                      />
-                    );
-                  }
-                  return (
-                    <>
-                      <GraphCanvas
-                        nodes={canvasNodes}
-                        edges={canvasEdges}
-                        selectedId={selected?.id ?? null}
-                        onSelect={selectFromCanvas}
-                        height={300}
-                        canvasClassName="md:min-h-[400px]"
-                        activation={activationRef.current}
-                        encoding={{
-                          body: 'symbol',
-                          size: 'connectedness',
-                          hue: 'symbol kind',
-                          signal: 'search or click activation',
-                          relation: 'relation; activation thickens',
-                        }}
-                      />
-                      {/* Eighty nodes out of a hundred and eighteen thousand is not a
-                        * reading until the rule that picked them is stated: "the
-                        * busiest connected region" and "one symbol's neighbours" are
-                        * different claims about identically-shaped pictures. Both
-                        * branches are read off the endpoint's own `mode`. */}
-                      <SubgraphCaption
-                        payload={payload}
-                        totalNodes={
-                          overview.data?.outcome === 'ok'
-                            ? overview.data.data.totals.nodes
-                            : null
-                        }
-                        seedLabel={selected ? displayName(selected) : null}
-                      />
-                    </>
-                  );
-                }}
-              </LegacyBoundary>
+                nodes={canvasNodes}
+                edges={canvasEdges}
+                selectedId={selected?.id ?? null}
+                onSelect={selectFromCanvas}
+                activation={activationRef.current}
+                totalNodes={
+                  overview.data?.outcome === 'ok' ? overview.data.data.totals.nodes : null
+                }
+                seedLabel={selected ? displayName(selected) : null}
+              />
             </div>
             <div className="md:min-h-[var(--pane-min-height)] md:flex-1 md:overflow-auto">
               {submitted === '' ? (
@@ -290,44 +250,13 @@ export function CodePage() {
                   selected={selected}
                 />
               ) : (
-                <LegacyBoundary title="Symbols" pending={search.isPending} result={search.data}>
-                  {(data) => {
-                    const rows = data.results ?? [];
-                    if (rows.length === 0)
-                      return (
-                        <CenteredState
-                          title={`No symbol matches ${submitted}`}
-                          kind="complete_zero_findings"
-                        />
-                      );
-                    const capped = data.total != null && data.total > rows.length;
-                    const degreeCeiling = rows.reduce(
-                      (max, node) => Math.max(max, node.degree ?? 0),
-                      0,
-                    );
-                    return (
-                      <VirtualList
-                        items={rows}
-                        getKey={(node) => node.id}
-                        header={
-                          <p className="td-legend border-b border-edge-subtle px-3 py-2">
-                            {capped
-                              ? `${rows.length} of ${data.total} matches`
-                              : `${data.total ?? rows.length} matches`}
-                          </p>
-                        }
-                        renderItem={(node) => (
-                          <SymbolRow
-                            node={node}
-                            degreeCeiling={degreeCeiling}
-                            selected={selected?.id === node.id}
-                            onSelect={() => setSelected(node)}
-                          />
-                        )}
-                      />
-                    );
-                  }}
-                </LegacyBoundary>
+                <SymbolMatches
+                  pending={search.isPending}
+                  result={search.data}
+                  submitted={submitted}
+                  selected={selected}
+                  onSelect={setSelected}
+                />
               )}
             </div>
           </div>
@@ -421,6 +350,131 @@ function TraceChunkFallback({
         </p>
       </div>
     </div>
+  );
+}
+
+/** The graph slice above the list: the canvas, and the caption naming the rule
+ * that picked what is on it. */
+function GraphSlicePane({
+  pending,
+  result,
+  nodes,
+  edges,
+  selectedId,
+  onSelect,
+  activation,
+  totalNodes,
+  seedLabel,
+}: {
+  pending: boolean;
+  result: LegacyResult<GraphSubgraphPayload> | undefined;
+  nodes: ComponentProps<typeof GraphCanvas>['nodes'];
+  edges: ComponentProps<typeof GraphCanvas>['edges'];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  activation: ComponentProps<typeof GraphCanvas>['activation'];
+  totalNodes: number | null;
+  seedLabel: string | null;
+}) {
+  return (
+    <LegacyBoundary title="Code graph" pending={pending} result={result}>
+      {(payload) => {
+        if (payload.nodes.length === 0) {
+          // An answered read that returned no symbols, said as the measurement
+          // it is. The slice route reports its own failures with a non-2xx the
+          // boundary renders instead of this, so reaching here means the graph
+          // holds nothing.
+          return (
+            <CenteredState
+              title="No symbols are indexed for this project"
+              kind="complete_zero_findings"
+            />
+          );
+        }
+        return (
+          <>
+            <GraphCanvas
+              nodes={nodes}
+              edges={edges}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              height={300}
+              canvasClassName="md:min-h-[400px]"
+              activation={activation}
+              encoding={{
+                body: 'symbol',
+                size: 'connectedness',
+                hue: 'symbol kind',
+                signal: 'search or click activation',
+                relation: 'relation; activation thickens',
+              }}
+            />
+            {/* Eighty nodes out of a hundred and eighteen thousand is not a
+              * reading until the rule that picked them is stated: "the busiest
+              * connected region" and "one symbol's neighbours" are different
+              * claims about identically-shaped pictures. Both branches are read
+              * off the endpoint's own `mode`. */}
+            <SubgraphCaption payload={payload} totalNodes={totalNodes} seedLabel={seedLabel} />
+          </>
+        );
+      }}
+    </LegacyBoundary>
+  );
+}
+
+/** The symbol search results, as the accessible equivalent of the canvas above
+ * them. The header states whether the rows are the whole match set, because the
+ * route caps them and a capped page presented as a total would understate the
+ * graph. */
+function SymbolMatches({
+  pending,
+  result,
+  submitted,
+  selected,
+  onSelect,
+}: {
+  pending: boolean;
+  result: LegacyResult<GraphSearchPayload> | undefined;
+  submitted: string;
+  selected: TraceFocus | null;
+  onSelect: (node: GraphNode) => void;
+}) {
+  return (
+    <LegacyBoundary title="Symbols" pending={pending} result={result}>
+      {(data) => {
+        const rows = data.results ?? [];
+        if (rows.length === 0)
+          return (
+            <CenteredState
+              title={`No symbol matches ${submitted}`}
+              kind="complete_zero_findings"
+            />
+          );
+        const capped = data.total != null && data.total > rows.length;
+        const degreeCeiling = rows.reduce((max, node) => Math.max(max, node.degree ?? 0), 0);
+        return (
+          <VirtualList
+            items={rows}
+            getKey={(node) => node.id}
+            header={
+              <p className="td-legend border-b border-edge-subtle px-3 py-2">
+                {capped
+                  ? `${rows.length} of ${data.total} matches`
+                  : `${data.total ?? rows.length} matches`}
+              </p>
+            }
+            renderItem={(node) => (
+              <SymbolRow
+                node={node}
+                degreeCeiling={degreeCeiling}
+                selected={selected?.id === node.id}
+                onSelect={() => onSelect(node)}
+              />
+            )}
+          />
+        );
+      }}
+    </LegacyBoundary>
   );
 }
 

@@ -5,8 +5,8 @@ use tracedecay_domain::ObservationScopeV1;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
 use crate::runtime::store_port::TranscriptIngestStore;
+use crate::runtime::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,

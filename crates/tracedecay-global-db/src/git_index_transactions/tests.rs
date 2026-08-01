@@ -1,4 +1,4 @@
-use crate::db::engine::{TestConnection, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior, params};
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewDispositionV1,

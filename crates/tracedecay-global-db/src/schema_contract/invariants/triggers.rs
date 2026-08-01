@@ -1,4 +1,4 @@
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::global_db_operation_error;
 
@@ -1695,7 +1695,7 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
 pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -1706,7 +1706,7 @@ pub(super) async fn replace_trigger(
 
 pub(super) async fn trigger_contracts_intact(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     for invariant in INVARIANTS {
         for trigger in invariant.triggers {
             if !trigger_matches(conn, trigger).await? {
@@ -1720,7 +1720,7 @@ pub(super) async fn trigger_contracts_intact(
 async fn trigger_matches(
     conn: &impl QueryExecutor,
     trigger: &Trigger,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT tbl_name, sql FROM sqlite_master
@@ -1748,7 +1748,7 @@ async fn trigger_matches(
 
 pub async fn suspend_immutability_for_canonical_repair(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         if !trigger_matches(conn, trigger).await? {
             return Err(authority_violation(format!(
@@ -1767,7 +1767,7 @@ pub async fn suspend_immutability_for_canonical_repair(
 
 pub async fn restore_immutability_after_canonical_repair(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
         replace_trigger(conn, trigger).await?;
         if !trigger_matches(conn, trigger).await? {
@@ -1782,7 +1782,7 @@ pub async fn restore_immutability_after_canonical_repair(
 
 pub async fn suspend_session_invariants_for_schema_upgrade(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for invariant in INVARIANTS {
         for trigger in invariant
             .triggers
@@ -1799,7 +1799,7 @@ pub async fn suspend_session_invariants_for_schema_upgrade(
 
 #[cfg(test)]
 mod tests {
-    use crate::db::engine::params;
+    use tracedecay_runtime_core::db::engine::params;
     use crate::tests::harness::RegisteredGlobalDbHarness;
 
     /// Registry rows the identity triggers key off. `upsert_code_project`

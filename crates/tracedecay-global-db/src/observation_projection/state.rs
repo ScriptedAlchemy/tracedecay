@@ -6,8 +6,8 @@ use tracedecay_store::{
     SessionRecord,
 };
 
-use crate::application::session::compatibility::projected_content_hash;
-use crate::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -857,7 +857,7 @@ pub async fn converge_session_project_paths(
 ///
 /// On macOS, `Path::canonicalize` expands firmlinks such as `/var` ->
 /// `/private/var`. Prefer the stable public `/var/...` spelling (same policy as
-/// [`crate::sessions::git_correlation::normalize_worktree`]) so host-reported
+/// [`tracedecay_sessions::runtime::git_correlation::normalize_worktree`]) so host-reported
 /// temp/project roots are not rewritten into a form that breaks search keys and
 /// authority verify against the original observation path.
 fn canonical_project_path(path: &str) -> Option<String> {
@@ -1121,7 +1121,7 @@ mod reconcile_tests {
     #[cfg(unix)]
     use super::{canonicalize_session_project_paths, converge_session_project_paths};
     #[cfg(unix)]
-    use crate::db::engine::{Executor, QueryExecutor, TestConnection};
+    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection};
 
     fn record(project_path: &str) -> SessionRecord {
         SessionRecord {

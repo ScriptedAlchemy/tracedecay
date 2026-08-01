@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::db::engine::{Error as EngineError, Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor};
 use crate::RegisteredGlobalDb;
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
@@ -748,7 +748,7 @@ pub async fn session_temporal_doctor_health_at(
     if !db_path.is_file() {
         return unavailable_report(SessionTemporalHealthStatus::Unavailable);
     }
-    if !crate::storage::has_sqlite_database_header(db_path).unwrap_or(false) {
+    if !tracedecay_runtime_core::storage::has_sqlite_database_header(db_path).unwrap_or(false) {
         return unavailable_report_with_reason(
             SessionTemporalHealthStatus::Unavailable,
             Some("session_store_uninitialized"),
@@ -828,7 +828,7 @@ impl RegisteredGlobalDb {
     pub async fn repair_session_temporal_fts(
         &self,
         apply: bool,
-    ) -> crate::db::engine::Result<(usize, usize)> {
+    ) -> tracedecay_runtime_core::db::engine::Result<(usize, usize)> {
         let report = self.session_temporal_doctor_health().await;
         if report.status != SessionTemporalHealthStatus::Complete {
             return Err(repair_refused(
@@ -1208,7 +1208,7 @@ fn schema_inventory(conn: &RusqliteConnection) -> Result<SchemaInventory, rusqli
 
 async fn snapshot_schema_inventory(
     conn: &impl QueryExecutor,
-) -> crate::db::engine::Result<SchemaInventory> {
+) -> tracedecay_runtime_core::db::engine::Result<SchemaInventory> {
     let mut rows = conn
         .query(
             "SELECT type, name, COALESCE(sql, '') FROM sqlite_master
@@ -1268,7 +1268,7 @@ fn column_shape_drift(
 async fn snapshot_column_shape_drift(
     conn: &impl QueryExecutor,
     inventory: &SchemaInventory,
-) -> crate::db::engine::Result<u64> {
+) -> tracedecay_runtime_core::db::engine::Result<u64> {
     let mut drift = 0_u64;
     for &(table, expected) in TEMPORAL_TABLE_COLUMNS {
         if !inventory.tables.contains(table) {
@@ -1309,7 +1309,7 @@ fn schema_version(conn: &RusqliteConnection) -> Result<Option<i64>, rusqlite::Er
 
 async fn snapshot_schema_version(
     conn: &impl QueryExecutor,
-) -> crate::db::engine::Result<Option<i64>> {
+) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_temporal_schema_migrations
@@ -1328,7 +1328,7 @@ fn count(conn: &RusqliteConnection, sql: &str) -> Result<u64, rusqlite::Error> {
         .min(MAX_FINDING_COUNT))
 }
 
-async fn snapshot_count(conn: &impl QueryExecutor, sql: &str) -> crate::db::engine::Result<u64> {
+async fn snapshot_count(conn: &impl QueryExecutor, sql: &str) -> tracedecay_runtime_core::db::engine::Result<u64> {
     let mut rows = conn.query(sql, ()).await?;
     let value = rows
         .next()
@@ -1384,7 +1384,7 @@ async fn require_quick_check(
     conn: &impl Executor,
     repair_occurrences: bool,
     repair_summaries: bool,
-) -> crate::db::engine::Result<()> {
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     let mut rows = match conn.query("PRAGMA quick_check", ()).await {
         Ok(rows) => rows,
         Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
@@ -1437,7 +1437,7 @@ fn is_exact_fts_blob_corruption(message: &str, expected_table: &str) -> bool {
     blob.parse::<u64>().is_ok() && table.strip_suffix('"') == Some(expected_table)
 }
 
-async fn connection_count(conn: &impl Executor, table: &str) -> crate::db::engine::Result<i64> {
+async fn connection_count(conn: &impl Executor, table: &str) -> tracedecay_runtime_core::db::engine::Result<i64> {
     let sql = match table {
         "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
         "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",
@@ -1454,7 +1454,7 @@ async fn verify_fts_repair(
     conn: &impl Executor,
     integrity_sql: &str,
     drift_sql: &str,
-) -> crate::db::engine::Result<()> {
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     conn.execute(integrity_sql, ()).await?;
     let mut rows = conn.query(drift_sql, ()).await?;
     let Some(row) = rows.next().await? else {

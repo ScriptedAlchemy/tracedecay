@@ -1,4 +1,4 @@
-use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2, UtcMicros};
+use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionStateV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
@@ -84,7 +84,7 @@ async fn current_disposition(
         .transpose()?)
 }
 
-pub async fn publish_anchor_derivative(
+pub(crate) async fn publish_anchor_derivative(
     connection: &(impl Executor + Sync),
     derivative: &RetrievalAnchorDerivativeV1,
 ) -> Result<AnchorDispositionAppendOutcomeV1> {
@@ -143,7 +143,7 @@ pub async fn publish_anchor_derivative(
     }
 }
 
-pub async fn resolve_anchor_derivatives<O>(
+pub(crate) async fn resolve_anchor_derivatives<O>(
     connection: &(impl QueryExecutor + Sync),
     owner: &O,
     anchor_id: &RetrievalAnchorId,
@@ -187,7 +187,7 @@ where
     Ok(derivatives)
 }
 
-pub async fn resolve_anchor_derivative(
+pub(crate) async fn resolve_anchor_derivative(
     connection: &(impl QueryExecutor + Sync),
     owner: &FactOwnerV1,
     kind: AnchorDerivativeKindV1,
@@ -228,7 +228,7 @@ pub async fn resolve_anchor_derivative(
         .map(|row| row.is_some())
 }
 
-pub async fn tombstone_fact_derivatives_tx<E>(
+pub(crate) async fn tombstone_fact_derivatives_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -280,7 +280,7 @@ where
         .map_err(database_error)
 }
 
-pub async fn publish_fact_feedback_finding_tx<E>(
+pub(crate) async fn publish_fact_feedback_finding_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -327,7 +327,7 @@ where
 }
 
 impl super::Database {
-    pub async fn append_retrieval_anchor_disposition(
+    pub(crate) async fn append_retrieval_anchor_disposition(
         &self,
         record: &RetrievalAnchorDispositionRecordV1,
     ) -> Result<AnchorDispositionAppendOutcomeV1> {
@@ -403,7 +403,7 @@ impl super::Database {
         Ok(AnchorDispositionAppendOutcomeV1::Appended)
     }
 
-    pub async fn publish_retrieval_anchor_derivative(
+    pub(crate) async fn publish_retrieval_anchor_derivative(
         &self,
         derivative: &RetrievalAnchorDerivativeV1,
     ) -> Result<AnchorDispositionAppendOutcomeV1> {
@@ -466,7 +466,7 @@ impl super::Database {
         Ok(outcome)
     }
 
-    pub async fn resolve_retrieval_anchor_derivatives<O>(
+    pub(crate) async fn resolve_retrieval_anchor_derivatives<O>(
         &self,
         owner: &O,
         anchor_id: &RetrievalAnchorId,
@@ -478,7 +478,7 @@ impl super::Database {
         resolve_anchor_derivatives(&connection, owner, anchor_id).await
     }
 
-    pub async fn resolve_retrieval_anchor_derivative(
+    pub(crate) async fn resolve_retrieval_anchor_derivative(
         &self,
         owner: &FactOwnerV1,
         kind: AnchorDerivativeKindV1,
@@ -488,7 +488,7 @@ impl super::Database {
         resolve_anchor_derivative(&connection, owner, kind, derivative_id).await
     }
 
-    pub async fn retrieval_anchor_disposition_history(
+    pub(crate) async fn retrieval_anchor_disposition_history(
         &self,
         owner: &impl serde::Serialize,
         anchor_id: &RetrievalAnchorId,
@@ -519,48 +519,6 @@ impl super::Database {
             history.push(record);
         }
         Ok(history)
-    }
-
-    pub async fn resolve_retrieval_anchor(
-        &self,
-        owner: &FactOwnerV1,
-        anchor_id: &RetrievalAnchorId,
-    ) -> Result<Option<RetrievalAnchorRecordV2>> {
-        let serialized_owner = owner_json(owner)?;
-        let connection = self.engine_conn();
-        let mut rows = connection
-            .query(
-                "SELECT anchor.anchor_json
-                 FROM retrieval_anchors AS anchor
-                 WHERE anchor.anchor_id = ?1 AND anchor.owner_json = ?2
-                   AND COALESCE((
-                       SELECT disposition.state
-                       FROM retrieval_anchor_dispositions AS disposition
-                       WHERE disposition.anchor_id = anchor.anchor_id
-                         AND disposition.owner_json = anchor.owner_json
-                       ORDER BY disposition.sequence DESC LIMIT 1
-                   ), 'active') = 'active'",
-                params![anchor_id.as_str(), serialized_owner],
-            )
-            .await
-            .map_err(database_error)?;
-        rows.next()
-            .await
-            .map_err(database_error)?
-            .map(|row| row.get::<String>(0).map_err(database_error))
-            .transpose()?
-            .map(|json| {
-                let record: RetrievalAnchorRecordV2 =
-                    serde_json::from_str(&json).map_err(database_error)?;
-                record.validate().map_err(database_error)?;
-                if record.anchor_id() != anchor_id
-                    || FactOwnerV1::from(record.owner().clone()) != *owner
-                {
-                    return Err(authority_error("retrieval anchor record identity mismatch"));
-                }
-                Ok(record)
-            })
-            .transpose()
     }
 }
 

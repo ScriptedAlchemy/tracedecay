@@ -6,7 +6,7 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { FigureRail, Meter, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
@@ -53,6 +53,20 @@ export function KnowledgePage() {
   const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadSchema);
   const statusBands =
     status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
+  const overviewData = overview.data?.outcome === 'ok' ? overview.data.data : undefined;
+  // One distribution for the two plates that draw it.
+  //
+  // The rail and the list are separate boundaries on purpose — a failed read
+  // has to be reported in both panes rather than leaving one a hollow shell —
+  // but they are the same read, and each was composing the distribution from
+  // the same three values written slightly differently. Two spellings of one
+  // computation is one place for them to drift apart, which on this plate would
+  // mean a rail and a list disagreeing about the trust of the same facts.
+  const trust = composeTrustDistribution(
+    overviewData?.holographic.overview?.trust_histogram,
+    statusBands,
+    overviewData?.holographic.facts,
+  );
   const [selected, setSelected] = useState<MemoryFactRow | null>(null);
   const detail = useLegacy(
     ['memory', 'fact', String(selected?.fact_id ?? '')],
@@ -78,11 +92,6 @@ export function KnowledgePage() {
         >
           {(data) => {
             const stats = data.holographic.overview;
-            const trust = composeTrustDistribution(
-              stats?.trust_histogram,
-              statusBands,
-              data.holographic.facts,
-            );
             // Ranked by count so the rail's length is a real ordering, not an
             // accident of whatever order the producer emitted rows in.
             const categories = [...(stats?.categories ?? [])].sort(
@@ -213,11 +222,6 @@ export function KnowledgePage() {
               0,
             );
             const loaded = summarizeLoadedTrust(facts);
-            const trust = composeTrustDistribution(
-              data.holographic.overview?.trust_histogram,
-              statusBands,
-              facts,
-            );
             return (
               <FactList
                 facts={facts}

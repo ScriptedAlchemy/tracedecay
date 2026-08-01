@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$ROOT/scripts/check-release-drift.sh"
+# shellcheck source=../scripts/lib/gate-test.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib/gate-test.sh"
 
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+SCRIPT="$GATE_REPO_ROOT/scripts/check-release-drift.sh"
 
 write_repo() {
   local version="$1"
-  local path="$tmpdir/repo"
+  local path="$GATE_SCRATCH/repo"
   rm -rf "$path"
   mkdir -p "$path"
   cat >"$path/Cargo.toml" <<TOML
@@ -20,16 +19,13 @@ TOML
   printf '%s\n' "$path"
 }
 
-same_repo="$(write_repo 0.0.33)"
-same_output="$("$SCRIPT" --repo "$same_repo" --registry-version 0.0.33)"
-[[ "$same_output" == *"release versions are aligned: 0.0.33"* ]]
+gate_run "$SCRIPT" --repo "$(write_repo 0.0.33)" --registry-version 0.0.33
+gate_expect_success "aligned versions"
+gate_output_contains "aligned versions" "release versions are aligned: 0.0.33"
 
-ahead_repo="$(write_repo 0.0.34)"
-set +e
-ahead_output="$("$SCRIPT" --repo "$ahead_repo" --registry-version 0.0.33 2>&1)"
-ahead_status=$?
-set -e
-
-[[ "$ahead_status" -eq 1 ]]
-[[ "$ahead_output" == *"release drift detected: local Cargo.toml version 0.0.34 is ahead of crates.io 0.0.33"* ]]
-[[ "$ahead_output" == *"Reset the unpublished release bump so release-plz can recreate it, or publish 0.0.34 manually before merging more release changes."* ]]
+gate_run "$SCRIPT" --repo "$(write_repo 0.0.34)" --registry-version 0.0.33
+gate_expect_status "local ahead of registry" 1
+gate_output_contains "local ahead of registry" \
+  "release drift detected: local Cargo.toml version 0.0.34 is ahead of crates.io 0.0.33"
+gate_output_contains "local ahead of registry" \
+  "Reset the unpublished release bump so release-plz can recreate it, or publish 0.0.34 manually before merging more release changes."

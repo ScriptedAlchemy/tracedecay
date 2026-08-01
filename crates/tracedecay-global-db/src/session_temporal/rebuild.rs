@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_domain::{DurableObservationV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1};
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionGenerationActivationReceiptV1,

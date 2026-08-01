@@ -6,9 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::admission::{
-    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES,
-};
+use crate::admission::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES};
 
 /// Fixed metadata charge per directory entry (filetype/stat bookkeeping).
 ///

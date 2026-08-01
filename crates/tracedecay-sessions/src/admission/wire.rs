@@ -251,9 +251,7 @@ fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
 
 /// Map a bounded line read into the historical `Option<String>` transport shape.
 #[cfg(test)]
-pub fn line_outcome_to_io(
-    outcome: WireReadOutcome<Option<String>>,
-) -> io::Result<Option<String>> {
+pub fn line_outcome_to_io(outcome: WireReadOutcome<Option<String>>) -> io::Result<Option<String>> {
     match outcome {
         WireReadOutcome::Ready(line) => Ok(line),
         WireReadOutcome::Oversized => Err(wire_oversized_io_error()),

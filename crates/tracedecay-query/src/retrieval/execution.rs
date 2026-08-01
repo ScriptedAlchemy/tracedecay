@@ -7,9 +7,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, ExactTechnicalTermKindV1, FileOccurrenceId,
-    FixedPointScore, RetrievalBudgetUsage, RetrievalFailure, RetrieverBatch, RetrieverCoverage,
-    RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkId, CompactCandidate, ExactTechnicalTermKindV1,
+    FileOccurrenceId, FixedPointScore, RetrievalBudgetUsage, RetrievalFailure, RetrieverBatch,
+    RetrieverCoverage, RetrieverOutcome, SourceFreshness, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::exact::ExactLaneEvidence;
@@ -180,10 +180,7 @@ where
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let evidence = batch
-                    .evidence_by_occurrence
-                    .get(&candidate.source_occurrence_id)
-                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
                 if !evidence
                     .matched_literals
@@ -223,10 +220,7 @@ where
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let evidence = batch
-                    .evidence_by_occurrence
-                    .get(&candidate.source_occurrence_id)
-                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
                 let occurrence = self.records.occurrence(&evidence.binding)?;
                 self.validate_occurrence(&evidence.binding, &occurrence)?;
@@ -256,10 +250,7 @@ where
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let evidence = batch
-                    .evidence_by_occurrence
-                    .get(&candidate.source_occurrence_id)
-                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                let evidence = lane_evidence(batch, candidate)?;
                 self.validate_binding(&evidence.binding)?;
                 let Some(symbol) = evidence.binding.occurrence.symbol.as_ref() else {
                     continue;
@@ -290,10 +281,7 @@ where
         self.translate(outcome, |batch| {
             let mut items = Vec::new();
             for candidate in &batch.candidates {
-                let evidence = batch
-                    .evidence_by_occurrence
-                    .get(&candidate.source_occurrence_id)
-                    .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)?;
+                let evidence = lane_evidence(batch, candidate)?;
                 let occurrence = self.records.occurrence_by_chunk(&evidence.chunk_id)?;
                 if occurrence.chunk.as_ref() != Some(&evidence.chunk_id) {
                     return Err(QueryExecutionContractErrorV1::RecordIdentityMismatch);
@@ -375,6 +363,20 @@ where
             coverage: batch.coverage,
         }
     }
+}
+
+/// The evidence a batch emitted for one candidate.
+///
+/// A batch that returns a candidate without its evidence is not translatable
+/// at all, so every lane translation resolves it the same way.
+fn lane_evidence<'batch, E>(
+    batch: &'batch RetrieverBatch<E>,
+    candidate: &CompactCandidate,
+) -> Result<&'batch E, QueryExecutionContractErrorV1> {
+    batch
+        .evidence_by_occurrence
+        .get(&candidate.source_occurrence_id)
+        .ok_or(QueryExecutionContractErrorV1::InvalidLaneEvidence)
 }
 
 #[cfg(test)]

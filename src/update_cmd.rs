@@ -812,6 +812,47 @@ pub(crate) fn partition_reinstall_results(
     }
 }
 
+/// Records a completed tracked-agent reinstall pass by advancing BOTH version
+/// markers, persisting the config only when something actually changed.
+///
+/// This is the one place any completed pass may record its version, and it is
+/// deliberately not open-coded. `previous_version` — not
+/// `last_installed_version` — is what arms the startup silent reinstall
+/// (`silent_reinstall_action`), so a pass that advanced only
+/// `last_installed_version` left the arming intact and repeated the whole
+/// reinstall on the very next ordinary command. Callers that treat a failed
+/// save as advisory report the error; `tracedecay reinstall` surfaces it,
+/// because an unsaved marker means the arming it just cleared is still on disk.
+pub(crate) fn record_completed_reinstall_pass(
+    config: &mut UserConfig,
+) -> tracedecay::errors::Result<()> {
+    if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
+        config
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("could not save tracedecay config: {err}"),
+            })?;
+    }
+    Ok(())
+}
+
+/// Whether an explicit `tracedecay install` pass amounted to a full
+/// tracked-agent refresh and may therefore call
+/// [`record_completed_reinstall_pass`].
+///
+/// The install flow only (re)installs its selection delta — agents that were
+/// already tracked are left untouched. After an upgrade those untouched
+/// agents still carry the previous binary's integration, so the pass may
+/// only disarm the startup silent reinstall when every agent that remains
+/// tracked was actually installed by this very pass. An empty tracked set is
+/// trivially covered: there is nothing left to refresh.
+pub(crate) fn install_pass_covers_tracked_agents(
+    tracked: &[String],
+    refreshed: &std::collections::BTreeSet<String>,
+) -> bool {
+    tracked.iter().all(|id| refreshed.contains(id))
+}
+
 fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::errors::Result<()> {
     if strict {
         return Err(tracedecay::errors::TraceDecayError::Config {
@@ -951,10 +992,8 @@ async fn run_post_update_mutations(
         // undo the skip on the next ordinary command and reinstall everything
         // anyway. The next real upgrade re-arms the reinstall as usual.
         let mut config = UserConfig::load();
-        if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
-            && let Err(err) = config.save()
-        {
-            eprintln!("warning: could not save tracedecay config: {err}");
+        if let Err(err) = record_completed_reinstall_pass(&mut config) {
+            eprintln!("warning: {err}");
         }
         return Ok(());
     }
@@ -999,10 +1038,8 @@ async fn run_post_update_mutations(
     let reinstall_result =
         match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
             ReinstallOutcome::AllOk => {
-                if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
-                    && let Err(err) = config.save()
-                {
-                    eprintln!("warning: could not save tracedecay config: {err}");
+                if let Err(err) = record_completed_reinstall_pass(&mut config) {
+                    eprintln!("warning: {err}");
                 }
                 Ok(())
             }
@@ -1515,6 +1552,96 @@ mod tests {
         assert!(config.last_installed_version.is_empty());
         // A subsequent full install pass would still have work to record.
         assert!(config.mark_version_installed(running));
+    }
+
+    /// Defect: `tracedecay reinstall` recorded only `last_installed_version`,
+    /// but `silent_reinstall_action` arms on `previous_version`. The explicit
+    /// pass therefore left the startup silent reinstall armed and repeated the
+    /// entire tracked-agent install on the very next ordinary command.
+    #[test]
+    fn an_explicit_reinstall_pass_disarms_the_startup_silent_reinstall() {
+        let running = "9.9.9";
+        let armed = || UserConfig {
+            installed_agents: vec!["claude".to_string()],
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        assert_eq!(
+            crate::silent_reinstall_action(&armed(), running),
+            crate::SilentReinstallAction::Reinstall,
+            "an unrecorded minor upgrade arms the startup pass"
+        );
+
+        // The old reinstall tail: only `last_installed_version` advanced.
+        let mut last_marker_only = armed();
+        last_marker_only.last_installed_version = running.to_string();
+        assert_eq!(
+            crate::silent_reinstall_action(&last_marker_only, running),
+            crate::SilentReinstallAction::Reinstall,
+            "advancing only last_installed_version leaves the pass armed"
+        );
+
+        // The shared completion protocol advances both markers.
+        let mut completed = armed();
+        assert!(completed.mark_version_installed(running));
+        assert_eq!(completed.previous_version, running);
+        assert_eq!(completed.last_installed_version, running);
+        assert_eq!(
+            crate::silent_reinstall_action(&completed, running),
+            crate::SilentReinstallAction::Nothing,
+            "a completed explicit reinstall disarms the startup pass"
+        );
+    }
+
+    /// Defect (sibling of the reinstall one): `tracedecay install` recorded
+    /// only `last_installed_version`, leaving the startup pass armed even
+    /// when the install had just refreshed every tracked agent. The converse
+    /// matters too: an install that only touched its selection delta must
+    /// NOT disarm the pass, because after an upgrade the untouched agents
+    /// still carry the previous binary's integration.
+    #[test]
+    fn an_install_pass_disarms_the_silent_reinstall_only_on_full_coverage() {
+        let running = "9.9.9";
+        let armed = |agents: &[&str]| UserConfig {
+            installed_agents: agents.iter().map(ToString::to_string).collect(),
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        let refreshed = |ids: &[&str]| -> std::collections::BTreeSet<String> {
+            ids.iter().map(ToString::to_string).collect()
+        };
+
+        // Full coverage: every tracked agent was installed by this pass, so
+        // completing the shared protocol disarms the startup reinstall.
+        let mut config = armed(&["claude"]);
+        assert!(install_pass_covers_tracked_agents(
+            &config.installed_agents,
+            &refreshed(&["claude"]),
+        ));
+        assert!(config.mark_version_installed(running));
+        assert_eq!(
+            crate::silent_reinstall_action(&config, running),
+            crate::SilentReinstallAction::Nothing,
+            "a full-coverage install pass disarms the startup pass"
+        );
+
+        // Partial coverage: `cursor` stayed tracked but untouched, so the
+        // old tail (last_installed_version only) must be kept and the
+        // startup pass must stay armed to refresh it.
+        let mut config = armed(&["claude", "cursor"]);
+        assert!(!install_pass_covers_tracked_agents(
+            &config.installed_agents,
+            &refreshed(&["claude"]),
+        ));
+        config.last_installed_version = running.to_string();
+        assert_eq!(
+            crate::silent_reinstall_action(&config, running),
+            crate::SilentReinstallAction::Reinstall,
+            "a delta-only install pass leaves the startup pass armed"
+        );
+
+        // Nothing tracked: trivially covered, nothing left to refresh.
+        assert!(install_pass_covers_tracked_agents(&[], &refreshed(&[])));
     }
 
     /// Closure factory for the upgrade step: records `label`, returns `result`.

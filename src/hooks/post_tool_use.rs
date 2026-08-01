@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::{codex, event_cwd_from_parsed, hook_route_metadata_from_parsed, rel_under_root};
 
@@ -43,7 +44,7 @@ pub fn claude_post_tool_use_matcher() -> String {
 
 /// Per-agent parameterization of the shared post-tool-use pipeline.
 pub(crate) struct PostToolUseSpec {
-    pub agent: crate::daemon::HookAgent,
+    pub agent: HookAgent,
     pub is_edit_tool: fn(&str) -> bool,
     pub is_shell_tool: fn(&str) -> bool,
     /// (parsed event, session cwd, project root) -> project-relative paths
@@ -51,14 +52,14 @@ pub(crate) struct PostToolUseSpec {
 }
 
 pub(crate) const CLAUDE_POST_TOOL_USE_SPEC: PostToolUseSpec = PostToolUseSpec {
-    agent: crate::daemon::HookAgent::Claude,
+    agent: HookAgent::Claude,
     is_edit_tool: is_claude_edit_tool,
     is_shell_tool: is_claude_bash_tool,
     edit_rel_paths: claude_edit_rel_paths,
 };
 
 pub(crate) const CODEX_POST_TOOL_USE_SPEC: PostToolUseSpec = PostToolUseSpec {
-    agent: crate::daemon::HookAgent::Codex,
+    agent: HookAgent::Codex,
     is_edit_tool: is_codex_edit_tool,
     is_shell_tool: is_codex_bash_tool,
     edit_rel_paths: codex_edit_rel_paths,
@@ -109,7 +110,7 @@ async fn notify_post_tool_use_inner(
         }
         super::notify_hook_event_with_optional_telemetry(
             &root,
-            crate::daemon::DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
+            DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
                 .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
             telemetry,
         )
@@ -117,7 +118,7 @@ async fn notify_post_tool_use_inner(
     } else if (spec.is_shell_tool)(tool_name) {
         super::notify_hook_event_with_optional_telemetry(
             &root,
-            crate::daemon::DaemonHookEvent::post_tool_use_shell(spec.agent, cwd)
+            DaemonHookEvent::post_tool_use_shell(spec.agent, cwd)
                 .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
             telemetry,
         )

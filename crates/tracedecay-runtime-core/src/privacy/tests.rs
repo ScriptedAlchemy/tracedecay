@@ -8,15 +8,17 @@ use tracedecay_domain::{
     RetentionClass, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
+use super::detect::{
+    SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1, SanitizationRemediationClassV1,
+    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
+};
+use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION_V1};
 use super::{
-    CLAUDE_SANITIZER_VERSION_V1, CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1,
-    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
-    DetectionConfidenceV1, MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1,
-    PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1, SanitizationDetectorOriginV1,
-    SanitizationDetectorRevisionV1, SanitizationFindingV1, SanitizationRemediationClassV1,
-    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1, parse_claude_record_v1,
-    parse_normalized_observation_record_v1, parse_observation_record_v1,
-    sanitize_code_source_bytes,
+    CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
+    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
+    MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    SanitizationFindingV1, parse_claude_record_v1, parse_normalized_observation_record_v1,
+    parse_observation_record_v1, sanitize_code_source_bytes,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {

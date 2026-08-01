@@ -26,7 +26,7 @@ pub use copy::{
     copy_external_payload_files, copy_raw_messages, copy_table, remap_store_id_columns,
     remap_summary_source, remove_created_payloads,
 };
-pub use pipeline::{migrate_candidate, migrate_legacy_state_store};
+use pipeline::{migrate_candidate, migrate_legacy_state_store};
 pub use resolution::same_path;
 
 const LEDGER_DIR: &str = "migration-ledger/hermes-legacy";

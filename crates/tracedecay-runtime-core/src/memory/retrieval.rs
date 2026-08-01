@@ -45,7 +45,7 @@ impl<'a> FactRetriever<'a> {
             .await
     }
 
-    pub async fn search_untracked(
+    pub(crate) async fn search_untracked(
         &self,
         query: &str,
         category: Option<MemoryCategory>,

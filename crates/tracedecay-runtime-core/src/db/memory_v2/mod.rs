@@ -40,11 +40,13 @@ pub(super) use schema::{
 };
 pub use types::{
     CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
-    MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
-    MemoryV2FeedbackHistoryRepairProgress,
+    MemoryV2CutoverReceipt,
 };
 use types::{CurrentFactState, OwnerKey, Progress};
-pub use writers::MemoryV2LegacyPurgeReceipt;
+pub(crate) use types::{
+    MemoryV2FeedbackHistoryRepairBatchOutcome, MemoryV2FeedbackHistoryRepairProgress,
+};
+pub(crate) use writers::MemoryV2LegacyPurgeReceipt;
 #[cfg(test)]
 pub(super) use writers::purge_memory_v2_fact;
 pub(super) use writers::purge_memory_v2_fact_in_transaction;

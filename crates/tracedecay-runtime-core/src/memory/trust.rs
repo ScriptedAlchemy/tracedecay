@@ -10,7 +10,7 @@ pub const DEFAULT_TRUST: f64 = 0.5;
 pub const DEFAULT_MIN_TRUST: f64 = 0.3;
 /// Lower bound of the "high" bucket in [`trust_bucket`]; scores in
 /// `[DEFAULT_MIN_TRUST, HIGH_TRUST_THRESHOLD)` are "medium".
-pub const HIGH_TRUST_THRESHOLD: f64 = 0.75;
+pub(crate) const HIGH_TRUST_THRESHOLD: f64 = 0.75;
 /// Representative score for a "low" trust label, inside the low bucket.
 pub const LOW_TRUST_REPRESENTATIVE: f64 = 0.15;
 /// Representative score for a "high" trust label, inside the high bucket.

@@ -5,10 +5,10 @@ use std::sync::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, read_ingest_watermark,
 };
+use tracedecay_global_db::RegisteredGlobalDb;
 
 static WORKFLOW_TEST_NONCE: AtomicU64 = AtomicU64::new(1);
 

@@ -276,12 +276,15 @@ fn apply_host_bundle_artifact_action_at(
 ) -> tracedecay::errors::Result<[u8; 16]> {
     if options.dry_run {
         return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "artifact backup/restore has no dry-run mode; it requires --yes".to_string(),
+            message: "artifact backup/restore has no dry-run mode".to_string(),
         });
     }
-    if !options.yes {
+    // A backup only ever writes a new snapshot; nothing deployed changes, so
+    // it needs no confirmation. A restore overwrites deployed bytes and keeps
+    // requiring `--yes`.
+    if matches!(action, crate::cli::HostBundleAction::ArtifactRestore { .. }) && !options.yes {
         return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "artifact backup/restore requires --yes".to_string(),
+            message: "artifact restore requires --yes".to_string(),
         });
     }
     let component =
@@ -708,6 +711,14 @@ fn apply_canonical_component_set_with_tracedecay_bin(
         request.lifecycle.operation,
         tracedecay_bin.to_string(),
     )?;
+    // Recover this host's own outstanding journal before previewing, exactly as
+    // `HostComponentSetTransactionV1::execute` does. Without this the residue of
+    // any earlier failure — including one that has since been fixed — makes
+    // every later run refuse with `RecoveryRequired` until somebody runs
+    // `host-bundle recover` by hand, so a transient fault becomes permanent.
+    transaction
+        .recover_host(component_set.component_set.host, &mut registration)
+        .map_err(|error| host_bundle_error_for_agent(agent_id, error))?;
     let preview = transaction
         .preview(
             &component_set.component_set,
@@ -2988,6 +2999,10 @@ pub(crate) async fn handle_install_command(
 
     let mut installed_names: Vec<String> = Vec::new();
     let mut removed_names: Vec<String> = Vec::new();
+    // Ids this pass actually (re)installed at the current binary version. The
+    // tail uses this to decide whether the pass covered every tracked agent
+    // and may disarm the startup silent reinstall.
+    let mut refreshed_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let project_path = std::env::current_dir().ok();
 
     if let Some(id) = agent {
@@ -3016,6 +3031,7 @@ pub(crate) async fn handle_install_command(
             print_legacy_install_guidance(&id);
         }
         ag.post_install(project_path.as_deref()).await;
+        refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
             let scoped_project_path = validate_codex_automation_project_path()?;
             install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
@@ -3075,6 +3091,7 @@ pub(crate) async fn handle_install_command(
                 print_legacy_install_guidance(id);
             }
             ag.post_install(project_path.as_deref()).await;
+            refreshed_ids.insert(id.clone());
             installed_names.push(ag.name().to_string());
             if !user_cfg.installed_agents.contains(id) {
                 user_cfg.installed_agents.push(id.clone());
@@ -3099,12 +3116,24 @@ pub(crate) async fn handle_install_command(
         }
     }
 
-    user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-    user_cfg
-        .save()
-        .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to save user config: {err}"),
-        })?;
+    // An explicit install pass only refreshes its selection delta, so it may
+    // disarm the startup silent reinstall (`previous_version`) only when every
+    // agent still tracked was (re)installed by this very pass. Anything less
+    // advances `last_installed_version` alone and leaves the arming intact:
+    // after an upgrade, the untouched agents still need the silent refresh.
+    if crate::update_cmd::install_pass_covers_tracked_agents(
+        &user_cfg.installed_agents,
+        &refreshed_ids,
+    ) {
+        crate::update_cmd::record_completed_reinstall_pass(&mut user_cfg)?;
+    } else {
+        user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
+    }
 
     tracedecay::agents::offer_git_post_commit_hook(&tracedecay_bin);
     Ok(())
@@ -3127,6 +3156,19 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
     if user_cfg.installed_agents.is_empty() {
         eprintln!("No installed agents found. Run `tracedecay install` first.");
     } else {
+        // Drop tracked ids that no longer resolve to an integration (a release
+        // renamed or removed one, or a typo landed in `installed_agents`).
+        // `migrate_installed_agents` only ADDS ids, so without this the stale
+        // id is retried forever. Mirrors `run_post_update_mutations`.
+        let before = user_cfg.installed_agents.len();
+        user_cfg
+            .installed_agents
+            .retain(|id| tracedecay::agents::get_integration(id).is_ok());
+        if user_cfg.installed_agents.len() != before
+            && let Err(err) = user_cfg.save()
+        {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
         let agents = user_cfg.installed_agents.clone();
         eprintln!(
             "Reinstalling {} agent(s): {}",
@@ -3134,26 +3176,15 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.join(", ")
         );
         let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
-        let mut deferred_any = false;
-        for (id, result) in &results {
-            if let Ok(AgentReinstallOutcome::DeferredUserAction(deferred)) = result {
-                deferred_any = true;
-                eprintln!(
-                    "\x1b[33mwarning:\x1b[0m {id} reinstall deferred: {}",
-                    deferred.remediation
-                );
-                for path in &deferred.staged_paths {
-                    eprintln!("  staged: {}", path.display());
-                }
-            }
-        }
-        // Keep the reason with the name — a bare id list left "failed for:
-        // claude, cursor, hermes, kimi" undiagnosable from the output.
-        let failed: Vec<String> = results
+        let deferred_any = results
             .iter()
-            .filter_map(|(id, result)| result.as_ref().err().map(|error| format!("{id}: {error}")))
-            .collect();
-        if !failed.is_empty() {
+            .any(|(_, result)| matches!(result, Ok(AgentReinstallOutcome::DeferredUserAction(_))));
+        // Reporting lives in `partition_reinstall_results`, which every
+        // reinstall pass shares. Keep the reason with the name — a bare id list
+        // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
+        if let crate::update_cmd::ReinstallOutcome::PartialFailure { failed } =
+            crate::update_cmd::partition_reinstall_results(results)
+        {
             return Err(tracedecay::errors::TraceDecayError::Config {
                 message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
             });
@@ -3165,12 +3196,10 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         } else {
             eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
         }
-        user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-        user_cfg
-            .save()
-            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-                message: format!("failed to save user config: {err}"),
-            })?;
+        // Advance BOTH markers: `previous_version` is what arms the startup
+        // silent reinstall, so recording only `last_installed_version` here
+        // left this explicit pass re-running on the next ordinary command.
+        crate::update_cmd::record_completed_reinstall_pass(&mut user_cfg)?;
     }
     Ok(())
 }
@@ -3815,6 +3844,16 @@ mod tests {
             self.inner.confirm_preview(component_set, request, preview)
         }
 
+        fn declare_artifact_writes(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+            paths: &[PathBuf],
+        ) -> Result<(), HostBundleError> {
+            self.inner
+                .declare_artifact_writes(component_set, request, paths)
+        }
+
         fn preflight(
             &mut self,
             component_set: &HostComponentSetV1,
@@ -3846,6 +3885,104 @@ mod tests {
         ) -> Result<(), HostBundleError> {
             self.inner.verify(component_set, request)?;
             self.injected_after_apply = !self.expected_removed_path.exists();
+            Err(HostBundleError::StorageFailure)
+        }
+
+        fn commit(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.commit(component_set, request)
+        }
+
+        fn rollback(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.rollback(component_set, request)
+        }
+    }
+
+    /// Forwards the whole lifecycle to a real delegate but always fails
+    /// `verify`, which interrupts the transaction after its artifacts are on
+    /// disk — the state that leaves a recovery journal behind.
+    /// Pinned binary path for the Kiro fixtures. Resolving it from `PATH`
+    /// would let a sibling test that swaps `PATH` change these artifacts
+    /// mid-test.
+    const KIRO_FIXTURE_BIN: &str = "/usr/local/bin/tracedecay";
+
+    struct AlwaysFailVerifyRegistration {
+        inner: CompatibilityAgentRegistrationDelegate,
+    }
+
+    impl HostComponentSetRegistrationV1 for AlwaysFailVerifyRegistration {
+        fn current_revision(
+            &self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<[u8; 32], HostBundleError> {
+            self.inner.current_revision(component_set, request)
+        }
+
+        fn discover_competing_extension_claims(
+            &self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<Vec<CompetingHostExtensionClaimV1>, HostBundleError> {
+            self.inner
+                .discover_competing_extension_claims(component_set, request)
+        }
+
+        fn confirm_preview(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+            preview: &HostComponentSetLifecyclePreviewV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.confirm_preview(component_set, request, preview)
+        }
+
+        fn declare_artifact_writes(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+            paths: &[PathBuf],
+        ) -> Result<(), HostBundleError> {
+            self.inner
+                .declare_artifact_writes(component_set, request, paths)
+        }
+
+        fn preflight(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.preflight(component_set, request)
+        }
+
+        fn stage(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.stage(component_set, request)
+        }
+
+        fn apply(
+            &mut self,
+            component_set: &HostComponentSetV1,
+            request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
+            self.inner.apply(component_set, request)
+        }
+
+        fn verify(
+            &mut self,
+            _component_set: &HostComponentSetV1,
+            _request: &HostComponentSetExecutionRequestV1,
+        ) -> Result<(), HostBundleError> {
             Err(HostBundleError::StorageFailure)
         }
 
@@ -4194,6 +4331,345 @@ mod tests {
         )
         .unwrap();
         assert_opencode_non_context_state(&preserved);
+    }
+
+    /// Kiro's `context_mcp` registration surface *is* its managed artifact
+    /// (`~/.kiro/settings/mcp.json`), so the transaction's own artifact write
+    /// necessarily changes the registration revision the apply step is about
+    /// to recheck. Rechecking the full revision against the confirmed base
+    /// therefore makes the transaction invalidate itself on every run.
+    #[test]
+    fn kiro_context_mcp_component_set_applies_non_interactively_and_repeats() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+
+        // Install then Repair is exactly the non-interactive dogfood loop:
+        // `reinstall_agent_integrations` re-runs the canonical component set
+        // as `Repair` on every update.
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Repair,
+            HostBundleCliOperation::Repair,
+        ] {
+            apply_canonical_component_set_with_tracedecay_bin(
+                "kiro",
+                operation,
+                &component_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+                KIRO_FIXTURE_BIN,
+            )
+            .unwrap_or_else(|error| panic!("kiro {operation:?} must apply cleanly: {error}"));
+        }
+
+        let registration_path = home.path().join(".kiro/settings/mcp.json");
+        let registered: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&registration_path).unwrap()).unwrap();
+        assert!(
+            registered["mcpServers"]["tracedecay"].is_object(),
+            "kiro MCP registration must survive the transaction: {registered}"
+        );
+    }
+
+    /// A transaction interrupted after it staged registration leaves a journal
+    /// behind. The non-interactive path must recover that journal itself, or a
+    /// single transient fault wedges every later run behind a manual
+    /// `host-bundle recover`.
+    #[test]
+    fn interrupted_component_set_journal_recovers_on_next_non_interactive_apply() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: false,
+            yes: true,
+            adopt: false,
+        };
+
+        // Interrupt a real transaction the way a crash would: run it through a
+        // registration adapter that fails `verify` after the artifacts are
+        // already on disk, which is exactly the state that leaves a journal.
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut writer =
+            tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        let mut transaction =
+            tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
+        let mut interrupted_registration = AlwaysFailVerifyRegistration {
+            inner: CompatibilityAgentRegistrationDelegate::new(
+                "kiro",
+                home.path(),
+                lifecycle.path(),
+                request.lifecycle.operation,
+            )
+            .unwrap(),
+        };
+        transaction
+            .execute(
+                &component_set.component_set,
+                &request,
+                &component_set,
+                &mut interrupted_registration,
+            )
+            .expect_err("the injected verify failure must interrupt this transaction");
+        drop(transaction);
+        drop(writer);
+        let journal_path = lifecycle
+            .path()
+            .join(".tracedecay-host-bundle-v1/component-set-journal.kiro.v1.json");
+        assert!(
+            journal_path.is_file(),
+            "the interrupted transaction must leave a recovery journal behind"
+        );
+
+        // The next non-interactive run must clear the residue by itself.
+        apply_canonical_component_set_with_tracedecay_bin(
+            "kiro",
+            HostBundleCliOperation::Repair,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+            KIRO_FIXTURE_BIN,
+        )
+        .expect("a leftover journal must be recovered, not turned into a permanent refusal");
+
+        let registered: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(".kiro/settings/mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(registered["mcpServers"]["tracedecay"].is_object());
+    }
+
+    /// A standing refusal such as an ownership conflict must reach the operator
+    /// under its own name. Reporting it as `StalePreview` tells them to retry
+    /// something that can never succeed and hides the only actionable
+    /// diagnostic they have.
+    #[test]
+    fn confirmed_apply_reports_an_ownership_conflict_as_itself() {
+        use tracedecay::agents::host_bundle_v2::HostBundleError;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
+                .unwrap()
+                .unwrap();
+        std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut writer =
+            tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+        let mut transaction =
+            tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "kiro",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        let preview = transaction
+            .preview(
+                &component_set.component_set,
+                &request,
+                &component_set,
+                &mut registration,
+            )
+            .unwrap();
+
+        // Somebody else takes the artifact path between preview and apply.
+        let artifact_path = home
+            .path()
+            .join(&component_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+        std::fs::write(&artifact_path, b"{\"owner\":\"somebody else\"}").unwrap();
+
+        let error = transaction
+            .execute_confirmed(
+                &component_set.component_set,
+                &request,
+                &preview,
+                &component_set,
+                &mut registration,
+            )
+            .expect_err("an unowned file on the artifact path must refuse the apply");
+        assert_ne!(
+            error,
+            HostBundleError::StalePreview,
+            "a standing refusal must not be laundered into a retryable staleness report"
+        );
+        assert_eq!(error, HostBundleError::OwnershipConflict);
+    }
+
+    /// A foreign edit landing between `stage` and `apply` must still abort the
+    /// transaction. Scoping the apply-time recheck to the paths this
+    /// transaction did not declare must not weaken that.
+    #[test]
+    fn foreign_registration_edit_between_stage_and_apply_still_aborts() {
+        use tracedecay::agents::host_bundle_v2::{
+            HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set("opencode", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+
+        // No declared writes: every registration path stays foreign, so the
+        // scoped recheck is the full revision.
+        registration
+            .declare_artifact_writes(&component_set.component_set, &request, &[])
+            .unwrap();
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        let revision = registration
+            .current_revision(&component_set.component_set, &request)
+            .unwrap();
+        let preview = HostComponentSetLifecyclePreviewV1 {
+            operation_id: request.operation_id,
+            plan_digest: [7; 32],
+            base_registration_revision: revision,
+            current_registration_revision: revision,
+            artifact_state_revision: [8; 32],
+            component_plans: Vec::new(),
+            competing_extension_claims: Vec::new(),
+            confirmation_required: false,
+        };
+        registration
+            .confirm_preview(&component_set.component_set, &request, &preview)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+
+        // Somebody else rewrites the registration surface mid-transaction.
+        let registration_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
+        std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
+
+        assert_eq!(
+            registration.apply(&component_set.component_set, &request),
+            Err(HostBundleError::StalePreview),
+            "a foreign mid-transaction edit must still abort the apply"
+        );
+    }
+
+    /// The transaction's own declared write must not read back as foreign
+    /// drift, but a foreign edit to a path it did *not* declare still must.
+    #[test]
+    fn declared_artifact_write_is_not_foreign_drift() {
+        use tracedecay::agents::host_bundle_v2::{
+            HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
+        };
+
+        let component_set = canonical_host_component_set("opencode", None, 0)
+            .unwrap()
+            .unwrap();
+
+        // `declare_the_write` decides only whether the mid-transaction write to
+        // the registration surface is attributed to this transaction. Every
+        // other input is identical, and each run gets its own home so the two
+        // outcomes cannot influence each other.
+        let drive = |declare_the_write: bool| {
+            let home = tempfile::tempdir().unwrap();
+            let lifecycle = tempfile::tempdir().unwrap();
+            let registration_path = home.path().join(".config/opencode/opencode.json");
+            // Create the directory up front: a registration directory that is
+            // absent at stage and present at apply is its own (unrelated)
+            // staleness signal, and this test is about the file's content.
+            std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
+            let request =
+                component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                    .unwrap();
+            let mut registration = CompatibilityAgentRegistrationDelegate::new(
+                "opencode",
+                home.path(),
+                lifecycle.path(),
+                request.lifecycle.operation,
+            )
+            .unwrap();
+            let declared: Vec<PathBuf> = if declare_the_write {
+                vec![registration_path.clone()]
+            } else {
+                Vec::new()
+            };
+            registration
+                .declare_artifact_writes(&component_set.component_set, &request, &declared)
+                .unwrap();
+            registration
+                .preflight(&component_set.component_set, &request)
+                .unwrap();
+            let revision = registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap();
+            let preview = HostComponentSetLifecyclePreviewV1 {
+                operation_id: request.operation_id,
+                plan_digest: [7; 32],
+                base_registration_revision: revision,
+                current_registration_revision: revision,
+                artifact_state_revision: [8; 32],
+                component_plans: Vec::new(),
+                competing_extension_claims: Vec::new(),
+                confirmation_required: false,
+            };
+            registration
+                .confirm_preview(&component_set.component_set, &request, &preview)
+                .unwrap();
+            registration
+                .stage(&component_set.component_set, &request)
+                .unwrap();
+            // The write the transaction makes to its own registration surface.
+            std::fs::write(&registration_path, b"{\"written\":\"by the transaction\"}").unwrap();
+            registration.apply(&component_set.component_set, &request)
+        };
+
+        assert_ne!(
+            drive(true),
+            Err(HostBundleError::StalePreview),
+            "the transaction's own declared write must not read back as drift"
+        );
+        assert_eq!(
+            drive(false),
+            Err(HostBundleError::StalePreview),
+            "the same write is foreign drift when the transaction did not declare it"
+        );
     }
 
     #[test]
@@ -4685,44 +5161,58 @@ mod tests {
     /// artifact write that moves that revision makes the adapter's recheck read
     /// TraceDecay's own bytes as third-party drift: every apply then rolls back
     /// with `StalePreview`. Kiro's set owned `settings/mcp.json` through both
-    /// paths and was self-invalidating exactly that way.
+    /// paths; OpenCode resolved its prompt path from a directory its own
+    /// artifacts create. Both were self-invalidating exactly that way, so the
+    /// invariant is checked for every host that ships a canonical set rather
+    /// than for the host that happened to break last.
     #[test]
-    fn kiro_artifact_writes_never_invalidate_the_confirmed_revision() {
+    fn host_artifact_writes_never_invalidate_the_confirmed_revision() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let component_set = canonical_host_component_set("kiro", None, 0)
-            .unwrap()
+        let mut self_invalidating = Vec::new();
+        for agent in [
+            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let lifecycle = tempfile::tempdir().unwrap();
+            let component_set = canonical_host_component_set(agent, None, 0)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{agent} must ship a canonical component set"));
+            let request =
+                component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                    .unwrap();
+            let registration = CompatibilityAgentRegistrationDelegate::new(
+                agent,
+                home.path(),
+                lifecycle.path(),
+                request.lifecycle.operation,
+            )
             .unwrap();
-        let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let registration = CompatibilityAgentRegistrationDelegate::new(
-            "kiro",
-            home.path(),
-            lifecycle.path(),
-            request.lifecycle.operation,
-        )
-        .unwrap();
-        let confirmed = registration
-            .current_revision(&component_set.component_set, &request)
-            .unwrap();
+            let confirmed = registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap();
 
-        for component in &component_set.component_set.components {
-            for asset in &component.contents {
-                let deployed = home.path().join(&asset.relative_path);
-                std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
-                std::fs::write(&deployed, &asset.bytes).unwrap();
+            for component in &component_set.component_set.components {
+                for asset in &component.contents {
+                    let deployed = home.path().join(&asset.relative_path);
+                    std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+                    std::fs::write(&deployed, &asset.bytes).unwrap();
+                }
+            }
+
+            if registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap()
+                != confirmed
+            {
+                self_invalidating.push(agent);
             }
         }
 
-        assert_eq!(
-            registration
-                .current_revision(&component_set.component_set, &request)
-                .unwrap(),
-            confirmed,
-            "deploying Kiro's own managed artifacts moved the registration revision it \
-             just confirmed"
+        assert!(
+            self_invalidating.is_empty(),
+            "deploying their own managed artifacts moved the registration revision these \
+             hosts just confirmed: {self_invalidating:?}"
         );
     }
 

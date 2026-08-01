@@ -1,5 +1,6 @@
 mod cursor_keys;
 mod direct;
+pub mod execution;
 mod doctor_health;
 mod expand;
 mod hydration;
@@ -9,9 +10,9 @@ mod query;
 mod rebuild;
 mod refresh;
 /// LCM compatibility rendering over one frozen registered-store snapshot. The
-/// DB-free shaping it applies is owned by
-/// [`crate::application::session::lcm::render`].
+/// DB-free shaping it applies is owned by [`self::render`].
 mod registered_lcm_render;
+pub mod render;
 mod retrieval;
 mod schema;
 mod sql;
@@ -20,22 +21,20 @@ mod tests;
 
 use std::collections::BTreeMap;
 
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::engine::params;
 use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
-use crate::application::session::lcm::contracts::{
+use tracedecay_sessions::lcm::contracts::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
 };
-use crate::application::session::lcm::render::{
-    CanonicalLcmSourceHydration, apply_canonical_summary_source_content,
-};
-use crate::application::session::{
+use self::execution::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
+use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
 use crate::RegisteredGlobalDb;
 use tracedecay_store::SessionMessageRecord;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
@@ -371,7 +370,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         &self,
         request: &AuthorizedTemporalExecutionRequest,
     ) -> Result<
-        (crate::db::engine::ReadSnapshot, TemporalExecutionSnapshot),
+        (tracedecay_runtime_core::db::engine::ReadSnapshot, TemporalExecutionSnapshot),
         SessionTemporalExecutionError,
     > {
         let control = request.snapshot_request().execution_control();

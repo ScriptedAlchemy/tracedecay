@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::db::engine::{Row, params};
+use tracedecay_runtime_core::db::engine::{Row, params};
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
     LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorId, SessionCursorKeyIdV1,
@@ -368,7 +368,7 @@ impl RegisteredGlobalDb {
 }
 
 async fn retrieve_summary_page(
-    read: &crate::db::engine::ReadSnapshot,
+    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
     request: &SessionTemporalRetrievalRequestV1,
     generation: i64,
 ) -> SessionStoreResult<SessionRetrievalPageV1> {
@@ -514,7 +514,7 @@ async fn retrieve_summary_page(
 }
 
 async fn validate_frozen_snapshot(
-    read: &crate::db::engine::ReadSnapshot,
+    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
     snapshot: &SessionTemporalSnapshotV1,
 ) -> SessionStoreResult<()> {
     let generation = i64::try_from(snapshot.watermarks().active_generation().value())

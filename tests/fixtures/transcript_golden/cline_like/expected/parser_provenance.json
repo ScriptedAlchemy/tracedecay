@@ -1,5 +1,5 @@
 {
-  "adapter_module": "src/sessions/cline_like.rs",
+  "adapter_module": "crates/tracedecay-sessions/src/runtime/cline_like.rs",
   "parse_entry": "message_from_entry",
   "normalize_entry": "normalize_cline_like_snapshot_observations",
   "canonical_entry": "canonical_snapshot_envelope",

@@ -10,7 +10,7 @@ use super::queries::*;
 use super::records::*;
 use super::*;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::db::engine::{Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, ReadSnapshot, TestConnection, Value as SqlValue};
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
@@ -195,7 +195,7 @@ impl RegisteredTemporalRead {
         )
         .expect("record query");
         let mut rows =
-            crate::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
+            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
                 .await
                 .expect("record rows");
         let mut kinds = Vec::new();
@@ -227,7 +227,7 @@ impl RegisteredTemporalRead {
         )
         .expect("record query");
         let mut rows =
-            crate::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
+            tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &query.sql, query.params)
                 .await
                 .expect("record rows");
         let mut records = Vec::new();
@@ -239,7 +239,7 @@ impl RegisteredTemporalRead {
 
     async fn explain_record_query(&self, query: RecordQuery) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {}", query.sql);
-        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, query.params)
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &explain, query.params)
             .await
             .expect("record query must parse and plan");
         let mut details = Vec::new();
@@ -251,7 +251,7 @@ impl RegisteredTemporalRead {
     }
 
     async fn text_column(&self, sql: &str, params: Vec<SqlValue>, column: i32) -> Vec<String> {
-        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
             .await
             .expect("query must execute");
         let mut values = Vec::new();
@@ -267,7 +267,7 @@ impl RegisteredTemporalRead {
         params: Vec<SqlValue>,
         column: i32,
     ) -> Vec<Option<String>> {
-        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, sql, params)
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, sql, params)
             .await
             .expect("query must execute");
         let mut values = Vec::new();
@@ -279,7 +279,7 @@ impl RegisteredTemporalRead {
 
     async fn explain_query_plan(&self, sql: &str, params: Vec<SqlValue>) -> Vec<String> {
         let explain = format!("EXPLAIN QUERY PLAN {sql}");
-        let mut rows = crate::db::engine::QueryExecutor::query(&self.read, &explain, params)
+        let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(&self.read, &explain, params)
             .await
             .expect("query must plan");
         let mut details = Vec::new();
@@ -2051,7 +2051,7 @@ async fn provider_filter_separates_same_session_and_none_reads_all_providers() {
     async fn occurrence_ids(
         conn: &Connection,
         provider: SqlValue,
-    ) -> crate::db::engine::Result<Vec<String>> {
+    ) -> tracedecay_runtime_core::db::engine::Result<Vec<String>> {
         let mut rows = conn
             .query(
                 TIME_CANDIDATE_QUERY,

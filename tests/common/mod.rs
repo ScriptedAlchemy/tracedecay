@@ -27,6 +27,24 @@ use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
 
+/// Host-installer source and template assets that live in
+/// `crates/tracedecay-agent-hosts`. Tests assert over the *source* of the
+/// generated guidance, so every suite must read the same authority; keeping the
+/// `include_str!` sites here means one edit repoints them all after a move.
+pub mod host_sources {
+    pub const HERMES_INSTALLER: &str =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes.rs");
+    pub const HERMES_TEMPLATES_MODULE: &str =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates.rs");
+    pub const HERMES_PLUGIN_INIT_PY: &str = include_str!(
+        "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
+    );
+    pub const HERMES_CLI_PY: &str =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/cli.py");
+    pub const HERMES_SKILL_MD: &str =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md");
+}
+
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();

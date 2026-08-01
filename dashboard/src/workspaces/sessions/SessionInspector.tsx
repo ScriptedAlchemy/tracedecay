@@ -35,7 +35,7 @@ import {
 } from '../../contracts/wire.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';

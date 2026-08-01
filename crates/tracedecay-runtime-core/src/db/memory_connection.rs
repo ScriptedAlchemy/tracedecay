@@ -39,7 +39,7 @@ impl<'a> MemoryConnection<'a> {
         Self::Runtime(connection)
     }
 
-    pub const fn runtime_transaction(transaction: &'a engine::Transaction) -> Self {
+    pub(crate) const fn runtime_transaction(transaction: &'a engine::Transaction) -> Self {
         Self::RuntimeTransaction(transaction)
     }
 
@@ -47,7 +47,7 @@ impl<'a> MemoryConnection<'a> {
         Self::Transaction(transaction)
     }
 
-    pub const fn database_transaction(
+    pub(crate) const fn database_transaction(
         transaction: &'a crate::db::DatabaseMemoryTransaction<'a>,
     ) -> Self {
         Self::DatabaseTransaction(transaction)

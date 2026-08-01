@@ -182,7 +182,6 @@ pub trait AnalyzerAdmissionEvaluator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalyzerAdmissionEvaluatorV1 {
     evaluator_id: PolicyIdentifierV1,
-    evaluator_revision: u64,
 }
 
 impl Default for AnalyzerAdmissionEvaluatorV1 {
@@ -190,12 +189,16 @@ impl Default for AnalyzerAdmissionEvaluatorV1 {
         Self {
             evaluator_id: PolicyIdentifierV1::new("analyzer_admission.v1")
                 .expect("static evaluator identifier is valid"),
-            evaluator_revision: 1,
         }
     }
 }
 
 impl AnalyzerAdmissionEvaluatorV1 {
+    /// Revision of this reviewed implementation, recorded with every decision
+    /// so replay can refuse a substituted evaluator. It is a property of the
+    /// code, not of an instance.
+    const EVALUATOR_REVISION: u64 = 1;
+
     pub fn snapshot(&self, input: &AnalyzerAdmissionInputV1) -> AnalyzerAdmissionSnapshotV1 {
         AnalyzerAdmissionSnapshotV1::compose(self, input)
     }
@@ -209,7 +212,7 @@ impl AnalyzerAdmissionEvaluatorV1 {
     ) -> AnalyzerAdmissionDecisionV1 {
         AnalyzerAdmissionDecisionV1 {
             evaluator_id: self.evaluator_id.clone(),
-            evaluator_revision: self.evaluator_revision,
+            evaluator_revision: Self::EVALUATOR_REVISION,
             input_digest: policy_digest("tracedecay.policy.analyzer-admission-input.v1", input),
             policy_revision: input.policy_revision,
             policy_digest: input.policy_digest.clone(),

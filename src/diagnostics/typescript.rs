@@ -18,7 +18,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope};
+use crate::diagnostics::{Diagnostic, Driver, Scope, is_diagnostic_level};
 use crate::errors::Result;
 
 pub struct TscDriver;
@@ -104,7 +104,7 @@ pub fn parse_tsc_line(line: &str) -> Option<Diagnostic> {
     // after = "error TS2322: Type ..." or "warning TS####: ..."
     let mut tokens = after.splitn(3, ' ');
     let level = tokens.next()?.to_string();
-    if !matches!(level.as_str(), "error" | "warning") {
+    if !is_diagnostic_level(&level) {
         return None;
     }
     let code_token = tokens.next()?;

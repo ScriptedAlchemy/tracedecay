@@ -36,17 +36,17 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 
 #[cfg(test)]
-pub use attachment::EmptyPhysicalRuntimeAttachment;
+pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
 pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime};
-pub use capacity::{
-    DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES, StoreRuntimeRegistryConfig,
-};
+pub use capacity::StoreRuntimeRegistryConfig;
+pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
     StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
-pub use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin, StoreRuntimeOpenResult};
+pub use open::StoreRuntimeOpenResult;
+pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin};
 pub use ports::{
     LifecycleShardRuntimePublisher, ResolvedStoreLocator, RuntimeLocatorRecord,
     ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeRegistryFuture,
@@ -246,14 +246,14 @@ impl StoreRuntimeHandle {
         Ok(authority)
     }
 
-    pub fn validate_registered_read(
+    pub(crate) fn validate_registered_read(
         &self,
         operation: &'static str,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
         self.validate_opened_file_identity(operation).map(|_| ())
     }
 
-    pub fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
+    pub(crate) fn physical_snapshot(&self) -> PhysicalRuntimeSnapshot {
         self.inner.attachment.snapshot()
     }
 
@@ -276,7 +276,7 @@ impl StoreRuntimeHandle {
         Ok(counts)
     }
 
-    pub fn storage_table_bytes(
+    pub(crate) fn storage_table_bytes(
         &self,
         reader_wait: Duration,
     ) -> Result<Vec<(String, u64)>, StoreRuntimeRegistryFailure> {
@@ -764,7 +764,7 @@ impl StoreRuntimeRegistry {
         Self::with_config_and_authority_epoch_floor(resolver, publisher, config, None)
     }
 
-    pub fn with_config_and_authority_epoch_floor(
+    pub(crate) fn with_config_and_authority_epoch_floor(
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
         config: StoreRuntimeRegistryConfig,

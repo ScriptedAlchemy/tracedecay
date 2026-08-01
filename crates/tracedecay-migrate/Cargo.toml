@@ -9,12 +9,16 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [features]
 # Fault injection for cutover receipts, matching the root crate's feature of
 # the same name so `--all-features` keeps exercising the same code.
-test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+test-transport = [
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+]
 
 [dependencies]
 dirs = "6"
 fs2 = "0.4"
 gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+getrandom = "0.2"
 hex = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +28,7 @@ tokio = { version = "1", features = ["full"] }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
@@ -32,6 +37,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

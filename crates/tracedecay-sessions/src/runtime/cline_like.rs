@@ -25,8 +25,6 @@ use crate::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
 use crate::observation::ObservationCancellation;
-#[cfg(test)]
-use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
@@ -54,6 +52,8 @@ use tracedecay_domain::{
     ObservationSourceRangeV1,
 };
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
+#[cfg(test)]
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 #[cfg(test)]
 use tracedecay_store::ObservationReplayRequest;
 
@@ -1192,11 +1192,10 @@ mod observation_tests {
         let first_bytes = snapshot_input_bytes("cline", &paths[0]).unwrap();
         let second_bytes = snapshot_input_bytes("cline", &paths[1]).unwrap();
 
-        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
-            temp.path().join("profile"),
-        )
-        .await
-        .expect("open registered observation runtime");
+        let runtime =
+            crate::admission::HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
+                .await
+                .expect("open registered observation runtime");
         let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
 
@@ -1260,11 +1259,10 @@ mod observation_tests {
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
         };
-        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
-            temp.path().join("profile"),
-        )
-        .await
-        .expect("open registered observation runtime");
+        let runtime =
+            crate::admission::HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
+                .await
+                .expect("open registered observation runtime");
         let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
@@ -1477,8 +1475,9 @@ mod observation_tests {
     const GOLDEN_API_HISTORY: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
     );
-    const GOLDEN_API_MESSAGES: &str =
-        include_str!("../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json");
+    const GOLDEN_API_MESSAGES: &str = include_str!(
+        "../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
+    );
     const GOLDEN_EXPECTED_ASSISTANT: &str = include_str!(
         "../../../../tests/fixtures/transcript_golden/cline_like/expected/assistant_tool_use.canonical.json"
     );

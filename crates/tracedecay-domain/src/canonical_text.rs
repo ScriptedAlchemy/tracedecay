@@ -50,6 +50,26 @@ pub fn is_tagged_lowercase_hex(value: &str, tag: &str, length: usize) -> bool {
         .is_some_and(|encoded| is_lowercase_hex(encoded, length))
 }
 
+/// Lowercase hex encoding of `bytes`, the inverse of [`is_lowercase_hex`].
+#[must_use]
+pub fn encode_lowercase_hex(bytes: &[u8]) -> String {
+    encode_tagged_lowercase_hex("", bytes)
+}
+
+/// `tag` followed by the lowercase hex encoding of `bytes`. The tag must
+/// include its separator, e.g. `"sha256:"`.
+#[must_use]
+pub fn encode_tagged_lowercase_hex(tag: &str, bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(tag.len() + bytes.len() * 2);
+    encoded.push_str(tag);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 /// Canonical bounded string that reports an empty value distinctly from a
 /// non-canonical one.
 ///

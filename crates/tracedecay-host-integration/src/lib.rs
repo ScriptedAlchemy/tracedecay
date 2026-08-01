@@ -860,6 +860,73 @@ pub struct HostComponentSetJournalV1 {
     pub components: Vec<HostComponentSetJournalComponentV1>,
 }
 
+impl HostComponentSetJournalV1 {
+    /// Whether the recorded phase and the two registration flags describe a
+    /// combination a writer can actually produce.
+    ///
+    /// The writer raises each flag immediately *before* invoking the
+    /// registration hook it names and advances `state` only *after* that hook
+    /// returns, so every phase implies the flags of the phases behind it:
+    ///
+    /// - `Prepared` precedes `registration.apply`, so `registration_applied`
+    ///   can never be set there.
+    /// - `Staged` and later are reached only after `registration.stage` was
+    ///   invoked, which requires `registration_staged`.
+    /// - `Applied` and later are reached only after `registration.apply` was
+    ///   invoked, which requires `registration_applied`.
+    /// - `registration_applied` is never raised without `registration_staged`.
+    ///
+    /// `RolledBack` is deliberately unconstrained: rollback preserves whichever
+    /// flags the failed attempt had reached, so every combination is authentic
+    /// there. Recovery must therefore not read the flags as proof that a
+    /// rolled-back journal needs no compensation - see
+    /// [`Self::registration_compensation_required`].
+    #[must_use]
+    pub fn registration_flags_match_state(&self) -> bool {
+        let staged_required = matches!(
+            self.state,
+            HostComponentSetJournalStateV1::Staged
+                | HostComponentSetJournalStateV1::Applied
+                | HostComponentSetJournalStateV1::Verified
+                | HostComponentSetJournalStateV1::Committed
+        );
+        let applied_required = matches!(
+            self.state,
+            HostComponentSetJournalStateV1::Applied
+                | HostComponentSetJournalStateV1::Verified
+                | HostComponentSetJournalStateV1::Committed
+        );
+        if self.registration_applied && !self.registration_staged {
+            return false;
+        }
+        if staged_required && !self.registration_staged {
+            return false;
+        }
+        if applied_required && !self.registration_applied {
+            return false;
+        }
+        !(self.state == HostComponentSetJournalStateV1::Prepared && self.registration_applied)
+    }
+
+    /// Whether recovery must attempt host-native registration compensation.
+    ///
+    /// Only a `Prepared` journal proves registration was never entered: its
+    /// flags are raised before the hooks they name, so `Prepared` with both
+    /// flags clear is the single state where skipping compensation is sound.
+    /// Every other phase - including `RolledBack`, whose flags describe the
+    /// interrupted attempt rather than the work still outstanding - must
+    /// re-attempt rollback. That re-attempt is already load-bearing today,
+    /// because a crash between `rollback_component_set` and journal cleanup
+    /// replays the same compensation; the registration adapter contract is
+    /// idempotent and no-ops when it finds no staged backup.
+    #[must_use]
+    pub fn registration_compensation_required(&self) -> bool {
+        self.registration_staged
+            || self.registration_applied
+            || self.state != HostComponentSetJournalStateV1::Prepared
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,5 +979,89 @@ mod tests {
             evidence.unavailable_reason.as_deref(),
             Some("native_fixture_missing")
         );
+    }
+
+    fn component_set_journal(
+        state: HostComponentSetJournalStateV1,
+        registration_staged: bool,
+        registration_applied: bool,
+    ) -> HostComponentSetJournalV1 {
+        HostComponentSetJournalV1 {
+            schema_version: 1,
+            operation_id: [7; 16],
+            host: HostKindV1::OpenCode,
+            operation: HostBundleLifecycleOpV1::Update,
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+            confirmed_plan_digest: None,
+            base_registration_revision: None,
+            current_registration_revision: None,
+            artifact_state_revision: None,
+            state,
+            registration_staged,
+            registration_applied,
+            components: Vec::new(),
+        }
+    }
+
+    /// The flags are raised before the hook they name and the phase advances
+    /// after it returns, so each phase implies the flags behind it. `RolledBack`
+    /// is the one state that keeps whatever the failed attempt reached.
+    #[test]
+    fn component_set_journal_phases_imply_their_registration_flags() {
+        use HostComponentSetJournalStateV1 as State;
+
+        for (state, staged, applied, representable) in [
+            (State::Prepared, false, false, true),
+            (State::Prepared, true, false, true),
+            (State::Prepared, false, true, false),
+            (State::Prepared, true, true, false),
+            (State::Staged, true, false, true),
+            (State::Staged, true, true, true),
+            (State::Staged, false, false, false),
+            (State::Applied, true, true, true),
+            (State::Applied, true, false, false),
+            (State::Verified, true, true, true),
+            (State::Verified, false, true, false),
+            (State::Committed, true, true, true),
+            (State::Committed, false, false, false),
+            (State::RolledBack, false, false, true),
+            (State::RolledBack, true, false, true),
+            (State::RolledBack, true, true, true),
+            (State::RolledBack, false, true, false),
+        ] {
+            assert_eq!(
+                component_set_journal(state, staged, applied).registration_flags_match_state(),
+                representable,
+                "{state:?} staged={staged} applied={applied}"
+            );
+        }
+    }
+
+    /// Only a `Prepared` journal with both flags clear proves registration was
+    /// never entered. Every other journal - a rolled-back one above all - still
+    /// owes an idempotent compensation attempt.
+    #[test]
+    fn only_an_untouched_prepared_journal_skips_registration_compensation() {
+        use HostComponentSetJournalStateV1 as State;
+
+        assert!(
+            !component_set_journal(State::Prepared, false, false)
+                .registration_compensation_required()
+        );
+        for (state, staged, applied) in [
+            (State::Prepared, true, false),
+            (State::Staged, true, false),
+            (State::Applied, true, true),
+            (State::Verified, true, true),
+            (State::Committed, true, true),
+            (State::RolledBack, false, false),
+            (State::RolledBack, true, true),
+        ] {
+            assert!(
+                component_set_journal(state, staged, applied).registration_compensation_required(),
+                "{state:?} staged={staged} applied={applied}"
+            );
+        }
     }
 }

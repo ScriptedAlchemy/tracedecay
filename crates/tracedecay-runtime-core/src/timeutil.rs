@@ -27,7 +27,7 @@ pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
 
 /// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
 /// UTC dates, `today`, `yesterday`, and relative forms like `last hour`.
-pub fn parse_search_time_filter(value: &str, now: i64) -> Option<i64> {
+pub(crate) fn parse_search_time_filter(value: &str, now: i64) -> Option<i64> {
     parse_search_time_filter_bound(value, now, SearchTimeBound::Start)
 }
 

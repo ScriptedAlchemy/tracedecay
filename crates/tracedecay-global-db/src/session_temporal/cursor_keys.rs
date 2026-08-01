@@ -10,7 +10,7 @@ use tracedecay_query::retrieval::QUERY_CURSOR_TTL_MICROS_V1;
 use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 use tracedecay_store::{SessionStoreError, SessionStoreResult};
 
-use crate::db::engine::{Executor, ReadSnapshot, params};
+use tracedecay_runtime_core::db::engine::{Executor, ReadSnapshot, params};
 use tracedecay_temporal_query::cursor::{CURSOR_CLOCK_SKEW_MICROS, CURSOR_LIFETIME_MICROS};
 use tracedecay_temporal_query::ports::{
     CursorKeyError, CursorSignature, InMemoryCursorAuthenticator, SessionCursorAuthenticator,
@@ -48,7 +48,7 @@ pub enum GlobalDbCursorKeyProviderError {
     Storage {
         operation: &'static str,
         #[source]
-        source: crate::db::engine::Error,
+        source: tracedecay_runtime_core::db::engine::Error,
     },
 }
 
@@ -363,7 +363,7 @@ impl SessionCursorAuthenticator for GlobalDbCursorKeyProvider {
     }
 }
 
-fn storage(source: crate::db::engine::Error) -> GlobalDbCursorKeyProviderError {
+fn storage(source: tracedecay_runtime_core::db::engine::Error) -> GlobalDbCursorKeyProviderError {
     GlobalDbCursorKeyProviderError::Storage {
         operation: LOAD_OPERATION,
         source,

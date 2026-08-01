@@ -18,7 +18,7 @@ pub(in crate::db::memory_v2) use lineage::{
     insert_legacy_feedback_event_mapping, insert_mapping, legacy_feedback_mapping_can_be_recorded,
     update_current,
 };
-pub use purge::MemoryV2LegacyPurgeReceipt;
+pub(crate) use purge::MemoryV2LegacyPurgeReceipt;
 #[cfg(test)]
 pub(in crate::db) use purge::purge_memory_v2_fact;
 pub(in crate::db) use purge::purge_memory_v2_fact_in_transaction;

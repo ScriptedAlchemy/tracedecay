@@ -978,7 +978,10 @@ where
         request: LspSessionOpenRequest,
         now_ms: u64,
     ) -> Result<LspSessionAccess, LspEndpointError> {
-        if request.workspace_folders.len() > 1 {
+        // Client folder hints are never authority: admission resolves the
+        // workspace independently. The only thing enforced here is the hard
+        // root ceiling, so an oversized hint cannot cost an admission.
+        if request.workspace_folders.len() > MAX_LSP_WORKSPACE_ROOTS {
             return Err(LspEndpointError::AdmissionRejected);
         }
         let authorized = self.admission.admit_lsp_session(&request, now_ms)?;
@@ -1264,11 +1267,27 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_refuses_multi_root_before_admission_and_keeps_single_root_working() {
+    fn endpoint_defers_folder_hints_to_admission_and_caps_oversized_hints() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut endpoint = DaemonLspSessionEndpoint::new(RecordingAdmission {
             calls: Arc::clone(&calls),
         });
+        let oversized = endpoint
+            .open(
+                LspSessionOpenRequest {
+                    workspace_folders: (0..=MAX_LSP_WORKSPACE_ROOTS)
+                        .map(|index| format!("file:///folder-{index}"))
+                        .collect(),
+                    ..LspSessionOpenRequest::default()
+                },
+                10,
+            )
+            .expect_err("an oversized folder hint must not cost an admission");
+        assert_eq!(oversized, LspEndpointError::AdmissionRejected);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(endpoint.registry().active_sessions(), 0);
+
+        // The admitted workspace, not the hint, decides the session's roots.
         let multi = endpoint
             .open(
                 LspSessionOpenRequest {
@@ -1277,10 +1296,14 @@ mod tests {
                 },
                 10,
             )
-            .expect_err("multi-root workspace must be quarantined");
-        assert_eq!(multi, LspEndpointError::AdmissionRejected);
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(endpoint.registry().active_sessions(), 0);
+            .expect("multi-folder hints defer to admission");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            endpoint.registry_mut().root(&multi, 11).unwrap().uri(),
+            "file:///admitted"
+        );
+        endpoint.registry_mut().expire_at(u64::MAX);
+        calls.store(0, Ordering::Relaxed);
 
         let access = endpoint
             .open(

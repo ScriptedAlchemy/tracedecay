@@ -1,7 +1,8 @@
 # Codex provider-normalization golden inputs
 
 Inputs are real Codex rollout JSONL record shapes already exercised by
-`tests/transcript_ingest_suite/codex.rs` and `src/sessions/codex.rs`
+`tests/transcript_ingest_suite/codex.rs` and
+`crates/tracedecay-sessions/src/runtime/codex.rs`
 (`session_meta`, `event_msg`/`agent_message`, `response_item`/`function_call`,
 plus lifecycle shapes: nested `thread_goal_updated`, `update_plan`, and exact
 `task_started`/`task_complete`/`turn_aborted`).

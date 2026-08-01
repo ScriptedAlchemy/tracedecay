@@ -7,7 +7,8 @@ use crate::id::{CapabilityId, ProfileId};
 use crate::manifest::canonicalize_set;
 use crate::validation::CatalogValidationError;
 
-/// Named profile categories with independently reviewed ceilings.
+/// Named profile categories. The ceiling for each profile is chosen by the
+/// composer that builds it, never inferred from the category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileKind {
@@ -25,23 +26,6 @@ pub struct ProfileBudget {
 }
 
 impl ProfileBudget {
-    pub const DEFAULT: Self = Self {
-        maximum_bindings: 64,
-        maximum_routing_tokens: 12_000,
-    };
-    pub const COMPACT: Self = Self {
-        maximum_bindings: 20,
-        maximum_routing_tokens: 4_000,
-    };
-    pub const ADMINISTRATIVE: Self = Self {
-        maximum_bindings: 32,
-        maximum_routing_tokens: 8_000,
-    };
-    pub const HOST_LIMITED: Self = Self {
-        maximum_bindings: 12,
-        maximum_routing_tokens: 2_000,
-    };
-
     pub fn new(
         maximum_bindings: u32,
         maximum_routing_tokens: u32,
@@ -56,15 +40,6 @@ impl ProfileBudget {
             maximum_bindings,
             maximum_routing_tokens,
         })
-    }
-
-    pub const fn recommended(kind: ProfileKind) -> Self {
-        match kind {
-            ProfileKind::Default => Self::DEFAULT,
-            ProfileKind::Compact => Self::COMPACT,
-            ProfileKind::Administrative => Self::ADMINISTRATIVE,
-            ProfileKind::HostLimited => Self::HOST_LIMITED,
-        }
     }
 
     pub const fn maximum_bindings(&self) -> u32 {

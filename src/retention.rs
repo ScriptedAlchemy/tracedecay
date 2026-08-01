@@ -11,8 +11,8 @@
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
 //! timestamp is both present and strictly older than the cutoff, so rows with
-//! an unknown timestamp are always kept. A [dry-run][`RetentionPlan`] counts
-//! what would be removed without mutating anything.
+//! an unknown timestamp are always kept. A dry run reports the same
+//! [`RetentionTableReport`] rows it would delete, without mutating anything.
 
 use serde::Serialize;
 pub use tracedecay_automation::config::{
@@ -309,20 +309,6 @@ where
         );
     }
     Ok(reports)
-}
-
-/// A ready-to-log summary of a retention pass.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RetentionPlan {
-    pub reports: Vec<RetentionTableReport>,
-}
-
-impl RetentionPlan {
-    /// Total rows across all tables (matched in a dry run, deleted when
-    /// applied).
-    pub fn total_rows(&self) -> u64 {
-        self.reports.iter().map(|report| report.rows).sum()
-    }
 }
 
 fn retention_error(table: &str, op: &str, err: &crate::db::engine::Error) -> TraceDecayError {

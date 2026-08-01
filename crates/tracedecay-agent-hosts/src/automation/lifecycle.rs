@@ -24,7 +24,7 @@ use super::scheduler::{
     stale_lock_secs,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::tracedecay::current_timestamp;
 
 static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(0);

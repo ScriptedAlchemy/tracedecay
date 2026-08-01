@@ -26,7 +26,8 @@ const BENCHMARK_SECRET_PREFIX: &str = "sk-test-";
 const REDACTION_MARKER: &str = "[TraceDecay redacted:";
 const PROVIDER_PIPELINE_SCOPE: &str =
     "production_parse_normalize_sanitize_commit_project_and_replay";
-const WORKLOAD_MANIFEST: &str = include_str!("../../../../benchmarks/pr5-observation/workload-v1.json");
+const WORKLOAD_MANIFEST: &str =
+    include_str!("../../../../benchmarks/pr5-observation/workload-v1.json");
 const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
@@ -36,15 +37,21 @@ const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
     ),
     (
         "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-        include_str!("../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"),
+        include_str!(
+            "../../../../tests/fixtures/provider_normalization/codex/session_meta.input.json"
+        ),
     ),
     (
         "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-        include_str!("../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"),
+        include_str!(
+            "../../../../tests/fixtures/provider_normalization/codex/agent_message.input.json"
+        ),
     ),
     (
         "tests/fixtures/provider_normalization/cursor/tool_use.input.json",
-        include_str!("../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"),
+        include_str!(
+            "../../../../tests/fixtures/provider_normalization/cursor/tool_use.input.json"
+        ),
     ),
     (
         "tests/fixtures/provider_normalization/hermes/assistant_tool_call.input.json",
@@ -66,7 +73,9 @@ const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
     ),
     (
         "tests/fixtures/transcript_golden/cline_like/input/task_metadata.json",
-        include_str!("../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"),
+        include_str!(
+            "../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ),
     ),
 ];
 const HARNESS_SOURCES: &[(&str, &str)] = &[

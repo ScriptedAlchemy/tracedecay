@@ -5,7 +5,8 @@
 //! [`RepositoryPhysicalAttachmentFactory`], which builds a
 //! [`ConcreteRepositoryWriteExecutor`] and a
 //! [`ConcreteRepositoryReadExecutor`]; see
-//! `src/daemon/store_runtime/registry/ports.rs`. The executors still contain no
+//! `crates/tracedecay-runtime-core/src/store_runtime/registry/ports.rs`. The
+//! executors still contain no
 //! locator, opener, migration installer, registry binding, cutover selector, or
 //! generic SQL surface — the attachment supplies all of those.
 //!
@@ -20,7 +21,7 @@
 //! - the profile/configuration family
 //!   ([`RepositoryWritePayloadV1::Configuration`] and every
 //!   [`RepositoryReadOperationV1::Profile`] operation), whose live writer is
-//!   still `src/global_db/configuration/store.rs`;
+//!   still `crates/tracedecay-global-db/src/configuration/store.rs`;
 //! - [`RepositoryWritePayloadV1::DiagnosticSupersession`] and the
 //!   `Stale`/`SupersessionChain` diagnostic reads, whose live engine is still
 //!   `src/diagnostics_store.rs`;

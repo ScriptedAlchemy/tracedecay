@@ -48,7 +48,8 @@ import {
   useScope,
   type ScopeWritability,
 } from '../../data/scope/store.ts';
-import { EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
+import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
+import { ReadModelState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn.ts';
@@ -282,15 +283,15 @@ function DoctorFindings({
   ) => void;
   onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
 }) {
-  if (pending) {
-    return <ReadModelState kind="loading" detail="requesting canonical Doctor findings" />;
-  }
-  if (!result) return <ReadModelState kind="unknown" detail="no Doctor response recorded" />;
-  if (result.outcome === 'transport') {
-    return <ReadModelState kind={result.state} detail={result.detail ?? 'daemon unreachable'} />;
+  const read = envelopeReadState(pending, result, {
+    loading: 'requesting canonical Doctor findings',
+    unknown: 'no Doctor response recorded',
+  });
+  if (read.kind === 'blocked') {
+    return <ReadModelState kind={read.state} detail={read.detail} />;
   }
 
-  const { envelope } = result;
+  const envelope = read.value;
   if (envelope.payload.entries.length === 0) {
     return (
       <>
@@ -584,18 +585,21 @@ function OperationStatus({
       />
     );
   }
-  if (pending && !result) {
-    return <ReadModelState kind="loading" detail="checking remediation operation" />;
+  // `pending && !result`: a re-poll that already has a reading keeps showing it
+  // rather than blanking back to a loading chip.
+  const read = envelopeReadState(pending && !result, result, {
+    loading: 'checking remediation operation',
+    unknown: 'operation status is unavailable',
+    transport: 'operation owner unreachable',
+  });
+  if (read.kind === 'blocked') {
+    return <ReadModelState kind={read.state} detail={read.detail} />;
   }
-  if (!result) return <ReadModelState kind="unknown" detail="operation status is unavailable" />;
-  if (result.outcome === 'transport') {
-    return <ReadModelState kind={result.state} detail={result.detail ?? 'operation owner unreachable'} />;
-  }
-  const { payload } = result.envelope;
+  const { payload } = read.value;
   if (payload.status === 'unavailable') {
     return (
       <ReadModelState
-        kind={result.envelope.domain_state}
+        kind={read.value.domain_state}
         detail={`remediation ${payload.reason.replaceAll('_', ' ')}`}
       />
     );

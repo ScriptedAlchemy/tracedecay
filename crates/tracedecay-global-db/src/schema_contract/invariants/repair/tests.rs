@@ -20,7 +20,7 @@ use super::{
     repair_committed_source_cursors, repair_projection_frontier,
     validate_observation_cursor_coverage,
 };
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 /// The exact-advance receipt that makes a frontier ahead of the last committed
 /// observation legitimate rather than lost progress.

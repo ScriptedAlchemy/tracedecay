@@ -1,4 +1,4 @@
-use crate::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
@@ -1110,7 +1110,7 @@ fn decode_generation_i64(
     SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
 }
 
-fn map_begin_conflict(error: crate::db::engine::Error) -> SessionStoreError {
+fn map_begin_conflict(error: tracedecay_runtime_core::db::engine::Error) -> SessionStoreError {
     let message = error.to_string();
     if message.contains("idx_session_refresh_operations_one_running")
         || message.contains("UNIQUE constraint failed: session_refresh_operations.session_id")
