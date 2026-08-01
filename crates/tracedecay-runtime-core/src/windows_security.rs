@@ -282,7 +282,7 @@ fn with_private_security_attributes<T>(
         lpSecurityDescriptor: addr_of_mut!(descriptor).cast(),
         bInheritHandle: 0,
     };
-    operation(&attributes)
+    operation(&raw const attributes)
 }
 
 fn reopen_private_file(
@@ -445,7 +445,7 @@ fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()
 fn current_user_sid() -> io::Result<OwnedSid> {
     let mut token = null_mut();
     // SAFETY: the process pseudo-handle is always valid and `token` is writable.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
     if token.is_null() {
@@ -464,7 +464,7 @@ fn current_user_sid() -> io::Result<OwnedSid> {
             TokenUser,
             null_mut(),
             0,
-            &mut required,
+            &raw mut required,
         )
     };
     if sized != 0 || required < size_of::<TOKEN_USER>() as u32 {
@@ -487,7 +487,7 @@ fn current_user_sid() -> io::Result<OwnedSid> {
             TokenUser,
             token_user.as_mut_ptr().cast(),
             required,
-            &mut returned,
+            &raw mut returned,
         )
     } == 0
     {
@@ -531,11 +531,11 @@ fn validate_current_owner(file: &File, path: &Path, current_user: &OwnedSid) -> 
             file.as_raw_handle(),
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,
-            &mut owner,
+            &raw mut owner,
             null_mut(),
             null_mut(),
             null_mut(),
-            &mut descriptor,
+            &raw mut descriptor,
         )
     };
     let descriptor = LocalAllocation(descriptor);
@@ -573,7 +573,7 @@ fn private_acl(current_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAll
     let mut acl: *mut ACL = null_mut();
     // SAFETY: `entry` and its SID remain valid for the call; a null old ACL
     // requests an exact new ACL allocated with LocalAlloc.
-    let status = unsafe { SetEntriesInAclW(1, &entry, null(), &mut acl) };
+    let status = unsafe { SetEntriesInAclW(1, &raw const entry, null(), &raw mut acl) };
     let allocation = LocalAllocation(acl.cast());
     if status != ERROR_SUCCESS {
         return Err(io::Error::from_raw_os_error(status as i32));
@@ -621,11 +621,11 @@ fn security_snapshot(
             file.as_raw_handle(),
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
+            &raw mut owner,
             null_mut(),
-            &mut dacl,
+            &raw mut dacl,
             null_mut(),
-            &mut descriptor,
+            &raw mut descriptor,
         )
     };
     let descriptor = LocalAllocation(descriptor);
@@ -647,7 +647,9 @@ fn security_snapshot(
     let mut control = 0_u16;
     let mut revision = 0_u32;
     // SAFETY: the descriptor is valid and both output pointers are writable.
-    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &raw mut control, &raw mut revision) }
+        == 0
+    {
         return Err(contextual_error(
             "read Windows security descriptor control",
             path,
@@ -691,7 +693,7 @@ fn security_snapshot(
 
     let mut raw_ace = null_mut();
     // SAFETY: `dacl` is valid, has one ACE, and `raw_ace` is writable.
-    if unsafe { GetAce(dacl, 0, &mut raw_ace) } == 0 || raw_ace.is_null() {
+    if unsafe { GetAce(dacl, 0, &raw mut raw_ace) } == 0 || raw_ace.is_null() {
         return Err(contextual_error("read private Windows DACL ACE", path));
     }
     // SAFETY: `GetAce` returned a pointer to an ACE with at least an ACE header.
