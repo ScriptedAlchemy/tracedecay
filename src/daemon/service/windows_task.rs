@@ -679,7 +679,7 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
             .map_err(|error| {
                 secure_path_error("create service executable temporary", &temporary, error)
             })?;
-        let mut buffer = [0_u8; 64 * 1024];
+        let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             let read = input
                 .read(&mut buffer)

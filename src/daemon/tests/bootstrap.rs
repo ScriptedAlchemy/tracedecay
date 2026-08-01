@@ -1115,7 +1115,7 @@ async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready(
         let discovery_lifecycle = lifecycle.clone();
         let discovery_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_won_by_future = Arc::clone(&discovery_won);
-        super::super::spawn_lifecycle_automation_scheduler_activation(
+        super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
             lifecycle.clone(),
             async move {
                 discovery_polled_by_future.notify_one();
@@ -1222,21 +1222,23 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
         let open_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let open_won_by_future = Arc::clone(&open_won);
         let tasks = super::super::ProjectOpenTasks::default();
-        let claim = Box::pin(super::super::start_lifecycle_project_open(
-            &tasks,
-            lifecycle.clone(),
-            project_open_test_route("simultaneous-drain"),
-            std::path::PathBuf::from("/projects/simultaneous-drain"),
-            Some(initialize_request.clone()),
-            move |_| async move {
-                open_polled_by_future.notify_one();
-                open_lifecycle.wait_for_draining().await;
-                open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
-                Err(crate::errors::TraceDecayError::Config {
-                    message: "simultaneous warmup completion".to_string(),
-                })
-            },
-        ))
+        let claim = Box::pin(
+            super::super::project_open_orchestration::start_lifecycle_project_open(
+                &tasks,
+                lifecycle.clone(),
+                project_open_test_route("simultaneous-drain"),
+                std::path::PathBuf::from("/projects/simultaneous-drain"),
+                Some(initialize_request.clone()),
+                move |_| async move {
+                    open_polled_by_future.notify_one();
+                    open_lifecycle.wait_for_draining().await;
+                    open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+                    Err(crate::errors::TraceDecayError::Config {
+                        message: "simultaneous warmup completion".to_string(),
+                    })
+                },
+            ),
+        )
         .await;
         let state = match claim {
             super::super::ProjectOpenTaskClaim::InFlight(state) => state,

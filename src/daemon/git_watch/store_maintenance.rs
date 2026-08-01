@@ -15,8 +15,10 @@ use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
 #[cfg(unix)]
+use super::branch_admin::StoreAdministration;
+#[cfg(unix)]
 use super::git_watch::GitWatcherInner;
-use super::{branch_admin::StoreAdministration, log_daemon_event};
+use super::log_daemon_event;
 
 /// Opens the project store and runs a diff-scoped incremental sync (or a full
 /// sync when the diff base is missing / oversized). Returns true on success.
@@ -26,6 +28,7 @@ use super::{branch_admin::StoreAdministration, log_daemon_event};
 /// `!Send` `gix` values so they drop before every `.await`; see
 /// `indexing::stamp_last_synced_commit`), so this awaits them directly on the
 /// caller's task under the daemon-wide sync semaphore — no nested runtime.
+#[cfg(unix)]
 pub(super) async fn sync_project(
     cg: &TraceDecay,
     escalation: usize,
@@ -53,6 +56,7 @@ pub(super) async fn sync_project(
 
 /// Proactively tracks a linked worktree's branch. Returns the
 /// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
+#[cfg(unix)]
 pub(super) async fn track_worktree_branch(
     administration: &StoreAdministration,
     cg: &TraceDecay,
@@ -71,6 +75,7 @@ pub(super) async fn track_worktree_branch(
 
 /// Resolves a `worktrees/<name>` leaf to `(worktree_root, branch)` by reading
 /// its `gitdir` file and the linked HEAD.
+#[cfg(unix)]
 pub(super) fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, String)> {
     let wt_meta = common.join("worktrees").join(name);
     let gitdir_file = wt_meta.join("gitdir");
@@ -86,6 +91,7 @@ pub(super) fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, St
 /// reconciliation pass. Native Git remains authoritative when each leaf is
 /// resolved; this inventory only recovers callback path detail lost to lock
 /// contention.
+#[cfg(unix)]
 pub(super) fn linked_worktree_names(common: &Path) -> std::collections::HashSet<String> {
     let Ok(entries) = std::fs::read_dir(common.join("worktrees")) else {
         return std::collections::HashSet::new();

@@ -26,6 +26,7 @@ pub async fn run_foreground(socket_path: PathBuf) -> Result<()> {
 
 #[cfg(not(unix))]
 pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
+    store_runtime::session_registry::register_profile_sessions_port();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
