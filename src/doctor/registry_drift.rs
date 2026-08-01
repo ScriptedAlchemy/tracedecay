@@ -260,14 +260,8 @@ pub(super) fn reconcile_drifted_store_roots_from_findings(
         }
 
         match reconcile_one_store_root(finding, canonical) {
-            Ok((entry, warning)) => {
-                if let Some(entry) = entry {
-                    reconciled.push(entry);
-                }
-                if let Some(warning) = warning {
-                    warnings.push(warning);
-                }
-            }
+            Ok(Some(entry)) => reconciled.push(entry),
+            Ok(None) => {}
             Err(message) => warnings.push(message),
         }
     }
@@ -275,40 +269,33 @@ pub(super) fn reconcile_drifted_store_roots_from_findings(
     (reconciled, warnings)
 }
 
+/// Rewrites one drifted manifest onto its canonical root. Returns `None` when
+/// the manifest already agrees with the registry and nothing was written, so a
+/// reconciliation entry is reported only for a root this pass actually moved.
 fn reconcile_one_store_root(
     finding: &RegistryDriftFinding,
     canonical: &Path,
-) -> std::result::Result<(Option<ReconciledStoreRoot>, Option<String>), String> {
+) -> std::result::Result<Option<ReconciledStoreRoot>, String> {
+    if finding.manifest.project_root == canonical {
+        return Ok(None);
+    }
+
     let mut manifest = finding.manifest.clone();
+    manifest.project_root = canonical.to_path_buf();
+    crate::storage::write_store_manifest_to_path(&finding.manifest_path, &manifest).map_err(|e| {
+        format!(
+            "could not rewrite store manifest '{}': {e}",
+            finding.manifest_path.display()
+        )
+    })?;
 
-    let mut manifest_rewritten = false;
-    if manifest.project_root != canonical {
-        manifest.project_root = canonical.to_path_buf();
-        crate::storage::write_store_manifest_to_path(&finding.manifest_path, &manifest).map_err(
-            |e| {
-                format!(
-                    "could not rewrite store manifest '{}': {e}",
-                    finding.manifest_path.display()
-                )
-            },
-        )?;
-        manifest_rewritten = true;
-    }
-
-    if !manifest_rewritten {
-        return Ok((None, None));
-    }
-
-    Ok((
-        Some(ReconciledStoreRoot {
-            store_id: finding.store_id.clone(),
-            manifest_path: finding.manifest_path.clone(),
-            // `config.json` is read-only legacy migration input. Its root
-            // metadata is neither drift authority nor a repair target.
-            config_path: None,
-        }),
-        None,
-    ))
+    Ok(Some(ReconciledStoreRoot {
+        store_id: finding.store_id.clone(),
+        manifest_path: finding.manifest_path.clone(),
+        // `config.json` is read-only legacy migration input. Its root
+        // metadata is neither drift authority nor a repair target.
+        config_path: None,
+    }))
 }
 
 fn resolve_registry_manifest_path(
