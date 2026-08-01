@@ -101,7 +101,7 @@ pub async fn import_hook_analytics(
     outcome
 }
 
-async fn import_source(
+pub async fn import_source(
     gdb: &RegisteredGlobalDb,
     source: &HookImportSource,
 ) -> HookImportSourceOutcome {
@@ -215,7 +215,7 @@ fn read_from_offset(path: &Path, offset: u64) -> Result<String, String> {
     Ok(text)
 }
 
-fn hook_row_to_analytics_event(
+pub fn hook_row_to_analytics_event(
     line: &str,
     default_project_root: Option<&Path>,
 ) -> Option<AnalyticsEventInsert> {
