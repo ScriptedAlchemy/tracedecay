@@ -522,3 +522,36 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
         0
     );
 }
+
+#[tokio::test]
+async fn compatibility_v1_feedback_on_nonexistent_fact_id_fails_fast() {
+    // Regression for the live-verified defect where `fact_feedback` on a
+    // nonexistent fact hung to the client deadline instead of failing fast
+    // like `fact_store --action get`. The compatibility write transaction
+    // resolves the legacy target and rejects a miss inside its own
+    // transaction — it must never block on anything beyond that lookup.
+    let (db, _tmp) = make_memory_store().await;
+    let owner = FactOwnerV1::Profile;
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&db)).unwrap();
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        memory.record_fact_feedback_v1(
+            FeedbackRequest {
+                fact_id: 999_999_999,
+                action: FeedbackAction::Helpful,
+                source: None,
+                note: None,
+            },
+            MemoryOperationContext::generated(&owner, "nonexistent-feedback", None).unwrap(),
+        ),
+    )
+    .await
+    .expect("feedback on a nonexistent fact must not hang until a timeout");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "feedback on a nonexistent fact must fail fast: {:?}",
+        started.elapsed()
+    );
+    assert!(result.is_err(), "feedback on a nonexistent fact must fail");
+}

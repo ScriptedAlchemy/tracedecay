@@ -43,6 +43,14 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
             note,
         };
         let memory = memory_application(&target_memory)?;
+        if memory
+            .get_fact_v1(request.fact_id)
+            .await
+            .map_err(memory_application_error)?
+            .is_none()
+        {
+            return Err(config_error(format!("fact {} not found", request.fact_id)));
+        }
         let result = memory
             .record_fact_feedback_v1(
                 request,

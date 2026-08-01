@@ -271,6 +271,12 @@ async fn read_facts_envelope(
         }
         FactStoreAction::Reason => {
             let entities = request_entities(args);
+            if entities.is_empty() {
+                return Err(config_error(
+                    "missing required parameter: entities — `fact_store --action reason` \
+                     requires at least one `--entities`/`--entity` value to reason over",
+                ));
+            }
             let category = optional_category(args)?;
             let min_trust = optional_f64(args, "min_trust");
             let limit = limit(args);
