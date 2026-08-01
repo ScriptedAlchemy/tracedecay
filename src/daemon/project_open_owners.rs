@@ -95,6 +95,7 @@ use crate::application::primitives::{
     locator_digest_for_project, open_pr12_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
+use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::service::invocation::{
     daemon_operation_event_authority, observe_accepted_feedback_cycle_terminal,
@@ -1697,17 +1698,42 @@ async fn register_production_advisory_owner(
     let hook_v2 = hook_notices.sink();
     let legacy_hook = unavailable_advisory_hook_sink();
     let (hook_project_id, hook_worktree_id) = crate::hooks::hook_v2_scope_locators(&resolved_scope);
-    if !crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
-        hook_project_id,
-        hook_worktree_id,
-        feedback_scope.project_id.clone(),
-        feedback_scope.worktree_id.clone(),
-        &project_runtime_db,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: "project-open Context Scout lifecycle authority registration failed"
-                .to_owned(),
-        });
+    let lifecycle_registration =
+        crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+            hook_project_id,
+            hook_worktree_id,
+            feedback_scope.project_id.clone(),
+            feedback_scope.worktree_id.clone(),
+            &project_runtime_db,
+        );
+    match lifecycle_registration {
+        AuthorityRegistrationV1::Registered | AuthorityRegistrationV1::AlreadyRegistered => {}
+        // A live authority already owns this hook locator pair under a
+        // *different* native identity: the incumbent keeps serving lookups,
+        // so this open must fail rather than silently route Scout lifecycle
+        // resolution at another project or worktree.
+        AuthorityRegistrationV1::Conflict => {
+            tracing::warn!(
+                target: "tracedecay::context_scout_lifecycle",
+                project_id = feedback_scope.project_id.as_str(),
+                worktree_id = feedback_scope.worktree_id.as_str(),
+                "project-open hit a conflicting Context Scout lifecycle authority; \
+                 the incumbent registration was kept"
+            );
+            return Err(TraceDecayError::Config {
+                message: "project-open Context Scout lifecycle authority conflicts with a live \
+                          registration for the same hook scope"
+                    .to_owned(),
+            });
+        }
+        AuthorityRegistrationV1::Rejected(reason) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "project-open Context Scout lifecycle authority registration failed: {}",
+                    reason.as_str()
+                ),
+            });
+        }
     }
     if !register_pr13_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
         return Err(TraceDecayError::Config {
