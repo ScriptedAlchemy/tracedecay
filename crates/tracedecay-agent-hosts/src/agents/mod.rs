@@ -1343,8 +1343,7 @@ pub fn doctor_check_mcp_registration(
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
 pub fn which_tracedecay() -> Option<String> {
-    which_tracedecay_path()
-        .and_then(|path| path.to_str().map(|path| normalize_path_separators(path)))
+    which_tracedecay_path().and_then(|path| path.to_str().map(normalize_path_separators))
 }
 
 /// Finds the tracedecay binary without converting its platform-native path.
@@ -1366,7 +1365,7 @@ fn which_tracedecay_from(
     cargo_target_dir: Option<&Path>,
 ) -> Option<String> {
     which_tracedecay_path_from(current_exe, path_var, cargo_target_dir)
-        .and_then(|path| path.to_str().map(|path| normalize_path_separators(path)))
+        .and_then(|path| path.to_str().map(normalize_path_separators))
 }
 
 fn which_tracedecay_path_from(
