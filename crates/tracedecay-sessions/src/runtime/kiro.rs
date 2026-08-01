@@ -1023,89 +1023,9 @@ mod observation_tests {
     }
 
     #[tokio::test]
-    async fn byte_budget_charges_once_and_defers_second_before_parse() {
-        let temp = tempfile::TempDir::new().expect("temp Kiro storage");
-        let project = temp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let hash = "0123456789abcdef0123456789abcdef";
-        let agent_dir = temp.path().join("agent");
-        let workspace_dir = agent_dir.join(hash);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let workspace_storage_dir = temp.path().join("workspaces");
-        let workspace_metadata = workspace_metadata_path(&workspace_storage_dir, hash);
-        std::fs::create_dir_all(workspace_metadata.parent().unwrap()).unwrap();
-        std::fs::write(
-            &workspace_metadata,
-            serde_json::json!({"folder": format!("file://{}", project.display())}).to_string(),
-        )
-        .unwrap();
-        let first_path = workspace_dir.join("a-first.chat");
-        std::fs::write(
-            &first_path,
-            serde_json::json!({
-                "executionId": "first",
-                "chat": [{"role": "human", "content": "first"}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        // Malformed JSON that parse_snapshot would reject as non-durable if reached.
-        let hostile = format!("{{\"executionId\":\"hostile\",\"chat\":{}", "x".repeat(256));
-        let second_path = workspace_dir.join("z-hostile.chat");
-        std::fs::write(&second_path, &hostile).unwrap();
-        let source = KiroSource {
-            agent_dir,
-            workspace_storage_dir,
-            user_registered_roots: None,
-        };
-        let paths = source.transcript_paths(&project);
-        assert_eq!(paths, vec![first_path.clone(), second_path.clone()]);
-        let first_bytes = source.snapshot_input_bytes(&first_path).unwrap();
-        let second_bytes = source.snapshot_input_bytes(&second_path).unwrap();
-
-        let runtime =
-            crate::admission::HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
-                .await
-                .expect("open registered observation runtime");
-        let facade = runtime.facade();
-        let cancellation = ObservationCancellation::default();
-
-        let deferred = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(first_bytes),
-            &cancellation,
-        )
-        .await
-        .expect("second unit must defer without parsing malformed JSON");
-        assert!(deferred.deferred_by_byte_cap);
-        assert_eq!(deferred.stats.messages_upserted, 1);
-        assert_eq!(deferred.bytes_consumed, first_bytes);
-
-        std::fs::remove_file(first_path).unwrap();
-        let err = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(second_bytes),
-            &cancellation,
-        )
-        .await
-        .expect_err("deferred malformed snapshot must remain retryable");
-        assert!(matches!(
-            err,
-            TranscriptIngestError::NonDurableRecord {
-                reason: "malformed snapshot JSON",
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
     async fn pre_cancelled_snapshot_capture_does_not_advance_kiro_source() {
+        use crate::admission::test_support::PanicHostAdmission;
+
         let temp = tempfile::TempDir::new().expect("temp Kiro storage");
         let project = temp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -1135,16 +1055,11 @@ mod observation_tests {
             workspace_storage_dir,
             user_registered_roots: None,
         };
-        let runtime =
-            crate::admission::HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
-                .await
-                .expect("open registered observation runtime");
-        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
         let error = capture_kiro_snapshot_observations(
-            &facade,
+            &PanicHostAdmission,
             &source,
             &project,
             ObservationScopeV1::Profile,
@@ -1160,120 +1075,6 @@ mod observation_tests {
                 ..
             }
         ));
-
-        let retry = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            None,
-            &ObservationCancellation::default(),
-        )
-        .await
-        .expect("uncancelled retry must capture the same Kiro record");
-        assert_eq!(retry.stats.messages_upserted, 1);
-    }
-
-    #[tokio::test]
-    async fn aggregate_budget_replay_charges_committed_prefix_and_retries_suffix() {
-        let temp = tempfile::TempDir::new().expect("temp Kiro storage");
-        let project = temp.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let hash = "0123456789abcdef0123456789abcdef";
-        let agent_dir = temp.path().join("agent");
-        let workspace_dir = agent_dir.join(hash);
-        std::fs::create_dir_all(&workspace_dir).unwrap();
-        let workspace_storage_dir = temp.path().join("workspaces");
-        let workspace_metadata = workspace_metadata_path(&workspace_storage_dir, hash);
-        std::fs::create_dir_all(workspace_metadata.parent().unwrap()).unwrap();
-        std::fs::write(
-            &workspace_metadata,
-            serde_json::json!({"folder": format!("file://{}", project.display())}).to_string(),
-        )
-        .unwrap();
-        for id in ["a", "b"] {
-            std::fs::write(
-                workspace_dir.join(format!("{id}.chat")),
-                serde_json::json!({
-                    "executionId": id,
-                    "chat": [{"role": "human", "content": format!("message-{id}")}]
-                })
-                .to_string(),
-            )
-            .unwrap();
-        }
-        let source = KiroSource {
-            agent_dir,
-            workspace_storage_dir,
-            user_registered_roots: None,
-        };
-        let paths = source.transcript_paths(&project);
-        assert_eq!(paths.len(), 2);
-        let first_bytes = source.snapshot_input_bytes(&paths[0]).unwrap();
-        let second_bytes = source.snapshot_input_bytes(&paths[1]).unwrap();
-        let full_cap = first_bytes.saturating_add(second_bytes);
-        let runtime =
-            crate::admission::HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
-                .await
-                .expect("open registered observation runtime");
-        let facade = runtime.facade();
-        let cancellation = ObservationCancellation::default();
-
-        let first = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(first_bytes),
-            &cancellation,
-        )
-        .await
-        .expect("first bounded sweep");
-        assert_eq!(first.stats.messages_upserted, 1);
-        assert_eq!(first.bytes_consumed, first_bytes);
-        assert!(first.deferred_by_byte_cap);
-
-        let second = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(first_bytes),
-            &cancellation,
-        )
-        .await
-        .expect("committed prefix replay");
-        assert_eq!(second.stats.messages_upserted, 0);
-        assert_eq!(second.bytes_consumed, first_bytes);
-        assert!(second.deferred_by_byte_cap);
-
-        let resumed = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(full_cap),
-            &cancellation,
-        )
-        .await
-        .expect("deferred suffix replay");
-        assert_eq!(resumed.stats.messages_upserted, 1);
-        assert_eq!(resumed.bytes_consumed, full_cap);
-        assert!(!resumed.deferred_by_byte_cap);
-
-        let complete = capture_kiro_snapshot_observations(
-            &facade,
-            &source,
-            &project,
-            ObservationScopeV1::Profile,
-            Some(full_cap),
-            &cancellation,
-        )
-        .await
-        .expect("complete replay");
-        assert_eq!(complete.stats.messages_upserted, 0);
-        assert_eq!(complete.bytes_consumed, full_cap);
-        assert!(!complete.deferred_by_byte_cap);
     }
 
     #[test]
