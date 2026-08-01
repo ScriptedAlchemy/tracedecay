@@ -2,15 +2,13 @@ use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
 
-pub use crate::application::session::compatibility::derived_text_for_index;
-pub use crate::application::session::compatibility::derived_text_for_snippet;
-use crate::application::session::compatibility::projected_content_hash;
-use crate::{
-    db::engine::{Executor, QueryExecutor, Row, params},
-    privacy::detector_kernel::{
-        JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
-    },
-    sessions::SessionMessageRecord,
+pub use crate::compatibility::derived_text_for_index;
+pub use crate::compatibility::derived_text_for_snippet;
+use crate::compatibility::projected_content_hash;
+use crate::runtime::SessionMessageRecord;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::privacy::detector_kernel::{
+    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
 };
 
 use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};

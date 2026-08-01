@@ -12,7 +12,7 @@ use serde_json::Value;
 use tracedecay_domain::ProjectId;
 
 use crate::accounting::parser::parse_timestamp;
-use crate::application::host_admission::DEFAULT_MAX_RECORDS;
+use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::shared::ProjectRootMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,

@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{
     ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
@@ -364,7 +364,7 @@ async fn open_state_source(
 /// destination's authoritative SQLite-row cursor.
 #[allow(clippy::too_many_arguments)]
 async fn ingest_bounded_pages<F, R>(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     conn: &SqliteReadConn,
     select_sql: &str,
     scope: ObservationScopeV1,
@@ -437,7 +437,7 @@ pub async fn try_ingest_state_db_bounded_with_admission(
     source: &HermesProfileSource,
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     budget: &mut IngestByteBudget,
     cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String> {
@@ -562,7 +562,7 @@ pub async fn try_ingest_state_db_for_projects(
 }
 
 pub async fn try_ingest_user_state_db_bounded_with_admission(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,

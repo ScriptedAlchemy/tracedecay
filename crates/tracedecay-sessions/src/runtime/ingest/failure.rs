@@ -313,7 +313,7 @@ fn non_durable_reason_code(reason: &'static str) -> &'static str {
         "usage event count exceeds provider bound" => "usage_event_bound_exceeded",
         "snapshot input exceeds provider byte bound" => "snapshot_input_byte_bound_exceeded",
         "snapshot metadata exceeds provider byte bound" => "snapshot_metadata_byte_bound_exceeded",
-        reason if crate::application::host_admission::is_bounded_reason_code(reason) => reason,
+        reason if crate::admission::is_bounded_reason_code(reason) => reason,
         _ => "transcript_record_non_durable",
     }
 }
@@ -411,19 +411,19 @@ pub fn classify_claude_observation_failure(
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
         Ingest::Application(error) => match error {
-            crate::application::observation::ObservationApplicationError::Store(error) => {
+            crate::observation::ObservationApplicationError::Store(error) => {
                 store(error)
             }
-            crate::application::observation::ObservationApplicationError::Cancelled => {
+            crate::observation::ObservationApplicationError::Cancelled => {
                 retryable("observation_cancelled")
             }
-            crate::application::observation::ObservationApplicationError::PersistedObservationUnavailable => {
+            crate::observation::ObservationApplicationError::PersistedObservationUnavailable => {
                 retryable("observation_persisted_value_unavailable")
             }
-            crate::application::observation::ObservationApplicationError::Contract(_) => {
+            crate::observation::ObservationApplicationError::Contract(_) => {
                 permanent("observation_contract_invalid")
             }
-            crate::application::observation::ObservationApplicationError::Privacy(_) => {
+            crate::observation::ObservationApplicationError::Privacy(_) => {
                 permanent("observation_privacy_rejected")
             }
         },

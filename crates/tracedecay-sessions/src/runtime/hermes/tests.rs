@@ -9,8 +9,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::observation::ObservationCancellation;
 use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 use crate::runtime::shared::StoredCursor;
 

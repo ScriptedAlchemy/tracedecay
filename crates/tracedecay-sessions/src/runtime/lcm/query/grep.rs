@@ -1,4 +1,4 @@
-use crate::application::session::compatibility::{
+use crate::compatibility::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, is_inventory_text,
 };
 use crate::runtime::SessionMessageType;

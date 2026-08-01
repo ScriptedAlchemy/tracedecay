@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracedecay_domain::ProjectId;
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, codex, git_correlation, source};
 

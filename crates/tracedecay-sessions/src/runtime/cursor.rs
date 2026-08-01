@@ -23,8 +23,8 @@ use tracedecay_store::cursor_dispatch::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
@@ -166,7 +166,7 @@ fn admit_cursor_jsonl_observations<'a>(
     parent_session_id: &'a str,
     path: &'a Path,
     context: &'a CursorObservationContext,
-    admission: &'a HostAdmissionFacade<'a>,
+    admission: &'a dyn HostAdmission,
     scope: &'a ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &'a ObservationCancellation,
@@ -422,7 +422,7 @@ fn parse_cursor_jsonl(
 /// unchanged file are a no-op.
 pub async fn ingest_cursor_transcript_event(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_id: ProjectId,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
@@ -432,7 +432,7 @@ pub async fn ingest_cursor_transcript_event(
 
 pub async fn try_ingest_cursor_transcript_event(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_id: ProjectId,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     try_ingest_cursor_transcript_event_capped(event_json, admission, project_id, None).await
@@ -444,7 +444,7 @@ pub async fn try_ingest_cursor_transcript_event(
 /// transcript.
 pub async fn ingest_cursor_transcript_event_capped(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
@@ -461,7 +461,7 @@ pub async fn ingest_cursor_transcript_event_capped(
 
 pub async fn try_ingest_cursor_transcript_event_capped(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -477,7 +477,7 @@ pub async fn try_ingest_cursor_transcript_event_capped(
 pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     event_json: &str,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Ok(event) = serde_json::from_str::<Value>(event_json) else {
@@ -537,7 +537,7 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
 
 pub async fn ingest_cursor_user_transcript_event_capped(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> CursorTranscriptIngestStats {
     cursor_ingest_or_default(
@@ -547,7 +547,7 @@ pub async fn ingest_cursor_user_transcript_event_capped(
 
 pub async fn try_ingest_cursor_user_transcript_event_capped(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
@@ -563,7 +563,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped(
 /// wrapper remains useful for isolated parsing without a profile registry.
 pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> CursorTranscriptIngestStats {
@@ -580,7 +580,7 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
 
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_roots(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -595,7 +595,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_registered_root
 
 pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     event_json: &str,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -680,7 +680,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
 /// observation admission.
 pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     project_root: &Path,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
@@ -701,7 +701,7 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
 pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
     project_root: &'a Path,
     project_id: ProjectId,
-    admission: &'a HostAdmissionFacade<'a>,
+    admission: &'a dyn HostAdmission,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &'a ObservationCancellation,
@@ -732,7 +732,7 @@ pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>
 /// before observation admission.
 pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
     registered_roots: &[PathBuf],
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -748,7 +748,7 @@ pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
 
 pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
     registered_roots: &[PathBuf],
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &ObservationCancellation,
@@ -772,7 +772,7 @@ pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
 async fn admit_cursor_sweep_observations_with_admission(
     source: &CursorSweepSource,
     project_root: &Path,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -828,7 +828,7 @@ async fn admit_cursor_sweep_observations_with_admission(
 }
 
 async fn drain_cursor_observation_projections(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
@@ -1795,7 +1795,7 @@ fn dispatch_message_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::admission::HostAdmissionTestRuntimeV1;
     use serde_json::json;
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use super::lcm_service::{self, SearchPayloadArgs};
 use super::*;
 use crate::application::configuration::ProductionUserSettingsDaemonClient;
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::db::engine::params;

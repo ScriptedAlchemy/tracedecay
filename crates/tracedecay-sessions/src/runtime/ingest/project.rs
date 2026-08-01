@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionAuthorities, HostAdmission};
+use crate::observation::ObservationCancellation;
 use tracedecay_global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -196,7 +196,7 @@ async fn ingest_project_sources_for_provider_inner(
     if let Some(repository_provenance) = repository_provenance {
         authorities = authorities.with_repository_provenance(repository_provenance);
     }
-    let facade = HostAdmissionFacade::new(authorities);
+    let facade = HostAdmission::new(authorities);
     let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();
     let selected: Vec<SessionProvider> = PROJECT_CATCH_UP_PROVIDERS

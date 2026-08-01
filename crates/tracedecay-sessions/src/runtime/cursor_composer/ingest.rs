@@ -14,8 +14,8 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::admission::HostAdmission;
+use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::path_belongs_to_project;
 
@@ -49,7 +49,7 @@ pub fn path_is_regular_file_no_follow(path: &Path) -> bool {
 }
 
 struct ComposerIngestContext<'facade, 'db, 'root> {
-    facade: &'facade HostAdmissionFacade<'db>,
+    facade: &'facade dyn HostAdmission,
     scope: ObservationScopeV1,
     project_root: Option<&'root Path>,
     registered_roots: &'root [PathBuf],
@@ -84,7 +84,7 @@ pub fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1>
 }
 
 struct ComposerCoverageContext<'facade, 'db> {
-    facade: &'facade HostAdmissionFacade<'db>,
+    facade: &'facade dyn HostAdmission,
     scope: &'facade ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     cancellation: &'facade ObservationCancellation,
@@ -172,7 +172,7 @@ impl CursorComposerSource {
     /// the outcome so far rather than propagating.
     pub async fn ingest(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         project_root: &Path,
         project_id: ProjectId,
         envelope_cap: usize,
@@ -191,7 +191,7 @@ impl CursorComposerSource {
     /// shared across every composer store discovered during the pass.
     pub async fn ingest_capped(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         project_root: &Path,
         project_id: ProjectId,
         envelope_cap: usize,
@@ -210,7 +210,7 @@ impl CursorComposerSource {
 
     pub async fn ingest_capped_with_cancellation(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         project_root: &Path,
         project_id: ProjectId,
         envelope_cap: usize,
@@ -230,7 +230,7 @@ impl CursorComposerSource {
 
     pub async fn ingest_user(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
@@ -247,7 +247,7 @@ impl CursorComposerSource {
     /// shared across every composer store discovered during the pass.
     pub async fn ingest_user_capped(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
@@ -264,7 +264,7 @@ impl CursorComposerSource {
 
     pub async fn ingest_user_capped_with_cancellation(
         &self,
-        admission: &HostAdmissionFacade<'_>,
+        admission: &dyn HostAdmission,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
         max_new_bytes: Option<u64>,

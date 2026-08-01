@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::application::session::compatibility::projected_content_hash;
+use crate::compatibility::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::message_storage_text;

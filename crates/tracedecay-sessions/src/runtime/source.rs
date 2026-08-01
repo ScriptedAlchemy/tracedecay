@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
-use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
+use crate::admission::{WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub use crate::runtime::shared::{
