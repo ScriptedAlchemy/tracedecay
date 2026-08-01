@@ -79,104 +79,34 @@ impl TraceDecay {
     }
 }
 
-/// Coarse ranking tier used as the primary sort key in `search`. Lower
-/// numbers sort first. The tiers separate "real definitions" (functions,
-/// types, traits, …) from "references" (`use`, `module`, annotation usage)
-/// so a re-export can never beat the thing it re-exports, no matter what
-/// BM25 produces for the row.
-fn kind_tier(kind: &NodeKind) -> u8 {
-    match kind {
-        // Tier 0: callable definitions and type definitions — the
-        // "what is this?" answers a user usually wants when searching by
-        // symbol name.
-        NodeKind::Function
-        | NodeKind::Method
-        | NodeKind::StructMethod
-        | NodeKind::Constructor
-        | NodeKind::AbstractMethod
-        | NodeKind::ArrowFunction
-        | NodeKind::Procedure
-        | NodeKind::Struct
-        | NodeKind::Enum
-        | NodeKind::Trait
-        | NodeKind::Class
-        | NodeKind::InnerClass
-        | NodeKind::Interface
-        | NodeKind::InterfaceType
-        | NodeKind::Record
-        | NodeKind::CaseClass
-        | NodeKind::DataClass
-        | NodeKind::SealedClass
-        | NodeKind::TypeAlias
-        | NodeKind::Union
-        | NodeKind::Typedef
-        | NodeKind::Mixin
-        | NodeKind::Extension
-        | NodeKind::Delegate
-        | NodeKind::Template
-        | NodeKind::PascalRecord
-        | NodeKind::ScalaObject
-        | NodeKind::KotlinObject
-        | NodeKind::CompanionObject
-        | NodeKind::Annotation
-        | NodeKind::Event => 0,
-        // Proto definitions are unconditional domain vocabulary even when
-        // the parser implementation is not enabled in this build.
-        NodeKind::ProtoMessage | NodeKind::ProtoService | NodeKind::ProtoRpc => 0,
-        // Tier 1: impl blocks — between definitions and references.
-        NodeKind::Impl => 1,
-        // Tier 2: values, macros, members of types.
-        NodeKind::Const
-        | NodeKind::Static
-        | NodeKind::Macro
-        | NodeKind::PreprocessorDef
-        | NodeKind::EnumVariant
-        | NodeKind::Field
-        | NodeKind::ValField
-        | NodeKind::VarField
-        | NodeKind::Property
-        | NodeKind::CSharpProperty
-        | NodeKind::StructTag
-        | NodeKind::InitBlock
-        | NodeKind::Export => 2,
-        // Tier 3: containers (module, namespace, …) — usually not the
-        // answer to "find symbol".
-        NodeKind::Module
-        | NodeKind::Package
-        | NodeKind::Namespace
-        | NodeKind::ScalaPackage
-        | NodeKind::GoPackage
-        | NodeKind::KotlinPackage
-        | NodeKind::PascalUnit
-        | NodeKind::Library
-        | NodeKind::File
-        | NodeKind::GenericParam
-        | NodeKind::PascalProgram => 3,
-        // Tier 4: pure references / annotations — always rank last.
-        NodeKind::Use | NodeKind::Include | NodeKind::AnnotationUsage | NodeKind::Decorator => 4,
-    }
-}
-
-/// Search-result rank bonus applied per node kind, so symbol *definitions*
-/// outrank mere *references* (use statements, annotation usages, modules)
-/// that BM25 may otherwise score equally. Tuned so a definition with a
-/// slightly worse BM25 score still surfaces above its imports.
+/// Coarse ranking tier (primary sort key) and rank bonus (score adjustment)
+/// used together in `search`. Merged into one exhaustive match so the two
+/// partitions of `NodeKind` — previously duplicated across `kind_tier` and
+/// `kind_rank_bonus` — can't drift apart.
+///
+/// Tiers separate "real definitions" (functions, types, traits, …) from
+/// "references" (`use`, `module`, annotation usage) so a re-export can never
+/// beat the thing it re-exports, no matter what BM25 produces for the row.
+/// Lower tier numbers sort first. The bonus is added directly to the BM25
+/// score so a definition with a slightly worse BM25 score still surfaces
+/// above its imports.
 ///
 /// Exhaustive match by design: when a new `NodeKind` variant is added the
 /// compiler will force a re-tune here rather than silently defaulting it to
-/// `0.0`, matching the project rule "crash hard if there is an unknown
+/// `(0, 0.0)`, matching the project rule "crash hard if there is an unknown
 /// value".
-fn kind_rank_bonus(kind: &NodeKind) -> f64 {
+fn kind_rank(kind: &NodeKind) -> (u8, f64) {
     match kind {
-        // Callable definitions
+        // Tier 0 / callable definitions — the "what is this?" answers a
+        // user usually wants when searching by symbol name.
         NodeKind::Function
         | NodeKind::Method
         | NodeKind::StructMethod
         | NodeKind::Constructor
         | NodeKind::AbstractMethod
         | NodeKind::ArrowFunction
-        | NodeKind::Procedure => 3.0,
-        // Type definitions
+        | NodeKind::Procedure => (0, 3.0),
+        // Tier 0 / type definitions.
         NodeKind::Struct
         | NodeKind::Enum
         | NodeKind::Trait
@@ -200,19 +130,19 @@ fn kind_rank_bonus(kind: &NodeKind) -> f64 {
         | NodeKind::KotlinObject
         | NodeKind::CompanionObject
         | NodeKind::Annotation
-        | NodeKind::Event => 2.5,
-        // Proto definitions are unconditional domain vocabulary even when
-        // the parser implementation is not enabled in this build.
-        NodeKind::ProtoMessage | NodeKind::ProtoService | NodeKind::ProtoRpc => 2.5,
-        // Impl blocks (between defs and refs)
-        NodeKind::Impl => 2.0,
-        // Values, macros, preprocessor defs
+        | NodeKind::Event => (0, 2.5),
+        // Tier 0 / proto definitions are unconditional domain vocabulary
+        // even when the parser implementation is not enabled in this build.
+        NodeKind::ProtoMessage | NodeKind::ProtoService | NodeKind::ProtoRpc => (0, 2.5),
+        // Tier 1: impl blocks — between definitions and references.
+        NodeKind::Impl => (1, 2.0),
+        // Tier 2 / values, macros, preprocessor defs.
         NodeKind::Const
         | NodeKind::Static
         | NodeKind::Macro
         | NodeKind::PreprocessorDef
-        | NodeKind::EnumVariant => 1.0,
-        // Members of types
+        | NodeKind::EnumVariant => (2, 1.0),
+        // Tier 2 / members of types.
         NodeKind::Field
         | NodeKind::ValField
         | NodeKind::VarField
@@ -220,12 +150,11 @@ fn kind_rank_bonus(kind: &NodeKind) -> f64 {
         | NodeKind::CSharpProperty
         | NodeKind::StructTag
         | NodeKind::InitBlock
-        | NodeKind::Export => 0.5,
-        // File / generic-parameter — neutral
-        NodeKind::File | NodeKind::GenericParam | NodeKind::PascalProgram => 0.0,
-        // References & containers — push below definitions
-        NodeKind::Use | NodeKind::Include => -3.0,
-        NodeKind::AnnotationUsage | NodeKind::Decorator => -2.0,
+        | NodeKind::Export => (2, 0.5),
+        // Tier 3 / file & generic-parameter — neutral bonus.
+        NodeKind::File | NodeKind::GenericParam | NodeKind::PascalProgram => (3, 0.0),
+        // Tier 3 / containers (module, namespace, …) — usually not the
+        // answer to "find symbol".
         NodeKind::Module
         | NodeKind::Package
         | NodeKind::Namespace
@@ -233,8 +162,21 @@ fn kind_rank_bonus(kind: &NodeKind) -> f64 {
         | NodeKind::GoPackage
         | NodeKind::KotlinPackage
         | NodeKind::PascalUnit
-        | NodeKind::Library => -1.5,
+        | NodeKind::Library => (3, -1.5),
+        // Tier 4 / pure references — always rank last.
+        NodeKind::Use | NodeKind::Include => (4, -3.0),
+        NodeKind::AnnotationUsage | NodeKind::Decorator => (4, -2.0),
     }
+}
+
+/// Thin wrapper over [`kind_rank`] for callers that only need the sort tier.
+fn kind_tier(kind: &NodeKind) -> u8 {
+    kind_rank(kind).0
+}
+
+/// Thin wrapper over [`kind_rank`] for callers that only need the score bonus.
+fn kind_rank_bonus(kind: &NodeKind) -> f64 {
+    kind_rank(kind).1
 }
 
 /// True when the user-supplied query matches either the node's short `name`

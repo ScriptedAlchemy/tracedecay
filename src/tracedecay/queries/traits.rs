@@ -34,17 +34,31 @@ impl TraceDecay {
             impls.retain(|n| node_name_matches(n, type_q));
         }
 
-        // Gather Implements edges per impl, then batch-fetch every trait node
-        // in one `get_nodes_by_ids` call to avoid an N+1 across impl blocks.
+        // Gather Implements edges for every impl in one bulk round-trip
+        // (instead of one `get_outgoing_edges` call per impl node), then
+        // batch-fetch every trait node in one `get_nodes_by_ids` call to
+        // avoid an N+1 across impl blocks.
+        let impl_ids: Vec<String> = impls.iter().map(|n| n.id.clone()).collect();
+        let implements_edges = self
+            .db
+            .get_outgoing_edges_bulk(&impl_ids, &[EdgeKind::Implements])
+            .await
+            .unwrap_or_default();
+        let mut first_target_by_source: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for edge in implements_edges {
+            // Preserve "first edge wins" semantics of the old per-impl
+            // `.into_iter().next()` by only recording the first target seen
+            // for each source.
+            first_target_by_source
+                .entry(edge.source)
+                .or_insert(edge.target);
+        }
+
         let mut per_impl_trait_id: Vec<Option<String>> = Vec::with_capacity(impls.len());
         let mut trait_target_ids: Vec<String> = Vec::new();
         for impl_node in &impls {
-            let edges = self
-                .db
-                .get_outgoing_edges(&impl_node.id, &[EdgeKind::Implements])
-                .await
-                .unwrap_or_default();
-            let target = edges.into_iter().next().map(|e| e.target);
+            let target = first_target_by_source.get(&impl_node.id).cloned();
             if let Some(ref t) = target {
                 trait_target_ids.push(t.clone());
             }
@@ -113,12 +127,26 @@ impl TraceDecay {
             return Ok(Vec::new());
         }
 
+        // Fetch the children of every impl block in one bulk round-trip
+        // instead of one `get_children_of` call per impl inside the loop,
+        // then bucket by parent so per-impl iteration order (and the
+        // `start_line` order within each impl) matches the old per-impl
+        // fetch exactly.
+        let bulk_children = self.db.get_children_of_bulk(&impl_ids).await?;
+        let mut children_by_parent: std::collections::HashMap<String, Vec<Node>> =
+            std::collections::HashMap::new();
+        for n in bulk_children {
+            if let Some(parent) = n.parent_id.clone() {
+                children_by_parent.entry(parent).or_default().push(n);
+            }
+        }
+
         // For each impl block, surface the method whose name matches the
         // trait method. Multiple impls may share names with unrelated nodes,
         // so we filter by both kind and name.
         let mut targets = Vec::new();
         for impl_id in impl_ids {
-            let candidates = self.db.get_children_of(&impl_id).await?;
+            let candidates = children_by_parent.remove(&impl_id).unwrap_or_default();
             for n in candidates {
                 if matches!(n.kind, NodeKind::Method | NodeKind::Function) && n.name == method.name
                 {

@@ -448,6 +448,43 @@ impl Database {
         collect_rows(&mut rows, row_to_node, "get_children_of").await
     }
 
+    /// Returns every node whose `parent_id` matches any of `parent_ids`, in
+    /// one round-trip. Mirrors `get_children_of` but batched: callers that
+    /// would otherwise loop `get_children_of` once per parent (e.g.
+    /// `TraceDecay::get_trait_dispatch_targets` walking impl blocks) can
+    /// batch them into a single query.
+    ///
+    /// Results are grouped by `parent_id` implicitly via the `parent_id`
+    /// column in the returned rows (callers can bucket by it); within each
+    /// parent, ordering follows `start_line` as in `get_children_of`.
+    pub async fn get_children_of_bulk(&self, parent_ids: &[String]) -> Result<Vec<Node>> {
+        if parent_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = build_qmark_placeholders(parent_ids.len());
+        let sql = format!(
+            concat!(
+                "SELECT ",
+                node_select_columns!(),
+                " FROM nodes WHERE parent_id IN ({}) ORDER BY parent_id, start_line"
+            ),
+            placeholders
+        );
+        let param_values: Vec<Value> = parent_ids
+            .iter()
+            .map(|id| Value::Text(id.clone()))
+            .collect();
+        let mut rows = self
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to batch query children: {e}"),
+                operation: "get_children_of_bulk".to_string(),
+            })?;
+        collect_rows(&mut rows, row_to_node, "get_children_of_bulk").await
+    }
+
     /// Returns the distinct file paths that hold at least one node of `kind`,
     /// in path order, starting after `after_path`.
     ///
