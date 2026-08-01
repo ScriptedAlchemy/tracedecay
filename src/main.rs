@@ -179,7 +179,12 @@ fn main() {
 }
 
 fn async_main() -> tracedecay::errors::Result<()> {
-    tracedecay::agents::register_mcp_tool_catalog_ports();
+    // Every process-global runtime port the extracted crates invert back into
+    // the composition root. Must precede argument parsing: hook, install, and
+    // ingest paths all read these slots, and an unregistered slot fails quietly
+    // (no LCM redaction, no memory injection, zero turn costs) rather than
+    // loudly.
+    tracedecay::register_runtime_ports();
     let args: Vec<String> = std::env::args().collect();
     if render_dynamic_command_help(&args) {
         return Ok(());
