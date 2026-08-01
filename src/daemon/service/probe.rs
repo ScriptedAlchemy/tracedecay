@@ -198,6 +198,76 @@ fn query_daemon_identity_stream(
     }
 }
 
+#[cfg(not(unix))]
+pub(super) fn request_daemon_shutdown(transport_hint: &Path) -> Result<()> {
+    const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let (address, auth_token) =
+        current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
+    let stream = StdTcpStream::connect_timeout(&address, SHUTDOWN_TIMEOUT)?;
+    stream.set_read_timeout(Some(SHUTDOWN_TIMEOUT))?;
+    stream.set_write_timeout(Some(SHUTDOWN_TIMEOUT))?;
+    request_daemon_shutdown_stream(stream, &auth_token, SHUTDOWN_TIMEOUT)
+}
+
+#[cfg(not(unix))]
+fn request_daemon_shutdown_stream(
+    mut stream: impl ProbeStream,
+    auth_token: &str,
+    shutdown_timeout: std::time::Duration,
+) -> Result<()> {
+    const REQUEST_ID: i64 = 2;
+    let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": REQUEST_ID,
+        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+    });
+    let preface = super::super::transport::DaemonAuthPreface::new(auth_token).to_line()?;
+    writeln!(stream, "{preface}")?;
+    writeln!(stream, "{}", handshake.to_line()?)?;
+    writeln!(stream, "{request}")?;
+    IoWrite::flush(&mut stream)?;
+
+    let deadline = std::time::Instant::now() + shutdown_timeout;
+    let mut reader = BufReader::new(stream);
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(TraceDecayError::Config {
+                message: "daemon shutdown request exceeded its absolute deadline".to_string(),
+            });
+        }
+        reader
+            .get_ref()
+            .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(TraceDecayError::Config {
+                message: "daemon closed the shutdown request before acknowledging it".to_string(),
+            });
+        }
+        let response: serde_json::Value = serde_json::from_str(line.trim())?;
+        if response.get("id") != Some(&serde_json::json!(REQUEST_ID)) {
+            continue;
+        }
+        if shutdown_response_accepted(line.trim(), REQUEST_ID) {
+            return Ok(());
+        }
+        return Err(TraceDecayError::Config {
+            message: format!("daemon rejected the authenticated shutdown request: {response}"),
+        });
+    }
+}
+
+pub(super) fn shutdown_response_accepted(line: &str, request_id: i64) -> bool {
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    response.get("id") == Some(&serde_json::json!(request_id))
+        && response.pointer("/result/accepted") == Some(&serde_json::Value::Bool(true))
+        && response.get("error").is_none()
+}
+
 impl DaemonSocketState {
     pub(super) fn is_proven_quiesced(self) -> bool {
         matches!(self, Self::Missing | Self::Stale)

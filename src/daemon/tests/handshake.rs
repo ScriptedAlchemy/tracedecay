@@ -97,12 +97,14 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     .expect("loopback listener");
     let server_administration = store_administration.clone();
     let server_attempts = std::sync::Arc::clone(&attempts);
+    let lifecycle = DaemonLifecycle::default();
+    let server_lifecycle = lifecycle.clone();
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
         Box::pin(super::super::serve_windows_broker_client(
             stream,
             TOKEN,
-            &DaemonLifecycle::default(),
+            &server_lifecycle,
             server_administration,
             gates,
             Some(server_attempts),
@@ -126,6 +128,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
         .expect("server task")
         .expect_err("missing auth must fail closed");
     assert!(error.to_string().contains("authentication failed"));
+    assert!(lifecycle.accepting());
     assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
     assert!(owners.lock().await.values().next().is_none());
 }

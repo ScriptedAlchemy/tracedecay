@@ -89,8 +89,117 @@ fn daemon_admission_preserves_reserved_health_capacity() {
         "params": {"name": "tracedecay_context", "arguments": {"task": "x"}},
     })
     .to_string();
+    let shutdown_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+    })
+    .to_string();
     assert!(super::super::is_reserved_control_request(&status_request));
+    assert!(super::super::is_reserved_control_request(&shutdown_request));
     assert!(!super::super::is_reserved_control_request(&bulk_request));
+}
+
+#[test]
+fn daemon_shutdown_requires_a_response_id() {
+    let notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+    })
+    .to_string();
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": super::super::DAEMON_SHUTDOWN_METHOD,
+    })
+    .to_string();
+
+    assert!(super::super::daemon_shutdown_response(&notification).is_none());
+    let response = super::super::daemon_shutdown_response(&request).expect("shutdown response");
+    assert_eq!(response.id, serde_json::json!(17));
+    assert_eq!(response.result, Some(serde_json::json!({"accepted": true})));
+}
+
+#[tokio::test]
+async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let profile = TempDir::new().expect("profile");
+    let client_identity = test_client_identity_for(profile.path().to_path_buf());
+    let store_administration = test_store_administration_for_profile(profile.path());
+    let lifecycle = DaemonLifecycle::default();
+    let server_lifecycle = lifecycle.clone();
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept shutdown client");
+        super::super::serve_windows_broker_client(
+            stream,
+            TOKEN,
+            &server_lifecycle,
+            store_administration,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            None,
+        )
+        .await
+        .expect("serve shutdown client");
+    });
+
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect shutdown client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+        .to_line()
+        .expect("auth preface");
+    writer
+        .write_all(format!("{preface}\n").as_bytes())
+        .await
+        .expect("write auth preface");
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                DaemonHandshake {
+                    client_identity,
+                    ..test_handshake_defaults()
+                }
+                .to_line()
+                .expect("handshake")
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write handshake");
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 23,
+                    "method": super::super::DAEMON_SHUTDOWN_METHOD,
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write shutdown");
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
+        .await
+        .expect("read shutdown response");
+    let response: serde_json::Value = serde_json::from_str(response.trim()).expect("shutdown JSON");
+
+    assert_eq!(response["id"], serde_json::json!(23));
+    assert_eq!(response["result"], serde_json::json!({"accepted": true}));
+    server.await.expect("shutdown server");
+    assert!(!lifecycle.accepting());
 }
 
 #[test]

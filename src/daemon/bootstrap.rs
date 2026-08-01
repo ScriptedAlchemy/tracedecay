@@ -85,6 +85,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 }
                 continue;
             },
+            () = lifecycle.wait_for_draining() => break,
             _ = tokio::signal::ctrl_c() => break,
         };
         let permit = match admission.try_admit() {

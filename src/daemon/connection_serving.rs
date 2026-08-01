@@ -559,6 +559,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
+    if let Some(response) = daemon_shutdown_response(&first_request_line) {
+        lifecycle.begin_draining();
+        write_json_rpc_response(&mut transport, &response).await?;
+        drop(setup_activity);
+        return Ok(());
+    }
     let reserved_control_request = is_reserved_control_request(&first_request_line);
     if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);

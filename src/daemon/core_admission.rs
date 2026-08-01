@@ -323,6 +323,9 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;
     };
+    if request.method == super::DAEMON_SHUTDOWN_METHOD {
+        return request.id.is_some_and(|id| !id.is_null());
+    }
     if request.method != "tools/call" {
         return false;
     }
@@ -341,6 +344,13 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
             | "tracedecay_lcm_status"
             | "tracedecay_lcm_doctor"
     )
+}
+
+pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResponse> {
+    let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
+    let id = request.id.filter(|id| !id.is_null())?;
+    (request.method == super::DAEMON_SHUTDOWN_METHOD)
+        .then(|| JsonRpcResponse::success(id, serde_json::json!({"accepted": true})))
 }
 
 pub(crate) async fn reject_reserved_bulk_request(
