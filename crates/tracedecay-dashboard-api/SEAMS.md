@@ -116,8 +116,31 @@ It is merged **after** `.with_state(runtime)`, so:
 - `Router::new()` is a valid argument, serving the JSON API with no UI.
 
 The three `// SEAM(assets)` markers are gone. **Root wiring:** the root builds
-this router from `src/dashboard/assets.rs` and passes it at every call site of
-the five entry points.
+this router from `src/dashboard/assets.rs` —
+
+```rust
+axum::Router::new()
+    .route("/", get(assets::app_index))
+    .route("/static/{*tail}", get(assets::app_static))
+    .fallback(get(assets::app_spa_fallback))
+```
+
+— and passes it at the six call sites that exist today. Only one is
+production:
+
+| Call site | Entry point |
+|---|---|
+| `src/mcp/tools/handlers/dashboard.rs:150` | `router(…)` — **production** |
+| `tests/dashboard_api_test/dashboard_api_support.rs:142` | `run_until_shutdown_for_tests_with_host_admission(…)` |
+| `tests/dashboard_api_test/analytics.rs:448` | same |
+| `tests/dashboard_api_test/graph.rs:329` | same |
+| `tests/dashboard_api_test/lcm.rs:299` | same |
+| `tests/dashboard_api_test/savings.rs:512` | same |
+
+`run()` and `run_until_shutdown()` have no callers in the tree today; the CLI
+reaches the dashboard through the daemon. Without this wiring the root's
+`assets` module becomes dead and the dashboard serves the JSON API with no UI —
+it does not fail to build, so the wiring is easy to forget.
 
 ### `PinnedUserDataDir` — inverted into this crate
 
