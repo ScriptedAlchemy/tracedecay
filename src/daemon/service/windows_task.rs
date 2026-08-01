@@ -580,8 +580,16 @@ fn stop_managed_with(
         DaemonServiceState::StoppedDisabled
     };
     let initial_quiescence = control.quiescence();
-    if !current.running && initial_quiescence.satisfied {
-        return Ok(());
+    if !current.running {
+        if initial_quiescence.satisfied {
+            return Ok(());
+        }
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to stop an unmanaged TraceDecay daemon: scheduled task is {desired:?}, but {}",
+                initial_quiescence.diagnostic
+            ),
+        });
     }
 
     let graceful_result = control.request_shutdown().and_then(|()| {
@@ -1681,6 +1689,19 @@ mod tests {
         assert_eq!(api.state(), DaemonServiceState::StoppedEnabled);
         assert_eq!(control.shutdown_requests, 1);
         assert!(!api.operations.contains(&Operation::Stop));
+    }
+
+    #[test]
+    fn managed_stop_refuses_live_endpoint_when_task_is_already_stopped() {
+        let mut api = FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task/>");
+        let mut control = FakeDaemonControl::default();
+
+        let error =
+            stop_managed_with(&mut api, &mut control).expect_err("unmanaged daemon must fail");
+
+        assert!(error.to_string().contains("unmanaged"));
+        assert_eq!(control.shutdown_requests, 0);
+        assert!(api.operations.is_empty());
     }
 
     #[test]
