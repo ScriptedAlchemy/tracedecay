@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;

@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use tracedecay_lsp::{FramePoll, FrameSend};
 
 #[tokio::test]
