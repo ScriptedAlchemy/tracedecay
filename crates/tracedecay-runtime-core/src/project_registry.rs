@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 /// common directory, or `None` when this checkout already is the primary one
 /// or the repository has a shape whose primary checkout cannot be derived
 /// safely (bare repos, submodule gitlinks).
-pub fn primary_checkout_root(project_root: &Path, git_common_dir: Option<&Path>) -> Option<PathBuf> {
+pub fn primary_checkout_root(
+    project_root: &Path,
+    git_common_dir: Option<&Path>,
+) -> Option<PathBuf> {
     let common_dir = git_common_dir?;
     // Only a plain, non-bare `<repo>/.git` common dir has a parent that is
     // reliably the checkout root. Bare repos and submodule gitlinks (whose

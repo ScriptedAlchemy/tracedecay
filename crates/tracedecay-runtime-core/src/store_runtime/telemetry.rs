@@ -24,7 +24,7 @@ use super::shard::{
 ///
 /// The aggregate still covers every supplied inventory entry and reports the
 /// number of omitted detail rows.
-pub(crate) const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
+pub const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
 
 /// One registry inventory item captured before telemetry projection.
 ///
@@ -32,10 +32,10 @@ pub(crate) const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
 /// preserves the registry/shard eviction decision rather than recomputing it
 /// from individual counters.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeRegistryInventoryEntry {
-    pub(crate) health: ShardRuntimeHealthSnapshot,
-    pub(crate) eviction: ShardRuntimeEvictionEligibility,
-    pub(crate) physical: PhysicalRuntimeSnapshot,
+pub struct RuntimeRegistryInventoryEntry {
+    pub health: ShardRuntimeHealthSnapshot,
+    pub eviction: ShardRuntimeEvictionEligibility,
+    pub physical: PhysicalRuntimeSnapshot,
 }
 
 impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
@@ -55,21 +55,21 @@ impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
 /// synthesized by summing shard queues because global admission can include
 /// work not yet associated with a shard.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeRegistryInventory {
-    pub(crate) admission: AdmissionConfigV1,
-    pub(crate) global_queued_bytes: u64,
-    pub(crate) entries: Vec<RuntimeRegistryInventoryEntry>,
+pub struct RuntimeRegistryInventory {
+    pub admission: AdmissionConfigV1,
+    pub global_queued_bytes: u64,
+    pub entries: Vec<RuntimeRegistryInventoryEntry>,
 }
 
 /// Counted leases held by a shard at one health-snapshot instant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeLeaseCounts {
-    pub(crate) general_readers: u32,
-    pub(crate) health_readers: u32,
-    pub(crate) snapshots: u32,
-    pub(crate) watchers: u32,
-    pub(crate) schedulers: u32,
-    pub(crate) clients: u32,
+pub struct ShardRuntimeLeaseCounts {
+    pub general_readers: u32,
+    pub health_readers: u32,
+    pub snapshots: u32,
+    pub watchers: u32,
+    pub schedulers: u32,
+    pub clients: u32,
 }
 
 impl ShardRuntimeLeaseCounts {
@@ -87,37 +87,37 @@ impl ShardRuntimeLeaseCounts {
 
 /// Driver-neutral telemetry detail for one daemon-owned runtime publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeTelemetry {
+pub struct ShardRuntimeTelemetry {
     /// The source binding carries the canonical shard, incarnation, and epoch.
-    pub(crate) binding: StoreRuntimeBindingV1,
-    pub(crate) state: RuntimeMaintenanceStateV1,
-    pub(crate) queue_budget: QueueBudgetV1,
-    pub(crate) global_queue_budget_bytes: u64,
-    pub(crate) queued_operations: u32,
-    pub(crate) queued_bytes: u64,
-    pub(crate) writer_present: bool,
-    pub(crate) physical_reader_handles: u32,
-    pub(crate) leases: ShardRuntimeLeaseCounts,
-    pub(crate) wal_bytes: u64,
-    pub(crate) wal_budget: WalBudgetV1,
-    pub(crate) memory_estimate_bytes: u64,
-    pub(crate) health: ShardRuntimeHealth,
-    pub(crate) pinned_profile: bool,
-    pub(crate) idle_for_ms: u64,
-    pub(crate) eviction_eligible: bool,
-    pub(crate) eviction_blocker_count: u32,
+    pub binding: StoreRuntimeBindingV1,
+    pub state: RuntimeMaintenanceStateV1,
+    pub queue_budget: QueueBudgetV1,
+    pub global_queue_budget_bytes: u64,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub writer_present: bool,
+    pub physical_reader_handles: u32,
+    pub leases: ShardRuntimeLeaseCounts,
+    pub wal_bytes: u64,
+    pub wal_budget: WalBudgetV1,
+    pub memory_estimate_bytes: u64,
+    pub health: ShardRuntimeHealth,
+    pub pinned_profile: bool,
+    pub idle_for_ms: u64,
+    pub eviction_eligible: bool,
+    pub eviction_blocker_count: u32,
 }
 
 /// Fixed-shape, saturating counts of runtime states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeStateCounts {
-    pub(crate) closed: u32,
-    pub(crate) opening: u32,
-    pub(crate) ready: u32,
-    pub(crate) draining: u32,
-    pub(crate) exclusive_maintenance: u32,
-    pub(crate) reopening: u32,
-    pub(crate) faulted: u32,
+pub struct RuntimeStateCounts {
+    pub closed: u32,
+    pub opening: u32,
+    pub ready: u32,
+    pub draining: u32,
+    pub exclusive_maintenance: u32,
+    pub reopening: u32,
+    pub faulted: u32,
 }
 
 impl RuntimeStateCounts {
@@ -137,11 +137,11 @@ impl RuntimeStateCounts {
 
 /// Fixed-shape, saturating counts of observed health states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeHealthCounts {
-    pub(crate) unknown: u32,
-    pub(crate) healthy: u32,
-    pub(crate) degraded: u32,
-    pub(crate) faulted: u32,
+pub struct RuntimeHealthCounts {
+    pub unknown: u32,
+    pub healthy: u32,
+    pub degraded: u32,
+    pub faulted: u32,
 }
 
 impl RuntimeHealthCounts {
@@ -158,28 +158,28 @@ impl RuntimeHealthCounts {
 
 /// Bounded aggregate facts for every entry in a registry inventory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryAggregate {
-    pub(crate) inventory_shards: u32,
-    pub(crate) returned_shards: u32,
-    pub(crate) omitted_shards: u32,
-    pub(crate) states: RuntimeStateCounts,
-    pub(crate) health: RuntimeHealthCounts,
-    pub(crate) pinned_profiles: u32,
-    pub(crate) eviction_eligible: u32,
-    pub(crate) writer_present: u32,
-    pub(crate) physical_reader_handles: u64,
-    pub(crate) queued_operations: u64,
-    pub(crate) queued_bytes: u64,
-    pub(crate) general_reader_leases: u64,
-    pub(crate) health_reader_leases: u64,
-    pub(crate) snapshot_leases: u64,
-    pub(crate) watcher_leases: u64,
-    pub(crate) scheduler_leases: u64,
-    pub(crate) client_leases: u64,
-    pub(crate) total_leases: u64,
-    pub(crate) wal_bytes: u64,
-    pub(crate) memory_estimate_bytes: u64,
-    pub(crate) global_queued_bytes: u64,
+pub struct RuntimeTelemetryAggregate {
+    pub inventory_shards: u32,
+    pub returned_shards: u32,
+    pub omitted_shards: u32,
+    pub states: RuntimeStateCounts,
+    pub health: RuntimeHealthCounts,
+    pub pinned_profiles: u32,
+    pub eviction_eligible: u32,
+    pub writer_present: u32,
+    pub physical_reader_handles: u64,
+    pub queued_operations: u64,
+    pub queued_bytes: u64,
+    pub general_reader_leases: u64,
+    pub health_reader_leases: u64,
+    pub snapshot_leases: u64,
+    pub watcher_leases: u64,
+    pub scheduler_leases: u64,
+    pub client_leases: u64,
+    pub total_leases: u64,
+    pub wal_bytes: u64,
+    pub memory_estimate_bytes: u64,
+    pub global_queued_bytes: u64,
 }
 
 impl RuntimeTelemetryAggregate {
@@ -237,16 +237,16 @@ impl RuntimeTelemetryAggregate {
 
 /// Deterministically ordered bounded telemetry details plus full aggregates.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryProjection {
-    pub(crate) per_shard_queue_budget: QueueBudgetV1,
-    pub(crate) global_queue_budget_bytes: u64,
-    pub(crate) wal_budget: WalBudgetV1,
-    pub(crate) shards: Vec<ShardRuntimeTelemetry>,
-    pub(crate) aggregate: RuntimeTelemetryAggregate,
+pub struct RuntimeTelemetryProjection {
+    pub per_shard_queue_budget: QueueBudgetV1,
+    pub global_queue_budget_bytes: u64,
+    pub wal_budget: WalBudgetV1,
+    pub shards: Vec<ShardRuntimeTelemetry>,
+    pub aggregate: RuntimeTelemetryAggregate,
 }
 
 /// Projects a registry inventory with the standard per-shard detail bound.
-pub(crate) fn project_runtime_telemetry(
+pub fn project_runtime_telemetry(
     inventory: &RuntimeRegistryInventory,
 ) -> RuntimeTelemetryProjection {
     project_runtime_telemetry_with_limit(inventory, MAX_PROJECTED_RUNTIME_SHARDS)
@@ -339,7 +339,7 @@ mod tests {
     use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};
 
     use super::*;
-    use crate::daemon::store_runtime::shard::{
+    use crate::store_runtime::shard::{
         ShardRuntime, ShardRuntimeEvictionBlocker, ShardRuntimeLeaseKind,
     };
 

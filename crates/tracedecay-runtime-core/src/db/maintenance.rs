@@ -42,10 +42,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub async fn clear_unguarded(
-        &self,
-        transaction: &DatabaseWriteTransaction<'_>,
-    ) -> Result<()> {
+    pub async fn clear_unguarded(&self, transaction: &DatabaseWriteTransaction<'_>) -> Result<()> {
         transaction
             .execute_batch(
                 "DELETE FROM vectors;

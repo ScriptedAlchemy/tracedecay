@@ -16,18 +16,18 @@ use super::StoreRuntimeRegistryFailure;
 
 /// Bounded, path-free facts sampled from the physical writer/read runtime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PhysicalRuntimeSnapshot {
-    pub(crate) healthy: bool,
-    pub(crate) writer_present: bool,
-    pub(crate) reader_handles: u32,
-    pub(crate) queued_operations: u32,
-    pub(crate) queued_bytes: u64,
-    pub(crate) wal_bytes: u64,
-    pub(crate) memory_estimate_bytes: u64,
+pub struct PhysicalRuntimeSnapshot {
+    pub healthy: bool,
+    pub writer_present: bool,
+    pub reader_handles: u32,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub wal_bytes: u64,
+    pub memory_estimate_bytes: u64,
 }
 
 impl PhysicalRuntimeSnapshot {
-    pub(crate) const fn is_drained(self) -> bool {
+    pub const fn is_drained(self) -> bool {
         !self.writer_present
             && self.reader_handles == 0
             && self.queued_operations == 0
@@ -37,7 +37,7 @@ impl PhysicalRuntimeSnapshot {
 
 /// Opaque owner of driver resources. Implementations live behind the daemon
 /// boundary and must not expose a connection or a driver-specific type.
-pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
+pub trait PhysicalRuntimeAttachment: Send + Sync {
     fn snapshot(&self) -> PhysicalRuntimeSnapshot;
 
     /// Physical identity captured from a descriptor held across `SQLite` worker
@@ -186,7 +186,7 @@ pub(crate) trait PhysicalRuntimeAttachment: Send + Sync {
 
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct EmptyPhysicalRuntimeAttachment;
+pub struct EmptyPhysicalRuntimeAttachment;
 
 #[cfg(test)]
 impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
@@ -211,15 +211,15 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
 }
 
 /// The publisher's atomic result: logical lifecycle plus physical lifetime.
-pub(crate) struct PublishedShardRuntime {
-    runtime: Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
+pub struct PublishedShardRuntime {
+    runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     schema_migrated: bool,
 }
 
 impl PublishedShardRuntime {
-    pub(crate) fn new(
-        runtime: Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
+    pub fn new(
+        runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
     ) -> Self {
         Self {
@@ -229,8 +229,8 @@ impl PublishedShardRuntime {
         }
     }
 
-    pub(crate) fn new_with_schema_migration(
-        runtime: Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
+    pub fn new_with_schema_migration(
+        runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
         schema_migrated: bool,
     ) -> Self {
@@ -241,22 +241,22 @@ impl PublishedShardRuntime {
         }
     }
 
-    pub(crate) fn logical(&self) -> &Arc<crate::daemon::store_runtime::shard::ShardRuntime> {
+    pub fn logical(&self) -> &Arc<crate::store_runtime::shard::ShardRuntime> {
         &self.runtime
     }
 
-    pub(crate) fn opened_file_identity(&self) -> Result<u64, String> {
+    pub fn opened_file_identity(&self) -> Result<u64, String> {
         self.attachment.opened_file_identity()
     }
 
-    pub(crate) const fn schema_migrated(&self) -> bool {
+    pub const fn schema_migrated(&self) -> bool {
         self.schema_migrated
     }
 
     pub(super) fn into_parts(
         self,
     ) -> (
-        Arc<crate::daemon::store_runtime::shard::ShardRuntime>,
+        Arc<crate::store_runtime::shard::ShardRuntime>,
         Arc<dyn PhysicalRuntimeAttachment>,
     ) {
         (self.runtime, self.attachment)

@@ -21,8 +21,7 @@ use crate::errors::{Result, TraceDecayError};
 /// spin lets a contender through instead of failing immediately.
 pub const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
 /// Interval between branch-lock acquisition retries.
-pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(50);
+pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Resolves the current branch name using `gix`. Linked worktrees use
 /// `git symbolic-ref HEAD` because gix can resolve their shared repository's
@@ -149,10 +148,101 @@ fn acquire_branch_add_lock_blocking_with(
             Err(error) => return Err(error),
         }
     }
-    Err(last_contention.unwrap_or_else(|| TraceDecayError::SyncLock {
-        message: format!(
-            "timed out waiting for branch metadata lock at {}",
-            tracedecay_dir.join(".branch-add.lock").display()
-        ),
-    }))
+    Err(
+        last_contention.unwrap_or_else(|| TraceDecayError::SyncLock {
+            message: format!(
+                "timed out waiting for branch metadata lock at {}",
+                tracedecay_dir.join(".branch-add.lock").display()
+            ),
+        }),
+    )
+}
+
+/// Auto-detects the repository's default branch.
+///
+/// Strategy:
+/// 1. Try `git symbolic-ref refs/remotes/origin/HEAD`
+/// 2. Fall back to checking if `main` or `master` exists locally
+/// 3. Fall back to the currently checked-out local branch
+///
+/// The final fallback deliberately returns `None` for detached HEAD rather
+/// than inventing a default branch.
+#[must_use]
+pub fn detect_default_branch(project_root: &Path) -> Option<String> {
+    let repo = gix::open(project_root).ok()?;
+
+    // Try symbolic-ref first (refs/remotes/origin/HEAD -> refs/remotes/origin/<branch>)
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(Ok(target)) = reference.follow()
+        && let Some(name) = target
+            .name()
+            .as_bstr()
+            .to_string()
+            .strip_prefix("refs/remotes/origin/")
+    {
+        return Some(name.to_string());
+    }
+
+    // Fall back to heuristics
+    for candidate in &["main", "master"] {
+        let refname = format!("refs/heads/{candidate}");
+        if repo.find_reference(&refname).is_ok() {
+            return Some((*candidate).to_string());
+        }
+    }
+
+    current_branch(project_root)
+}
+
+/// Sanitizes a branch name for use as a filename.
+///
+/// Replaces `/` with `_`, strips characters unsafe for filenames,
+/// and collapses `..` sequences to prevent path traversal.
+#[must_use]
+pub fn sanitize_branch_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | ' ' | '.' => '_',
+            c => c,
+        })
+        .collect();
+    // Collapse runs of underscores
+    let mut result = String::with_capacity(sanitized.len());
+    let mut prev_underscore = false;
+    for c in sanitized.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                result.push(c);
+            }
+            prev_underscore = true;
+        } else {
+            result.push(c);
+            prev_underscore = false;
+        }
+    }
+    // Strip leading/trailing underscores
+    result.trim_matches('_').to_string()
+}
+
+/// Resolves the DB path for a given branch.
+///
+/// If the branch is tracked in metadata, returns its `db_file` path.
+/// Returns `None` if untracked or if the path would escape `tracedecay_dir`.
+#[must_use]
+pub fn resolve_branch_db_path(
+    tracedecay_dir: &Path,
+    branch: &str,
+    meta: &crate::branch_meta::BranchMeta,
+) -> Option<std::path::PathBuf> {
+    let entry = meta.branches.get(branch)?;
+    let resolved = tracedecay_dir.join(&entry.db_file);
+    // Prevent path traversal: resolved path must stay within tracedecay_dir
+    if let (Ok(canonical_dir), Ok(canonical_path)) =
+        (tracedecay_dir.canonicalize(), resolved.canonicalize())
+        && !canonical_path.starts_with(&canonical_dir)
+    {
+        return None;
+    }
+    Some(resolved)
 }

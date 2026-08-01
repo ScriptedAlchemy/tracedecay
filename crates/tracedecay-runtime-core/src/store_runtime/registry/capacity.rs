@@ -9,24 +9,24 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 
-pub(crate) const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
-pub(crate) const DEFAULT_PROJECT_CODE_OPEN_RUNTIMES: usize = 4;
+pub const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
+pub const DEFAULT_PROJECT_CODE_OPEN_RUNTIMES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StoreRuntimeRegistryConfig {
+pub struct StoreRuntimeRegistryConfig {
     project_code_open_runtime_budget: usize,
     eviction_idle: Duration,
     exclusive_maintenance: bool,
 }
 
 impl StoreRuntimeRegistryConfig {
-    pub(crate) fn new(
+    pub fn new(
         project_code_open_runtime_budget: usize,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
         Self::with_eviction_idle(project_code_open_runtime_budget, Duration::ZERO)
     }
 
-    pub(crate) fn for_exclusive_maintenance(
+    pub fn for_exclusive_maintenance(
         project_code_open_runtime_budget: usize,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
         if project_code_open_runtime_budget == 0 {
@@ -42,7 +42,7 @@ impl StoreRuntimeRegistryConfig {
         })
     }
 
-    pub(crate) fn with_eviction_idle(
+    pub fn with_eviction_idle(
         project_code_open_runtime_budget: usize,
         eviction_idle: Duration,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
@@ -55,7 +55,7 @@ impl StoreRuntimeRegistryConfig {
         Ok(config)
     }
 
-    pub(crate) const fn project_code_open_runtime_budget(self) -> usize {
+    pub const fn project_code_open_runtime_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
 

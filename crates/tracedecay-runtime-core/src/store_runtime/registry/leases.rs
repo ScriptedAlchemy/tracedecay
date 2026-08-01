@@ -11,18 +11,18 @@ use super::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProfileAuthorityPin {
+pub struct ProfileAuthorityPin {
     pub(super) binding: Arc<StoreRuntimeBindingV1>,
 }
 
 impl ProfileAuthorityPin {
-    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct StoreRuntimeOpenRequest {
+pub struct StoreRuntimeOpenRequest {
     pub(super) key: StoreRuntimeKey,
     pub(super) profile_authority: Option<ProfileAuthorityPin>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
@@ -30,13 +30,13 @@ pub(crate) struct StoreRuntimeOpenRequest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StoreRuntimeOpenMode {
+pub enum StoreRuntimeOpenMode {
     Existing,
     Initialize,
 }
 
 impl StoreRuntimeOpenRequest {
-    pub(crate) fn new_authorized(
+    pub fn new_authorized(
         shard_id: StoreShardIdV1,
         incarnation: StoreIncarnationV1,
         profile_authority: Option<ProfileAuthorityPin>,
@@ -50,7 +50,7 @@ impl StoreRuntimeOpenRequest {
         }
     }
 
-    pub(crate) fn new_initialize_authorized(
+    pub fn new_initialize_authorized(
         shard_id: StoreShardIdV1,
         incarnation: StoreIncarnationV1,
         profile_authority: Option<ProfileAuthorityPin>,
@@ -65,7 +65,7 @@ impl StoreRuntimeOpenRequest {
     }
 
     #[cfg(test)]
-    pub(crate) fn new(
+    pub fn new(
         shard_id: StoreShardIdV1,
         incarnation: StoreIncarnationV1,
         profile_authority: Option<ProfileAuthorityPin>,
@@ -78,13 +78,13 @@ impl StoreRuntimeOpenRequest {
         }
     }
 
-    pub(crate) fn key(&self) -> &StoreRuntimeKey {
+    pub fn key(&self) -> &StoreRuntimeKey {
         &self.key
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum StoreRuntimeLeaseAcquireResult {
+pub enum StoreRuntimeLeaseAcquireResult {
     Acquired(Box<RuntimeLeaseV1>),
     Opening {
         key: Box<StoreRuntimeKey>,
@@ -103,7 +103,7 @@ pub(crate) enum StoreRuntimeLeaseAcquireResult {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum ProfileAuthorityPinResult {
+pub enum ProfileAuthorityPinResult {
     Pinned(ProfileAuthorityPin),
     Opening { key: Box<StoreRuntimeKey> },
     Missing { profile_shard: Box<StoreShardIdV1> },
@@ -111,7 +111,7 @@ pub(crate) enum ProfileAuthorityPinResult {
 }
 
 impl StoreRuntimeRegistry {
-    pub(crate) fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
+    pub fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
         if let Err(error) = lease.validate() {
             return StoreRuntimeLeaseAcquireResult::Rejected(
                 StoreRuntimeRegistryFailure::InvalidLease {
@@ -163,7 +163,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    pub(crate) fn release_lease(
+    pub fn release_lease(
         &self,
         binding: &StoreRuntimeBindingV1,
         lease_id: &RuntimeLeaseIdV1,
@@ -182,7 +182,7 @@ impl StoreRuntimeRegistry {
         runtime.release_runtime_lease(lease_id)
     }
 
-    pub(crate) fn profile_authority_pin(
+    pub fn profile_authority_pin(
         &self,
         profile_shard: &StoreShardIdV1,
     ) -> ProfileAuthorityPinResult {

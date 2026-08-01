@@ -509,9 +509,7 @@ pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
 
 /// Sanitizes arbitrary source bytes through the canonical credential detector
 /// and issues receipt evidence bound to both the raw input and sanitized text.
-pub fn sanitize_code_source_bytes(
-    raw: &[u8],
-) -> Result<CodeSourceSanitizationV1, DetectionError> {
+pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1, DetectionError> {
     let source = String::from_utf8_lossy(raw);
     let invalid_utf8 = matches!(source, std::borrow::Cow::Owned(_));
     let detected = redact_sensitive_values(Value::String(source.into_owned()), &BTreeSet::new())?;

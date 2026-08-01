@@ -22,18 +22,18 @@ use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeRequestProbeV1,
 };
 
-// The daemon registry owns the physical runtime and sits above this
-// kernel; the facade retains it through the `StoreRuntimeSource` port.
-use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
+// The store-runtime registry moved into this kernel, so the facade retains the
+// concrete handle rather than an erased port.
+use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavior};
+use crate::errors::{Result, TraceDecayError};
+use crate::store_runtime::registry::StoreRuntimeHandle;
 #[cfg(any(test, feature = "test-transport"))]
-use crate::daemon::store_runtime::registry::{
+use crate::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavior};
-use crate::errors::{Result, TraceDecayError};
 
 use super::{
     CapturedMemoryV2Frontiers, DatabaseAuthority, MemoryV2BackfillBatchOutcome, memory_v2,
@@ -275,11 +275,7 @@ impl DatabaseWriterConnection<'_> {
     }
 
     #[cfg(test)]
-    pub async fn execute_engine<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> crate::db::engine::Result<u64>
+    pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
@@ -537,11 +533,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.execute_batch(sql).await
     }
 
-    pub async fn execute_engine<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> crate::db::engine::Result<u64>
+    pub async fn execute_engine<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
         P: crate::db::engine::IntoParams,
     {
@@ -1133,10 +1125,7 @@ impl Database {
     /// Opens an isolated writer while holding the process-local writer lane.
     /// The handle cannot escape the guard, preventing raw DML from bypassing
     /// serialization or joining a transaction on the retained reader.
-    pub async fn writer_connection(
-        &self,
-        operation: &str,
-    ) -> Result<DatabaseWriterConnection<'_>> {
+    pub async fn writer_connection(&self, operation: &str) -> Result<DatabaseWriterConnection<'_>> {
         let guard = self.writer().await;
         let conn = self.open_writer_connection_unguarded(operation).await?;
         Ok(DatabaseWriterConnection {
@@ -1202,10 +1191,7 @@ impl Database {
 
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
-    pub async fn begin_isolated_read_snapshot(
-        &self,
-        operation: &str,
-    ) -> Result<ReadSnapshot> {
+    pub async fn begin_isolated_read_snapshot(&self, operation: &str) -> Result<ReadSnapshot> {
         self.inner
             .conn
             .read_snapshot()

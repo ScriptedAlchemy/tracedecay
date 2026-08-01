@@ -5902,6 +5902,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-lsp",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
  "tracing",
  "tree-sitter",
