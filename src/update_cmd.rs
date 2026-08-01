@@ -812,6 +812,30 @@ pub(crate) fn partition_reinstall_results(
     }
 }
 
+/// Records a completed tracked-agent reinstall pass by advancing BOTH version
+/// markers, persisting the config only when something actually changed.
+///
+/// This is the one place any completed pass may record its version, and it is
+/// deliberately not open-coded. `previous_version` — not
+/// `last_installed_version` — is what arms the startup silent reinstall
+/// (`silent_reinstall_action`), so a pass that advanced only
+/// `last_installed_version` left the arming intact and repeated the whole
+/// reinstall on the very next ordinary command. Callers that treat a failed
+/// save as advisory report the error; `tracedecay reinstall` surfaces it,
+/// because an unsaved marker means the arming it just cleared is still on disk.
+pub(crate) fn record_completed_reinstall_pass(
+    config: &mut UserConfig,
+) -> tracedecay::errors::Result<()> {
+    if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
+        config
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("could not save tracedecay config: {err}"),
+            })?;
+    }
+    Ok(())
+}
+
 fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::errors::Result<()> {
     if strict {
         return Err(tracedecay::errors::TraceDecayError::Config {
@@ -951,10 +975,8 @@ async fn run_post_update_mutations(
         // undo the skip on the next ordinary command and reinstall everything
         // anyway. The next real upgrade re-arms the reinstall as usual.
         let mut config = UserConfig::load();
-        if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
-            && let Err(err) = config.save()
-        {
-            eprintln!("warning: could not save tracedecay config: {err}");
+        if let Err(err) = record_completed_reinstall_pass(&mut config) {
+            eprintln!("warning: {err}");
         }
         return Ok(());
     }
@@ -999,10 +1021,8 @@ async fn run_post_update_mutations(
     let reinstall_result =
         match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
             ReinstallOutcome::AllOk => {
-                if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
-                    && let Err(err) = config.save()
-                {
-                    eprintln!("warning: could not save tracedecay config: {err}");
+                if let Err(err) = record_completed_reinstall_pass(&mut config) {
+                    eprintln!("warning: {err}");
                 }
                 Ok(())
             }
@@ -1515,6 +1535,45 @@ mod tests {
         assert!(config.last_installed_version.is_empty());
         // A subsequent full install pass would still have work to record.
         assert!(config.mark_version_installed(running));
+    }
+
+    /// Defect: `tracedecay reinstall` recorded only `last_installed_version`,
+    /// but `silent_reinstall_action` arms on `previous_version`. The explicit
+    /// pass therefore left the startup silent reinstall armed and repeated the
+    /// entire tracked-agent install on the very next ordinary command.
+    #[test]
+    fn an_explicit_reinstall_pass_disarms_the_startup_silent_reinstall() {
+        let running = "9.9.9";
+        let armed = || UserConfig {
+            installed_agents: vec!["claude".to_string()],
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        assert_eq!(
+            crate::silent_reinstall_action(&armed(), running),
+            crate::SilentReinstallAction::Reinstall,
+            "an unrecorded minor upgrade arms the startup pass"
+        );
+
+        // The old reinstall tail: only `last_installed_version` advanced.
+        let mut last_marker_only = armed();
+        last_marker_only.last_installed_version = running.to_string();
+        assert_eq!(
+            crate::silent_reinstall_action(&last_marker_only, running),
+            crate::SilentReinstallAction::Reinstall,
+            "advancing only last_installed_version leaves the pass armed"
+        );
+
+        // The shared completion protocol advances both markers.
+        let mut completed = armed();
+        assert!(completed.mark_version_installed(running));
+        assert_eq!(completed.previous_version, running);
+        assert_eq!(completed.last_installed_version, running);
+        assert_eq!(
+            crate::silent_reinstall_action(&completed, running),
+            crate::SilentReinstallAction::Nothing,
+            "a completed explicit reinstall disarms the startup pass"
+        );
     }
 
     /// Closure factory for the upgrade step: records `label`, returns `result`.
