@@ -79,6 +79,22 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     true
 }
 
+/// Test-only view of raw registry membership.
+///
+/// Deliberately distinct from [`resolve_authority`]: this reports whether the
+/// key is still *present* without upgrading its `Weak`, so retain-driven
+/// eviction is observable separately from a session store that merely died.
+#[cfg(test)]
+fn context_scout_lifecycle_authority_is_registered(
+    hook_project_id: [u8; 16],
+    hook_worktree_id: [u8; 16],
+) -> bool {
+    registered_context_scout_lifecycle_authorities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&(hook_project_id, hook_worktree_id))
+}
+
 /// Looks up the registered lifecycle authority for a hook-scoped
 /// (project, worktree) pair and upgrades its `Weak` session handle.
 ///
@@ -418,6 +434,34 @@ mod tests {
         AnchoredObservationWrite::new(write, anchor, projection_generation).unwrap()
     }
 
+    /// `RegisteredGlobalDb` deliberately no longer builds this adapter
+    /// itself; the composition root assembles it from the registered runtime
+    /// and write authority (see the note on `RegisteredGlobalDb::db_path`).
+    fn observation_store(
+        sessions: &RegisteredGlobalDb,
+    ) -> crate::store::GlobalDbObservationStore<'_> {
+        crate::store::GlobalDbObservationStore::with_runtime(
+            sessions.runtime(),
+            sessions.authority(),
+        )
+    }
+
+    /// Every test below registers under hook ids unique to that test: the
+    /// authority registry is process-global, so overlapping keys would make
+    /// parallel tests observe each other's entries.
+    async fn project_runtime(
+        temporary: &TempDir,
+        project_id: &ProjectId,
+    ) -> HostAdmissionTestRuntimeV1 {
+        HostAdmissionTestRuntimeV1::project(
+            temporary.path().join("profile"),
+            temporary.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap()
+    }
+
     #[test]
     fn complete_canonical_native_lifecycle_is_admitted_without_hash_identity() {
         let lifecycle = lifecycle_from_canonical(
@@ -487,8 +531,7 @@ mod tests {
         let sessions = runtime
             .registered_database_arc(HostAdmissionScope::Project)
             .unwrap();
-        sessions
-            .observation_store()
+        observation_store(&sessions)
             .persist_observation(durable_native_observation(&project_id))
             .await
             .unwrap();
@@ -511,5 +554,364 @@ mod tests {
         .unwrap();
 
         assert_eq!(session_id.as_str(), "session.native.codex");
+    }
+
+    /// The cap is a fail-closed bound, not a tuning knob: it must stay small
+    /// enough to keep one hook lookup bounded, and `cap + 1` must remain a
+    /// valid `i64` SQL `LIMIT` (the `try_from` in the lookup returns `None`
+    /// otherwise, silently failing every lookup closed).
+    #[test]
+    fn session_observation_cap_stays_bounded_and_expressible_as_a_sql_limit() {
+        assert_eq!(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1, 64);
+        assert!(i64::try_from(MAX_CONTEXT_SCOUT_SESSION_OBSERVATIONS_V1 + 1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn zero_hook_identifiers_are_rejected_before_registration() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.zero-hook");
+        let worktree_id = id::<WorktreeId>("worktree.native.zero-hook");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+
+        assert!(!register_context_scout_lifecycle_authority(
+            [0; 16],
+            [71; 16],
+            project_id.clone(),
+            worktree_id.clone(),
+            &sessions,
+        ));
+        assert!(!register_context_scout_lifecycle_authority(
+            [71; 16],
+            [0; 16],
+            project_id,
+            worktree_id,
+            &sessions,
+        ));
+        assert!(!context_scout_lifecycle_authority_is_registered(
+            [0; 16], [71; 16]
+        ));
+        assert!(!context_scout_lifecycle_authority_is_registered(
+            [71; 16], [0; 16]
+        ));
+    }
+
+    #[tokio::test]
+    async fn profile_scoped_session_authority_is_rejected() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.profile-scope");
+        let worktree_id = id::<WorktreeId>("worktree.native.profile-scope");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        // A profile shard carries `StoreShardScopeV1::ProfileSessions`, which
+        // can never authorize a project-scoped lifecycle lookup.
+        let profile_sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Profile)
+            .unwrap();
+
+        assert!(!register_context_scout_lifecycle_authority(
+            [41; 16],
+            [42; 16],
+            project_id,
+            worktree_id,
+            &profile_sessions,
+        ));
+        assert!(!context_scout_lifecycle_authority_is_registered(
+            [41; 16], [42; 16]
+        ));
+    }
+
+    #[tokio::test]
+    async fn registration_rejects_a_project_that_the_authority_does_not_own() {
+        let temporary = TempDir::new().unwrap();
+        let bound_project_id = id::<ProjectId>("project.native.bound");
+        let worktree_id = id::<WorktreeId>("worktree.native.bound");
+        let runtime = project_runtime(&temporary, &bound_project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+
+        assert!(!register_context_scout_lifecycle_authority(
+            [43; 16],
+            [44; 16],
+            id::<ProjectId>("project.native.unowned"),
+            worktree_id,
+            &sessions,
+        ));
+        assert!(!context_scout_lifecycle_authority_is_registered(
+            [43; 16], [44; 16]
+        ));
+    }
+
+    #[tokio::test]
+    async fn re_registration_is_idempotent_but_conflicting_identity_is_rejected() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.rereg");
+        let worktree_id = id::<WorktreeId>("worktree.native.rereg");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+
+        assert!(register_context_scout_lifecycle_authority(
+            [31; 16],
+            [32; 16],
+            project_id.clone(),
+            worktree_id.clone(),
+            &sessions,
+        ));
+        assert!(register_context_scout_lifecycle_authority(
+            [31; 16],
+            [32; 16],
+            project_id.clone(),
+            worktree_id,
+            &sessions,
+        ));
+        // Same hook key, different native worktree: the live entry wins and
+        // the caller is told the registration did not take.
+        assert!(!register_context_scout_lifecycle_authority(
+            [31; 16],
+            [32; 16],
+            project_id,
+            id::<WorktreeId>("worktree.native.rereg-conflict"),
+            &sessions,
+        ));
+        assert!(context_scout_lifecycle_authority_is_registered(
+            [31; 16], [32; 16]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_session_authority_is_evicted_by_the_next_registration() {
+        let temporary = TempDir::new().unwrap();
+        let dead_project_id = id::<ProjectId>("project.native.dead");
+        {
+            let runtime = project_runtime(&temporary, &dead_project_id).await;
+            let sessions = runtime
+                .registered_database_arc(HostAdmissionScope::Project)
+                .unwrap();
+            assert!(register_context_scout_lifecycle_authority(
+                [11; 16],
+                [12; 16],
+                dead_project_id,
+                id::<WorktreeId>("worktree.native.dead"),
+                &sessions,
+            ));
+            // Asserted while the authority is still alive: `retain` never
+            // evicts a live entry, so this cannot race a parallel test.
+            assert!(context_scout_lifecycle_authority_is_registered(
+                [11; 16], [12; 16]
+            ));
+            drop(sessions);
+            drop(runtime);
+        }
+
+        let live_temporary = TempDir::new().unwrap();
+        let live_project_id = id::<ProjectId>("project.native.live");
+        let live_runtime = project_runtime(&live_temporary, &live_project_id).await;
+        let live_sessions = live_runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        assert!(register_context_scout_lifecycle_authority(
+            [13; 16],
+            [14; 16],
+            live_project_id,
+            id::<WorktreeId>("worktree.native.live"),
+            &live_sessions,
+        ));
+
+        assert!(
+            !context_scout_lifecycle_authority_is_registered([11; 16], [12; 16]),
+            "a registration must retain-evict authorities whose session store died"
+        );
+        assert!(context_scout_lifecycle_authority_is_registered(
+            [13; 16], [14; 16]
+        ));
+    }
+
+    #[tokio::test]
+    async fn registered_lifecycle_lookup_resolves_the_authoritative_tuple() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.registered-lookup");
+        let worktree_id = id::<WorktreeId>("worktree.native.registered-lookup");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        observation_store(&sessions)
+            .persist_observation(durable_native_observation(&project_id))
+            .await
+            .unwrap();
+        assert!(register_context_scout_lifecycle_authority(
+            [21; 16],
+            [22; 16],
+            project_id,
+            worktree_id,
+            &sessions,
+        ));
+        let session_id = id::<SessionId>("session.native.codex");
+
+        let lifecycle = lookup_registered_context_scout_lifecycle([21; 16], [22; 16], &session_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lifecycle.project_id.as_str(),
+            "project.native.registered-lookup"
+        );
+        assert_eq!(
+            lifecycle.worktree_id.as_str(),
+            "worktree.native.registered-lookup"
+        );
+        assert_eq!(lifecycle.provider_id.as_str(), "codex");
+        assert_eq!(lifecycle.session_id.as_str(), "session.native.codex");
+        assert_eq!(lifecycle.thread_id.as_str(), "thread.native.codex");
+        assert_eq!(lifecycle.turn_id.as_str(), "turn.native.codex");
+        assert_eq!(lifecycle.agent_id.as_str(), "agent.native.codex");
+        assert_eq!(
+            lifecycle.logical_message_id.as_str(),
+            "message.native.codex"
+        );
+        assert_eq!(
+            lifecycle.profile_id.as_str(),
+            sessions.binding().shard_id.profile_id.as_str()
+        );
+
+        // An unregistered hook pair resolves nothing, even though the same
+        // observation is durable and the same session id is requested.
+        assert!(
+            lookup_registered_context_scout_lifecycle([51; 16], [52; 16], &session_id)
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_rejects_a_binding_that_does_not_match_the_requested_identity() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.binding");
+        let worktree_id = id::<WorktreeId>("worktree.native.binding");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        observation_store(&sessions)
+            .persist_observation(durable_native_observation(&project_id))
+            .await
+            .unwrap();
+        let bound_profile_id = sessions.binding().shard_id.profile_id.clone();
+        let session_id = id::<SessionId>("session.native.codex");
+
+        // Control: the matching identity does resolve, so the rejections
+        // below are attributable to the binding checks and nothing else.
+        assert!(
+            lookup_context_scout_lifecycle(
+                &bound_profile_id,
+                &project_id,
+                &worktree_id,
+                &session_id,
+                sessions.as_ref(),
+            )
+            .await
+            .is_some()
+        );
+        assert!(
+            lookup_context_scout_lifecycle(
+                &UserProfileId::new("profile.native.not-bound").unwrap(),
+                &project_id,
+                &worktree_id,
+                &session_id,
+                sessions.as_ref(),
+            )
+            .await
+            .is_none(),
+            "a profile that does not own the shard must fail closed"
+        );
+        assert!(
+            lookup_context_scout_lifecycle(
+                &bound_profile_id,
+                &id::<ProjectId>("project.native.not-bound"),
+                &worktree_id,
+                &session_id,
+                sessions.as_ref(),
+            )
+            .await
+            .is_none(),
+            "a project the shard is not scoped to must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_scope_and_session_mismatches_fail_closed() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.durable-scope");
+        let worktree_id = id::<WorktreeId>("worktree.native.durable-scope");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        // Durable evidence carrying a foreign project scope, stored in the
+        // shard that the lookup is otherwise authorized against.
+        observation_store(&sessions)
+            .persist_observation(durable_native_observation(&id::<ProjectId>(
+                "project.native.foreign-scope",
+            )))
+            .await
+            .unwrap();
+        let bound_profile_id = sessions.binding().shard_id.profile_id.clone();
+
+        assert!(
+            lookup_context_scout_lifecycle(
+                &bound_profile_id,
+                &project_id,
+                &worktree_id,
+                &id::<SessionId>("session.native.codex"),
+                sessions.as_ref(),
+            )
+            .await
+            .is_none(),
+            "an observation scoped to another project must never satisfy this lookup"
+        );
+        assert!(
+            lookup_context_scout_lifecycle(
+                &bound_profile_id,
+                &project_id,
+                &worktree_id,
+                &id::<SessionId>("session.native.absent"),
+                sessions.as_ref(),
+            )
+            .await
+            .is_none(),
+            "a session with no durable evidence must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_protected_session_id_is_rejected_even_with_a_live_authority() {
+        let temporary = TempDir::new().unwrap();
+        let project_id = id::<ProjectId>("project.native.zero-protected");
+        let runtime = project_runtime(&temporary, &project_id).await;
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        observation_store(&sessions)
+            .persist_observation(durable_native_observation(&project_id))
+            .await
+            .unwrap();
+        assert!(register_context_scout_lifecycle_authority(
+            [61; 16],
+            [62; 16],
+            project_id,
+            id::<WorktreeId>("worktree.native.zero-protected"),
+            &sessions,
+        ));
+
+        assert!(
+            lookup_registered_context_scout_native_session([61; 16], [62; 16], [0; 32])
+                .await
+                .is_none(),
+            "an all-zero protected locator is never a resolvable session"
+        );
     }
 }
