@@ -1,19 +1,20 @@
 //! Strict PR13 runtime acceptance over authentic provider response captures.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracedecay::application::advisory::ci_runtime::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
     GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
 };
 use tracedecay::application::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubProviderLifecycleV1, GitHubReviewAtomicRefreshStoreV1, GitHubReviewBodyReadOutcomeV1,
+    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
     GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
-    GitHubSourceAccessAuthorityV1,
+    GitHubSourceAccessAuthorityV1, ProjectGitHubAnchorAuthorityV1,
 };
 use tracedecay::application::advisory::{
     CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource, GitHubCanonicalReviewAnchorAuthorityV1,
@@ -33,14 +34,14 @@ use tracedecay_application::{
     RequestContext, RequestId, ResolvedScope, now_micros,
 };
 use tracedecay_domain::feedback::{
-    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1,
+    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
     GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros,
+    WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -151,6 +152,34 @@ impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
         _request: &'a GitHubReviewReadRequestV1,
     ) -> FeedbackPortFuture<'a, tracedecay::application::advisory::GitHubProviderLifecycleV1> {
         Box::pin(async { panic!("denied GitHub request reached source access authority") })
+    }
+}
+
+struct SequencedGitHubSourceAccess {
+    outcomes: Mutex<VecDeque<GitHubProviderLifecycleV1>>,
+}
+
+impl SequencedGitHubSourceAccess {
+    fn new(outcomes: impl IntoIterator<Item = GitHubProviderLifecycleV1>) -> Self {
+        Self {
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+        }
+    }
+}
+
+impl GitHubSourceAccessAuthorityV1 for SequencedGitHubSourceAccess {
+    fn authorize<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+        let outcome = self
+            .outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(GitHubProviderLifecycleV1::Unavailable);
+        Box::pin(async move { outcome })
     }
 }
 
@@ -415,6 +444,207 @@ fn ci_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
         CancellationContext::active("cancel.pr13.ci").unwrap(),
     )
     .unwrap()
+}
+
+fn github_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestContext {
+    let resolved = ResolvedScope::new(
+        project_id,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+    )
+    .unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.github.body").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        ActorId::new("actor.github.body.issuer").unwrap(),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        resolved.clone(),
+        BTreeSet::from([
+            CapabilityId::new("capability.application.feedback.github-review-ingest").unwrap(),
+        ]),
+        BTreeSet::from([
+            UseCaseId::new("use-case.application.feedback.github-review-ingest").unwrap(),
+        ]),
+        DisclosureClass::Evidence,
+    )
+    .unwrap();
+    RequestContext::new(
+        ActorId::new("actor.github.body").unwrap(),
+        resolved,
+        grant,
+        RequestId::new("request.github.body").unwrap(),
+        Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
+        CancellationContext::active("cancel.github.body").unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access() {
+    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let source = "pub fn reviewed() {}\npub fn batched() {}\n";
+    std::fs::write(project.join("src/lib.rs"), source).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "tests@example.invalid"],
+        vec!["config", "user.name", "TraceDecay Tests"],
+        vec!["add", "src/lib.rs"],
+        vec!["commit", "-m", "test: seed reviewed source"],
+    ] {
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .output()
+            .expect("git command runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project)
+        .output()
+        .expect("read fixture head");
+    assert!(output.status.success());
+    let head = CommitId::new(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
+    let graph = TraceDecay::init(&project).await.unwrap();
+    let database = graph.db().clone();
+    let scope = FeedbackScopeV1 {
+        project_id: ProjectId::new("project.github.body").unwrap(),
+        repository_id: RepositoryId::new("repository.github.body").unwrap(),
+        worktree_id: WorktreeId::new("worktree.github.body").unwrap(),
+        branch_ref: "refs/heads/github-body".to_owned(),
+        head_commit_id: head.clone(),
+    };
+    let authority = ProjectGitHubAnchorAuthorityV1::new(database, &project, scope.clone()).unwrap();
+    let request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+        scope: scope.clone(),
+        pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+    };
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review_comment.json"
+    ))
+    .unwrap();
+    let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
+    let provider_body_digest =
+        ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
+    let retained_body = tracedecay::privacy::sanitize_provider_metadata_text(body).unwrap();
+    let seed = GitHubReviewAnchorSeedV1 {
+        comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
+        author_node_id: "BOT_kgDOC98s_g".to_owned(),
+        body_digest: provider_body_digest.clone(),
+        retained_body: retained_body.clone(),
+        safe_url: "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423"
+            .to_owned(),
+        path: "src/lib.rs".to_owned(),
+        original_commit_id: head.clone(),
+        observed_commit_id: head.clone(),
+        original_start_line: Some(1),
+        original_line: Some(1),
+        current_start_line: Some(1),
+        current_line: Some(1),
+    };
+    let second_seed = GitHubReviewAnchorSeedV1 {
+        comment_id: GitHubReviewCommentIdV1::new("3556767424").unwrap(),
+        author_node_id: "BOT_kgDOC98s_g".to_owned(),
+        body_digest: provider_body_digest.clone(),
+        retained_body: retained_body.clone(),
+        safe_url: "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767424"
+            .to_owned(),
+        path: "src/lib.rs".to_owned(),
+        original_commit_id: head.clone(),
+        observed_commit_id: head,
+        original_start_line: Some(2),
+        original_line: Some(2),
+        current_start_line: Some(2),
+        current_line: Some(2),
+    };
+    let batch = authority
+        .resolve_many(&request, &[seed, second_seed])
+        .await
+        .expect("canonical body anchors");
+    assert_eq!(batch.len(), 2);
+    assert_eq!(
+        batch[0].original.span,
+        Some(SourceSpan {
+            start_byte: 0,
+            end_byte: "pub fn reviewed() {}\n".len() as u64,
+        })
+    );
+    assert_eq!(
+        batch[1].original.span,
+        Some(SourceSpan {
+            start_byte: "pub fn reviewed() {}\n".len() as u64,
+            end_byte: source.len() as u64,
+        })
+    );
+    let unavailable_seed = GitHubReviewAnchorSeedV1 {
+        comment_id: GitHubReviewCommentIdV1::new("3556767425").unwrap(),
+        author_node_id: "BOT_kgDOC98s_g".to_owned(),
+        body_digest: provider_body_digest.clone(),
+        retained_body: retained_body.clone(),
+        safe_url: "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767425"
+            .to_owned(),
+        path: "src/missing.rs".to_owned(),
+        original_commit_id: scope.head_commit_id.clone(),
+        observed_commit_id: scope.head_commit_id.clone(),
+        original_start_line: Some(1),
+        original_line: Some(1),
+        current_start_line: Some(1),
+        current_line: Some(1),
+    };
+    assert!(
+        authority
+            .resolve_many(&request, &[unavailable_seed])
+            .await
+            .is_none()
+    );
+    let anchors = batch[0].clone();
+    let context = github_context(&scope, scope.project_id.clone());
+    let access = SequencedGitHubSourceAccess::new([
+        GitHubProviderLifecycleV1::Ready,
+        GitHubProviderLifecycleV1::Ready,
+    ]);
+    let GitHubReviewBodyReadOutcomeV1::Current(evidence) = authority
+        .read_body(&context, &request, &anchors.body_anchor, &access)
+        .await
+    else {
+        panic!("authorized body evidence must expand");
+    };
+    assert_eq!(evidence.body(), retained_body);
+    assert_eq!(evidence.provider_body_digest, provider_body_digest);
+
+    let revoked = SequencedGitHubSourceAccess::new([
+        GitHubProviderLifecycleV1::Ready,
+        GitHubProviderLifecycleV1::Denied,
+    ]);
+    assert!(matches!(
+        authority
+            .read_body(&context, &request, &anchors.body_anchor, &revoked)
+            .await,
+        GitHubReviewBodyReadOutcomeV1::Denied
+    ));
+    let wrong_project =
+        github_context(&scope, ProjectId::new("project.github.body.other").unwrap());
+    let never_called = SequencedGitHubSourceAccess::new([]);
+    assert!(matches!(
+        authority
+            .read_body(
+                &wrong_project,
+                &request,
+                &anchors.body_anchor,
+                &never_called,
+            )
+            .await,
+        GitHubReviewBodyReadOutcomeV1::Denied
+    ));
 }
 
 #[tokio::test]
