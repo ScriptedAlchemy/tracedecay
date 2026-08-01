@@ -1,8 +1,8 @@
 //! Shared test fixtures for the invocation-handler test suite; every
 //! themed submodule below reaches these (and all production items) via
-//! `use super::super::*;`.
+//! `use super::*;`.
 
-use super::super::*;
+use super::*;
 
 use tracedecay_lsp::{
     CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
