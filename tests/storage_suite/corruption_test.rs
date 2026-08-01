@@ -8,7 +8,6 @@
 //! - The dirty sentinel lifecycle works correctly
 //! - The full crash→detect→repair cycle works end-to-end
 
-use crate::common;
 use crate::support;
 
 use std::io::{Seek, Write};
