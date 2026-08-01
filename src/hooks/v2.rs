@@ -5,18 +5,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
-#[cfg(test)]
-use tracedecay_hooks::HookImmediateAdmissionStateV1;
 use tracedecay_hooks::{
     AsyncHookFeedbackDeliveryPortV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
     HookConfigurationSnapshotV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
     HookFeedbackDeliveryRouteV1, HookFeedbackDeliveryV1, HookFeedbackRollbackSwitchV1,
     HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
-    HookScopeBindingV1, HookScopedFeedbackV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1,
-    HookSynchronousDeadlineV1, HookTransportDispositionV1, NativeEnvelopeMaterialV1,
-    NativeHookDecodeError, SpoolAppendOutcomeV1, admit_async_exact_scope,
-    decode_bound_native_hook_event, deliver_hook_feedback, finish_synchronous_hook,
+    HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1,
+    HookTransportDispositionV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
+    SpoolAppendOutcomeV1, admit_async_exact_scope, decode_bound_native_hook_event,
+    deliver_hook_feedback, finish_synchronous_hook,
 };
+#[cfg(test)]
+use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
+
+use crate::agents::context_scout_v2::context_scout_delivery_receipt_id;
 
 use super::analytics::{HookTimingSpan, elapsed_us};
 #[cfg(test)]
@@ -603,46 +605,12 @@ async fn dispatch_decoded(
     }
 }
 
-impl HookScopedFeedbackV1 for crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
-    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        feedback_notice_matches_envelope(self, envelope)
-    }
-}
-
-impl HookScopedFeedbackV1 for crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1 {
-    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        self.receipt_id != [0; 16]
-            && self.envelope_id != [0; 16]
-            && self.delivered_at.0 > 0
-            && self.receipt_id
-                == context_scout_delivery_receipt_id(envelope.event_id, self.envelope_id)
-    }
-}
-
 #[cfg(test)]
 impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         self.feedback.receipt_id == self.receipt.receipt_id
             && self.receipt.matches_envelope(envelope)
     }
-}
-
-fn feedback_notice_matches_envelope(
-    notice: &crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
-    envelope: &HookEventEnvelopeV2,
-) -> bool {
-    notice.validate().is_ok()
-        && domain_hash16(notice.scope.project_id.as_str(), "project") == envelope.project_id
-        && domain_hash16(notice.scope.repository_id.as_str(), "repository")
-            == envelope.repository_id
-        && domain_hash16(notice.scope.worktree_id.as_str(), "worktree") == envelope.worktree_id
-}
-
-fn context_scout_delivery_receipt_id(event_id: [u8; 16], envelope_id: [u8; 16]) -> [u8; 16] {
-    let mut material = [0; 32];
-    material[..16].copy_from_slice(&event_id);
-    material[16..].copy_from_slice(&envelope_id);
-    hash16(&material)
 }
 
 #[cfg(test)]
@@ -943,10 +911,10 @@ mod tests {
                 boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
             },
         };
-        assert!(feedback_notice_matches_envelope(&notice, &current_envelope));
+        assert!(notice.matches_envelope(&current_envelope));
         let mut stale_envelope = current_envelope;
         stale_envelope.worktree_id = [9; 16];
-        assert!(!feedback_notice_matches_envelope(&notice, &stale_envelope));
+        assert!(!notice.matches_envelope(&stale_envelope));
         let response = serde_json::json!({
             "action": "hook_v2_admit",
             "status": "accepted",
