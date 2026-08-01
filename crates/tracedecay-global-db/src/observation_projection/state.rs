@@ -6,7 +6,7 @@ use tracedecay_store::{
     SessionRecord,
 };
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
 use tracedecay_sessions::compatibility::projected_content_hash;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -834,16 +834,43 @@ pub async fn converge_session_project_paths(conn: &impl Executor) -> ProjectionS
     }
     drop(rows);
 
-    for (project_path, canonical) in repairs {
-        conn.execute(
-            "UPDATE sessions
-             SET project_key = CASE WHEN project_key = ?1 THEN ?2 ELSE project_key END,
-                 project_path = ?2
-             WHERE project_path = ?1",
-            (&project_path, &canonical),
-        )
-        .await
-        .map_err(|error| storage("converge session project path", error))?;
+    // Batch every distinct drifted path into one statement per chunk via a
+    // `VALUES` CTE, rather than one `UPDATE ... WHERE project_path = ?1` per
+    // path. The old_path -> canonical mapping still varies per row (unlike
+    // the retention passes' shared marker), so each chunk binds the mapping
+    // as a small `repair` table and resolves it with a correlated subquery
+    // keyed on `sessions.project_path`, which is exactly the old loop's
+    // per-path `WHERE`/`SET` pairing collapsed into one pass. Chunked at 400
+    // paths (2 params each) to stay under SQLite's default bound-parameter
+    // limit (999).
+    const CONVERGE_CHUNK: usize = 400;
+    for chunk in repairs.chunks(CONVERGE_CHUNK) {
+        let values_clause = vec!["(?, ?)"; chunk.len()].join(",");
+        let sql = format!(
+            "WITH repair(old_path, canonical_path) AS (VALUES {values_clause})
+             UPDATE sessions
+             SET project_key = CASE
+                     WHEN project_key = (
+                         SELECT old_path FROM repair WHERE old_path = sessions.project_path
+                     )
+                     THEN (
+                         SELECT canonical_path FROM repair WHERE old_path = sessions.project_path
+                     )
+                     ELSE project_key
+                 END,
+                 project_path = (
+                     SELECT canonical_path FROM repair WHERE old_path = sessions.project_path
+                 )
+             WHERE project_path IN (SELECT old_path FROM repair)"
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 2);
+        for (project_path, canonical) in chunk {
+            values.push(Value::Text(project_path.clone()));
+            values.push(Value::Text(canonical.clone()));
+        }
+        conn.execute(&sql, values)
+            .await
+            .map_err(|error| storage("converge session project path", error))?;
     }
     Ok(())
 }
@@ -1240,6 +1267,80 @@ mod reconcile_tests {
         assert_eq!(
             path.get::<String>(2).unwrap(),
             real.to_string_lossy().as_ref()
+        );
+    }
+
+    /// The batched `WITH repair(...) AS (VALUES ...)` statement maps each
+    /// distinct drifted `project_path` to its own canonical target within one
+    /// chunked pass. Two independent families in the same batch must each
+    /// resolve to their own canonical spelling, not cross-contaminate.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_families_converge_to_distinct_canonical_paths_in_one_batch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real_a = tmp.path().join("fast-projects").join("repo-a");
+        let real_b = tmp.path().join("fast-projects").join("repo-b");
+        std::fs::create_dir_all(&real_a).unwrap();
+        std::fs::create_dir_all(&real_b).unwrap();
+        let alias_parent = tmp.path().join("home-projects");
+        std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
+        let aliased_a = alias_parent.join("repo-a");
+        let aliased_b = alias_parent.join("repo-b");
+
+        let connection = TestConnection::open(&tmp.path().join("sessions.db"));
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    provider TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    project_key TEXT NOT NULL,
+                    project_path TEXT NOT NULL
+                 );",
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('codex', 'session-a', ?1, ?1),
+                        ('codex', 'session-b', ?2, ?2)",
+                (
+                    aliased_a.to_string_lossy().as_ref(),
+                    aliased_b.to_string_lossy().as_ref(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        converge_session_project_paths(&connection).await.unwrap();
+
+        let mut rows = connection
+            .query(
+                "SELECT session_id, project_key, project_path
+                 FROM sessions ORDER BY session_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let session_a = rows.next().await.unwrap().unwrap();
+        assert_eq!(session_a.get::<String>(0).unwrap(), "session-a");
+        assert_eq!(
+            session_a.get::<String>(1).unwrap(),
+            real_a.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            session_a.get::<String>(2).unwrap(),
+            real_a.to_string_lossy().as_ref()
+        );
+        let session_b = rows.next().await.unwrap().unwrap();
+        assert_eq!(session_b.get::<String>(0).unwrap(), "session-b");
+        assert_eq!(
+            session_b.get::<String>(1).unwrap(),
+            real_b.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            session_b.get::<String>(2).unwrap(),
+            real_b.to_string_lossy().as_ref()
         );
     }
 
