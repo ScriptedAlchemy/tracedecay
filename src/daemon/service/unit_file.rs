@@ -248,7 +248,7 @@ pub(super) fn service_unit_path() -> Result<PathBuf> {
     match ServiceRunner::current()? {
         ServiceRunner::Systemd => systemd_user_service_path(),
         ServiceRunner::Launchd => launchd_user_service_path(),
-        ServiceRunner::WindowsTask => Ok(windows_task::task_path()),
+        ServiceRunner::WindowsTask => windows_task::task_path(),
     }
 }
 
