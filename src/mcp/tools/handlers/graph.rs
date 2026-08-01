@@ -106,6 +106,27 @@ fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
 
+/// Resolves the nodes a symbol-addressing tool was pointed at: `node_id` (with
+/// the `id` alias) when present, otherwise `qualified_name`. An id that no
+/// longer resolves yields no nodes rather than an error, so the caller renders
+/// an empty match list; only an argument-less call is rejected.
+async fn nodes_addressed_by_args(cg: &TraceDecay, args: &Value) -> Result<Vec<Node>> {
+    let node_id = args
+        .get("node_id")
+        .or_else(|| args.get("id"))
+        .and_then(|v| v.as_str());
+    if let Some(node_id) = node_id {
+        return Ok(cg.get_node(node_id).await?.into_iter().collect());
+    }
+
+    let Some(qualified_name) = args.get("qualified_name").and_then(|v| v.as_str()) else {
+        return Err(TraceDecayError::Config {
+            message: "missing required parameter: qualified_name or node_id".to_string(),
+        });
+    };
+    cg.get_nodes_by_qualified_name(qualified_name).await
+}
+
 fn rendered_tool_result<F>(
     cg: &TraceDecay,
     args: &Value,
@@ -1502,29 +1523,7 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
 /// qualified name or node ID. Returns the public-API surface of a symbol so
 /// callers can avoid reading the source file just to inspect the signature.
 pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let qname = args.get("qualified_name").and_then(|v| v.as_str());
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str());
-
-    if qname.is_none() && node_id.is_none() {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: qualified_name or node_id".to_string(),
-        });
-    }
-
-    let nodes = if let Some(id) = node_id {
-        match cg.get_node(id).await? {
-            Some(n) => vec![n],
-            None => vec![],
-        }
-    } else if let Some(q) = qname {
-        cg.get_nodes_by_qualified_name(q).await?
-    } else {
-        vec![]
-    };
-
+    let nodes = nodes_addressed_by_args(cg, &args).await?;
     let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
@@ -1604,28 +1603,7 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
 /// and the trait + method names each one synthesizes (per the static
 /// `derive_table`). Accepts either `node_id` or `qualified_name`.
 pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let qname = args.get("qualified_name").and_then(|v| v.as_str());
-    let node_id = args
-        .get("node_id")
-        .or_else(|| args.get("id"))
-        .and_then(|v| v.as_str());
-    if qname.is_none() && node_id.is_none() {
-        return Err(TraceDecayError::Config {
-            message: "missing required parameter: qualified_name or node_id".to_string(),
-        });
-    }
-
-    let nodes = if let Some(id) = node_id {
-        match cg.get_node(id).await? {
-            Some(n) => vec![n],
-            None => vec![],
-        }
-    } else if let Some(q) = qname {
-        cg.get_nodes_by_qualified_name(q).await?
-    } else {
-        vec![]
-    };
-
+    let nodes = nodes_addressed_by_args(cg, &args).await?;
     let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let mut items: Vec<Value> = Vec::with_capacity(nodes.len());
