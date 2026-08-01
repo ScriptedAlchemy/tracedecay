@@ -540,19 +540,23 @@ attempt_id="$(date +%s)-$$-$RANDOM-$RANDOM"
 # re-writes the full profile twice; at current profile size that outlasts the
 # maintenance window, so the owner accepted a plain copy as the recovery
 # artifact. The copy must at least LOOK like a profile before we proceed.
-if [[ "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" == 1 ]]; then
-  if [[ -z "$verified_backup" || ! -d "$verified_backup/profile" \
-    || ! -f "$verified_backup/profile/global.db" ]]; then
+if [[ -z "$verified_backup" ]]; then
+  # Owner directive (2026-08-01): dogfood no longer requires a profile backup.
+  # The forward-only boundary recovers forward on its own (retain the new
+  # binary and rerun); a profile snapshot is optional insurance, not a gate.
+  # When TRACEDECAY_DOGFOOD_BACKUP is set it is still validated and rehearsed.
+  printf 'dogfood: no TRACEDECAY_DOGFOOD_BACKUP set; proceeding without a profile backup\n' >&2
+elif [[ "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" == 1 ]]; then
+  if [[ ! -d "$verified_backup/profile" || ! -f "$verified_backup/profile/global.db" ]]; then
     printf '%s\n' \
       'TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1 requires TRACEDECAY_DOGFOOD_BACKUP to' \
       'name a directory holding a plain profile copy at <backup>/profile.' >&2
     exit 1
   fi
-elif [[ -z "$verified_backup" || ! -d "$verified_backup" \
-  || ! -f "$verified_backup/backup-manifest.json" ]]; then
+elif [[ ! -d "$verified_backup" || ! -f "$verified_backup/backup-manifest.json" ]]; then
   printf '%s\n' \
-    'dogfood requires TRACEDECAY_DOGFOOD_BACKUP to name a complete verified profile backup.' \
-    'Create one with tracedecay migrate backup-profile, then rehearse it before retrying.' >&2
+    'TRACEDECAY_DOGFOOD_BACKUP names an incomplete backup (no backup-manifest.json).' \
+    'Create one with tracedecay migrate backup-profile, or unset it to skip.' >&2
   exit 1
 fi
 
@@ -686,7 +690,7 @@ trap 'handle_signal 143' TERM
 
 # A plain owner-authorized copy has no manifest to rehearse against; the
 # checksummed path keeps its full restore-and-verify rehearsal.
-if [[ "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" != 1 ]]; then
+if [[ -n "$verified_backup" && "${TRACEDECAY_DOGFOOD_BACKUP_PLAIN:-}" != 1 ]]; then
   backup_rehearsal=$(mktemp -d "$stage_dir/dogfood-backup-rehearsal.XXXXXX")
   rmdir -- "$backup_rehearsal"
   "$source_binary" migrate rehearse-profile-backup \
