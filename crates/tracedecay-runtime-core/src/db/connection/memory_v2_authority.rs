@@ -30,7 +30,7 @@ impl Database {
 
     /// Reads V22 repair progress from an already-open authoritative writer
     /// transaction without opening a second writer connection.
-    pub async fn feedback_history_repair_progress_in_transaction(
+    pub(crate) async fn feedback_history_repair_progress_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -43,7 +43,7 @@ impl Database {
     /// Repairs one bounded V22 feedback-history batch inside an already-open
     /// authoritative writer transaction. The caller owns commit/rollback so a
     /// repair, V1 mirror work, and receipt share one atomic outcome.
-    pub async fn repair_memory_v2_feedback_history_batch_in_transaction(
+    pub(crate) async fn repair_memory_v2_feedback_history_batch_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -62,7 +62,7 @@ impl Database {
 
     /// Marks an owner-bound V23 compatibility-bank projection dirty inside an
     /// already-open authoritative writer transaction.
-    pub async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
+    pub(crate) async fn mark_memory_v2_compatibility_bank_dirty_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -86,7 +86,7 @@ impl Database {
     /// Replaces an owner-bound V23 compatibility-bank projection inside an
     /// already-open authoritative writer transaction.
     #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_memory_v2_compatibility_bank_in_transaction(
+    pub(crate) async fn upsert_memory_v2_compatibility_bank_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -113,7 +113,7 @@ impl Database {
 
     /// Deletes an empty owner-bound V23 compatibility-bank projection inside
     /// an already-open authoritative writer transaction.
-    pub async fn delete_memory_v2_compatibility_bank_in_transaction(
+    pub(crate) async fn delete_memory_v2_compatibility_bank_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -134,7 +134,7 @@ impl Database {
 
     /// Clears an owner-bound V23 dirty-bank generation only when it matches
     /// the generation the caller rebuilt in this writer transaction.
-    pub async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
+    pub(crate) async fn clear_memory_v2_compatibility_bank_dirty_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,
@@ -166,7 +166,7 @@ impl Database {
     /// Applies the guarded migrated-V1 deletion path inside the compatibility
     /// command's authority transaction, preserving one atomic receipt.
     #[allow(clippy::too_many_arguments)]
-    pub async fn purge_memory_v2_legacy_fact_payload_in_transaction(
+    pub(crate) async fn purge_memory_v2_legacy_fact_payload_in_transaction(
         &self,
         transaction: &DatabaseMemoryTransaction<'_>,
         owner: &FactOwnerV1,

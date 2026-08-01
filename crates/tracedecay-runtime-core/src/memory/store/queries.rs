@@ -93,7 +93,7 @@ impl MemoryStore<'_> {
     ///
     /// Ids are chunked at 256 per `IN (...)` statement to stay well clear of
     /// `SQLite`'s 999-parameter limit.
-    pub async fn get_facts(&self, fact_ids: &[i64]) -> Result<HashMap<i64, FactRecord>> {
+    pub(crate) async fn get_facts(&self, fact_ids: &[i64]) -> Result<HashMap<i64, FactRecord>> {
         const CHUNK: usize = 256;
         let mut facts: HashMap<i64, FactRecord> = HashMap::new();
         for chunk in fact_ids.chunks(CHUNK) {
@@ -138,7 +138,7 @@ impl MemoryStore<'_> {
     ///
     /// Ids are chunked at 256 per `IN (...)` statement to stay well clear of
     /// `SQLite`'s 999-parameter limit.
-    pub async fn fact_vectors(&self, fact_ids: &[i64]) -> Result<HashMap<i64, Vec<f64>>> {
+    pub(crate) async fn fact_vectors(&self, fact_ids: &[i64]) -> Result<HashMap<i64, Vec<f64>>> {
         const CHUNK: usize = 256;
         let mut vectors: HashMap<i64, Vec<f64>> = HashMap::new();
         for chunk in fact_ids.chunks(CHUNK) {

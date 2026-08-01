@@ -61,20 +61,20 @@ pub enum SanitizationActionV1 {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SanitizationDetectorOriginV1 {
+pub(crate) enum SanitizationDetectorOriginV1 {
     BuiltInDetectorKernel,
     SanitizerPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SanitizationDetectorRevisionV1 {
+pub(crate) enum SanitizationDetectorRevisionV1 {
     V1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SanitizationScanBoundaryV1 {
+pub(crate) enum SanitizationScanBoundaryV1 {
     RecordBytes,
     NestingDepth,
     ValueCount,
@@ -82,7 +82,7 @@ pub enum SanitizationScanBoundaryV1 {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum SanitizationScannedCoverageV1 {
+pub(crate) enum SanitizationScannedCoverageV1 {
     Complete,
     Incomplete {
         boundary: SanitizationScanBoundaryV1,
@@ -91,7 +91,7 @@ pub enum SanitizationScannedCoverageV1 {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SanitizationRemediationClassV1 {
+pub(crate) enum SanitizationRemediationClassV1 {
     RotateOrRevokeCredential,
     RemoveSensitiveValue,
     CorrectMalformedRecord,
@@ -111,7 +111,7 @@ impl SanitizationEvidenceAnchorV1 {
         }
     }
 
-    pub fn structural_location(&self) -> &str {
+    pub(crate) fn structural_location(&self) -> &str {
         &self.structural_location
     }
 }
@@ -242,7 +242,7 @@ impl SanitizationFindingV1 {
         Self::new_with_origin(detector, origin, location, confidence, action)
     }
 
-    pub fn new_with_origin(
+    pub(crate) fn new_with_origin(
         detector: PrivacyDetectorV1,
         detector_origin: SanitizationDetectorOriginV1,
         location: impl Into<String>,
@@ -264,7 +264,7 @@ impl SanitizationFindingV1 {
         }
     }
 
-    pub fn new_with_incomplete_coverage(
+    pub(crate) fn new_with_incomplete_coverage(
         detector: PrivacyDetectorV1,
         location: impl Into<String>,
         confidence: DetectionConfidenceV1,
@@ -280,11 +280,11 @@ impl SanitizationFindingV1 {
         self.detector
     }
 
-    pub fn detector_origin(&self) -> SanitizationDetectorOriginV1 {
+    pub(crate) fn detector_origin(&self) -> SanitizationDetectorOriginV1 {
         self.detector_origin
     }
 
-    pub fn detector_revision(&self) -> SanitizationDetectorRevisionV1 {
+    pub(crate) fn detector_revision(&self) -> SanitizationDetectorRevisionV1 {
         self.detector_revision
     }
 
@@ -300,7 +300,7 @@ impl SanitizationFindingV1 {
         self.action
     }
 
-    pub fn remediation_class(&self) -> SanitizationRemediationClassV1 {
+    pub(crate) fn remediation_class(&self) -> SanitizationRemediationClassV1 {
         self.remediation_class
     }
 
@@ -308,7 +308,7 @@ impl SanitizationFindingV1 {
         &self.evidence_anchors
     }
 
-    pub fn scanned_coverage(&self) -> SanitizationScannedCoverageV1 {
+    pub(crate) fn scanned_coverage(&self) -> SanitizationScannedCoverageV1 {
         self.scanned_coverage
     }
 }
@@ -396,7 +396,7 @@ impl CodeSourceSanitizationV1 {
     }
 }
 
-pub struct DetectionResult {
+pub(crate) struct DetectionResult {
     pub payload: Value,
     pub findings: Vec<SanitizationFindingV1>,
     pub quarantine_findings: Vec<SanitizationFindingV1>,
@@ -447,7 +447,7 @@ fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
         .any(|compound| separated.ends_with(compound))
 }
 
-pub fn redact_sensitive_values(
+pub(crate) fn redact_sensitive_values(
     mut payload: Value,
     sensitive_keys: &BTreeSet<String>,
 ) -> Result<DetectionResult, DetectionError> {
@@ -724,7 +724,7 @@ fn pattern_metadata(
     }
 }
 
-pub fn normalize_key(key: &str) -> String {
+pub(crate) fn normalize_key(key: &str) -> String {
     NormalizedSensitiveKey::new(key).ascii_compact().to_string()
 }
 

@@ -26,14 +26,14 @@ pub enum MemoryV2BackfillBatchOutcome {
 /// A V22 repair snapshot for legacy feedback rows that had already been
 /// imported before history/map projections existed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryV2FeedbackHistoryRepairProgress {
+pub(crate) struct MemoryV2FeedbackHistoryRepairProgress {
     pub feedback_frontier: i64,
     pub feedback_cursor: i64,
     pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoryV2FeedbackHistoryRepairBatchOutcome {
+pub(crate) enum MemoryV2FeedbackHistoryRepairBatchOutcome {
     Advanced { processed: usize },
     Complete { processed: usize },
     NotRequired,

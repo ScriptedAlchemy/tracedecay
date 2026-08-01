@@ -69,7 +69,7 @@ impl StoreDurabilityClass {
     /// Whether this class may be handled best-effort: skipped, retried
     /// later, or (for [`Self::Derived`]) dropped and rebuilt outright,
     /// without operator intervention.
-    pub const fn is_opportunistic(self) -> bool {
+    pub(crate) const fn is_opportunistic(self) -> bool {
         matches!(self, Self::Derived | Self::Recoverable)
     }
 }
@@ -153,7 +153,7 @@ pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilit
 
 /// Convenience wrapper over [`shard_kind_durability_class`] for callers that
 /// already hold a real [`StoreShardScopeV1`].
-pub fn shard_scope_durability_class(scope: &StoreShardScopeV1) -> StoreDurabilityClass {
+pub(crate) fn shard_scope_durability_class(scope: &StoreShardScopeV1) -> StoreDurabilityClass {
     shard_kind_durability_class(StoreShardKind::from(scope))
 }
 
@@ -164,7 +164,7 @@ impl StoreShardKind {
     ///
     /// Exhaustive, no wildcard arm: a new shard kind must state this
     /// deliberately rather than inherit "single-class" by omission.
-    pub const fn mixes_durability_classes(self) -> bool {
+    pub(crate) const fn mixes_durability_classes(self) -> bool {
         match self {
             // Derived code-graph tables plus durable `memory_*` tables.
             Self::Project

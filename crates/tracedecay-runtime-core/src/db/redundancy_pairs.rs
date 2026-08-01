@@ -73,7 +73,7 @@ impl Database {
     ///
     /// Callers pass pairs in canonical orientation (`a < b`); the primary key
     /// makes a re-run idempotent. Empty input is a no-op.
-    pub async fn upsert_redundancy_pairs(
+    pub(crate) async fn upsert_redundancy_pairs(
         &self,
         pairs: &[RedundancyPairWrite<'_>],
     ) -> Result<usize> {

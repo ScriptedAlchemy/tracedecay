@@ -46,7 +46,7 @@ mod registry;
 
 pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
 #[cfg(test)]
-pub use pragmas::{
+pub(crate) use pragmas::{
     adaptive_cache_sizes, platform_safe_journal_mode, platform_safe_mmap_size,
     platform_safe_synchronous_mode,
 };
@@ -216,7 +216,7 @@ pub struct DatabaseEngineConnection {
     conn: Connection,
 }
 
-pub struct DatabaseEngineStatement<'a> {
+pub(crate) struct DatabaseEngineStatement<'a> {
     target: DatabaseEngineStatementTarget<'a>,
     sql: String,
 }
@@ -551,7 +551,7 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    pub async fn prepare_engine(
+    pub(crate) async fn prepare_engine(
         &self,
         sql: &str,
     ) -> crate::db::engine::Result<DatabaseEngineStatement<'_>> {
@@ -1147,7 +1147,7 @@ impl Database {
     /// Whether this owner has no V1 legacy memory at all, so the cutover
     /// ladder would only manufacture an all-zero backfill row and a receipt
     /// for a migration that never happened.
-    pub async fn memory_v2_cutover_is_vacuous(
+    pub(crate) async fn memory_v2_cutover_is_vacuous(
         &self,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
@@ -1158,7 +1158,7 @@ impl Database {
         memory_v2::memory_v2_cutover_is_vacuous(&writer.conn, owner, source_store_id).await
     }
 
-    pub async fn load_or_capture_memory_v2_frontiers(
+    pub(crate) async fn load_or_capture_memory_v2_frontiers(
         &self,
         owner: &FactOwnerV1,
         source_store_id: &SourceStoreId,
@@ -1191,7 +1191,10 @@ impl Database {
 
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
-    pub async fn begin_isolated_read_snapshot(&self, operation: &str) -> Result<ReadSnapshot> {
+    pub(crate) async fn begin_isolated_read_snapshot(
+        &self,
+        operation: &str,
+    ) -> Result<ReadSnapshot> {
         self.inner
             .conn
             .read_snapshot()
@@ -1392,7 +1395,7 @@ impl Database {
         self.truncate_wal_for_offline_maintenance().await
     }
 
-    pub async fn checkpoint_unguarded(&self) -> Result<()> {
+    pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(
             CheckpointBlockers::default(),
@@ -1430,7 +1433,7 @@ impl Database {
         self.snapshot_to_unguarded(destination).await
     }
 
-    pub async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
+    pub(crate) async fn snapshot_to_unguarded(&self, destination: &Path) -> Result<()> {
         if destination.to_str().is_none() {
             return Err(TraceDecayError::Database {
                 message: format!(
@@ -1584,7 +1587,7 @@ impl Database {
         result
     }
 
-    pub async fn rebuild_fts_unguarded(
+    pub(crate) async fn rebuild_fts_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {

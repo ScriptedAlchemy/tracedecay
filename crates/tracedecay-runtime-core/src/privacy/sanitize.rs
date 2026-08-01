@@ -19,8 +19,8 @@ use super::detect::{
 use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
 use super::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 
-pub const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
-pub const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";
+pub(crate) const CLAUDE_SANITIZER_VERSION_V1: &str = "privacy.claude-record.v1";
+pub(crate) const OBSERVATION_SANITIZER_VERSION_V1: &str = "privacy.observation-record.v1";
 const CLAUDE_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.privacy.claude.policy.v1\0";
 const OBSERVATION_POLICY_FINGERPRINT_DOMAIN: &[u8] = b"tracedecay.privacy.observation.policy.v1\0";
 
@@ -99,7 +99,10 @@ impl ClaudeSanitizerPolicyV1 {
     }
 
     #[must_use]
-    pub fn with_sensitive_keys(mut self, keys: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+    pub(crate) fn with_sensitive_keys(
+        mut self,
+        keys: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
         self.sensitive_keys
             .extend(keys.into_iter().map(|key| normalize_key(key.as_ref())));
         self.valid = self.refresh_version().is_ok();
@@ -628,7 +631,7 @@ pub enum ClaudeSanitizationOutcomeV1 {
     },
 }
 
-pub type RecordSanitizerPolicyV1 = ClaudeSanitizerPolicyV1;
+pub(crate) type RecordSanitizerPolicyV1 = ClaudeSanitizerPolicyV1;
 pub type RecordSanitizerV1 = ClaudeRecordSanitizerV1;
 pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
 pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;

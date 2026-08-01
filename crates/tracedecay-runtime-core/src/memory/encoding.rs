@@ -12,7 +12,7 @@ impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
     pub const SERIALIZED_F32_BYTES: usize = 8 + Self::DIMENSIONS * std::mem::size_of::<f32>();
     pub const HRR_PRECISION: &'static str = "f32";
-    pub const LEGACY_HRR_PRECISION: &'static str = "f64";
+    pub(crate) const LEGACY_HRR_PRECISION: &'static str = "f64";
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
@@ -20,7 +20,7 @@ impl HolographicEncoder {
         Self
     }
 
-    pub fn encode_atom(&self, label: &str) -> Vec<f64> {
+    pub(crate) fn encode_atom(&self, label: &str) -> Vec<f64> {
         normalize_coefficients(deterministic_coefficients(label))
     }
 
