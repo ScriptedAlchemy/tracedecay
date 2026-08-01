@@ -65,7 +65,8 @@ pub use steering::{
 };
 
 #[cfg(test)]
-use analytics::{HOOK_ANALYTICS_FILENAME, HookCompletedReadinessDistributions};
+use analytics::HOOK_ANALYTICS_FILENAME;
+pub(crate) use analytics::HookCompletedReadinessDistributions;
 #[cfg(test)]
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
@@ -73,11 +74,40 @@ use analytics::{
     record_hook_invoked, record_other_hook_invoked, record_workspace_status_analytics,
 };
 
-#[cfg(test)]
 pub(crate) fn aggregate_hook_completed_readiness(
     rows: &[Value],
 ) -> HookCompletedReadinessDistributions {
     analytics::aggregate_hook_completed_readiness(rows)
+}
+
+struct RootHookReadinessProjection;
+
+impl tracedecay_dashboard_api::hooks::HookReadinessProjectionPort for RootHookReadinessProjection {
+    fn aggregate_hook_completed_readiness(&self, rows: &[Value]) -> Value {
+        let distribution = aggregate_hook_completed_readiness(rows);
+        match serde_json::to_value(distribution) {
+            Ok(value) => value,
+            Err(error) => {
+                panic!("failed to serialize canonical hook readiness distribution: {error}")
+            }
+        }
+    }
+}
+
+pub(crate) fn install_dashboard_hook_readiness_projection() -> crate::errors::Result<()> {
+    static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
+        std::sync::LazyLock::new(|| {
+            tracedecay_dashboard_api::hooks::install_hook_readiness_projection(std::sync::Arc::new(
+                RootHookReadinessProjection,
+            ))
+            .map_err(|_| "dashboard hook readiness projection is already installed".to_owned())
+        });
+    INSTALLATION
+        .as_ref()
+        .map_err(|message| crate::errors::TraceDecayError::Config {
+            message: message.clone(),
+        })
+        .copied()
 }
 use tool_hints::{HintAgent, ToolHint};
 

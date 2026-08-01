@@ -263,6 +263,7 @@ pub(super) async fn handle_dashboard(
                 Arc::new(DashboardInvocationExecutorAdapter::new(executor))
                     as Arc<dyn DashboardApplicationRuntime>
             });
+            crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
