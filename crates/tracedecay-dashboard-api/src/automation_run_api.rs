@@ -22,7 +22,7 @@ use crate::automation::run_ledger::{
     read_published_artifact_manifest, read_run_artifact_payload,
 };
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

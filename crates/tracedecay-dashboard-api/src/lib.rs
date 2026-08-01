@@ -54,12 +54,15 @@ mod graph_queries;
 mod graph_service;
 mod graph_structure_api;
 mod lcm_api;
-// SEAM(sessions): this test module is owned by `src/sessions/lcm/`, which the
-// sessions mover is extracting into `tracedecay-sessions` in parallel. The
-// `#[path]` reaches across the workspace until the lead repoints it at the
-// sessions crate (or moves the file into this crate's `tests/`).
+// SEAM(sessions): the sessions mover physically relocated this dashboard test
+// module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
+// declares it — it is a dashboard test (`super::*` resolves to this crate's
+// root, and it drives an `axum::Router` over `DashboardState`). The `#[path]`
+// follows the file so the coverage is not silently dropped; the lead should
+// physically move it back under this crate (`src/` or `tests/`) at
+// integration, at which point this attribute goes away.
 #[cfg(test)]
-#[path = "../../../src/sessions/lcm/dashboard_fixes_tests.rs"]
+#[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
 mod lcm_service;
@@ -108,13 +111,13 @@ use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
 use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
-use crate::db::{Database, DatabaseEngineConnection};
-use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::StorageMode;
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).

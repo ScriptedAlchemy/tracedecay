@@ -66,7 +66,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::db::engine::QueryExecutor;
+use tracedecay_runtime_core::db::engine::QueryExecutor;
 
 use super::DashboardState;
 use super::read_model::{
@@ -1247,7 +1247,8 @@ mod tests {
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().expect("test profile root");
+        let profile_root =
+            tracedecay_runtime_core::storage::default_profile_root().expect("test profile root");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1257,12 +1258,12 @@ mod tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             "dashboard event source fixture",
         )
         .expect("fixture lifecycle authority");
-        let _database_scope = crate::db::enter_maintenance_database_scope(
+        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
             &lifecycle,
             &profile_root,
             "dashboard event source fixture",

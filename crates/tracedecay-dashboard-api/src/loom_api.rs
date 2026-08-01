@@ -25,7 +25,7 @@ use super::read_model::{
     DashboardWatermarkV1, scope_from_state,
 };
 use super::util::{JsonQuery, query_rows};
-use crate::db::engine::{IntoParams, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, params};
 
 const DEFAULT_LIMIT: i64 = 200;
 const MAX_LIMIT: i64 = 500;

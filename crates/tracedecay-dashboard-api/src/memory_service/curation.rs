@@ -95,7 +95,7 @@ pub async fn push_curation_activity_with_level(
 ) {
     let mut events = state.curation_activity.write().await;
     events.push(json!({
-        "ts": crate::timeutil::now_iso_utc(),
+        "ts": tracedecay_runtime_core::timeutil::now_iso_utc(),
         "phase": phase,
         "message": message.into(),
         "level": level,

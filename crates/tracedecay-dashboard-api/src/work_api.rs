@@ -117,7 +117,8 @@ mod tests {
             _subject_digest: ManifestDigest,
             _observed_at: UtcMicros,
             _event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
-        ) -> DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+        ) -> DaemonInvocationExecutorFuture<'_, tracedecay_runtime_core::errors::Result<()>>
+        {
             Box::pin(async { Ok(()) })
         }
     }

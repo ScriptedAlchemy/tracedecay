@@ -15,8 +15,9 @@ use crate::tracedecay::TraceDecay;
 
 pub type RetainedProjectGraphFuture = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = crate::errors::Result<Option<Arc<TraceDecay>>>>
-            + Send
+        dyn std::future::Future<
+                Output = tracedecay_runtime_core::errors::Result<Option<Arc<TraceDecay>>>,
+            > + Send
             + 'static,
     >,
 >;
@@ -37,8 +38,12 @@ impl RetainedProjectGraphRequest {
     ) -> Self {
         Self {
             registered_root: PathBuf::from(&owner.project.canonical_root),
-            requested_git_common_dir: crate::worktree::git_common_dir(&requested_worktree_root),
-            requested_branch: crate::branch::current_branch(&requested_worktree_root),
+            requested_git_common_dir: tracedecay_runtime_core::worktree::git_common_dir(
+                &requested_worktree_root,
+            ),
+            requested_branch: tracedecay_runtime_core::branch::current_branch(
+                &requested_worktree_root,
+            ),
             requested_worktree_root,
             owner: Some(owner),
         }
@@ -46,8 +51,8 @@ impl RetainedProjectGraphRequest {
 
     pub fn for_mounted_root(root: PathBuf) -> Self {
         Self {
-            requested_git_common_dir: crate::worktree::git_common_dir(&root),
-            requested_branch: crate::branch::current_branch(&root),
+            requested_git_common_dir: tracedecay_runtime_core::worktree::git_common_dir(&root),
+            requested_branch: tracedecay_runtime_core::branch::current_branch(&root),
             registered_root: root.clone(),
             requested_worktree_root: root,
             owner: None,

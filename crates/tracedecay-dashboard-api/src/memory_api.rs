@@ -24,8 +24,10 @@ use super::DashboardState;
 use super::memory_analysis::{SIMILARITY_DEFAULT_THRESHOLD, SIMILARITY_PAIR_CAP};
 use super::memory_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
-use crate::memory::types::{MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus};
 use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_runtime_core::memory::types::{
+    MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus,
+};
 
 #[derive(Deserialize)]
 pub struct OverviewParams {
@@ -747,7 +749,9 @@ fn parse_fact_proposal_state(
         .map_err(|error| error.to_string())
 }
 
-fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Json<Value>) {
+fn fact_proposal_error(
+    err: &tracedecay_runtime_core::errors::TraceDecayError,
+) -> (StatusCode, Json<Value>) {
     let message = err.to_string();
     let status = if message.contains("not found") {
         StatusCode::NOT_FOUND

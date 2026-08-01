@@ -23,7 +23,7 @@ use crate::automation::jobs::{
     run_user_job_with_backend, save_jobs, validate_job, validate_job_id,
 };
 use crate::automation::run_ledger::AutomationTrigger;
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
