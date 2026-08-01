@@ -12,13 +12,12 @@ use tracedecay_capture::cursor_composer::normalize_cursor_composer_envelope_obse
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
-use crate::admission::HostAdmissionTestRuntimeV1;
+use crate::admission::test_support::PanicHostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 
 #[tokio::test]
 async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
-    let profile = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let state_dir = home
@@ -54,17 +53,12 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
     drop(connection);
     let project_id =
         tracedecay_domain::ProjectId::new("project.cursor-composer-cancelled").unwrap();
-    let runtime =
-        HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
-            .await
-            .unwrap();
-    let facade = runtime.facade();
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
 
     let outcome = CursorComposerSource::with_home(home.path())
         .ingest_capped_with_cancellation(
-            &facade,
+            &PanicHostAdmission,
             project.path(),
             project_id,
             DEFAULT_COMPOSER_ENVELOPE_CAP,

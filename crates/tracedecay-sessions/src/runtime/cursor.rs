@@ -1799,19 +1799,14 @@ fn dispatch_message_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::HostAdmissionTestRuntimeV1;
+    use crate::admission::test_support::PanicHostAdmission;
     use serde_json::json;
 
     #[tokio::test]
     async fn cancelled_startup_sweep_defers_before_admitting_cursor_jsonl() {
-        let profile = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let project_id = ProjectId::new("project.cursor-cancelled-startup").unwrap();
-        let runtime =
-            HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
-                .await
-                .unwrap();
         let slug = cursor_project_slug(project.path()).unwrap();
         let transcript_dir = home
             .path()
@@ -1827,14 +1822,13 @@ mod tests {
         )
         .unwrap();
         let source = CursorSweepSource::with_home(home.path());
-        let facade = runtime.facade();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
         let outcome = admit_cursor_sweep_observations_with_admission(
             &source,
             project.path(),
-            &facade,
+            &PanicHostAdmission,
             None,
             ObservationScopeV1::Project { project_id },
             &cancellation,
