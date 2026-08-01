@@ -322,6 +322,17 @@ pub enum RetrievalGrainV1 {
 }
 
 impl RetrievalGrainV1 {
+    /// Every variant, so exhaustive callers do not hand-maintain a list.
+    pub const ALL: [Self; 7] = [
+        Self::Occurrence,
+        Self::LogicalMessage,
+        Self::Turn,
+        Self::Session,
+        Self::Thread,
+        Self::Agent,
+        Self::Summary,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Occurrence => "occurrence",
@@ -473,6 +484,15 @@ pub enum SessionAuthorityClassV1 {
 }
 
 impl SessionAuthorityClassV1 {
+    /// Every variant, so exhaustive callers do not hand-maintain a list.
+    pub const ALL: [Self; 5] = [
+        Self::ProviderNative,
+        Self::CanonicalObservation,
+        Self::ExplicitAnchorAssertion,
+        Self::DerivedProjection,
+        Self::ImmutableSummary,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ProviderNative => "provider_native",
@@ -748,6 +768,14 @@ pub enum TemporalAssertionKindV1 {
 }
 
 impl TemporalAssertionKindV1 {
+    /// Every variant, so exhaustive callers do not hand-maintain a list.
+    pub const ALL: [Self; 4] = [
+        Self::Corrects,
+        Self::Supersedes,
+        Self::Contradicts,
+        Self::Supports,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Corrects => "corrects",

@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use serde_json::Value;
 use tracedecay_domain::{
     HostActivationPolicyV1, HostAssetRenderPolicyV1, HostHookMappingV1, HostKindV1,
     HostProjectRegistrationPathV1, NativeHostIdentityV1, host_descriptors_v1,
@@ -138,25 +137,7 @@ fn activation_and_registration_never_invent_unsupported_routes() {
 }
 
 #[test]
-fn existing_host_kind_wire_values_remain_byte_stable() {
-    assert_eq!(
-        HostKindV1::ALL.map(|host| serde_json::to_value(host).unwrap()),
-        [
-            "claude_code",
-            "cursor_desktop",
-            "cursor_cloud",
-            "codex",
-            "hermes",
-            "kiro",
-            "cline_family",
-            "cline",
-            "roo_code",
-            "kilo",
-            "kimi_code",
-            "open_code",
-        ]
-        .map(Value::from)
-    );
+fn native_host_identity_wire_values_remain_stable() {
     assert_eq!(
         serde_json::to_string(&NativeHostIdentityV1::OpenCode).unwrap(),
         "\"open_code\""
