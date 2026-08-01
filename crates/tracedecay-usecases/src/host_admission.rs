@@ -30,10 +30,10 @@ use crate::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
     ObservationApplication, ObservationApplicationError, ObservationCancellation,
 };
+use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::privacy::RecordSanitizerV1;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
-use crate::store::observation::GlobalDbObservationStore;
 
 mod disposition;
 mod durability;
@@ -716,8 +716,11 @@ impl<'a> HostAdmissionFacade<'a> {
             .registered_database(HostAdmissionScope::Project)
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?;
-        database
-            .evidence_assembly_store()?
+        crate::evidence_assembly::RuntimeEvidenceAssemblyStore::new(
+            database.binding().shard_id.profile_id.clone(),
+            database.runtime().clone(),
+            database.authority().clone(),
+        )?
             .resolve_anchor(context, owner, anchor_id)
             .await
     }
@@ -839,8 +842,10 @@ impl<'a> HostAdmissionFacade<'a> {
             .await
             .map_err(|error| classify_error(&error))?;
         if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
-            database
-                .external_source_store()
+            crate::external_source_store::RuntimeExternalSourceStore::new(
+                database.runtime().clone(),
+                database.authority().clone(),
+            )
                 .map_err(|error| {
                     tracing::warn!(%error, "registered external-source adapter is unavailable");
                     HostAdmissionOutcome::registered_authority_unavailable()
@@ -946,7 +951,10 @@ impl<'a> HostAdmissionFacade<'a> {
         scope: HostAdmissionScope,
     ) -> Result<GlobalDbObservationStore<'a>, HostAdmissionOutcome> {
         match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(database.observation_store()),
+            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
+                database.runtime(),
+                database.authority(),
+            )),
             None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
         }
     }
@@ -979,7 +987,10 @@ impl<'a> HostAdmissionFacade<'a> {
             return Err(probe);
         }
         match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(database.observation_store()),
+            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
+                database.runtime(),
+                database.authority(),
+            )),
             None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
         }
     }
@@ -1053,6 +1064,7 @@ pub enum LcmLineageFaultForTest {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LcmLineageCountsForTest {
     pub active_generations: i64,
@@ -1064,6 +1076,7 @@ pub struct LcmLineageCountsForTest {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcmExternalPayloadManifestTestRecord {
     pub payload_ref: String,
@@ -1081,6 +1094,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 /// registry, and actor-time database authority used by the daemon. It exposes
 /// neither raw admission authorities nor registered database handles.
 #[doc(hidden)]
+#[cfg(test)]
 #[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
@@ -1096,6 +1110,7 @@ pub struct HostAdmissionTestRuntimeV1 {
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
@@ -1199,12 +1214,12 @@ fn session_domain_digest_error(
 /// instead of the bare runtime makes a profile-scoped runtime unrepresentable
 /// at those seams, so the mismatch is a compile error at the call site rather
 /// than a panic deep inside construction.
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ProjectScopedTestRuntimeV1(Arc<HostAdmissionTestRuntimeV1>);
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl ProjectScopedTestRuntimeV1 {
     /// Checked promotion for runtimes whose scope is not known statically,
     /// such as one recovered from an already-open graph.
@@ -1229,7 +1244,7 @@ impl ProjectScopedTestRuntimeV1 {
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
     type Target = HostAdmissionTestRuntimeV1;
 
@@ -1239,6 +1254,7 @@ impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
 }
 
 #[allow(dead_code)] // integration/unit-test fixture; methods reached outside lib-only builds
+#[cfg(test)]
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
@@ -2184,14 +2200,14 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn plan_registry_reap(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_runtime_core::project_registry::RegistryReapPlan> {
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_global_db::RegistryReapPlan> {
         self.profile_database.plan_registry_reap().await
     }
 
     #[doc(hidden)]
     pub async fn apply_registry_reap(
         &self,
-        plan: &tracedecay_runtime_core::project_registry::RegistryReapPlan,
+        plan: &tracedecay_global_db::RegistryReapPlan,
     ) -> tracedecay_runtime_core::errors::Result<usize> {
         self.profile_database.apply_registry_reap(plan).await
     }

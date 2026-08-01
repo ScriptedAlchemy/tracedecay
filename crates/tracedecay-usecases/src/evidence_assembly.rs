@@ -8,9 +8,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{RetrievalAnchorId, UtcMicros, canonical_sha256};
 
-use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
 
 /// Typed Stage-C adapter for canonical V3 evidence assemblies.
 ///
