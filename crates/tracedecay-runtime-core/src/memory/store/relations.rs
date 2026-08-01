@@ -274,22 +274,4 @@ impl MemoryStore<'_> {
         }
         Ok(related.into_iter().collect())
     }
-
-    pub(crate) async fn remove_fact_relation(
-        &self,
-        source_fact_id: i64,
-        target_fact_id: i64,
-        relation: FactRelationKind,
-    ) -> Result<bool> {
-        let changed = self
-            .conn
-            .execute(
-                "DELETE FROM memory_fact_relations
-                 WHERE source_fact_id = ?1 AND target_fact_id = ?2 AND relation = ?3",
-                params![source_fact_id, target_fact_id, relation.as_str()],
-            )
-            .await
-            .map_err(|e| db_error("remove_fact_relation", e))?;
-        Ok(changed > 0)
-    }
 }

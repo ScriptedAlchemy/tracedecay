@@ -1,3 +1,4 @@
+use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionStateV1,
@@ -18,11 +19,7 @@ impl From<RetrievalAnchorStoreError> for TraceDecayError {
 }
 
 fn validate_label(value: &str, field: &str) -> Result<()> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
+    if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
         return Err(authority_error(format!("{field} is not canonical")));
     }
     Ok(())
