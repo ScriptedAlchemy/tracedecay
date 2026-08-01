@@ -1,6 +1,6 @@
 //! Read and access-tracking queries for `MemoryStore`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::db::engine::{Value, params};
 use crate::errors::Result;
@@ -9,7 +9,10 @@ use crate::memory::trust::DEFAULT_MIN_TRUST;
 use crate::memory::types::{FactRecord, MemoryCategory};
 use crate::tracedecay::current_timestamp;
 
-use super::{MemoryStore, db_error, db_message, fact_from_row, normalized_limit, sql_i64_list};
+use super::{
+    ENTITY_BATCH_SIZE, MemoryStore, db_error, db_message, fact_from_row, normalized_limit,
+    parse_category, sql_i64_list,
+};
 
 impl MemoryStore<'_> {
     pub async fn list_facts(
@@ -130,6 +133,69 @@ impl MemoryStore<'_> {
             fact.entities = entities_by_fact.remove(&fact.fact_id).unwrap_or_default();
         }
         Ok(facts)
+    }
+
+    /// Batched existence check for fact ids. Returns the subset of
+    /// `fact_ids` present in `memory_facts`, without the full 16-column
+    /// row fetch or per-id entity `JOIN` that [`Self::get_fact`] performs.
+    /// Callers that only need to know whether facts exist should use this
+    /// instead of discarding the record returned by `get_fact`.
+    pub(crate) async fn facts_exist(&self, fact_ids: &[i64]) -> Result<HashSet<i64>> {
+        let mut existing = HashSet::with_capacity(fact_ids.len());
+        for chunk in fact_ids.chunks(ENTITY_BATCH_SIZE) {
+            let Some(id_list) = sql_i64_list(chunk) else {
+                continue;
+            };
+            let sql = format!("SELECT fact_id FROM memory_facts WHERE fact_id IN ({id_list})");
+            let mut rows = self
+                .conn
+                .query(&sql, params![])
+                .await
+                .map_err(|e| db_error("facts_exist", e))?;
+            while let Some(row) = rows.next().await.map_err(|e| db_error("facts_exist", e))? {
+                existing.insert(row.get::<i64>(0).map_err(|e| db_error("facts_exist", e))?);
+            }
+        }
+        Ok(existing)
+    }
+
+    /// Batched category lookup for fact ids, for callers (bank/dirty
+    /// marking) that only need the stored `category` rather than the full
+    /// record [`Self::get_fact`] would return. Ids absent from
+    /// `memory_facts` are simply absent from the returned map.
+    pub(crate) async fn fact_categories(
+        &self,
+        fact_ids: &[i64],
+    ) -> Result<HashMap<i64, MemoryCategory>> {
+        let mut categories = HashMap::with_capacity(fact_ids.len());
+        for chunk in fact_ids.chunks(ENTITY_BATCH_SIZE) {
+            let Some(id_list) = sql_i64_list(chunk) else {
+                continue;
+            };
+            let sql =
+                format!("SELECT fact_id, category FROM memory_facts WHERE fact_id IN ({id_list})");
+            let mut rows = self
+                .conn
+                .query(&sql, params![])
+                .await
+                .map_err(|e| db_error("fact_categories", e))?;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| db_error("fact_categories", e))?
+            {
+                let fact_id = row
+                    .get::<i64>(0)
+                    .map_err(|e| db_error("fact_categories", e))?;
+                let category = parse_category(
+                    &row.get::<String>(1)
+                        .map_err(|e| db_error("fact_categories", e))?,
+                    "fact_categories",
+                )?;
+                categories.insert(fact_id, category);
+            }
+        }
+        Ok(categories)
     }
 
     /// Bulk-loads stored HRR vectors by `fact_id`. Facts whose vector is NULL or

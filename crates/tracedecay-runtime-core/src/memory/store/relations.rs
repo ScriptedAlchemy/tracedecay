@@ -65,9 +65,8 @@ impl MemoryStore<'_> {
         if source.is_empty() {
             return Err(db_message("upsert_fact_relation", "source cannot be empty"));
         }
-        if self.get_fact(source_fact_id).await?.is_none()
-            || self.get_fact(target_fact_id).await?.is_none()
-        {
+        let existing = self.facts_exist(&[source_fact_id, target_fact_id]).await?;
+        if !existing.contains(&source_fact_id) || !existing.contains(&target_fact_id) {
             return Err(db_message(
                 "upsert_fact_relation",
                 "source and target facts must both exist in this project store",
