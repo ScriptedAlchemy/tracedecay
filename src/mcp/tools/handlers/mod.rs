@@ -700,7 +700,8 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         );
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
-        // diagnostics_read without an executor falls through to analysis.
+        // `tracedecay_diagnostics` without an executor falls through to the
+        // analysis group, whose binding row routes it to the local handler.
         let dispatch_group = classify_mcp_tool_dispatch_group(
             tool_name,
             options.application_invocation_executor.is_some(),
@@ -826,13 +827,23 @@ fn unknown_tool_error(tool_name: &str) -> TraceDecayError {
     }
 }
 
+/// The `diagnostics_read` name that still carries the pre-application argument
+/// shape, and so the only one [`dispatch_analysis_tools`] can serve in-process.
+const DIAGNOSTICS_COMPATIBILITY_TOOL: &str = "tracedecay_diagnostics";
+
 fn classify_mcp_tool_dispatch_group(
     tool_name: &str,
     application_invocation_executor_available: bool,
 ) -> Option<McpToolDispatchGroup> {
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) {
+        // `DiagnosticsRead` answers to two tool names. Only the compatibility
+        // name has an in-process analysis handler that accepts its arguments,
+        // so only that name is deferred when no executor is attached.
+        // `tracedecay_diagnostics_read` stays on the surface, which reports the
+        // transport as unavailable rather than failing as an unknown tool.
         let defer_diagnostics_without_executor = operation
             == ApplicationSurfaceOperation::DiagnosticsRead
+            && tool_name == DIAGNOSTICS_COMPATIBILITY_TOOL
             && !application_invocation_executor_available;
         if !defer_diagnostics_without_executor {
             return Some(McpToolDispatchGroup::ApplicationSurface);
@@ -1722,6 +1733,34 @@ mod tests {
         }
     }
 
+    /// `DiagnosticsRead` answers to two tool names, and the classifier only
+    /// declines the surface for one of them. The deferred name must land on a
+    /// group that owns a concrete handler; it previously resolved to nothing,
+    /// so every executor-less server answered `unknown tool`.
+    #[test]
+    fn diagnostics_without_an_executor_reaches_the_analysis_handler() {
+        assert_eq!(
+            classify_mcp_tool_dispatch_group("tracedecay_diagnostics", true),
+            Some(McpToolDispatchGroup::ApplicationSurface),
+        );
+        assert_eq!(
+            classify_mcp_tool_dispatch_group("tracedecay_diagnostics", false),
+            Some(McpToolDispatchGroup::Analysis),
+        );
+        assert_eq!(
+            dispatch_group_for_tool("tracedecay_diagnostics"),
+            Some(McpToolDispatchGroup::Analysis),
+            "the deferred lookup has no other table to resolve against",
+        );
+        for executor_available in [true, false] {
+            assert_eq!(
+                classify_mcp_tool_dispatch_group("tracedecay_diagnostics_read", executor_available),
+                Some(McpToolDispatchGroup::ApplicationSurface),
+                "the reviewed request shape has no in-process handler to fall back to",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         let _env_lock = lock_user_data_dir_test_env();
@@ -1745,66 +1784,77 @@ mod tests {
                 "{} is advertised more than once",
                 definition.name
             );
-            let group = classify_mcp_tool_dispatch_group(&definition.name, true)
-                .unwrap_or_else(|| panic!("{} has no production dispatch entry", definition.name));
-
-            match group {
-                McpToolDispatchGroup::ApplicationSurface => assert!(
-                    ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
-                    "{} has no application-surface handler entry",
-                    definition.name
-                ),
-                McpToolDispatchGroup::RetainedApplication => {
-                    let operation = RetainedSurfaceOperation::from_name(&definition.name)
-                        .unwrap_or_else(|| {
-                            panic!("{} has no retained-surface handler entry", definition.name)
-                        });
-                    let composition = retained_mcp_composition().unwrap_or_else(|error| {
-                        panic!("{} catalog composition failed: {error}", definition.name)
+            // Both executor states, because the classifier defers a tool to a
+            // different group when no application invocation executor is
+            // attached. Probing only the attached state let the deferred group
+            // resolve to nothing at all without failing this test.
+            for executor_available in [true, false] {
+                let group = classify_mcp_tool_dispatch_group(&definition.name, executor_available)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} has no production dispatch entry with executor_available={executor_available}",
+                            definition.name
+                        )
                     });
-                    let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                    let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                    let capability = composition
-                        .snapshot()
-                        .resolve_binding(
-                            &profile,
-                            BindingSurface::Mcp,
-                            &operation_name,
-                            1,
-                            &BTreeSet::new(),
-                        )
-                        .unwrap_or_else(|| {
-                            panic!("{} catalog binding is not callable", definition.name)
+
+                match group {
+                    McpToolDispatchGroup::ApplicationSurface => assert!(
+                        ApplicationSurfaceOperation::from_tool_name(&definition.name).is_some(),
+                        "{} has no application-surface handler entry",
+                        definition.name
+                    ),
+                    McpToolDispatchGroup::RetainedApplication => {
+                        let operation = RetainedSurfaceOperation::from_name(&definition.name)
+                            .unwrap_or_else(|| {
+                                panic!("{} has no retained-surface handler entry", definition.name)
+                            });
+                        let composition = retained_mcp_composition().unwrap_or_else(|error| {
+                            panic!("{} catalog composition failed: {error}", definition.name)
                         });
-                    let expected = retained_surface_application_operation(operation).unwrap();
-                    assert_eq!(capability.capability_id(), expected.capability_id());
-                    assert_eq!(capability.use_case_id(), expected.use_case_id());
-                    assert!(
-                        composition
-                            .bind_handler(capability.use_case_id(), &())
-                            .is_some(),
-                        "{} application handler is not registered",
-                        definition.name
-                    );
-                }
-                group => {
-                    assert_eq!(
-                        dispatch_group_for_tool(&definition.name),
-                        Some(group),
-                        "{} does not resolve through the canonical MCP binding registry",
-                        definition.name
-                    );
-                    assert!(
-                        concrete_dispatch_group_accepts(
-                            group,
-                            &definition.name,
-                            &cg,
-                            options.clone()
-                        )
-                        .await,
-                        "{} has no concrete handler-family entry",
-                        definition.name
-                    );
+                        let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+                        let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+                        let capability = composition
+                            .snapshot()
+                            .resolve_binding(
+                                &profile,
+                                BindingSurface::Mcp,
+                                &operation_name,
+                                1,
+                                &BTreeSet::new(),
+                            )
+                            .unwrap_or_else(|| {
+                                panic!("{} catalog binding is not callable", definition.name)
+                            });
+                        let expected = retained_surface_application_operation(operation).unwrap();
+                        assert_eq!(capability.capability_id(), expected.capability_id());
+                        assert_eq!(capability.use_case_id(), expected.use_case_id());
+                        assert!(
+                            composition
+                                .bind_handler(capability.use_case_id(), &())
+                                .is_some(),
+                            "{} application handler is not registered",
+                            definition.name
+                        );
+                    }
+                    group => {
+                        assert_eq!(
+                            dispatch_group_for_tool(&definition.name),
+                            Some(group),
+                            "{} does not resolve through the canonical MCP binding registry",
+                            definition.name
+                        );
+                        assert!(
+                            concrete_dispatch_group_accepts(
+                                group,
+                                &definition.name,
+                                &cg,
+                                options.clone()
+                            )
+                            .await,
+                            "{} has no concrete handler-family entry",
+                            definition.name
+                        );
+                    }
                 }
             }
         }
@@ -1817,11 +1867,13 @@ mod tests {
             "tracedecay_multi_root_execute",
         ] {
             assert!(!advertised.contains(tool_name));
-            assert_eq!(
-                classify_mcp_tool_dispatch_group(tool_name, true),
-                None,
-                "{tool_name} must fail closed"
-            );
+            for executor_available in [true, false] {
+                assert_eq!(
+                    classify_mcp_tool_dispatch_group(tool_name, executor_available),
+                    None,
+                    "{tool_name} must fail closed with executor_available={executor_available}"
+                );
+            }
             let rejected = handle_tool_call_with_registry_and_implicit_project(
                 &cg,
                 tool_name,
