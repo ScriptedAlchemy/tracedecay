@@ -228,7 +228,6 @@ pub trait CapabilityRoutingEvaluator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityRoutingEvaluatorV1 {
     evaluator_id: PolicyIdentifierV1,
-    evaluator_revision: u64,
 }
 
 impl Default for CapabilityRoutingEvaluatorV1 {
@@ -236,12 +235,16 @@ impl Default for CapabilityRoutingEvaluatorV1 {
         Self {
             evaluator_id: PolicyIdentifierV1::new("capability_routing.v1")
                 .expect("static evaluator identifier is valid"),
-            evaluator_revision: 1,
         }
     }
 }
 
 impl CapabilityRoutingEvaluatorV1 {
+    /// Revision of this reviewed implementation, recorded with every decision
+    /// so replay can refuse a substituted evaluator. It is a property of the
+    /// code, not of an instance.
+    const EVALUATOR_REVISION: u64 = 1;
+
     fn decision(
         &self,
         request: &CapabilityRoutingRequestV1,
@@ -251,7 +254,7 @@ impl CapabilityRoutingEvaluatorV1 {
     ) -> CapabilityRoutingDecisionV1 {
         CapabilityRoutingDecisionV1 {
             evaluator_id: self.evaluator_id.clone(),
-            evaluator_revision: self.evaluator_revision,
+            evaluator_revision: Self::EVALUATOR_REVISION,
             input_digest: policy_digest("tracedecay.policy.capability-routing-input.v1", request),
             requested_use_case_id: request.requested_use_case_id.clone(),
             grant_id: request.grant.grant_id.clone(),
