@@ -327,6 +327,51 @@ async fn test_unresolved_refs() {
     assert!(refs_after.is_empty());
 }
 
+/// A first index of a large repository leaves far more unresolved references
+/// than the `SQLite` runtime will materialize for a single query, and the
+/// runtime rejects an oversized query outright instead of truncating it.
+/// Reading them back must page, or branch sync fails with
+/// "migration SQL query materialization exceeded its limit".
+#[tokio::test]
+async fn unresolved_refs_read_back_beyond_the_runtime_query_limit() {
+    /// The `SQLite` runtime refuses a single query over this many rows.
+    const RUNTIME_QUERY_ROW_LIMIT: u32 = 10_000;
+    const REFS: u32 = RUNTIME_QUERY_ROW_LIMIT + 1;
+
+    let (db, _dir) = setup_db().await;
+    let node = sample_node("paged-ref-node", "my_func", "src/lib.rs");
+    db.insert_node(&node).await.expect("failed to insert node");
+
+    let refs: Vec<UnresolvedRef> = (0..REFS)
+        .map(|index| UnresolvedRef {
+            from_node_id: "paged-ref-node".to_string(),
+            reference_name: format!("target_{index:05}"),
+            reference_kind: EdgeKind::Calls,
+            line: index,
+            column: 0,
+            file_path: "src/lib.rs".to_string(),
+        })
+        .collect();
+    db.insert_unresolved_refs(&refs)
+        .await
+        .expect("failed to insert unresolved refs");
+
+    let read_back = db
+        .get_unresolved_refs()
+        .await
+        .expect("a paged scan must not exceed the runtime materialization limit");
+
+    assert_eq!(read_back.len(), refs.len());
+    assert_eq!(
+        read_back.first().map(|uref| uref.reference_name.as_str()),
+        Some("target_00000")
+    );
+    assert_eq!(
+        read_back.last().map(|uref| uref.reference_name.as_str()),
+        Some("target_10000")
+    );
+}
+
 #[tokio::test]
 async fn test_batch_insert_nodes() {
     let (db, _dir) = setup_db().await;
