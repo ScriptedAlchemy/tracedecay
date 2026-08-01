@@ -2,6 +2,41 @@
 
 use super::*;
 
+/// Upper bound for the size of the `DaemonInvocationService::invoke` future.
+///
+/// `invoke` matches over every daemon payload, so without boxing its coroutine
+/// is as large as the widest payload arm (~46 KiB). That future is embedded by
+/// value in every caller's future, so the cost multiplies across call sites and
+/// exhausts the default 2 MiB thread stack that both tokio workers and libtest
+/// threads use. The large arms are therefore `Box::pin`ned before being awaited.
+#[cfg(test)]
+const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
+
+#[cfg(test)]
+mod future_size_guard {
+    use super::*;
+
+    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    /// Fails if a payload arm stops boxing its awaited future and the dispatch
+    /// coroutine grows back toward the size that overflowed default stacks.
+    #[test]
+    fn invoke_future_stays_within_budget() {
+        #![allow(unreachable_code, clippy::diverging_sub_expression)]
+        let size = future_size(|| {
+            DaemonInvocationService::invoke(loop {}, loop {}, loop {}, loop {}, loop {}, loop {})
+        });
+        assert!(
+            size <= INVOKE_FUTURE_SIZE_BUDGET,
+            "DaemonInvocationService::invoke future is {size} bytes, over the \
+             {INVOKE_FUTURE_SIZE_BUDGET} byte budget; box the awaited future of \
+             any large payload arm in the dispatch match",
+        );
+    }
+}
+
 #[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
@@ -106,7 +141,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_git_preview(
+                Box::pin(execute_git_preview(
                     &self.operation_events,
                     request_id,
                     git_service,
@@ -114,7 +149,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::GitApply {
@@ -123,7 +158,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_git_apply(
+                Box::pin(execute_git_apply(
                     &self.operation_events,
                     request_id,
                     git_service,
@@ -131,7 +166,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::FeedbackDiagnostics {
@@ -278,7 +313,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_primitive(
+                Box::pin(execute_primitive(
                     self,
                     project_root,
                     request_id,
@@ -287,7 +322,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::PrimitiveAffectedTests {
@@ -296,7 +331,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_primitive(
+                Box::pin(execute_primitive(
                     self,
                     project_root,
                     request_id,
@@ -305,7 +340,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::PrimitiveTestResults {
@@ -314,7 +349,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_primitive(
+                Box::pin(execute_primitive(
                     self,
                     project_root,
                     request_id,
@@ -323,7 +358,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::PrimitiveRead {
@@ -333,7 +368,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_primitive(
+                Box::pin(execute_primitive(
                     self,
                     project_root,
                     request_id,
@@ -342,7 +377,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::PrimitiveCode {
@@ -368,7 +403,7 @@ impl DaemonInvocationService {
                         );
                     }
                 };
-                execute_primitive(
+                Box::pin(execute_primitive(
                     self,
                     project_root,
                     request_id,
@@ -377,7 +412,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::CallableCode {
@@ -388,7 +423,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_callable_code(
+                Box::pin(execute_callable_code(
                     self,
                     project_root,
                     request_id,
@@ -398,7 +433,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::Configuration {
@@ -419,7 +454,7 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 }
-                execute_configuration(
+                Box::pin(execute_configuration(
                     request_id,
                     configuration_runtime,
                     surface_operation,
@@ -427,7 +462,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::ContextScout {
@@ -437,7 +472,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
             } => {
-                execute_context_scout(
+                Box::pin(execute_context_scout(
                     self,
                     request_id,
                     configuration_runtime,
@@ -446,7 +481,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
@@ -496,7 +531,7 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
-                execute_workflow_application(
+                Box::pin(execute_workflow_application(
                     registered,
                     project_root,
                     request_id,
@@ -504,7 +539,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::WorkAttempt {
@@ -519,14 +554,14 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
-                execute_work_attempt(
+                Box::pin(execute_work_attempt(
                     registered,
                     request_id,
                     request,
                     observed_at,
                     deadline,
                     cancellation,
-                )
+                ))
                 .await
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
