@@ -13,7 +13,7 @@ use super::failure::{
 };
 
 /// Durable fair-rotation cursor for profile-wide provider catch-up passes.
-pub(super) const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
+pub const USER_INGEST_PROVIDER_FRONTIER_KEY: &str =
     "tracedecay-internal:user-ingest-provider-frontier:v1";
 
 /// Production bounds for transcript multi-source passes (discovery/queue/work).

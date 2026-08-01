@@ -619,7 +619,7 @@ pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String
         .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
 }
 
-pub async fn read_new_rows_strict(
+pub(super) async fn read_new_rows_strict(
     conn: &SqliteReadConn,
     select_sql: &str,
     prev: StoredCursor,

@@ -65,7 +65,7 @@ impl TranscriptCatchUpFailure {
     /// Mutable session ingestion requires a retained daemon registry mount.
     /// Compatibility callers without that mount must fail before touching the
     /// legacy database or any provider source.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(super) const fn registered_authority_unavailable(provider: &'static str) -> Self {
         Self::new(
             provider,
@@ -87,7 +87,7 @@ pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailur
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct IngestPassBounds {
+pub struct IngestPassBounds {
     /// Maximum work units discovered before discovery itself is truncated.
     pub discovered_units: usize,
     /// Maximum work units admitted into one pass after fair rotation.
@@ -127,7 +127,7 @@ impl IngestPassCoverage {
 
 /// Narrow additive pass result required by PR6 bounded multi-source scheduling.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct IngestPassOutcome {
+pub struct IngestPassOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,

@@ -291,8 +291,8 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cance
     .into_transcript_outcome()
 }
 
-#[cfg(test)]
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<
     A: SessionIngestAuthority,
 >(
     _db: &A,
@@ -309,7 +309,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_r
 }
 
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded<
+pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
     A: SessionIngestAuthority,
 >(
     registered: (&BrainId, &UserProfileId, &A),

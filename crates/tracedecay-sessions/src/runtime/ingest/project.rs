@@ -95,7 +95,7 @@ pub async fn ingest_project_sources_for_provider_with_cancellation<A: SessionIng
 /// Standalone callers do not own a registered runtime and therefore fail
 /// closed for observation providers. Daemon-owned callers must use
 /// [`ingest_project_sources_for_provider`] with their retained registry mount.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn ingest_project_sources_for_provider_without_registered_authority<
     A: SessionIngestAuthority,
 >(

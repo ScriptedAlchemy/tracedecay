@@ -46,7 +46,8 @@ use crate::runtime::source::{
 use serde_json::{Map, Value};
 #[cfg(test)]
 use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
+    CanonicalObservationEnvelopeV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
+    ObservationSourceRangeV1,
 };
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
@@ -901,6 +902,180 @@ fn message_metadata(provider: &str, entry: &Value, location_cwd: &Path) -> Value
 mod observation_tests {
     use super::*;
 
+    fn write_checked_in_native_task(tasks: &Path, project: &Path, api_filename: &str) -> PathBuf {
+        let task = tasks.join("checked-in-native");
+        std::fs::create_dir_all(&task).unwrap();
+        let mut metadata: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/transcript_golden/cline_like/input/task_metadata.json"
+        ))
+        .unwrap();
+        metadata["workspacePath"] = Value::String(project.to_string_lossy().into_owned());
+        std::fs::write(
+            task.join("task_metadata.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+        let fixture = match api_filename {
+            "api_messages.json" => include_str!(
+                "../../../../tests/fixtures/transcript_golden/cline_like/input/api_messages.json"
+            ),
+            "api_conversation_history.json" => include_str!(
+                "../../../../tests/fixtures/transcript_golden/cline_like/input/api_conversation_history.json"
+            ),
+            other => panic!("unsupported checked-in Cline-family fixture {other}"),
+        };
+        let api = task.join(api_filename);
+        std::fs::write(&api, fixture).unwrap();
+        std::fs::write(
+            task.join("ui_messages.json"),
+            include_str!(
+                "../../../../tests/fixtures/transcript_golden/cline_like/input/ui_messages.json"
+            ),
+        )
+        .unwrap();
+        api
+    }
+
+    #[tokio::test]
+    async fn checked_in_cline_family_snapshots_preserve_receipts_through_failures_and_replay() {
+        use crate::admission::test_support::MemoryHostAdmission;
+
+        for (provider, api_filename) in [
+            ("cline", "api_conversation_history.json"),
+            ("roo-code", "api_messages.json"),
+            ("kilo", "api_conversation_history.json"),
+        ] {
+            let temp = tempfile::TempDir::new().expect("temp Cline-family storage");
+            let project = temp.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let tasks = temp.path().join("tasks");
+            let api = write_checked_in_native_task(&tasks, &project, api_filename);
+            let source = ClineLikeSource {
+                provider,
+                storage_roots: vec![tasks],
+                user_registered_roots: None,
+            };
+            let admission = MemoryHostAdmission::default();
+
+            let first = capture_cline_like_snapshot_observations(
+                &admission,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider}: checked-in capture failed: {error}"));
+            assert_eq!(first.stats.messages_upserted, 3, "{provider}");
+
+            let observations = admission.observations();
+            assert_eq!(observations.len(), 3, "{provider}");
+            let receipts = observations
+                .iter()
+                .map(|item| {
+                    let envelope: CanonicalObservationEnvelopeV1 =
+                        serde_json::from_value(item.observation().payload().clone())
+                            .unwrap_or_else(|error| {
+                                panic!("{provider}: canonical envelope: {error}")
+                            });
+                    assert_eq!(envelope.provider().as_str(), provider);
+                    item.commit_receipt().clone()
+                })
+                .collect::<Vec<_>>();
+
+            for _ in 0..16 {
+                capture_cline_like_snapshot_observations(
+                    &admission,
+                    &source,
+                    &project,
+                    ObservationScopeV1::Profile,
+                    None,
+                    &ObservationCancellation::default(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{provider}: duplicate storm failed: {error}"));
+            }
+            assert_eq!(
+                admission.observations().len(),
+                3,
+                "{provider}: duplicate storm must coalesce"
+            );
+
+            let original = std::fs::read(&api).unwrap();
+            std::fs::write(&api, b"[{\"role\":}]").unwrap();
+            let poison = capture_cline_like_snapshot_observations(
+                &admission,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .expect_err("malformed replacement must remain non-durable");
+            assert!(
+                matches!(
+                    poison,
+                    TranscriptIngestError::NonDurableRecord {
+                        reason: "malformed snapshot JSON",
+                        ..
+                    }
+                ),
+                "{provider}: {poison:?}"
+            );
+            std::fs::write(&api, original).unwrap();
+
+            let cancelled = ObservationCancellation::default();
+            cancelled.cancel();
+            let cancelled_outcome = capture_cline_like_snapshot_observations(
+                &admission,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &cancelled,
+            )
+            .await
+            .expect_err("cancelled capture must stop before persistence");
+            assert!(
+                matches!(
+                    cancelled_outcome,
+                    TranscriptIngestError::NonDurableRecord {
+                        reason: "admission_cancelled",
+                        ..
+                    }
+                ),
+                "{provider}: {cancelled_outcome:?}"
+            );
+
+            let reopened = admission.clone();
+            assert_eq!(
+                reopened
+                    .observations()
+                    .iter()
+                    .map(|item| item.commit_receipt().clone())
+                    .collect::<Vec<_>>(),
+                receipts,
+                "{provider}: committed receipts changed across admission handoff"
+            );
+            let replay = capture_cline_like_snapshot_observations(
+                &reopened,
+                &source,
+                &project,
+                ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{provider}: replay failed: {error}"));
+            assert_eq!(
+                replay.stats.messages_upserted, 0,
+                "{provider}: acknowledgement-boundary replay must be exact"
+            );
+        }
+    }
+
     #[test]
     fn snapshot_budget_counts_all_task_input_files_once() {
         let temp = tempfile::TempDir::new().expect("temp Cline task");
@@ -943,6 +1118,88 @@ mod observation_tests {
         let paths = source.transcript_paths(&project);
         assert_eq!(paths.len(), 1);
         assert!(paths[0].ends_with("relevant/api_messages.json"));
+    }
+
+    #[tokio::test]
+    async fn byte_budget_charges_once_and_defers_second_before_parse() {
+        use crate::admission::test_support::MemoryHostAdmission;
+
+        let temp = tempfile::TempDir::new().expect("temp Cline storage");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let first_tasks = temp.path().join("first-tasks");
+        let first_task = first_tasks.join("first");
+        std::fs::create_dir_all(&first_task).unwrap();
+        std::fs::write(
+            first_task.join("api_messages.json"),
+            serde_json::json!([{"role": "assistant", "content": "first"}]).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            first_task.join("task_metadata.json"),
+            serde_json::json!({"cwd": project}).to_string(),
+        )
+        .unwrap();
+
+        let second_tasks = temp.path().join("second-tasks");
+        let second_task = second_tasks.join("hostile");
+        std::fs::create_dir_all(&second_task).unwrap();
+        let hostile = format!("[{}", "x".repeat(256));
+        std::fs::write(second_task.join("api_messages.json"), &hostile).unwrap();
+        std::fs::write(
+            second_task.join("task_metadata.json"),
+            serde_json::json!({"cwd": project}).to_string(),
+        )
+        .unwrap();
+        let source = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![first_tasks, second_tasks.clone()],
+            user_registered_roots: None,
+        };
+        let paths = source.transcript_paths(&project);
+        assert_eq!(paths.len(), 2);
+        let first_bytes = snapshot_input_bytes("cline", &paths[0]).unwrap();
+        let second_bytes = snapshot_input_bytes("cline", &paths[1]).unwrap();
+
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let deferred = capture_cline_like_snapshot_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            Some(first_bytes),
+            &cancellation,
+        )
+        .await
+        .expect("second unit must defer without parsing malformed JSON");
+        assert!(deferred.deferred_by_byte_cap);
+        assert_eq!(deferred.stats.messages_upserted, 1);
+        assert_eq!(deferred.bytes_consumed, first_bytes);
+
+        let second_only = ClineLikeSource {
+            provider: "cline",
+            storage_roots: vec![second_tasks],
+            user_registered_roots: None,
+        };
+        let err = capture_cline_like_snapshot_observations(
+            &admission,
+            &second_only,
+            &project,
+            ObservationScopeV1::Profile,
+            Some(second_bytes),
+            &cancellation,
+        )
+        .await
+        .expect_err("deferred malformed snapshot must remain retryable");
+        assert!(matches!(
+            err,
+            TranscriptIngestError::NonDurableRecord {
+                reason: "malformed snapshot JSON",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

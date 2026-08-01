@@ -900,35 +900,16 @@ mod tests {
 
     use serde_json::json;
     use tempfile::TempDir;
-    use tracedecay_store::{
-        ObservationProjectionStore, ObservationReplayRequest, ObservationStore,
-    };
 
     use super::*;
+    use crate::admission::test_support::MemoryHostAdmission;
     use crate::admission::{
-        AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostAdmissionScope,
-        HostAdmissionTestRuntimeV1, HostProjectionDrainOutcome,
+        AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostProjectionDrainOutcome,
     };
-    use crate::observation::{
-        CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
-        ReplayObservationsRequest,
-    };
+    use crate::observation::{CaptureObservationOutcome, CaptureObservationRequest};
     use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
     use tracedecay_domain::{ObservationSourceCursorV1, ObservationSourceIdentityV1};
-    use tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1;
     use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
-    const INGEST_STATE_TABLES: &[&str] = &[
-        "sanitization_receipts",
-        "observations",
-        "source_cursors",
-        "source_cursor_advances",
-        "projection_queue",
-        "observation_projection_checkpoints",
-        "observation_projection_provenance",
-        "sessions",
-        "session_messages",
-        "session_messages_fts",
-    ];
 
     #[derive(Default)]
     struct CapturePortSpy {
@@ -1022,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_frame_routes_through_observation_capture_port() {
-        let fixture = Fixture::new("port-spy-session").await;
+        let fixture = Fixture::new("port-spy-session");
         fixture.write_record("port spy content", "port-spy-secret");
         let identity = identify_claude_source(&fixture.transcript).unwrap();
         let mut scan = scan_claude_source_frames(identity.clone(), StoredCursor::default(), None)
@@ -1063,7 +1044,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_source_paths_read_cursor_through_transcript_cursor_port() {
-        let fixture = Fixture::new("cursor-port-session").await;
+        let fixture = Fixture::new("cursor-port-session");
         fixture.write_record("cursor port content", "cursor-port-secret");
         let source = fixture.source("cursor-port-session");
         let spy = CapturePortSpy::default();
@@ -1120,22 +1101,17 @@ mod tests {
         home: PathBuf,
         profile: PathBuf,
         transcript: PathBuf,
-        runtime: HostAdmissionTestRuntimeV1,
+        admission: MemoryHostAdmission,
     }
 
     impl Fixture {
-        async fn new(session_id: &str) -> Self {
+        fn new(session_id: &str) -> Self {
             let temp = TempDir::new().expect("temporary observation fixture");
             let home = temp.path().join("home");
-            Self::new_with_temp_and_home(session_id, temp, home).await
+            Self::new_with_temp_and_home(session_id, temp, home)
         }
 
-        async fn new_in_home(session_id: &str, home: PathBuf) -> Self {
-            let temp = TempDir::new().expect("temporary observation fixture");
-            Self::new_with_temp_and_home(session_id, temp, home).await
-        }
-
-        async fn new_with_temp_and_home(session_id: &str, temp: TempDir, home: PathBuf) -> Self {
+        fn new_with_temp_and_home(session_id: &str, temp: TempDir, home: PathBuf) -> Self {
             let profile = home.join(".tracedecay");
             let transcript = home
                 .join(".claude/projects/project-scope")
@@ -1143,22 +1119,13 @@ mod tests {
             fs::create_dir_all(transcript.parent().expect("transcript parent"))
                 .expect("create Claude fixture tree");
             fs::create_dir_all(&profile).expect("create profile root");
-            let runtime = HostAdmissionTestRuntimeV1::profile(&profile)
-                .await
-                .expect("open registered observation runtime");
             Self {
                 temp,
                 home,
                 profile,
                 transcript,
-                runtime,
+                admission: MemoryHostAdmission::default(),
             }
-        }
-
-        fn registered(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
-            self.runtime
-                .registered_database(HostAdmissionScope::Profile)
-                .expect("registered profile session database")
         }
 
         fn source(&self, session_id: &str) -> ClaudeSource {
@@ -1189,76 +1156,38 @@ mod tests {
             max_new_bytes: Option<u64>,
             cancellation: ObservationCancellation,
         ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError> {
-            let admission = self.runtime.facade();
             ingest_source_with_observations_with_admission(
                 source,
                 &self.profile,
                 ObservationScopeV1::Profile,
-                &admission,
+                &self.admission,
                 max_new_bytes,
                 cancellation,
             )
             .await
         }
-    }
 
-    async fn ingest_state_counts(fixture: &Fixture) -> Vec<i64> {
-        let snapshot = fixture
-            .runtime
-            .read_snapshot(HostAdmissionScope::Profile)
-            .await
-            .expect("open registered observation state snapshot");
-        let mut counts = Vec::with_capacity(INGEST_STATE_TABLES.len());
-        for table in INGEST_STATE_TABLES {
-            let mut rows = snapshot
-                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-                .await
-                .expect("count observation state rows");
-            counts.push(
-                rows.next()
-                    .await
-                    .expect("read observation state count")
-                    .expect("observation state count row")
-                    .get(0)
-                    .expect("decode observation state count"),
-            );
+        fn authority_documents(&self) -> Vec<String> {
+            self.admission
+                .observations()
+                .into_iter()
+                .flat_map(|stored| {
+                    [
+                        serde_json::to_string(stored.observation()).unwrap(),
+                        serde_json::to_string(stored.sanitization_receipt()).unwrap(),
+                        serde_json::to_string(stored.committed_cursor()).unwrap(),
+                    ]
+                })
+                .collect()
         }
-        counts
-    }
 
-    async fn persisted_observation_authority_json(fixture: &Fixture) -> Vec<String> {
-        let snapshot = fixture
-            .runtime
-            .read_snapshot(HostAdmissionScope::Profile)
-            .await
-            .expect("open registered observation authority snapshot");
-        let mut rows = snapshot
-            .query(
-                "SELECT observation_json FROM observations
-                 UNION ALL SELECT receipt_json FROM sanitization_receipts
-                 UNION ALL SELECT source_json FROM source_cursors",
-                (),
-            )
-            .await
-            .expect("read observation authority JSON");
-        let mut documents = Vec::new();
-        while let Some(row) = rows.next().await.expect("read authority JSON row") {
-            documents.push(row.get(0).expect("decode authority JSON"));
+        fn matching_observation_count(&self, marker: &str) -> usize {
+            self.admission
+                .observations()
+                .iter()
+                .filter(|stored| stored.observation().payload().to_string().contains(marker))
+                .count()
         }
-        documents
-    }
-
-    async fn matching_message_count(fixture: &Fixture, marker: &str) -> i64 {
-        let snapshot = fixture.registered().read_snapshot().await.unwrap();
-        let mut rows = snapshot
-            .query(
-                "SELECT COUNT(*) FROM session_messages
-                 WHERE provider = 'claude' AND role = 'user' AND text LIKE ?1",
-                (format!("%{marker}%"),),
-            )
-            .await
-            .unwrap();
-        rows.next().await.unwrap().unwrap().get(0).unwrap()
     }
 
     fn observation_source(path: &Path) -> ClaudeSourceIdentityV1 {
@@ -1299,15 +1228,11 @@ mod tests {
     }
 
     async fn assert_invalid_frame_preserves_observation_state(session_id: &str, frame: &[u8]) {
-        let fixture = Fixture::new(session_id).await;
+        let fixture = Fixture::new(session_id);
         fs::write(&fixture.transcript, frame).expect("write invalid Claude frame");
         let source_adapter = fixture.source(session_id);
         let source = observation_source(&fixture.transcript);
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let before = ingest_state_counts(&fixture).await;
+        let before = fixture.admission.observations();
 
         let stats = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -1320,31 +1245,20 @@ mod tests {
         assert_eq!(stats.projections_completed, 0);
         assert_eq!(stats.deferred_sources, 1);
         assert_eq!(stats.transcript, TranscriptIngestStats::default());
-        let after = ingest_state_counts(&fixture).await;
-        assert_eq!(after, before);
+        assert_eq!(fixture.admission.observations(), before);
         assert!(
-            store
+            fixture
+                .admission
                 .get_source_cursor(&source, &ObservationScopeV1::Profile)
                 .await
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            store
-                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(store.next_queued_observation().await.unwrap().is_none());
-        assert_eq!(
-            store.projection_checkpoint().await.unwrap().last_sequence(),
-            0
-        );
+        assert_eq!(fixture.admission.pending_projection_count(), 0);
     }
 
     async fn assert_invalid_suffix_preserves_valid_prefix(session_id: &str, suffix: &[u8]) {
-        let fixture = Fixture::new(session_id).await;
+        let fixture = Fixture::new(session_id);
         let marker = format!("valid prefix before {session_id}");
         let record = json!({
             "type": "user",
@@ -1370,11 +1284,8 @@ mod tests {
         assert_eq!(first.projections_completed, 1);
         assert_eq!(first.deferred_sources, 1);
 
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let source_cursor = store
+        let source_cursor = fixture
+            .admission
             .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
             .unwrap()
@@ -1383,38 +1294,34 @@ mod tests {
         let identity = identify_claude_source(&fixture.transcript).unwrap();
         let cursor_path = identity.cursor_key.store_path();
         let transcript_cursor = fixture
-            .registered()
-            .get_parse_offset_result(cursor_path.to_string_lossy().as_ref())
+            .admission
+            .get_parse_offset(
+                &ObservationScopeV1::Profile,
+                cursor_path.to_string_lossy().as_ref(),
+            )
             .await
-            .expect("read valid prefix transcript cursor")
+            .unwrap()
             .unwrap_or_default();
         assert_eq!(
             transcript_cursor.byte_offset, 0,
             "observation ingestion must not advance the legacy V1 cursor"
         );
-        assert_eq!(
-            store
-                .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(matching_message_count(&fixture, &marker).await, 1);
+        assert_eq!(fixture.admission.observations().len(), 1);
+        assert_eq!(fixture.matching_observation_count(&marker), 1);
 
-        let committed = ingest_state_counts(&fixture).await;
+        let committed = fixture.admission.observations();
         let retry = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
             .await
             .expect("invalid suffix retry must remain deferred");
         assert_eq!(retry.deferred_sources, 1);
         assert_eq!(retry.transcript, TranscriptIngestStats::default());
-        assert_eq!(ingest_state_counts(&fixture).await, committed);
+        assert_eq!(fixture.admission.observations(), committed);
     }
 
     #[tokio::test]
     async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_row() {
-        let fixture = Fixture::new("production-session").await;
+        let fixture = Fixture::new("production-session");
         fixture.write_record(
             "production vertical searchable",
             "never-persist-this-secret",
@@ -1424,9 +1331,8 @@ mod tests {
             source.transcript_paths(&fixture.profile),
             vec![fixture.transcript.clone()]
         );
-        let admission = fixture.runtime.facade();
         let (scheduled, deferred) = scheduled_source_paths(
-            &admission,
+            &fixture.admission,
             &ObservationScopeV1::Profile,
             &source,
             &fixture.profile,
@@ -1457,31 +1363,20 @@ mod tests {
         assert_eq!(stats.deferred_sources, 0, "{stats:?}");
         assert!(
             fixture
-                .registered()
-                .get_parse_offset_result(CLAUDE_SOURCE_FRONTIER_KEY)
+                .admission
+                .get_parse_offset(&ObservationScopeV1::Profile, CLAUDE_SOURCE_FRONTIER_KEY)
                 .await
                 .unwrap()
                 .is_none(),
             "a fully covered source set does not need a durable scheduling frontier"
         );
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let observations = store
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
+        let observations = fixture.admission.observations();
         assert_eq!(observations.len(), 1);
         let payload = observations[0].observation().payload();
         let payload = payload.to_string();
         assert!(!payload.contains("never-persist-this-secret"));
-        assert_eq!(
-            observations[0].projection_status(),
-            tracedecay_store::ObservationProjectionStatus::NotQueued
-        );
         let canonical_transcript = std::fs::canonicalize(&fixture.transcript).unwrap();
-        let authority_json = persisted_observation_authority_json(&fixture).await;
+        let authority_json = fixture.authority_documents();
         assert_eq!(authority_json.len(), 3);
         assert!(authority_json.iter().all(|document| {
             !document.contains(canonical_transcript.to_string_lossy().as_ref())
@@ -1497,9 +1392,10 @@ mod tests {
                     .all(|document| !document.contains(&raw_path_hex))
             );
         }
-        let hits = matching_message_count(&fixture, "production vertical searchable").await;
+        let hits = fixture.matching_observation_count("production vertical searchable");
         assert_eq!(hits, 1);
-        let cursor = store
+        let cursor = fixture
+            .admission
             .get_source_cursor(
                 observations[0].observation().source(),
                 &ObservationScopeV1::Profile,
@@ -1513,7 +1409,7 @@ mod tests {
             Some(scan.frames[0].resume_fingerprint)
         );
 
-        let committed = ingest_state_counts(&fixture).await;
+        let committed = fixture.admission.observations();
         let retry = fixture
             .ingest(&source, None, ObservationCancellation::default())
             .await
@@ -1524,16 +1420,16 @@ mod tests {
         assert_eq!(retry.projections_completed, 0);
         assert_eq!(retry.projection_duplicates, 0);
         assert_eq!(retry.source_bytes_scanned, 0);
-        assert_eq!(ingest_state_counts(&fixture).await, committed);
+        assert_eq!(fixture.admission.observations(), committed);
         assert_eq!(
-            matching_message_count(&fixture, "production vertical searchable").await,
+            fixture.matching_observation_count("production vertical searchable"),
             hits
         );
     }
 
     #[tokio::test]
     async fn native_observation_id_survives_identical_transcript_relocation() {
-        let fixture = Fixture::new("relocated-native-session").await;
+        let fixture = Fixture::new("relocated-native-session");
         fixture.write_record("relocated native observation", "relocation-secret");
         let source = fixture.source("relocated-native-session");
 
@@ -1542,14 +1438,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.observations_committed, 1);
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let before = store
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
+        let before = fixture.admission.observations();
         let before_id = before[0].observation().observation_id().clone();
 
         let relocated = fixture
@@ -1565,17 +1454,14 @@ mod tests {
             .unwrap();
         assert_eq!(second.observations_committed, 0);
         assert_eq!(second.observation_duplicates, 1);
-        let after = store
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
+        let after = fixture.admission.observations();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].observation().observation_id(), &before_id);
     }
 
     #[tokio::test]
     async fn persistence_failure_charges_the_source_scan_budget() {
-        let fixture = Fixture::new("budget-failure-0").await;
+        let fixture = Fixture::new("budget-failure-0");
         fixture.write_record(
             "first source is deliberately longer than the later source",
             "budget-failure-secret",
@@ -1601,23 +1487,7 @@ mod tests {
         .unwrap();
         let budget = fs::metadata(&fixture.transcript).unwrap().len();
         assert!(fs::metadata(&later).unwrap().len() < budget);
-        let connection = rusqlite::Connection::open(
-            fixture
-                .runtime
-                .database_path(HostAdmissionScope::Profile)
-                .unwrap(),
-        )
-        .unwrap();
-        connection
-            .execute_batch(
-                "CREATE TRIGGER fail_observation_insert
-                 BEFORE INSERT ON observations
-                 BEGIN
-                     SELECT RAISE(ABORT, 'forced observation failure');
-                 END;",
-            )
-            .unwrap();
-        drop(connection);
+        fixture.admission.fail_next_capture();
         let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
 
         let error = fixture
@@ -1635,39 +1505,21 @@ mod tests {
 
     #[tokio::test]
     async fn registered_claude_ingest_api_routes_through_observation_authority() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
-        let fixture = Fixture::new_in_home(
-            "legacy-api-session",
-            profile_root.parent().unwrap().to_path_buf(),
-        )
-        .await;
+        let fixture = Fixture::new("legacy-api-session");
         fixture.write_record("legacy API searchable", "legacy-api-secret");
-        let admission = fixture.runtime.facade();
-        let stats = crate::runtime::claude::ingest_user_sessions_with_admission(
-            &fixture.profile,
-            Some("legacy-api-session".to_string()),
-            Vec::new(),
-            &admission,
+        let stats = crate::runtime::with_transcript_source_home(
+            fixture.home.clone(),
+            crate::runtime::claude::ingest_user_sessions_with_admission(
+                &fixture.profile,
+                Some("legacy-api-session".to_string()),
+                Vec::new(),
+                &fixture.admission,
+            ),
         )
         .await;
 
         assert_eq!(stats.messages_upserted, 1);
-        let state = ingest_state_counts(&fixture).await;
-        assert_eq!(state[0], 1, "sanitization receipt");
-        assert_eq!(state[1], 1, "durable observation");
-        assert_eq!(state[2], 1, "observation source cursor");
-        assert_eq!(state[5], 1, "projection checkpoint");
-        assert_eq!(state[6], 1, "projection provenance");
-        assert_eq!(state[7], 1, "projected V1 session");
-        assert_eq!(state[8], 1, "projected V1 message");
-        let observations = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap()
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
+        let observations = fixture.admission.observations();
         assert_eq!(observations.len(), 1);
         assert!(
             !observations[0]
@@ -1680,7 +1532,7 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_source_frontier_charges_actual_bytes_within_global_budget() {
-        let fixture = Fixture::new("frontier-session-0").await;
+        let fixture = Fixture::new("frontier-session-0");
         let payload = "x".repeat(600 * 1024);
         let mut expected_source_bytes = 0_u64;
         for index in 0..3 {
@@ -1717,19 +1569,12 @@ mod tests {
         assert_eq!(first.source_bytes_scanned, expected_source_bytes);
         assert_eq!(first.deferred_sources, 0);
 
-        let observations = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap()
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(observations.len(), 3);
+        assert_eq!(fixture.admission.observations().len(), 3);
     }
 
     #[tokio::test]
     async fn deferred_sources_charge_work_without_pinning_the_round_robin_frontier() {
-        let fixture = Fixture::new("partial-budget-session-0").await;
+        let fixture = Fixture::new("partial-budget-session-0");
         let partial_bytes = usize::try_from(CLAUDE_HOOK_MAX_NEW_BYTES / 2).unwrap();
         for index in 0..2 {
             let transcript = fixture
@@ -1783,14 +1628,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn bad_source_is_isolated_and_committed_projection_work_still_drains() {
-        let fixture = Fixture::new("queued-before-bad-source").await;
+        let fixture = Fixture::new("queued-before-bad-source");
         fixture.write_record("queued before bad source", "queued-secret");
         let seed_source = fixture.source("queued-before-bad-source");
-        let admission = fixture.runtime.facade();
         let scope = ObservationScopeV1::Profile;
         let cancellation = ObservationCancellation::default();
         let processing_context = SourceProcessingContext {
-            admission: &admission,
+            admission: &fixture.admission,
             source_adapter: &seed_source,
             project_root: &fixture.profile,
             scope: &scope,
@@ -1800,7 +1644,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(seeded.observations_committed, 1);
-        assert_eq!(ingest_state_counts(&fixture).await[4], 1);
+        assert_eq!(fixture.admission.pending_projection_count(), 1);
 
         let transcripts = fixture.transcript.parent().unwrap();
         fs::write(transcripts.join("!bad\nsource.jsonl"), b"{}\n").unwrap();
@@ -1833,13 +1677,14 @@ mod tests {
                 first_retryable: false,
             }
         ));
-        let state = ingest_state_counts(&fixture).await;
         assert_eq!(
-            state[4], 0,
+            fixture.admission.pending_projection_count(),
+            0,
             "projection queue must drain despite source error"
         );
         assert_eq!(
-            state[8], 2,
+            fixture.admission.observations().len(),
+            2,
             "later valid source and queued seed must project"
         );
     }
@@ -1849,7 +1694,7 @@ mod tests {
         const FRAME_BYTES: usize = 128 * 1024;
         const FRAMES: u64 = 20;
 
-        let fixture = Fixture::new("bounded-recovery-session").await;
+        let fixture = Fixture::new("bounded-recovery-session");
         let frame = " ".repeat(FRAME_BYTES);
         let mut transcript = Vec::new();
         for _ in 0..FRAMES {
@@ -1862,10 +1707,6 @@ mod tests {
 
         let source_adapter = fixture.source("bounded-recovery-session");
         let source = observation_source(&fixture.transcript);
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
 
         let first = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -1876,7 +1717,8 @@ mod tests {
         assert!(first.cursor_advances < FRAMES);
         assert_eq!(first.transcript, TranscriptIngestStats::default());
         assert_eq!(first.deferred_sources, 1);
-        let first_cursor = store
+        let first_cursor = fixture
+            .admission
             .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
             .unwrap()
@@ -1892,7 +1734,8 @@ mod tests {
         assert!(second.cursor_advances > 0);
         assert_eq!(second.transcript, TranscriptIngestStats::default());
         assert_eq!(second.deferred_sources, 0);
-        let final_cursor = store
+        let final_cursor = fixture
+            .admission
             .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
             .unwrap()
@@ -1902,7 +1745,7 @@ mod tests {
 
     #[tokio::test]
     async fn commit_before_ack_retry_projects_without_rescan_or_duplicate() {
-        let fixture = Fixture::new("retry-session").await;
+        let fixture = Fixture::new("retry-session");
         fixture.write_record("retry backfill searchable", "retry-secret");
         let source_adapter = fixture.source("retry-session");
         let identity = identify_claude_source(&fixture.transcript).unwrap();
@@ -1916,17 +1759,8 @@ mod tests {
             SessionId::new(identity.source_id).unwrap(),
         )
         .unwrap();
-        let store = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let application = ObservationApplication::new(
-            store,
-            ClaudeRecordSanitizerV1::claude_v1().expect("Claude V1 sanitizer"),
-        );
-        let admission = fixture.runtime.facade();
         let capture = capture_frame(
-            &admission,
+            &fixture.admission,
             scan.frames.first_mut().expect("retry frame"),
             None,
             &FrameCaptureContext {
@@ -1952,20 +1786,13 @@ mod tests {
         assert_eq!(stats.source_bytes_scanned, 0);
         assert_eq!(stats.transcript.messages_upserted, 1);
         assert_eq!(stats.projections_completed, 1);
-        let observations = application
-            .replay_observations(ReplayObservationsRequest::new(
-                ObservationReplayRequest::new(0, 10).unwrap(),
-                ObservationCancellation::default(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(observations.observations().len(), 1);
+        assert_eq!(fixture.admission.observations().len(), 1);
     }
 
     #[tokio::test]
-    async fn protected_source_identity_reuses_cursor_after_restart() {
+    async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
         let raw_session_id = ["AKIA", "SYNTHETIC", "CANARY", "2"].concat();
-        let fixture = Fixture::new(&raw_session_id).await;
+        let fixture = Fixture::new(&raw_session_id);
         fixture.write_record("protected cursor restart", "restart-secret");
         let source_adapter = fixture.source(&raw_session_id);
         let identity = identify_claude_source(&fixture.transcript).unwrap();
@@ -1978,23 +1805,14 @@ mod tests {
             .unwrap();
         assert_eq!(first.observations_committed, 1);
 
-        let Fixture {
-            temp: _temp,
-            home,
-            profile,
-            transcript,
-            runtime,
-        } = fixture;
-        drop(runtime);
-        let restarted_runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
-        let restarted_source =
-            ClaudeSource::with_home(&home).for_user_scope(Some(raw_session_id.clone()), Vec::new());
-        let admission = restarted_runtime.facade();
+        let reopened = fixture.admission.clone();
+        let restarted_source = ClaudeSource::with_home(&fixture.home)
+            .for_user_scope(Some(raw_session_id.clone()), Vec::new());
         let second = ingest_source_with_observations_with_admission(
             &restarted_source,
-            &profile,
+            &fixture.profile,
             ObservationScopeV1::Profile,
-            &admission,
+            &reopened,
             None,
             ObservationCancellation::default(),
         )
@@ -2003,25 +1821,12 @@ mod tests {
         assert_eq!(second.observations_committed, 0);
         assert_eq!(second.source_bytes_scanned, 0);
 
-        let source = observation_source(&transcript);
-        let snapshot = restarted_runtime
-            .read_snapshot(HostAdmissionScope::Profile)
+        let source = observation_source(&fixture.transcript);
+        let cursor = reopened
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
             .await
-            .unwrap();
-        let mut rows = snapshot
-            .query(
-                "SELECT cursor_json FROM source_cursors
-                 WHERE source_json = ?1 AND scope_json = ?2",
-                (
-                    serde_json::to_string(&source).unwrap(),
-                    serde_json::to_string(&ObservationScopeV1::Profile).unwrap(),
-                ),
-            )
-            .await
-            .unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        let cursor: ClaudeSourceCursorV1 =
-            serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
+            .unwrap()
+            .expect("reopened protected source cursor");
         assert!(cursor.byte_offset() > 0);
         let durable = serde_json::to_string(cursor.source()).unwrap();
         assert!(!durable.contains(&raw_session_id));
@@ -2029,7 +1834,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_backlog_and_cancellation_never_advance_observation_state() {
-        let fixture = Fixture::new("deferred-session").await;
+        let fixture = Fixture::new("deferred-session");
         fs::write(&fixture.transcript, b"{\"type\":\"user\"").expect("write partial Claude frame");
         let source = fixture.source("deferred-session");
 
@@ -2052,14 +1857,7 @@ mod tests {
                 ObservationApplicationError::Cancelled
             ))
         ));
-        let observations = fixture
-            .runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap()
-            .replay_observations(ObservationReplayRequest::new(0, 10).unwrap())
-            .await
-            .unwrap();
-        assert!(observations.is_empty());
+        assert!(fixture.admission.observations().is_empty());
     }
 
     #[tokio::test]

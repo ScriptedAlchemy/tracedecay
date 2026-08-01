@@ -191,7 +191,7 @@ fn immutable_message_evidence(native: &Value) -> Value {
     })
 }
 
-pub fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
+pub(super) fn stable_native_id(prefix: &str, evidence: &Value) -> Result<ObservationId, ()> {
     let digest = PayloadReferenceV1::for_payload(evidence).map_err(|_| ())?;
     ObservationId::new(format!("{prefix}.{}", digest.digest().as_str())).map_err(|_| ())
 }
@@ -421,7 +421,7 @@ fn nonnegative_token_count(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_observation_row(
+pub(super) fn prepare_observation_row(
     row: &HermesRow,
     projection: Option<&HermesProjectionMetadata>,
     scope: &ObservationScopeV1,

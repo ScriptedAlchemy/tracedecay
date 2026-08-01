@@ -1,11 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 
 use tracedecay_domain::ProjectId;
 
-use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, codex, git_correlation, source};
@@ -15,25 +13,13 @@ use super::failure::{
     classify_claude_observation_failure, classify_transcript_ingest_failure,
     plan_round_robin_admission, scheduling_write_required,
 };
-use super::project::{
-    home_dir, ingest_project_sources_for_provider,
-    ingest_project_sources_for_provider_without_registered_authority, parse_git_log_commits,
-    with_transcript_source_home,
-};
+use super::project::{home_dir, parse_git_log_commits, with_transcript_source_home};
 use super::scheduler::{
-    USER_INGEST_PROVIDER_FRONTIER_KEY, finish_user_provider_coverage,
-    merge_project_provider_backpressure, plan_user_provider_admission,
+    finish_user_provider_coverage, merge_project_provider_backpressure,
+    plan_user_provider_admission,
 };
-use super::startup::{
-    StartupUserIngestGuard, TranscriptIngestOutcome,
-    ingest_user_global_sources_for_startup_with_db,
-    ingest_user_global_sources_for_startup_with_db_without_registered_authority,
-};
-use super::user::{
-    ingest_user_global_sources_for_provider_with_roots_bounded,
-    ingest_user_global_sources_for_provider_with_roots_without_registered_authority,
-    provider_selected,
-};
+use super::startup::{StartupUserIngestGuard, TranscriptIngestOutcome};
+use super::user::provider_selected;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     discovered_units: 16,
@@ -56,218 +42,12 @@ async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_i
     assert_eq!(std::env::var_os("HOME"), ambient_home);
 }
 
-fn scheduler_test_project_id() -> ProjectId {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    ProjectId::new(format!(
-        "scheduler-test-{}",
-        NEXT_ID.fetch_add(1, Ordering::Relaxed)
-    ))
-    .unwrap()
-}
-
-async fn profile_test_runtime(temp: &tempfile::TempDir) -> HostAdmissionTestRuntimeV1 {
-    HostAdmissionTestRuntimeV1::profile(temp.path().join("profile"))
-        .await
-        .unwrap()
-}
-
-async fn project_test_runtime(
-    temp: &tempfile::TempDir,
-    project_root: &Path,
-    project_id: ProjectId,
-) -> HostAdmissionTestRuntimeV1 {
-    HostAdmissionTestRuntimeV1::project(temp.path().join("profile"), project_root, project_id)
-        .await
-        .unwrap()
-}
-
-#[tokio::test]
-async fn missing_project_identity_fails_before_ingest_writes() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-
-    let outcome = ingest_project_sources_for_provider_without_registered_authority(
-        db,
-        temp.path(),
-        None,
-        None,
-        true,
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(outcome.failures[0].reason_code, "project_identity_missing");
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-}
-
-#[tokio::test]
-async fn unregistered_project_authority_fails_before_ingest_writes() {
-    let temp = tempfile::tempdir().unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, temp.path(), project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-
-    let outcome = ingest_project_sources_for_provider_without_registered_authority(
-        db,
-        temp.path(),
-        Some(project_id),
-        Some(SessionProvider::Vibe),
-        true,
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-}
-
-#[tokio::test]
-async fn mismatched_project_id_fails_before_provider_catch_up() {
-    let temp = tempfile::tempdir().unwrap();
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let mounted_project_id = scheduler_test_project_id();
-    let requested_project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, &project, mounted_project_id.clone()).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Project)
-        .unwrap();
-
-    let outcome = ingest_project_sources_for_provider(
-        &db.binding().shard_id.brain_id,
-        &db.binding().shard_id.profile_id,
-        db,
-        &project,
-        Some(requested_project_id),
-        None,
-        true,
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "project_sessions_authority_mismatch"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert_eq!(
-        db.binding().shard_id.scope,
-        tracedecay_store::StoreShardScopeV1::ProjectSessions {
-            project_id: mounted_project_id
-        }
-    );
-}
-
-#[tokio::test]
-async fn unregistered_profile_authority_fails_before_ingest_writes() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-
-    let outcome = ingest_user_global_sources_for_provider_with_roots_without_registered_authority(
-        db,
-        temp.path(),
-        Some(SessionProvider::Codex),
-        Vec::new(),
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert!(
-        db.get_parse_offset_result(USER_INGEST_PROVIDER_FRONTIER_KEY)
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn cancelled_user_pass_reports_partial_coverage() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let cancellation = ObservationCancellation::default();
-    cancellation.cancel();
-
-    let outcome = ingest_user_global_sources_for_provider_with_roots_bounded(
-        (
-            &db.binding().shard_id.brain_id,
-            &db.binding().shard_id.profile_id,
-            db,
-        ),
-        temp.path(),
-        None,
-        Vec::new(),
-        TEST_INGEST_BOUNDS,
-        &cancellation,
-    )
-    .await;
-
-    assert_eq!(outcome.units_admitted, 0);
-    assert_eq!(
-        outcome.coverage,
-        IngestPassCoverage::Partial { deferred_units: 9 }
-    );
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
-    );
-}
-
-#[tokio::test]
-async fn cancelled_startup_user_ingest_stops_before_registry_reads() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let cancellation = ObservationCancellation::default();
-    cancellation.cancel();
-
-    let outcome = ingest_user_global_sources_for_startup_with_db(
-        &db.binding().shard_id.brain_id,
-        &db.binding().shard_id.profile_id,
-        db,
-        db,
-        temp.path(),
-        &cancellation,
-    )
-    .await;
-
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-    assert!(
-        outcome
-            .failures
-            .iter()
-            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
-    );
-}
-
 #[tokio::test]
 async fn cancelled_codex_provider_stops_before_opening_the_next_jsonl_source() {
+    use crate::admission::test_support::PanicHostAdmission;
+
     let temp = tempfile::tempdir().unwrap();
-    let project_id = scheduler_test_project_id();
-    let runtime = project_test_runtime(&temp, temp.path(), project_id.clone()).await;
-    let facade = runtime.facade();
+    let project_id = ProjectId::new("scheduler-test-cancelled").unwrap();
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
 
@@ -276,7 +56,7 @@ async fn cancelled_codex_provider_stops_before_opening_the_next_jsonl_source() {
             &temp.path().join("must-not-open.jsonl"),
             temp.path(),
             project_id,
-            &facade,
+            &PanicHostAdmission,
             None,
             &cancellation,
         )
@@ -285,81 +65,6 @@ async fn cancelled_codex_provider_stops_before_opening_the_next_jsonl_source() {
 
     assert_eq!(outcome.bytes_consumed, 0);
     assert!(outcome.source_deferred);
-}
-
-#[tokio::test]
-async fn unregistered_startup_authority_fails_before_registry_reads() {
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-
-    let outcome = ingest_user_global_sources_for_startup_with_db_without_registered_authority(
-        db,
-        db,
-        temp.path(),
-    )
-    .await;
-
-    assert_eq!(outcome.failures.len(), 1);
-    assert_eq!(
-        outcome.failures[0].reason_code,
-        "registered_authority_unavailable"
-    );
-    assert_eq!(outcome.stats, TranscriptIngestStats::default());
-}
-
-#[tokio::test]
-async fn registered_project_roots_include_modern_registry_aliases() {
-    let temp = tempfile::tempdir().unwrap();
-    let canonical = temp.path().join("repo");
-    let worktree = temp.path().join("repo-worktree");
-    std::fs::create_dir_all(&canonical).unwrap();
-    std::fs::create_dir_all(&worktree).unwrap();
-    let canonical = std::fs::canonicalize(canonical).unwrap();
-    let worktree = std::fs::canonicalize(worktree).unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    runtime
-        .upsert_code_project("project-1", &canonical, None, None, None)
-        .await
-        .unwrap();
-    runtime
-        .upsert_project_alias(&worktree, "project-1")
-        .await
-        .unwrap();
-    let roots = runtime.registered_project_roots_for_test().await.unwrap();
-
-    assert!(
-        roots.contains(&canonical),
-        "missing {canonical:?} from {roots:?}"
-    );
-    assert!(
-        roots.contains(&worktree),
-        "missing {worktree:?} from {roots:?}"
-    );
-}
-
-// macOS filesystems reject invalid UTF-8 path components with EILSEQ.
-#[cfg(all(unix, not(target_os = "macos")))]
-#[tokio::test]
-async fn registered_project_roots_preserve_non_unicode_current_root() {
-    use std::os::unix::ffi::OsStringExt;
-
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp
-        .path()
-        .join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
-    std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    let runtime = profile_test_runtime(&temp).await;
-    runtime
-        .upsert_code_project("project-native", &root, None, None, None)
-        .await
-        .unwrap();
-    let roots = runtime.registered_project_paths_for_test().await.unwrap();
-
-    assert!(roots.contains(&root));
 }
 
 #[test]
