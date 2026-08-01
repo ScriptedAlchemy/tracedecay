@@ -268,14 +268,46 @@ impl OperationEventError {
                 retry: RetryDirective::AfterDelay,
                 legal_actions: vec![LegalAction::Retry],
             },
-            Self::InvalidConfiguration
-            | Self::InvalidContext(_)
-            | Self::AlreadyBound
+            // Permanently invalid input: the same request can never succeed, so
+            // the client must correct it rather than retry.
+            Self::InvalidContext(_)
             | Self::InvalidProgress
-            | Self::TerminalAlreadyPublished
             | Self::InvalidTerminal(_)
-            | Self::InvalidTestRunEvent
-            | Self::ResumeUnavailable => ApplicationProblem::unavailable(
+            | Self::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic::new(
+                    "operation_event.invalid_request",
+                    "The operation-event request is invalid",
+                )
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::CorrectRequest],
+            },
+            // Idempotency facts: the identity or terminal receipt is already
+            // published, so the client re-reads current state instead of
+            // retrying the same publish.
+            Self::AlreadyBound | Self::TerminalAlreadyPublished => ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic::new(
+                    "operation_event.already_published",
+                    "The operation-event identity is already published",
+                )
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            },
+            // A misconfigured authority is a deterministic, process-lifetime
+            // failure. It is not the caller's request that is wrong and no
+            // amount of retrying will change the outcome.
+            Self::InvalidConfiguration => ApplicationProblem::Unsupported {
+                diagnostic: SafeDiagnostic::new(
+                    "operation_event.unsupported",
+                    "The operation-event authority is not configured for this operation",
+                )
+                .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::ContactAdministrator],
+            },
+            // Genuinely transient: the resume-token authority could not answer.
+            Self::ResumeUnavailable => ApplicationProblem::unavailable(
                 SafeDiagnostic::new(
                     "operation_event.unavailable",
                     "The operation-event service is unavailable",
