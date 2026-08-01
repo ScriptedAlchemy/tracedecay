@@ -428,7 +428,9 @@ impl McpServer {
             Self::report_host_admission_outcome(outcome);
             return outcome;
         };
-        let cg = self.reopen_if_branch_drifted().await;
+        // R4: one branch resolution for this notification — the drift check
+        // below and the hook-plan branch label both read it.
+        let (cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
         let root = cg.project_root().to_path_buf();
         // Live-activity tap: a host hook arriving here IS an agent working in
         // this project, so publish it at the observation point carrying this
@@ -474,7 +476,7 @@ impl McpServer {
                 .await;
             }
         }
-        let current_branch = crate::branch::current_branch(&root);
+        let current_branch = live_branch.resolve_for(&root);
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
             let outcome = HostAdmissionOutcome::degraded("invalid_host_event_plan");
@@ -1032,7 +1034,7 @@ impl McpServer {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
-        let active_cg = self.reopen_if_branch_drifted().await;
+        let (active_cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
         let handler_start = timings_enabled.then(std::time::Instant::now);
         let routed = match self
             .route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope)
@@ -1065,8 +1067,14 @@ impl McpServer {
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
-        self.begin_tool_dispatch(tool_name, &cg, project_reader_preselected, publish_activity)
-            .await;
+        self.begin_tool_dispatch(
+            tool_name,
+            &cg,
+            &live_branch,
+            project_reader_preselected,
+            publish_activity,
+        )
+        .await;
 
         let server_stats = if tool_name == "tracedecay_status" {
             Some(self.server_stats_json().await)
@@ -1122,6 +1130,7 @@ impl McpServer {
         &self,
         tool_name: &str,
         cg: &Arc<TraceDecay>,
+        live_branch: &crate::branch::BranchMemo,
         project_reader_preselected: bool,
         publish_activity: bool,
     ) {
@@ -1139,7 +1148,7 @@ impl McpServer {
             // read sees fresh data. This heals read-only sessions that never
             // touch an edit tool without ever making a query wait behind a
             // project walk.
-            self.maybe_spawn_read_refresh(cg);
+            self.maybe_spawn_read_refresh(cg, live_branch);
         }
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);

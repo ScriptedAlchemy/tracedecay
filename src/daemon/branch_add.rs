@@ -20,7 +20,9 @@ pub(super) fn coordinated_hook_branch_writer(
                 .root
                 .canonicalize()
                 .unwrap_or_else(|_| request.root.clone());
-            let active_branch = crate::branch::current_branch(&canonical_root);
+            // R4: reuse the write's single branch resolution rather than
+            // re-opening the repository ahead of the direct writer's own gates.
+            let active_branch = request.live_branch.resolve_for(&canonical_root);
             let mounted = administration.mounted_project_graphs().await;
             if let Some(graph) = mounted.iter().find(|graph| {
                 graph.project_root() == canonical_root
@@ -30,7 +32,7 @@ pub(super) fn coordinated_hook_branch_writer(
             } else if !mounted
                 .iter()
                 .any(|graph| Arc::ptr_eq(graph, &request.graph))
-                || request.graph.branch_drifted()
+                || request.graph.branch_drifted_with(&request.live_branch)
             {
                 return Err(TraceDecayError::Config {
                     message: "retained hook branch graph is unavailable".to_string(),

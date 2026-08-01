@@ -22,6 +22,12 @@ pub(crate) struct HookBranchWriteRequest {
     pub(crate) root: PathBuf,
     pub(crate) branch: String,
     pub(crate) incremental_sync_agent: Option<HookAgent>,
+    /// R4: this write's single live-branch resolution, made once where the
+    /// effect root is authorized. The direct writer and the daemon's
+    /// coordinated writer both read it instead of re-opening the repository
+    /// (a linked worktree would otherwise spawn `git` up to four times for
+    /// one hook branch write). Request-scoped — never retained past the write.
+    pub(crate) live_branch: crate::branch::BranchMemo,
 }
 
 /// Metadata returned after the complete hook branch write has settled. No
@@ -53,7 +59,7 @@ pub(crate) fn direct_hook_branch_writer() -> HookBranchWriter {
 pub(crate) async fn execute_hook_branch_write_direct(
     request: HookBranchWriteRequest,
 ) -> Result<HookBranchWriteResult> {
-    if request.graph.branch_drifted() {
+    if request.graph.branch_drifted_with(&request.live_branch) {
         return Err(TraceDecayError::Config {
             message: "retained hook branch graph drifted before write".to_string(),
         });
@@ -71,7 +77,7 @@ pub(crate) async fn execute_hook_branch_write_direct(
             .root
             .canonicalize()
             .unwrap_or_else(|_| request.root.clone());
-        let active_branch = crate::branch::current_branch(&canonical_root);
+        let active_branch = request.live_branch.resolve_for(&canonical_root);
         if request.graph.project_root() == canonical_root
             && request.graph.active_branch() == active_branch.as_deref()
         {

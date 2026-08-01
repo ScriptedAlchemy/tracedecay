@@ -1,7 +1,30 @@
 //! Scoped health deltas: the observability cursor, the persisted watermark point, and the dimension-by-dimension comparison against it.
+//!
+//! Lives below the MCP handler tree: the `tracedecay_session_*` handlers and
+//! the root engine's `GraphRuntimePort` both call [`compute_health_delta_result`],
+//! so neither layer has to reach into the other.
 
-use super::session::session_dimension_values;
-use super::*;
+use std::collections::BTreeMap;
+
+use tracedecay_application::retrieval::{
+    HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaResult,
+    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
+};
+use tracedecay_application::{
+    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1,
+};
+use tracedecay_domain::{
+    CoverageStateV1, HealthDimensionObservedV1, HealthSnapshotObservedV1, ManifestDigest,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+    ObservabilityTerminalResultV1, UtcMicros, canonical_sha256,
+};
+
+use crate::application::observability::RegisteredObservabilityPortV1;
+use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
+use crate::tracedecay::TraceDecay;
+
+use super::snapshot::{HealthSnapshot, compute_health_snapshot, session_dimension_values};
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;
 const HEALTH_DELTA_CURSOR_PREFIX: &str = "health-delta.v1.";
