@@ -379,11 +379,7 @@ impl HostAdmissionOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostAdmissionScope {
-    Project,
-    Profile,
-}
+pub use tracedecay_sessions::admission::HostAdmissionScope;
 
 #[derive(Clone, Default)]
 pub struct HostAdmissionAuthorities<'a> {
@@ -442,6 +438,18 @@ impl<'a> HostAdmissionAuthorities<'a> {
         registered: &'a RegisteredGlobalDb,
     ) -> Self {
         Self::registered_for_profile(brain_id, profile_id, registered)
+    }
+
+    /// Adds the registered profile-session authority to project admission.
+    #[must_use]
+    pub fn with_profile_registered(
+        mut self,
+        profile_id: UserProfileId,
+        registered: &'a RegisteredGlobalDb,
+    ) -> Self {
+        self.profile_id = Some(profile_id);
+        self.profile_registered = Some(registered);
+        self
     }
 
     pub fn unavailable_for_project(

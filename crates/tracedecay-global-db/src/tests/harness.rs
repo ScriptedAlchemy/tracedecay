@@ -177,13 +177,50 @@ pub(crate) enum SessionTemporalFixtureCountV1 {
 }
 
 /// Test-only registered database fixture retained below the use-case layer.
-#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub struct HostAdmissionTestRuntimeV1 {
     profile_registry: Arc<RegisteredGlobalDb>,
     profile_registered: Arc<RegisteredGlobalDb>,
     project_registered: Option<Arc<RegisteredGlobalDb>>,
-    _scope: DaemonDatabaseScope,
+    _scope: Option<DaemonDatabaseScope>,
+}
+
+impl HostAdmissionTestRuntimeV1 {
+    /// Wraps databases whose authority is retained by a higher composition
+    /// runtime. This constructor grants no authority and owns no runtime scope.
+    #[doc(hidden)]
+    pub fn from_registered_databases_for_test(
+        profile_registry: Arc<RegisteredGlobalDb>,
+        profile_registered: Arc<RegisteredGlobalDb>,
+        project_registered: Option<Arc<RegisteredGlobalDb>>,
+    ) -> Self {
+        Self {
+            profile_registry,
+            profile_registered,
+            project_registered,
+            _scope: None,
+        }
+    }
+
+    pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
+        match scope {
+            HostAdmissionScope::Project => self.project_registered.as_deref(),
+            HostAdmissionScope::Profile => Some(self.profile_registered.as_ref()),
+        }
+    }
+
+    pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&std::path::Path> {
+        self.registered_database(scope)
+            .map(RegisteredGlobalDb::db_path)
+    }
+
+    pub fn profile_registry(&self) -> &RegisteredGlobalDb {
+        self.profile_registry.as_ref()
+    }
+
+    pub fn canonical_project_key(project_path: &std::path::Path) -> String {
+        RegisteredGlobalDb::canonical_project_key(project_path)
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -245,28 +282,8 @@ impl HostAdmissionTestRuntimeV1 {
             profile_registry,
             profile_registered,
             project_registered,
-            _scope: scope,
+            _scope: Some(scope),
         })
-    }
-
-    pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
-        match scope {
-            HostAdmissionScope::Project => self.project_registered.as_deref(),
-            HostAdmissionScope::Profile => Some(self.profile_registered.as_ref()),
-        }
-    }
-
-    pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&std::path::Path> {
-        self.registered_database(scope)
-            .map(RegisteredGlobalDb::db_path)
-    }
-
-    pub fn profile_registry(&self) -> &RegisteredGlobalDb {
-        self.profile_registry.as_ref()
-    }
-
-    pub fn canonical_project_key(project_path: &std::path::Path) -> String {
-        RegisteredGlobalDb::canonical_project_key(project_path)
     }
 
     fn session_database_for_test(
