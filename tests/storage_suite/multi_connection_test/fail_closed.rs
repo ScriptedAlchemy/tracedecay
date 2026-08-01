@@ -17,7 +17,6 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
     let storage_before_contender = wait_for_quiescent_storage(&db_path);
     let mut contender = ChildGuard::new(
         common::tracedecay_command_with_home(&home_path)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .args(["daemon", "run", "--socket"])
             .arg(&socket_path)
             .stdin(Stdio::null())
@@ -92,7 +91,6 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         }),
     ] {
         command
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .current_dir(&project_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -121,7 +119,6 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
     let mut hook = ChildGuard::new(
         common::tracedecay_command_with_home(&home_path)
             .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .arg("hook-cursor-after-file-edit")
             .current_dir(&project_path)
             .stdin(Stdio::piped())

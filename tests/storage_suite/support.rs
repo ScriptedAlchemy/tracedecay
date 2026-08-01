@@ -20,13 +20,11 @@ use fs2::FileExt;
 pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// FNV-1a hash of everything that can change a template's contents: the
-/// schema-defining sources, the template name, the unsafe-fast env toggle
-/// (it changes journal/synchronous file properties), and any
-/// builder-specific fingerprint supplied by the caller (for templates whose
-/// contents also depend on sources outside `tracedecay-runtime-core`'s `db`
-/// module, such as fixture SQL defined in a test file).
+/// schema-defining sources, the template name, and any builder-specific
+/// fingerprint supplied by the caller (for templates whose contents also
+/// depend on sources outside `tracedecay-runtime-core`'s `db` module, such as
+/// fixture SQL defined in a test file).
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
-    let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).unwrap_or_default();
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
         .iter()
@@ -38,7 +36,6 @@ fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
         ))
         .chain(include_bytes!("../common/mod.rs"))
         .chain(name.as_bytes())
-        .chain(unsafe_fast.as_bytes())
         .chain(builder_fingerprint)
     {
         hash ^= u64::from(*byte);

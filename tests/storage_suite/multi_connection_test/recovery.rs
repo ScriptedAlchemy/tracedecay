@@ -64,7 +64,6 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
             .env("TRACEDECAY_FIXTURE_DB", &db_path)
             .env("TRACEDECAY_FIXTURE_DIRTY", &dirty_path)
             .env("TRACEDECAY_FIXTURE_READY", &ready_path)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -129,7 +128,6 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
     let search_recovered_node = || {
         common::tracedecay_command_with_home(&home_path)
             .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .current_dir(&project_path)
             .args([
                 "tool",

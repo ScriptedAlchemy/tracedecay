@@ -289,12 +289,7 @@ async fn search_nodes_falls_back_to_like_when_fts_empty() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn bulk_load_preserves_platform_synchronous_mode() {
-    // Pin the CI-only unsafe-fast escape hatch off for this test: it asserts
-    // the *durable* platform synchronous mode, which
-    // TRACEDECAY_SQLITE_UNSAFE_FAST=1 (exported for the whole Windows CI test
-    // run) would relax to OFF.
     let _env_lock = common::lock_global_db_env();
-    let _unsafe_fast_off = common::EnvVarGuard::unset(tracedecay::db::SQLITE_UNSAFE_FAST_ENV);
     let (db, _dir, _path) = setup_db().await;
 
     let expected_sync = db
