@@ -357,23 +357,6 @@ fn wait_for_daemon_socket(socket_path: &Path) {
     );
 }
 
-fn wait_for_child_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child
-            .try_wait()
-            .expect("child status should be readable")
-            .is_some()
-        {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
 fn spawn_sentinel_daemon(
     socket_path: PathBuf,
     expected_tool_name: &'static str,
@@ -807,14 +790,16 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
 
     let socket_path = common::daemon_socket_path(&home_path);
     let _ = std::fs::remove_file(&socket_path);
-    let mut child = tracedecay_command_with_home(&home_path)
-        .arg("daemon")
-        .arg("run")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("tracedecay daemon should start");
+    let mut daemon = common::DaemonProcess::new(
+        tracedecay_command_with_home(&home_path)
+            .arg("daemon")
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("tracedecay daemon should start"),
+    );
     wait_for_daemon_socket(&socket_path);
 
     let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
@@ -867,18 +852,20 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
         "daemon should answer initialize before SIGTERM, got: {response}"
     );
 
-    let pid = child.id().to_string();
+    let pid = daemon.id().to_string();
     let status = std::process::Command::new("kill")
         .args(["-TERM", pid.as_str()])
         .status()
         .expect("send SIGTERM to daemon");
     assert!(status.success(), "kill -TERM should succeed");
 
-    if !wait_for_child_exit(&mut child, Duration::from_secs(3)) {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("daemon should exit on SIGTERM even with a connected project client");
-    }
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit on SIGTERM even with a connected project client"
+    );
 }
 
 #[test]
@@ -887,16 +874,18 @@ fn daemon_socket_is_owner_only() {
     let home_path = canonical_existing_path(home.path());
     let socket_path = common::daemon_socket_path(&home_path);
     let _ = std::fs::remove_file(&socket_path);
-    let mut child = tracedecay_command_with_home(&home_path)
-        .arg("daemon")
-        .arg("run")
-        .arg("--socket")
-        .arg(&socket_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("tracedecay daemon should start");
+    let mut daemon = common::DaemonProcess::new(
+        tracedecay_command_with_home(&home_path)
+            .arg("daemon")
+            .arg("run")
+            .arg("--socket")
+            .arg(&socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("tracedecay daemon should start"),
+    );
 
     wait_for_daemon_socket(&socket_path);
     let mode = std::fs::metadata(&socket_path)
@@ -906,18 +895,20 @@ fn daemon_socket_is_owner_only() {
         & 0o777;
     assert_eq!(mode, 0o600, "daemon socket should be owner-only");
 
-    let pid = child.id().to_string();
+    let pid = daemon.id().to_string();
     let status = std::process::Command::new("kill")
         .args(["-TERM", pid.as_str()])
         .status()
         .expect("send SIGTERM to daemon");
     assert!(status.success(), "kill -TERM should succeed");
 
-    if !wait_for_child_exit(&mut child, Duration::from_secs(3)) {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("daemon should exit after socket permission test");
-    }
+    assert!(
+        daemon
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("daemon status should be readable")
+            .is_some(),
+        "daemon should exit after socket permission test"
+    );
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::net::TcpListener;
 #[cfg(not(unix))]
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -494,13 +494,102 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-pub struct DaemonProcess {
+/// Reaps a spawned test child on every exit path.
+///
+/// Tests that expect a graceful exit can wait explicitly; if they return or
+/// panic while the child is still running, `Drop` force-stops and reaps it.
+pub struct TestChildProcess {
     child: Child,
 }
 
-impl DaemonProcess {
+/// Daemon-specific name retained for test fixtures that keep a daemon alive.
+pub type DaemonProcess = TestChildProcess;
+
+impl TestChildProcess {
+    pub fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn stdin_mut(&mut self) -> Option<&mut std::process::ChildStdin> {
+        self.child.stdin.as_mut()
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.try_wait()? {
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Closes stdin, drains both output pipes concurrently, and reaps the
+    /// child. Keeping ownership in the guard lets `Drop` recover from a wait
+    /// error without leaking the process.
+    pub fn wait_with_output(&mut self, timeout: Duration) -> std::io::Result<Output> {
+        drop(self.child.stdin.take());
+        let stdout = self.child.stdout.take();
+        let stderr = self.child.stderr.take();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            if let Some(mut stdout) = stdout {
+                stdout.read_to_end(&mut output)?;
+            }
+            Ok::<_, std::io::Error>(output)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            if let Some(mut stderr) = stderr {
+                stderr.read_to_end(&mut output)?;
+            }
+            Ok::<_, std::io::Error>(output)
+        });
+
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match self.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() >= deadline => {
+                    break Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("child did not exit within {timeout:?}"),
+                    ));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(error) => break Err(error),
+            }
+        };
+        if status.is_err() {
+            self.kill_and_wait()?;
+        }
+
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| std::io::Error::other("stdout reader thread panicked"))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| std::io::Error::other("stderr reader thread panicked"))?;
+        Ok(Output {
+            status: status?,
+            stdout: stdout?,
+            stderr: stderr?,
+        })
+    }
+
     fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        matches!(self.try_wait(), Ok(None))
     }
 
     /// Force-stops the daemon and reaps its process before returning.
@@ -530,14 +619,14 @@ impl DaemonProcess {
     }
 }
 
-impl Drop for DaemonProcess {
+impl Drop for TestChildProcess {
     fn drop(&mut self) {
         let _ = terminate_and_reap(&mut self.child);
     }
 }
 
 fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
-    if let Some(status) = child.try_wait()? {
+    if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
     }
 
@@ -673,7 +762,7 @@ pub fn spawn_tracedecay_daemon_with(
         .stderr(Stdio::piped());
     configure(&mut command);
     let child = command.spawn().expect("tracedecay daemon should start");
-    let mut daemon = DaemonProcess { child };
+    let mut daemon = DaemonProcess::new(child);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     poll_until(

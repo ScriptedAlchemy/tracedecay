@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -14,7 +15,9 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 
-use crate::common::{canonical_existing_path, tracedecay_command_with_home};
+use crate::common::{TestChildProcess, canonical_existing_path, tracedecay_command_with_home};
+
+const SERVE_CHILD_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn profile_root(home: &Path) -> PathBuf {
     canonical_existing_path(home).join(".tracedecay")
@@ -85,16 +88,18 @@ pub fn run_serve_runtime(
         command.arg("--path").arg(path);
     }
 
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("tracedecay serve should start");
+    let mut child = TestChildProcess::new(
+        command
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("tracedecay serve should start"),
+    );
 
     {
-        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        let stdin = child.stdin_mut().expect("stdin should be piped");
         let _ = writeln!(
             stdin,
             "{}",
@@ -121,7 +126,7 @@ pub fn run_serve_runtime(
     }
 
     child
-        .wait_with_output()
+        .wait_with_output(SERVE_CHILD_TIMEOUT)
         .expect("tracedecay serve should exit after stdin closes")
 }
 
