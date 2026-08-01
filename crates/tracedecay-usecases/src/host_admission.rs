@@ -2706,6 +2706,12 @@ impl HostAdmissionTestRuntimeV1 {
         }
     }
 
+    pub(crate) async fn remount_profile_database_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+        self._session_registry.profile_sessions().await
+    }
+
     #[doc(hidden)]
     pub fn observation_store(
         &self,
