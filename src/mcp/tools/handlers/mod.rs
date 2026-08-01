@@ -1860,6 +1860,9 @@ mod tests {
         }
 
         for tool_name in [
+            // `tracedecay_search` resolves a daemon-owned code-index search
+            // authority that is bound to the active project, so a selector
+            // would run the active authority against a different graph.
             "tracedecay_search",
             "tracedecay_str_replace",
             "tracedecay_run_affected_tests",
@@ -1870,6 +1873,20 @@ mod tests {
             assert!(
                 !tool_accepts_registered_project_selector(tool_name),
                 "{tool_name} should not be routed by the pure graph-reader selector policy"
+            );
+        }
+
+        // Pure graph reads that need nothing but the selected project's graph
+        // must accept a selector.
+        for tool_name in [
+            "tracedecay_type_hierarchy",
+            "tracedecay_outline",
+            "tracedecay_read",
+            "tracedecay_body",
+        ] {
+            assert!(
+                tool_accepts_registered_project_selector(tool_name),
+                "{tool_name} should route through the graph-reader selector policy"
             );
         }
     }
