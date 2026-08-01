@@ -1,14 +1,24 @@
+//! Publishing and reading one evidence assembly.
+//!
+//! The executor owns the transaction shape; the siblings own the pieces it
+//! composes — [`writes`] the replay-safe table inserts, [`reads`] the two read
+//! operations, and [`anchor_state`] the retrieval-anchor liveness both consult.
+
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
-use tracedecay_domain::{RetrievalAnchorRecordV3, RetrievalAnchorTargetV3};
 use tracedecay_store::{
-    CanonicalSourceOccurrenceSetRecordV1, EvidenceAssemblyDrilldownPageV1,
-    EvidenceAssemblyPublicationReceiptV1, EvidenceAssemblyReadOperationV1,
-    EvidenceAssemblyReadResultV1, EvidenceAssemblyWriteV1, EvidenceSourceOccurrenceRecordV1,
-    RetrievalAnchorOwnerV1, RetrieverContributionRecordV1,
+    EvidenceAssemblyReadOperationV1, EvidenceAssemblyReadResultV1, EvidenceAssemblyWriteV1,
 };
 
-use super::support::{
-    canonical_digest, decode, encode, idempotent_insert, invalid, u64_to_i64, usize_to_i64,
+use super::support::{canonical_digest, decode, encode, invalid, u64_to_i64};
+
+mod anchor_state;
+mod reads;
+mod writes;
+
+use anchor_state::require_source_anchor_current;
+use writes::{
+    insert_anchor, insert_derived_anchor, insert_immutable, insert_membership,
+    insert_span_membership, publish_reverse_lineage,
 };
 
 #[derive(Clone, Default)]
@@ -208,600 +218,20 @@ impl EvidenceAssemblyExecutor {
             EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
                 owner,
                 idempotency_key,
-            } => {
-                let receipt = snapshot
-                    .query_row(
-                        "SELECT publication_receipt_id, assembly_digest, occurrence_set_id,
-                                span_id, contribution_id, projection_receipt_id, receipt_json
-                         FROM evidence_assembly_receipts
-                         WHERE owner_digest = ?1 AND privacy_domain_id = ?2
-                           AND key_epoch = ?3 AND idempotency_key = ?4",
-                        params![
-                            canonical_digest(owner)?,
-                            owner.owner.privacy_domain_id().as_str(),
-                            u64_to_i64(owner.key_epoch, "evidence assembly key epoch")?,
-                            idempotency_key.as_digest().as_str(),
-                        ],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                                row.get::<_, String>(4)?,
-                                row.get::<_, String>(5)?,
-                                row.get::<_, String>(6)?,
-                            ))
-                        },
-                    )
-                    .optional()?
-                    .map(
-                        |(
-                            publication_receipt_id,
-                            assembly_digest,
-                            occurrence_set_id,
-                            span_id,
-                            contribution_id,
-                            projection_receipt_id,
-                            record,
-                        )| {
-                            let receipt: EvidenceAssemblyPublicationReceiptV1 = decode(record)?;
-                            receipt.validate().map_err(invalid)?;
-                            let expected_id =
-                            tracedecay_store::derive_evidence_assembly_publication_receipt_id_v1(
-                                &receipt.identity_projection(idempotency_key.clone()),
-                            )
-                            .map_err(invalid)?;
-                            if &receipt.owner != owner
-                                || receipt.publication_receipt_id != expected_id
-                                || receipt.publication_receipt_id.as_str() != publication_receipt_id
-                                || receipt.assembly_digest.as_str() != assembly_digest
-                                || receipt.occurrence_set_id.as_str() != occurrence_set_id
-                                || receipt.span_id.as_str() != span_id
-                                || receipt.contribution_id.as_str() != contribution_id
-                                || receipt.projection_receipt_id.as_str() != projection_receipt_id
-                            {
-                                return Err(invalid("evidence publication receipt identity"));
-                            }
-                            Ok(receipt)
-                        },
-                    )
-                    .transpose()?;
-                Ok(EvidenceAssemblyReadResultV1::Publication(receipt))
-            }
+            } => reads::publication_by_idempotency(snapshot, owner, idempotency_key),
             EvidenceAssemblyReadOperationV1::ContributionPage {
                 owner,
                 contribution_id,
                 start_ordinal,
                 page_size,
-            } => {
-                if *page_size == 0 || *page_size > 256 {
-                    return Err(invalid("evidence drilldown page size"));
-                }
-                let owner_digest = canonical_digest(owner)?;
-                let evidence_owner_digest = canonical_digest(&owner.owner)?;
-                let Some(contribution) = snapshot
-                    .query_row(
-                        "SELECT span_id, anchor_id, record_digest, record_json
-                         FROM evidence_retriever_contributions
-                         WHERE contribution_id = ?1 AND owner_digest = ?2",
-                        params![contribution_id.as_str(), owner_digest],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                            ))
-                        },
-                    )
-                    .optional()?
-                    .map(|(span_id, anchor_id, record_digest, record_json)| {
-                        let contribution: RetrieverContributionRecordV1 = decode(record_json)?;
-                        contribution.validate().map_err(invalid)?;
-                        if &contribution.contribution_id != contribution_id
-                            || contribution.span_id.as_str() != span_id
-                            || contribution.anchor.anchor_id().as_str() != anchor_id
-                            || canonical_digest(&contribution)? != record_digest
-                        {
-                            return Err(invalid(
-                                "evidence retriever contribution persistence mismatch",
-                            ));
-                        }
-                        Ok(contribution)
-                    })
-                    .transpose()?
-                else {
-                    return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
-                };
-                if &contribution.owner != owner {
-                    return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
-                }
-                if !evidence_anchor_is_current(snapshot, &contribution.anchor)? {
-                    return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
-                }
-                let span: tracedecay_store::EvidenceSpanRecordV1 = snapshot
-                    .query_row(
-                        "SELECT owner_digest, occurrence_set_id, anchor_id, producer_kind,
-                                record_digest, record_json
-                         FROM evidence_spans WHERE span_id = ?1",
-                        [contribution.span_id.as_str()],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, String>(3)?,
-                                row.get::<_, String>(4)?,
-                                row.get::<_, String>(5)?,
-                            ))
-                        },
-                    )
-                    .and_then(
-                        |(
-                            stored_owner,
-                            occurrence_set_id,
-                            anchor_id,
-                            producer_kind,
-                            record_digest,
-                            record_json,
-                        )| {
-                            let span: tracedecay_store::EvidenceSpanRecordV1 = decode(record_json)?;
-                            span.validate().map_err(invalid)?;
-                            if stored_owner.as_str() != evidence_owner_digest.as_str()
-                                || span.occurrence_set_id.as_str() != occurrence_set_id
-                                || span.anchor.anchor_id().as_str() != anchor_id
-                                || producer_kind != "v3"
-                                || canonical_digest(&span)? != record_digest
-                            {
-                                return Err(invalid("evidence span persistence mismatch"));
-                            }
-                            Ok(span)
-                        },
-                    )?;
-                if span.owner != owner.owner
-                    || span.span_id != contribution.span_id
-                    || span.occurrence_set_id != contribution.occurrence_set_id
-                    || &contribution.span_anchor_id != span.anchor.anchor_id()
-                    || contribution.exact_source_anchors != span.exact_source_anchors
-                {
-                    return Err(invalid("evidence drilldown cross-record binding"));
-                }
-                validate_occurrence_set(snapshot, owner, &span)?;
-                validate_span_members(snapshot, &span)?;
-                if !evidence_anchor_is_current(snapshot, &span.anchor)? {
-                    return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
-                }
-                let end = start_ordinal.saturating_add(*page_size);
-                let mut statement = snapshot.prepare(
-                    "SELECT member.occurrence_id, occurrence.owner_digest,
-                            occurrence.timeline_digest, occurrence.source_anchor_id,
-                            occurrence.source_order, occurrence.record_digest,
-                            occurrence.record_json
-                     FROM evidence_span_members AS member
-                     JOIN evidence_source_occurrences AS occurrence
-                       ON occurrence.occurrence_id = member.occurrence_id
-                     WHERE member.span_id = ?1
-                       AND member.assembly_ordinal >= ?2
-                       AND member.assembly_ordinal < ?3
-                     ORDER BY member.assembly_ordinal",
-                )?;
-                let occurrences = statement
-                    .query_map(
-                        params![
-                            span.span_id.as_str(),
-                            u64_to_i64(*start_ordinal, "evidence drilldown start")?,
-                            u64_to_i64(end, "evidence drilldown end")?,
-                        ],
-                        |row| {
-                            let occurrence_id = row.get::<_, String>(0)?;
-                            let stored_owner = row.get::<_, String>(1)?;
-                            let timeline_digest = row.get::<_, String>(2)?;
-                            let source_anchor_id = row.get::<_, String>(3)?;
-                            let source_order = row.get::<_, i64>(4)?;
-                            let record_digest = row.get::<_, String>(5)?;
-                            let occurrence: EvidenceSourceOccurrenceRecordV1 =
-                                row.get::<_, String>(6).and_then(decode)?;
-                            occurrence.validate().map_err(invalid)?;
-                            if occurrence.occurrence_id.as_str() != occurrence_id
-                                || occurrence.owner != owner.owner
-                                || stored_owner.as_str() != evidence_owner_digest.as_str()
-                                || occurrence.timeline.digest().map_err(invalid)?.as_str()
-                                    != timeline_digest
-                                || occurrence.exact_source_anchor.as_str() != source_anchor_id
-                                || u64_to_i64(
-                                    occurrence.source_order,
-                                    "evidence source occurrence order",
-                                )? != source_order
-                                || canonical_digest(&occurrence)? != record_digest
-                            {
-                                return Err(invalid("evidence drilldown occurrence binding"));
-                            }
-                            Ok(occurrence)
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let consumed = start_ordinal
-                    .saturating_add(u64::try_from(occurrences.len()).unwrap_or(u64::MAX));
-                for occurrence in &occurrences {
-                    if !evidence_anchor_is_current(snapshot, &occurrence.occurrence_anchor)? {
-                        return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
-                    }
-                    require_source_anchor_current(snapshot, occurrence)?;
-                }
-                let total = u64::try_from(span.ordered_occurrence_ids().len()).unwrap_or(u64::MAX);
-                Ok(EvidenceAssemblyReadResultV1::ContributionPage(Some(
-                    EvidenceAssemblyDrilldownPageV1 {
-                        occurrence_set_id: contribution.occurrence_set_id.clone(),
-                        contribution,
-                        span,
-                        occurrences,
-                        next_ordinal: (consumed < total).then_some(consumed),
-                    },
-                )))
-            }
-        }
-    }
-}
-
-fn validate_occurrence_set(
-    connection: &rusqlite::Connection,
-    owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
-    span: &tracedecay_store::EvidenceSpanRecordV1,
-) -> rusqlite::Result<()> {
-    let (owner_digest, record_digest, record_json) = connection.query_row(
-        "SELECT owner_digest, record_digest, record_json
-         FROM evidence_occurrence_sets WHERE occurrence_set_id = ?1",
-        [span.occurrence_set_id.as_str()],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    let occurrence_set: CanonicalSourceOccurrenceSetRecordV1 = decode(record_json)?;
-    occurrence_set.validate().map_err(invalid)?;
-    if occurrence_set.occurrence_set_id != span.occurrence_set_id
-        || occurrence_set.owner != owner.owner
-        || owner_digest != canonical_digest(&owner.owner)?
-        || record_digest != canonical_digest(&occurrence_set)?
-    {
-        return Err(invalid("evidence occurrence set persistence mismatch"));
-    }
-    let mut statement = connection.prepare(
-        "SELECT canonical_ordinal, occurrence_id
-         FROM evidence_occurrence_set_members
-         WHERE occurrence_set_id = ?1
-         ORDER BY canonical_ordinal",
-    )?;
-    let members = statement
-        .query_map([span.occurrence_set_id.as_str()], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if members.len() != occurrence_set.members.len() {
-        return Err(invalid("evidence occurrence set membership mismatch"));
-    }
-    for (ordinal, ((stored_ordinal, stored_id), expected_id)) in
-        members.iter().zip(&occurrence_set.members).enumerate()
-    {
-        if *stored_ordinal != usize_to_i64(ordinal, "evidence canonical occurrence ordinal")?
-            || stored_id != expected_id.as_str()
-        {
-            return Err(invalid("evidence occurrence set membership mismatch"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_span_members(
-    connection: &rusqlite::Connection,
-    span: &tracedecay_store::EvidenceSpanRecordV1,
-) -> rusqlite::Result<()> {
-    let mut statement = connection.prepare(
-        "SELECT assembly_ordinal, run_ordinal, run_member_ordinal, occurrence_id
-         FROM evidence_span_members
-         WHERE span_id = ?1
-         ORDER BY assembly_ordinal",
-    )?;
-    let members = statement
-        .query_map([span.span_id.as_str()], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let expected =
-        span.runs
-            .iter()
-            .enumerate()
-            .flat_map(|(run_ordinal, run)| {
-                run.occurrence_ids.iter().enumerate().map(
-                    move |(run_member_ordinal, occurrence_id)| {
-                        (run_ordinal, run_member_ordinal, occurrence_id)
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-    if members.len() != expected.len() {
-        return Err(invalid("evidence span membership mismatch"));
-    }
-    for (assembly_ordinal, (member, expected)) in members.iter().zip(expected).enumerate() {
-        if member.0 != usize_to_i64(assembly_ordinal, "evidence assembly ordinal")?
-            || member.1 != usize_to_i64(expected.0, "evidence run ordinal")?
-            || member.2 != usize_to_i64(expected.1, "evidence run member ordinal")?
-            || member.3 != expected.2.as_str()
-        {
-            return Err(invalid("evidence span membership mismatch"));
-        }
-    }
-    Ok(())
-}
-
-fn evidence_anchor_is_current(
-    connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV3,
-) -> rusqlite::Result<bool> {
-    let owner_json = encode(anchor.owner())?;
-    let Some((anchor_json, projection_generation)) = connection
-        .query_row(
-            "SELECT anchor_json, projection_generation
-             FROM retrieval_anchors
-             WHERE anchor_id = ?1 AND owner_json = ?2",
-            params![anchor.anchor_id().as_str(), owner_json],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?
-    else {
-        return Ok(false);
-    };
-    if anchor_json != encode(anchor)?
-        || projection_generation != anchor.projection_generation().as_str()
-    {
-        return Err(invalid("evidence retrieval anchor persistence mismatch"));
-    }
-    let state = latest_disposition_state(connection, anchor.anchor_id().as_str(), &owner_json)?;
-    Ok(state.as_deref().is_none_or(|state| state == "active"))
-}
-
-/// Reads the newest disposition recorded for an anchor, if it has one.
-///
-/// `None` means the anchor was never disposed, which every caller treats the
-/// same as an explicitly active disposition.
-fn latest_disposition_state(
-    connection: &rusqlite::Connection,
-    anchor_id: &str,
-    owner_json: &str,
-) -> rusqlite::Result<Option<String>> {
-    connection
-        .query_row(
-            "SELECT state FROM retrieval_anchor_dispositions
-             WHERE anchor_id = ?1 AND owner_json = ?2
-             ORDER BY sequence DESC LIMIT 1",
-            params![anchor_id, owner_json],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-}
-
-fn require_source_anchor_current(
-    connection: &rusqlite::Connection,
-    occurrence: &EvidenceSourceOccurrenceRecordV1,
-) -> rusqlite::Result<()> {
-    let owner_json = connection
-        .query_row(
-            "SELECT owner_json FROM retrieval_anchors WHERE anchor_id = ?1",
-            [occurrence.exact_source_anchor.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .ok_or_else(|| invalid("evidence source anchor unavailable"))?;
-    let source_owner: RetrievalAnchorOwnerV1 = decode(owner_json.clone())?;
-    if !source_owner_matches_assembly(&source_owner, &occurrence.owner) {
-        return Err(invalid("evidence source anchor owner mismatch"));
-    }
-    let state = latest_disposition_state(
-        connection,
-        occurrence.exact_source_anchor.as_str(),
-        &owner_json,
-    )?;
-    if state.as_deref().is_none_or(|state| state == "active") {
-        Ok(())
-    } else {
-        Err(invalid("evidence source anchor is disposed"))
-    }
-}
-
-fn source_owner_matches_assembly(
-    source: &RetrievalAnchorOwnerV1,
-    assembly: &tracedecay_domain::AnchorOwnerBindingV1,
-) -> bool {
-    match source {
-        RetrievalAnchorOwnerV1::V3(owner) => owner == assembly,
-        // A V2 owner has no authoritative profile/privacy-domain identity.
-        // Decoding remains supported, but it cannot establish V3 evidence
-        // ownership without a separate exact migration binding.
-        RetrievalAnchorOwnerV1::V2(_) => false,
-    }
-}
-
-fn insert_anchor(
-    connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV3,
-) -> rusqlite::Result<()> {
-    anchor.validate().map_err(invalid)?;
-    idempotent_insert(
-        connection,
-        "retrieval_anchors",
-        &[("anchor_id", anchor.anchor_id().as_str().into())],
-        &[
-            ("anchor_json", encode(anchor)?.into()),
-            ("owner_json", encode(anchor.owner())?.into()),
-            (
-                "projection_generation",
-                anchor.projection_generation().as_str().into(),
+            } => reads::contribution_page(
+                snapshot,
+                owner,
+                contribution_id,
+                *start_ordinal,
+                *page_size,
             ),
-        ],
-        "retrieval anchor replay conflict",
-    )
-}
-
-/// Writes one row of an immutable record table, which is any table keyed by a
-/// single id and carrying the canonical `record_digest`/`record_json` pair plus
-/// whatever columns it denormalizes out of that record for indexing.
-fn insert_immutable(
-    connection: &rusqlite::Connection,
-    table: &'static str,
-    id_column: &'static str,
-    id: &str,
-    record_digest: String,
-    record_json: String,
-    extra: &[(&'static str, String)],
-) -> rusqlite::Result<()> {
-    let mut values = vec![
-        ("record_digest", record_digest.into()),
-        ("record_json", record_json.into()),
-    ];
-    values.extend(
-        extra
-            .iter()
-            .map(|(column, value)| (*column, value.clone().into())),
-    );
-    idempotent_insert(
-        connection,
-        table,
-        &[(id_column, id.into())],
-        &values,
-        &format!("{table} immutable replay conflict"),
-    )
-}
-
-fn insert_membership(
-    connection: &rusqlite::Connection,
-    table: &'static str,
-    parent_column: &'static str,
-    parent_id: &str,
-    ordinal_column: &'static str,
-    ordinal: usize,
-    occurrence_id: &str,
-) -> rusqlite::Result<()> {
-    idempotent_insert(
-        connection,
-        table,
-        &[
-            (parent_column, parent_id.into()),
-            (
-                ordinal_column,
-                usize_to_i64(ordinal, "evidence membership ordinal")?.into(),
-            ),
-        ],
-        &[("occurrence_id", occurrence_id.into())],
-        &format!("{table} immutable replay conflict"),
-    )
-}
-
-fn insert_span_membership(
-    connection: &rusqlite::Connection,
-    span_id: &str,
-    assembly_ordinal: usize,
-    run_ordinal: usize,
-    run_member_ordinal: usize,
-    occurrence_id: &str,
-) -> rusqlite::Result<()> {
-    idempotent_insert(
-        connection,
-        "evidence_span_members",
-        &[
-            ("span_id", span_id.into()),
-            (
-                "assembly_ordinal",
-                usize_to_i64(assembly_ordinal, "evidence assembly ordinal")?.into(),
-            ),
-        ],
-        &[
-            (
-                "run_ordinal",
-                usize_to_i64(run_ordinal, "evidence run ordinal")?.into(),
-            ),
-            (
-                "run_member_ordinal",
-                usize_to_i64(run_member_ordinal, "evidence run member ordinal")?.into(),
-            ),
-            ("occurrence_id", occurrence_id.into()),
-        ],
-        "evidence span membership replay conflict",
-    )
-}
-
-fn publish_reverse_lineage(
-    connection: &rusqlite::Connection,
-    write: &EvidenceAssemblyWriteV1,
-) -> rusqlite::Result<()> {
-    for occurrence in &write.occurrences {
-        let owner_json = connection.query_row(
-            "SELECT owner_json FROM retrieval_anchors WHERE anchor_id = ?1",
-            [occurrence.exact_source_anchor.as_str()],
-            |row| row.get::<_, String>(0),
-        )?;
-        for (kind, derivative_id) in [
-            ("span", write.span.span_id.as_str()),
-            ("contribution", write.contribution.contribution_id.as_str()),
-        ] {
-            idempotent_insert(
-                connection,
-                "retrieval_anchor_reverse_lineage",
-                &[
-                    (
-                        "source_anchor_id",
-                        occurrence.exact_source_anchor.as_str().into(),
-                    ),
-                    ("owner_json", owner_json.clone().into()),
-                    ("derivative_kind", kind.into()),
-                    ("derivative_id", derivative_id.into()),
-                ],
-                &[("direct_evidence", 1_i64.into())],
-                "evidence reverse lineage replay conflict",
-            )?;
         }
-    }
-    Ok(())
-}
-
-fn insert_derived_anchor(
-    connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV3,
-    owner_digest: &str,
-) -> rusqlite::Result<()> {
-    let (target_kind, target_id) = evidence_target(anchor)?;
-    idempotent_insert(
-        connection,
-        "evidence_derived_anchors",
-        &[("anchor_id", anchor.anchor_id().as_str().into())],
-        &[
-            ("owner_digest", owner_digest.into()),
-            ("target_kind", target_kind.into()),
-            ("target_id", target_id.into()),
-            ("anchor_json", encode(anchor)?.into()),
-        ],
-        "evidence derived anchor replay conflict",
-    )
-}
-
-fn evidence_target(anchor: &RetrievalAnchorRecordV3) -> rusqlite::Result<(&'static str, &str)> {
-    match anchor.target() {
-        RetrievalAnchorTargetV3::ExactSourceOccurrence(id) => {
-            Ok(("source_occurrence", id.as_str()))
-        }
-        RetrievalAnchorTargetV3::ExactEvidenceSpan(id) => Ok(("evidence_span", id.as_str())),
-        RetrievalAnchorTargetV3::RetrieverContribution(id) => {
-            Ok(("retriever_contribution", id.as_str()))
-        }
-        _ => Err(invalid("non-evidence target in evidence assembly")),
     }
 }
 
@@ -816,21 +246,22 @@ pub mod tests {
         ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadAccessState,
         PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
         ProviderId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-        RetrievalAnchorRecordV3Parts, SanitizationReceiptId, SanitizationReceiptRefV1,
-        ScopeResolutionId, SessionId, UserProfileId, UtcMicros, VectorWatermark,
+        RetrievalAnchorRecordV3, RetrievalAnchorRecordV3Parts, RetrievalAnchorTargetV3,
+        SanitizationReceiptId, SanitizationReceiptRefV1, ScopeResolutionId, SessionId,
+        UserProfileId, UtcMicros, VectorWatermark,
     };
     use tracedecay_store::{
         CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
         EvidenceAssemblyIdempotencyKeyV1, EvidenceAssemblyOwnerV1,
-        EvidenceAssemblyPublicationReceiptV1, EvidenceSourceTimelineV1,
-        EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1, EvidenceSpanIdentityProjectionV1,
-        EvidenceSpanMemberReceiptBindingV1, EvidenceSpanProjectionReceiptIdentityProjectionV1,
-        EvidenceSpanProjectionReceiptV1, EvidenceSpanRecordV1, EvidenceSpanRunV1,
-        PrivacyBoundRequestDigestV1, PrivacyBoundRequestEnvelopeV1,
-        RetrieverContributionIdentityProjectionV1, RetrieverIdentityV1,
-        RetrieverWatermarkBindingV1, SanitizedObservationByteRangeV1,
-        SourceCapabilityCatalogBindingV1, SourceOccurrenceCoordinateV1,
-        SourceOccurrenceIdentityProjectionV1, SourceOccurrenceKindV1,
+        EvidenceAssemblyPublicationReceiptV1, EvidenceSourceOccurrenceRecordV1,
+        EvidenceSourceTimelineV1, EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1,
+        EvidenceSpanIdentityProjectionV1, EvidenceSpanMemberReceiptBindingV1,
+        EvidenceSpanProjectionReceiptIdentityProjectionV1, EvidenceSpanProjectionReceiptV1,
+        EvidenceSpanRecordV1, EvidenceSpanRunV1, PrivacyBoundRequestDigestV1,
+        PrivacyBoundRequestEnvelopeV1, RetrieverContributionIdentityProjectionV1,
+        RetrieverContributionRecordV1, RetrieverIdentityV1, RetrieverWatermarkBindingV1,
+        SanitizedObservationByteRangeV1, SourceCapabilityCatalogBindingV1,
+        SourceOccurrenceCoordinateV1, SourceOccurrenceIdentityProjectionV1, SourceOccurrenceKindV1,
         SourceOccurrenceSanitizationV1, VerifiedSourceOrderingProofV1,
         derive_canonical_source_occurrence_set_id_v1,
         derive_evidence_assembly_publication_receipt_id_v1, derive_evidence_span_id_v1,
