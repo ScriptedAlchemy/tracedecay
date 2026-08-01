@@ -474,7 +474,7 @@ async fn invoke_project_open_source_edit(
         observed_at,
     };
     crate::application::edit::execute_source_edit_with_control(
-        &graph,
+        &*graph,
         &operation,
         request,
         &authorization,
@@ -524,7 +524,7 @@ async fn invoke_project_open_source_edit_reconciliation(
         observed_at,
     };
     crate::application::edit::reconcile_source_edit_effect_unknown_with_control(
-        &graph,
+        &*graph,
         request,
         &authorization,
         &effect_control,

@@ -4305,4 +4305,23 @@ mod tests {
         assert!(source_edit_state_digest(project.path(), &["src/lib.rs".to_owned()]).is_err());
         assert_eq!(fs::read(outside.path().join("lib.rs")).unwrap(), b"outside");
     }
+
+    /// A canonicalized parent is not enough: the final component itself must
+    /// never be followed, or a symlink planted inside the worktree hands the
+    /// reader arbitrary bytes from outside it.
+    #[cfg(unix)]
+    #[test]
+    fn expected_state_digest_rejects_symlinked_candidate_file() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let secret = outside.path().join("secret.rs");
+        fs::write(&secret, b"outside").unwrap();
+        fs::create_dir(project.path().join("src")).unwrap();
+        symlink(&secret, project.path().join("src/lib.rs")).unwrap();
+
+        assert!(source_edit_state_digest(project.path(), &["src/lib.rs".to_owned()]).is_err());
+        assert_eq!(fs::read(&secret).unwrap(), b"outside");
+    }
 }

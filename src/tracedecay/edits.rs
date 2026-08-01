@@ -53,18 +53,22 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsString;
-use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use same_file::Handle;
-use serde::{Deserialize, Serialize};
+
+/// The preview/apply plan authority is owned by `tracedecay-usecases`; the
+/// root source-edit primitives consult that single set of task-locals so a
+/// preview captured by the use case is the same plan the apply validates.
+pub(super) use tracedecay_usecases::tracedecay::{
+    PlannedSourceEditFile, capture_planned_source_edit, validate_planned_source_edit,
+};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sync;
@@ -413,61 +417,7 @@ fn sync_source_edit_directory(directory: &Dir) -> Result<()> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PlannedSourceEditFile {
-    pub relative_path: String,
-    pub expected: Option<String>,
-    pub intended: Option<String>,
-}
-
-#[derive(Debug)]
-struct SourceEditApplyState {
-    files: Vec<PlannedSourceEditFile>,
-    consumed: BTreeSet<String>,
-}
-
-tokio::task_local! {
-    static SOURCE_EDIT_PLAN_CAPTURE: Arc<Mutex<Vec<PlannedSourceEditFile>>>;
-    static SOURCE_EDIT_APPLY_STATE: Arc<Mutex<SourceEditApplyState>>;
-}
-
-pub(crate) async fn capture_source_edit_plan<T>(
-    future: impl Future<Output = T>,
-) -> (T, Vec<PlannedSourceEditFile>) {
-    let capture = Arc::new(Mutex::new(Vec::new()));
-    let result = SOURCE_EDIT_PLAN_CAPTURE
-        .scope(Arc::clone(&capture), future)
-        .await;
-    let files = capture
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    (result, files)
-}
-
-pub(crate) async fn apply_source_edit_plan<T>(
-    files: Vec<PlannedSourceEditFile>,
-    future: impl Future<Output = T>,
-) -> (T, bool) {
-    let expected_count = files.len();
-    let state = Arc::new(Mutex::new(SourceEditApplyState {
-        files,
-        consumed: BTreeSet::new(),
-    }));
-    let result = SOURCE_EDIT_APPLY_STATE
-        .scope(Arc::clone(&state), future)
-        .await;
-    let complete = state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .consumed
-        .len()
-        == expected_count;
-    (result, complete)
-}
-
-pub(crate) fn rollback_planned_source_edit_files(
+fn rollback_planned_source_edit_files(
     project_root: &Path,
     files: &[PlannedSourceEditFile],
 ) -> Result<()> {
@@ -504,57 +454,6 @@ pub(crate) fn rollback_planned_source_edit_files(
         publish_planned_source_edit(project_root, &file.relative_path, Some(current), expected)?;
     }
     Ok(())
-}
-
-pub(super) fn capture_planned_source_edit(
-    relative_path: &str,
-    expected: Option<&str>,
-    intended: Option<&str>,
-) {
-    let _ = SOURCE_EDIT_PLAN_CAPTURE.try_with(|capture| {
-        capture
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(PlannedSourceEditFile {
-                relative_path: relative_path.to_owned(),
-                expected: expected.map(str::to_owned),
-                intended: intended.map(str::to_owned),
-            });
-    });
-}
-
-pub(super) fn validate_planned_source_edit(
-    relative_path: &str,
-    expected: Option<&str>,
-    intended: Option<&str>,
-) -> Result<()> {
-    SOURCE_EDIT_APPLY_STATE
-        .try_with(|state| {
-            let mut state = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(planned) = state
-                .files
-                .iter()
-                .find(|file| file.relative_path == relative_path)
-            else {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "source edit apply produced unplanned candidate {relative_path}"
-                    ),
-                });
-            };
-            if planned.expected.as_deref() != expected || planned.intended.as_deref() != intended {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "source edit candidate {relative_path} drifted from its exact preview"
-                    ),
-                });
-            }
-            state.consumed.insert(relative_path.to_owned());
-            Ok(())
-        })
-        .unwrap_or(Ok(()))
 }
 
 pub(super) fn publish_planned_source_edit(
@@ -1856,12 +1755,13 @@ mod tests {
     #[cfg(unix)]
     use super::read_source_edit_candidate;
     use super::{
-        SourceEditFileAuthority, capture_planned_source_edit, capture_source_edit_plan,
-        leading_doc_or_attr, narrow_symbol_for_edit, publish_planned_source_edit,
-        reconstruct_ast_grep_rewrite, rollback_api_migration_files,
+        SourceEditFileAuthority, capture_planned_source_edit, leading_doc_or_attr,
+        narrow_symbol_for_edit, publish_planned_source_edit, reconstruct_ast_grep_rewrite,
+        rollback_api_migration_files,
     };
     use crate::types::{Node, NodeKind, Visibility};
     use tempfile::tempdir;
+    use tracedecay_usecases::tracedecay::capture_source_edit_plan;
 
     fn node(kind: NodeKind, name: &str) -> Node {
         Node {
@@ -1891,6 +1791,9 @@ mod tests {
         }
     }
 
+    /// The root primitives must feed the single plan authority owned by
+    /// `tracedecay-usecases`; capturing through `super` and reading back
+    /// through the use-case scope proves there is no second set of statics.
     #[tokio::test]
     async fn source_edit_plan_capture_retains_exact_pre_and_post_bytes() {
         let ((), files) = capture_source_edit_plan(async {

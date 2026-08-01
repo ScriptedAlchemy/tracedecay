@@ -25,6 +25,7 @@ test-transport = [
 
 [dependencies]
 cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
 getrandom = "0.2"
 fs2 = "0.4"
 gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
