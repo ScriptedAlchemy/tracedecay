@@ -429,12 +429,11 @@ mod tests {
 
     #[tokio::test]
     async fn memory_deadline_passes_through_a_fast_result() {
-        let ok: Result<u32> = with_memory_deadline_for(
-            std::time::Duration::from_secs(30),
-            "fast probe",
-            async { Ok(7) },
-        )
-        .await;
+        let ok: Result<u32> =
+            with_memory_deadline_for(std::time::Duration::from_secs(30), "fast probe", async {
+                Ok(7)
+            })
+            .await;
         assert_eq!(ok.unwrap(), 7);
 
         let err = with_memory_deadline_for(std::time::Duration::from_secs(30), "fast err", async {
@@ -480,25 +479,27 @@ mod tests {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         let memory = active_memory(&cg);
-        let outcome = with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, "fact_store add", async {
-            memory
-                .add_fact_v1(
-                    AddFactRequest {
-                        content: "deadline-bounded add fixture".to_string(),
-                        category: MemoryCategory::General,
-                        source: None,
-                        tags: Vec::new(),
-                        entities: vec!["fixture-entity".to_string()],
-                        trust: None,
-                        metadata: json!({}),
-                    },
-                    MemoryOperationContext::generated(&owner, "deadline-bounded add", None).unwrap(),
-                )
-                .await
-                .map_err(memory_application_error)
-        })
-        .await
-        .expect("a clean add must complete within the operation deadline");
+        let outcome =
+            with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, "fact_store add", async {
+                memory
+                    .add_fact_v1(
+                        AddFactRequest {
+                            content: "deadline-bounded add fixture".to_string(),
+                            category: MemoryCategory::General,
+                            source: None,
+                            tags: Vec::new(),
+                            entities: vec!["fixture-entity".to_string()],
+                            trust: None,
+                            metadata: json!({}),
+                        },
+                        MemoryOperationContext::generated(&owner, "deadline-bounded add", None)
+                            .unwrap(),
+                    )
+                    .await
+                    .map_err(memory_application_error)
+            })
+            .await
+            .expect("a clean add must complete within the operation deadline");
         assert!(
             outcome.fact.is_some(),
             "the bounded add must persist a fact"
