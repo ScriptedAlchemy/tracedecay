@@ -1,19 +1,7 @@
-use std::path::Path;
-
 use tempfile::TempDir;
-use tracedecay::agents::{
-    AgentIntegration, ClaudeIntegration, InstallContext, expected_tool_perms,
-};
+use tracedecay::agents::{AgentIntegration, ClaudeIntegration};
 
-fn make_install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: false,
-    }
-}
+use crate::agent_test_support::make_install_ctx;
 
 /// Idempotency + unknown-key preservation for the Claude `.claude.json` case
 /// specifically: a repeated `ClaudeIntegration.install` leaves that file
