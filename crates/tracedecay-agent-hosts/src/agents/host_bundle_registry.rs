@@ -587,11 +587,20 @@ fn component_assets(
             ".cursor/extensions/tracedecay.cursor-native-0.0.0",
             super::plugin_bundle::cursor_native_extension_files(),
         ),
+        // Kiro's `settings/mcp.json` is a shared user document: the native
+        // registration adapter merges the TraceDecay server into it (preserving
+        // third-party entries) and re-reads it for this component's confirmed
+        // registration revision. A managed artifact must therefore never claim
+        // that path. Owning it here made the transaction's own artifact write
+        // land between preview confirmation and `registration.apply`, so the
+        // adapter's revision recheck read TraceDecay's own bytes as third-party
+        // drift and every apply rolled back with `StalePreview`. Own a
+        // descriptor under `.kiro/tracedecay` instead, exactly like Kiro Core.
         (HostKindV1::Kiro, HostBundleComponentV1::ContextMcp) => (
-            ".kiro",
+            ".kiro/tracedecay",
             vec![(
-                "settings/mcp.json",
-                r#"{"mcpServers":{"tracedecay":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}}"#,
+                "context-mcp.json",
+                r#"{"host":"kiro","registration":"settings/mcp.json","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"]}}"#,
             )],
         ),
         (HostKindV1::Kiro, HostBundleComponentV1::Core) => (
@@ -1130,10 +1139,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bundle.contents.len(), 1);
-        assert_eq!(bundle.contents[0].relative_path, ".kiro/settings/mcp.json");
-        let mcp: serde_json::Value = serde_json::from_slice(&bundle.contents[0].bytes).unwrap();
+        // The managed artifact is a TraceDecay-owned descriptor, never Kiro's
+        // shared `settings/mcp.json`: that document belongs to the native
+        // registration adapter, which merges into it and hashes it for the
+        // confirmed registration revision.
         assert_eq!(
-            mcp["mcpServers"]["tracedecay"]["command"],
+            bundle.contents[0].relative_path,
+            ".kiro/tracedecay/context-mcp.json"
+        );
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(&bundle.contents[0].bytes).unwrap();
+        assert_eq!(descriptor["registration"], "settings/mcp.json");
+        assert_eq!(
+            descriptor["server"]["command"],
             "/opt/tracedecay-distinct/bin/tracedecay"
         );
         assert_eq!(
