@@ -2158,7 +2158,7 @@ pub fn semantic_lane_readiness_for_request<'a>(
 }
 
 /// Obtain a query factory only for the atomically current generation.
-#[cfg(test)]
+#[cfg(feature = "semantic-fastembed")]
 pub fn current_query_factory(
     handle: &DaemonSemanticRuntimeHandleV1,
 ) -> Option<(SemanticGenerationPointerV1, DaemonSemanticQueryFactoryV1)> {
