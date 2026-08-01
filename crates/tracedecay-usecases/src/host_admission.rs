@@ -39,7 +39,6 @@ pub use disposition::{
 };
 pub use durability::{DirectorySyncPolicy, sync_directory};
 pub use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
-pub(crate) use tracedecay_sessions::admission::is_bounded_reason_code;
 
 pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};
 pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
@@ -931,19 +930,6 @@ impl<'a> HostAdmissionFacade<'a> {
         }
         outcome.session_ids = session_ids.into_iter().collect();
         Ok(outcome)
-    }
-
-    fn observation_store(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<GlobalDbObservationStore<'a>, HostAdmissionOutcome> {
-        match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
-                database.runtime(),
-                database.authority(),
-            )),
-            None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
-        }
     }
 
     fn application(

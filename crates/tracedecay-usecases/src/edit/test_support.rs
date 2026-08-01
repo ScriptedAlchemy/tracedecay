@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_application::{
