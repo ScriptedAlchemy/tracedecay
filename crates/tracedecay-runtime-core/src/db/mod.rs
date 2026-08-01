@@ -42,6 +42,7 @@ pub use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
+pub use analytics::HealthFileAggregate;
 pub use connection::Database;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::TestDatabaseRuntimeMode;

@@ -1000,3 +1000,401 @@ async fn test_batch_incoming_call_counts() {
         "gamma has 0 callers so should be absent"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Health/gini SQL aggregate pushdown — byte-identical-to-Rust-fold proofs.
+//
+// Each test folds a fixture graph with the exact pre-pushdown Rust algorithm
+// and asserts the SQL aggregate produces the identical result, so the health
+// and gini reports keep their numeric output while dropping the whole-table
+// `Vec<Node>` / `Vec<Edge>` materializations.
+// ---------------------------------------------------------------------------
+
+/// Installs the root-owned registered-schema port so `setup_db` can publish a
+/// test profile runtime. The fail-closed port (added with the S11 local-storage
+/// migration) refuses to open a shard until the root crate registers the
+/// installer; the dashboard fixtures expose this idempotent seam for exactly
+/// that. Only available with the `test-transport` feature (how CI builds this
+/// suite); without it the shared harness cannot open a database at all.
+#[cfg(feature = "test-transport")]
+fn ensure_schema_installer() {
+    tracedecay::dashboard::register_test_schema_installer();
+}
+
+#[cfg(not(feature = "test-transport"))]
+fn ensure_schema_installer() {}
+
+/// Builds a fresh, isolated graph database directly (no cached template), so
+/// these proofs do not depend on the shared `setup_db` template/`!migrated`
+/// assertion, which is entangled with the in-flight S11 storage migration.
+async fn fresh_graph_db() -> (TempDir, Database) {
+    ensure_schema_installer();
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let path = dir.path().join("graph.db");
+    let (db, _migrated) = crate::common::initialize_test_database(&path)
+        .await
+        .expect("failed to initialize fresh graph database");
+    (dir, db)
+}
+
+/// Applies the exact `path_matches_scope` predicate used by the handlers.
+fn in_scope(path: &str, prefix: Option<&str>) -> bool {
+    match prefix {
+        None => true,
+        Some(p) => {
+            let with_slash = if p.ends_with('/') {
+                p.to_string()
+            } else {
+                format!("{p}/")
+            };
+            path.starts_with(&with_slash) || path == p
+        }
+    }
+}
+
+/// A varied fixture: several files, mixed kinds, non-trivial metric columns,
+/// and `skip-test-coverage` markers on some function/method docstrings.
+fn metric_fixture_nodes() -> Vec<Node> {
+    let mut nodes = Vec::new();
+
+    let mut set = |id: &str,
+                   name: &str,
+                   file: &str,
+                   kind: NodeKind,
+                   branches: u32,
+                   loops: u32,
+                   returns: u32,
+                   max_nesting: u32,
+                   start: u32,
+                   end: u32,
+                   parent: Option<&str>,
+                   skip: bool| {
+        let mut n = sample_node(id, name, file);
+        n.kind = kind;
+        n.branches = branches;
+        n.loops = loops;
+        n.returns = returns;
+        n.max_nesting = max_nesting;
+        n.start_line = start;
+        n.end_line = end;
+        n.parent_id = parent.map(str::to_string);
+        n.docstring = if skip {
+            Some(format!("does things // skip-test-coverage for {name}"))
+        } else {
+            Some(format!("Documentation for {name}"))
+        };
+        nodes.push(n);
+    };
+
+    // src/a.rs
+    set("a-f1", "alpha", "src/a.rs", NodeKind::Function, 3, 1, 2, 4, 1, 20, None, false);
+    set("a-m1", "beta", "src/a.rs", NodeKind::Method, 1, 0, 1, 1, 5, 8, None, true);
+    set("a-s1", "Widget", "src/a.rs", NodeKind::Struct, 0, 0, 0, 0, 22, 40, None, false);
+
+    // src/b.rs
+    set("b-f1", "gamma", "src/b.rs", NodeKind::Function, 7, 2, 3, 5, 1, 60, None, false);
+    set("b-c1", "Service", "src/b.rs", NodeKind::Class, 0, 0, 0, 0, 1, 80, None, false);
+    set("b-m1", "handle", "src/b.rs", NodeKind::Method, 2, 1, 1, 2, 10, 30, Some("b-c1"), false);
+    set("b-m2", "start", "src/b.rs", NodeKind::Method, 0, 0, 0, 0, 32, 34, Some("b-c1"), true);
+
+    // src/nested/c.rs
+    set("c-f1", "delta", "src/nested/c.rs", NodeKind::Function, 1, 3, 0, 1, 1, 9, None, true);
+
+    nodes
+}
+
+fn fixture_edges() -> Vec<Edge> {
+    // Mix of cross-file and same-file edges, varied kinds, and a duplicate
+    // cross-file pair (two node pairs mapping to the same file pair).
+    [
+        ("a-f1", "b-f1", EdgeKind::Calls), // src/a.rs -> src/b.rs
+        ("a-f1", "b-m1", EdgeKind::Uses),  // src/a.rs -> src/b.rs (same file pair)
+        ("a-f1", "a-m1", EdgeKind::Calls), // same file (ignored)
+        ("b-f1", "a-s1", EdgeKind::Uses),  // src/b.rs -> src/a.rs
+        ("b-m1", "c-f1", EdgeKind::Calls), // src/b.rs -> src/nested/c.rs
+        ("c-f1", "a-f1", EdgeKind::Calls), // src/nested/c.rs -> src/a.rs
+    ]
+    .into_iter()
+    .map(|(s, t, k)| Edge {
+        source: s.to_string(),
+        target: t.to_string(),
+        kind: k,
+        line: Some(1),
+    })
+    .collect()
+}
+
+#[tokio::test]
+async fn complexity_sum_by_file_matches_rust_fold() {
+    let (_dir, db) = fresh_graph_db().await;
+    let nodes = metric_fixture_nodes();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    for prefix in [None, Some("src"), Some("src/nested")] {
+        let mut expected: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for n in nodes.iter().filter(|n| in_scope(&n.file_path, prefix)) {
+            let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
+            *expected.entry(n.file_path.clone()).or_insert(0.0) += c;
+        }
+        let got: std::collections::HashMap<String, f64> = db
+            .complexity_sum_by_file()
+            .await
+            .expect("complexity_sum_by_file")
+            .into_iter()
+            .filter(|(f, _)| in_scope(f, prefix))
+            .collect();
+        assert_eq!(got, expected, "complexity mismatch for prefix {prefix:?}");
+    }
+}
+
+#[tokio::test]
+async fn line_span_sum_by_file_matches_rust_fold() {
+    let (_dir, db) = fresh_graph_db().await;
+    let nodes = metric_fixture_nodes();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    let mut expected: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for n in &nodes {
+        let lines = f64::from(n.end_line.saturating_sub(n.start_line) + 1);
+        *expected.entry(n.file_path.clone()).or_insert(0.0) += lines;
+    }
+    let got: std::collections::HashMap<String, f64> = db
+        .line_span_sum_by_file()
+        .await
+        .expect("line_span_sum_by_file")
+        .into_iter()
+        .collect();
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn health_file_aggregates_match_rust_fold() {
+    let (_dir, db) = fresh_graph_db().await;
+    let nodes = metric_fixture_nodes();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    // Old snapshot fold, verbatim.
+    let mut per_file_complexity: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for n in &nodes {
+        let c = f64::from(n.branches) * 2.0
+            + f64::from(n.loops) * 2.0
+            + f64::from(n.max_nesting) * 3.0
+            + f64::from(n.end_line.saturating_sub(n.start_line) + 1);
+        *per_file_complexity.entry(n.file_path.clone()).or_insert(0.0) += c;
+    }
+    let total_fns = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .count();
+    let skip_ids: std::collections::HashSet<&str> = nodes
+        .iter()
+        .filter(|n| {
+            n.docstring
+                .as_deref()
+                .is_some_and(|d| d.contains("skip-test-coverage"))
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+    let skipped = nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                && skip_ids.contains(n.id.as_str())
+        })
+        .count();
+
+    let aggs = db
+        .health_file_aggregates()
+        .await
+        .expect("health_file_aggregates");
+    let got_complexity: std::collections::HashMap<String, f64> = aggs
+        .iter()
+        .map(|a| (a.file_path.clone(), a.complexity))
+        .collect();
+    let got_total_fns: usize = aggs.iter().map(|a| a.function_methods).sum();
+    let got_skipped: usize = aggs.iter().map(|a| a.skipped_function_methods).sum();
+
+    assert_eq!(got_complexity, per_file_complexity, "weighted complexity");
+    assert_eq!(got_total_fns, total_fns, "function/method count");
+    assert_eq!(got_skipped, skipped, "skip-test-coverage count");
+}
+
+#[tokio::test]
+async fn cross_file_fan_matches_rust_fold() {
+    let (_dir, db) = fresh_graph_db().await;
+    let nodes = metric_fixture_nodes();
+    let edges = fixture_edges();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+    db.insert_edges(&edges).await.expect("insert edges");
+
+    for &fan_in in &[true, false] {
+        // Old fold: node -> file map + whole-edge-table walk.
+        let node_to_file: std::collections::HashMap<String, String> = nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.file_path.clone()))
+            .collect();
+        let mut expected: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for n in &nodes {
+            expected.entry(n.file_path.clone()).or_insert(0.0);
+        }
+        for e in &edges {
+            if let (Some(sf), Some(tf)) =
+                (node_to_file.get(&e.source), node_to_file.get(&e.target))
+                && sf != tf
+            {
+                let key = if fan_in { tf.clone() } else { sf.clone() };
+                *expected.entry(key).or_insert(0.0) += 1.0;
+            }
+        }
+
+        // New: SQL pair counts + distinct node files.
+        let mut got: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for file in db.distinct_node_file_paths().await.expect("files") {
+            got.entry(file).or_insert(0.0);
+        }
+        for (src, tgt, count) in db.cross_file_edge_pair_counts().await.expect("pair counts") {
+            if src != tgt {
+                let key = if fan_in { tgt } else { src };
+                *got.entry(key).or_insert(0.0) += count as f64;
+            }
+        }
+
+        assert_eq!(got, expected, "fan_in={fan_in}");
+    }
+}
+
+#[tokio::test]
+async fn symbol_complexity_matches_rust_fold() {
+    let (_dir, db) = fresh_graph_db().await;
+    let nodes = metric_fixture_nodes();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    // Old symbol-scope projection, in insertion (rowid) order.
+    let expected: Vec<(String, f64)> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| {
+            let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
+            (format!("{}:{}", n.file_path, n.name), c)
+        })
+        .collect();
+
+    let got: Vec<(String, f64)> = db
+        .symbol_complexity()
+        .await
+        .expect("symbol_complexity")
+        .into_iter()
+        .map(|(file, name, value)| (format!("{file}:{name}"), value))
+        .collect();
+
+    assert_eq!(got, expected);
+}
+
+/// Measures the health-aggregate pushdown on a multi-thousand-node graph and
+/// proves the structural allocation win: the SQL path returns one row per file
+/// (a few hundred) instead of the whole `Vec<Node>` (several thousand `Node`
+/// structs, each with six owned `String`s). Also confirms the two paths agree.
+/// Run with `--nocapture` to see the before/after timings.
+#[tokio::test]
+async fn health_aggregate_pushdown_avoids_whole_table_fold() {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    let (_dir, db) = fresh_graph_db().await;
+
+    const FILES: usize = 250;
+    const PER_FILE: usize = 16; // 4000 nodes total
+    let mut nodes = Vec::with_capacity(FILES * PER_FILE);
+    for f in 0..FILES {
+        for i in 0..PER_FILE {
+            let file = format!("src/pkg{:03}/mod{:03}.rs", f / 10, f);
+            let mut n = sample_node(&format!("n-{f}-{i}"), &format!("fn_{f}_{i}"), &file);
+            n.kind = if i % 4 == 0 {
+                NodeKind::Method
+            } else {
+                NodeKind::Function
+            };
+            n.branches = (i as u32) % 5;
+            n.loops = (i as u32) % 3;
+            n.returns = (i as u32) % 2;
+            n.max_nesting = (i as u32) % 4;
+            n.start_line = (i as u32) * 10 + 1;
+            n.end_line = (i as u32) * 10 + 9;
+            n.docstring = if i % 8 == 0 {
+                Some(format!("// skip-test-coverage fn_{f}_{i}"))
+            } else {
+                Some(format!("doc {f}/{i}"))
+            };
+            nodes.push(n);
+        }
+    }
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    // Old path: materialize the whole node table, fold in Rust.
+    let old_start = Instant::now();
+    let all_nodes = db.get_all_nodes().await.expect("get_all_nodes");
+    let mut per_file: HashMap<String, f64> = HashMap::new();
+    let mut old_fns = 0usize;
+    let mut old_skipped = 0usize;
+    for n in &all_nodes {
+        let c = f64::from(n.branches) * 2.0
+            + f64::from(n.loops) * 2.0
+            + f64::from(n.max_nesting) * 3.0
+            + f64::from(n.end_line.saturating_sub(n.start_line) + 1);
+        *per_file.entry(n.file_path.clone()).or_insert(0.0) += c;
+        if matches!(n.kind, NodeKind::Function | NodeKind::Method) {
+            old_fns += 1;
+            if n
+                .docstring
+                .as_deref()
+                .is_some_and(|d| d.contains("skip-test-coverage"))
+            {
+                old_skipped += 1;
+            }
+        }
+    }
+    let old_nodes_materialized = all_nodes.len();
+    let old_elapsed = old_start.elapsed();
+
+    // New path: fold inside SQLite, one row per file.
+    let new_start = Instant::now();
+    let aggregates = db
+        .health_file_aggregates()
+        .await
+        .expect("health_file_aggregates");
+    let new_per_file: HashMap<String, f64> = aggregates
+        .iter()
+        .map(|a| (a.file_path.clone(), a.complexity))
+        .collect();
+    let new_fns: usize = aggregates.iter().map(|a| a.function_methods).sum();
+    let new_skipped: usize = aggregates.iter().map(|a| a.skipped_function_methods).sum();
+    let new_rows_materialized = aggregates.len();
+    let new_elapsed = new_start.elapsed();
+
+    // Byte-identical results.
+    assert_eq!(new_per_file, per_file);
+    assert_eq!(new_fns, old_fns);
+    assert_eq!(new_skipped, old_skipped);
+
+    // Structural allocation win: SQL returns one row per file, not per node,
+    // and never builds a `Vec<Node>`.
+    assert_eq!(new_rows_materialized, FILES);
+    assert_eq!(old_nodes_materialized, FILES * PER_FILE);
+    assert!(
+        new_rows_materialized * 4 < old_nodes_materialized,
+        "SQL aggregate must materialize far fewer rows than the node fold"
+    );
+
+    eprintln!(
+        "[health_aggregate_pushdown] nodes={} files={} | old(get_all_nodes+fold): {:?} materializing {} Node structs | new(SQL GROUP BY): {:?} materializing {} file rows",
+        nodes.len(),
+        FILES,
+        old_elapsed,
+        old_nodes_materialized,
+        new_elapsed,
+        new_rows_materialized,
+    );
+}
