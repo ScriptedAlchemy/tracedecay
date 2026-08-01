@@ -408,6 +408,21 @@ impl DashboardState {
             });
         }
     }
+
+    fn retain_admitted_authorities(
+        &mut self,
+        code_diagnostics_authority: Option<
+            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
+        >,
+        doctor_report_reader: Option<DoctorReportReader>,
+        doctor_remediation_dispatcher: Option<
+            doctor_remediation_api::DoctorRemediationDispatcherV1,
+        >,
+    ) {
+        self.code_diagnostics_authority = code_diagnostics_authority;
+        self.doctor_report_reader = doctor_report_reader;
+        self.doctor_remediation_dispatcher = doctor_remediation_dispatcher;
+    }
 }
 
 /// The LCM session store the dashboard will serve.
@@ -523,7 +538,7 @@ async fn build_state_inner(
         .map(|db| db.db_path().display().to_string())
         .or_else(|| tracedecay_global_db::global_db_path().map(|path| path.display().to_string()))
         .unwrap_or_default();
-    let state = DashboardState {
+    let mut state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
         resolved_scope: scope::resolve_dashboard_scope(
             cg.project_root(),
@@ -554,13 +569,18 @@ async fn build_state_inner(
         user_settings: cg.user_settings_client(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics_authority,
+        code_diagnostics_authority: None,
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_report_reader,
-        doctor_remediation_dispatcher,
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
         application_invocation_executor,
     };
+    state.retain_admitted_authorities(
+        code_diagnostics_authority,
+        doctor_report_reader,
+        doctor_remediation_dispatcher,
+    );
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -1889,15 +1909,17 @@ mod authority_tests {
                 tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
             ),
         ));
-        fixture.state.doctor_report_reader = Some(Arc::clone(&doctor_reader));
-        fixture.state.doctor_remediation_dispatcher = Some(doctor_dispatcher);
-        fixture.state.code_diagnostics_authority = Some(
-            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
-                fixture.layout.project_root.clone(),
-                fixture.layout.dashboard_root.clone(),
-                Arc::clone(&fixture.state.mem_db),
-                diagnostic_broker,
+        fixture.state.retain_admitted_authorities(
+            Some(
+                crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
+                    fixture.layout.project_root.clone(),
+                    fixture.layout.dashboard_root.clone(),
+                    Arc::clone(&fixture.state.mem_db),
+                    diagnostic_broker,
+                ),
             ),
+            Some(Arc::clone(&doctor_reader)),
+            Some(doctor_dispatcher),
         );
         let state = fixture.state;
 
