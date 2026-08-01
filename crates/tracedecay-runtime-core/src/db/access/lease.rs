@@ -484,7 +484,7 @@ impl DatabaseDeletionFence {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn tombstone_paths(&self) -> impl ExactSizeIterator<Item = &Path> {
         self.entries
             .iter()
