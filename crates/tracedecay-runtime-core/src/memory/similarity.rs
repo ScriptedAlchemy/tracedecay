@@ -12,7 +12,7 @@ const TOKEN_STOPWORDS: &[&str] = &[
     "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
 ];
 
-pub fn content_tokens(content: &str) -> BTreeSet<String> {
+pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
     for ch in content.chars() {
@@ -46,7 +46,7 @@ pub fn lexical_overlap(a: &str, b: &str) -> (serde_json::Value, f64, f64) {
 }
 
 /// Pre-tokenized variant of [`lexical_overlap`].
-pub fn lexical_overlap_tokens(
+pub(crate) fn lexical_overlap_tokens(
     a_tokens: &BTreeSet<String>,
     b_tokens: &BTreeSet<String>,
 ) -> (serde_json::Value, f64, f64) {

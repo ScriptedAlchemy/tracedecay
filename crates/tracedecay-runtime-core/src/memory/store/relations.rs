@@ -40,7 +40,7 @@ impl MemoryStore<'_> {
         .await
     }
 
-    pub async fn upsert_fact_relation_inner(
+    pub(crate) async fn upsert_fact_relation_inner(
         &self,
         source_fact_id: i64,
         target_fact_id: i64,
@@ -229,7 +229,11 @@ impl MemoryStore<'_> {
         Ok(relations)
     }
 
-    pub async fn related_fact_ids(&self, fact_ids: &[i64], limit: usize) -> Result<Vec<i64>> {
+    pub(crate) async fn related_fact_ids(
+        &self,
+        fact_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<i64>> {
         if fact_ids.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -271,7 +275,7 @@ impl MemoryStore<'_> {
         Ok(related.into_iter().collect())
     }
 
-    pub async fn remove_fact_relation(
+    pub(crate) async fn remove_fact_relation(
         &self,
         source_fact_id: i64,
         target_fact_id: i64,

@@ -186,7 +186,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
 
 #[cfg(test)]
 #[derive(Default)]
-pub struct EmptyPhysicalRuntimeAttachment;
+pub(crate) struct EmptyPhysicalRuntimeAttachment;
 
 #[cfg(test)]
 impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
@@ -229,7 +229,7 @@ impl PublishedShardRuntime {
         }
     }
 
-    pub fn new_with_schema_migration(
+    pub(crate) fn new_with_schema_migration(
         runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
         schema_migrated: bool,

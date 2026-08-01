@@ -17,7 +17,7 @@ pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
 ///
 /// This avoids the fixed 320 MB memory baseline for small/medium projects.
 #[cfg(test)]
-pub fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
+pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
 
@@ -39,7 +39,7 @@ pub fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
 /// across WAL checkpoints; ordinary file I/O keeps `SQLite`'s locking and WAL
 /// coherence mechanisms authoritative.
 #[cfg(test)]
-pub fn platform_safe_mmap_size(_mmap: u64) -> u64 {
+pub(crate) fn platform_safe_mmap_size(_mmap: u64) -> u64 {
     0
 }
 
@@ -60,7 +60,7 @@ fn sqlite_unsafe_fast_enabled() -> bool {
 /// production) this returns `MEMORY` on every platform, skipping journal file
 /// I/O entirely at the cost of crash durability.
 #[cfg(test)]
-pub fn platform_safe_journal_mode() -> &'static str {
+pub(crate) fn platform_safe_journal_mode() -> &'static str {
     if sqlite_unsafe_fast_enabled() {
         "MEMORY"
     } else if cfg!(windows) {
@@ -81,7 +81,7 @@ pub fn platform_safe_journal_mode() -> &'static str {
 /// production) this returns `OFF` on every platform, skipping fsyncs entirely
 /// at the cost of crash durability.
 #[cfg(test)]
-pub fn platform_safe_synchronous_mode() -> &'static str {
+pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
     if sqlite_unsafe_fast_enabled() {
         "OFF"
     } else if cfg!(windows) {

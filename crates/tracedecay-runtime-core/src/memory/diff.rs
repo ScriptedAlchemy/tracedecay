@@ -14,11 +14,11 @@ use super::similarity::lexical_overlap;
 use super::types::AddFactDiffKind;
 
 /// A new fact whose strongest candidate scores above this is a near-duplicate.
-pub const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
+pub(crate) const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
 /// Negation/state-change cues only flag a conflict at or above this
 /// similarity; below it, texts can share domain vocabulary without being
 /// about the same subject.
-pub const CONFLICT_THRESHOLD: f64 = 0.7;
+pub(crate) const CONFLICT_THRESHOLD: f64 = 0.7;
 /// Vector cosine similarity only contributes to the combined score above this
 /// floor: same-domain content clusters in the 0.70–0.85 band and would
 /// otherwise produce false near-duplicate matches.
@@ -68,7 +68,11 @@ pub fn normalized_equivalent(a: &str, b: &str) -> bool {
 /// existing candidate. Token overlap is the baseline; real vector cosine
 /// contributes only when it is high enough to be trustworthy (mnemon's
 /// combination rule, adapted to stored holographic vectors).
-pub fn combined_similarity(new_content: &str, existing_content: &str, cosine: Option<f64>) -> f64 {
+pub(crate) fn combined_similarity(
+    new_content: &str,
+    existing_content: &str,
+    cosine: Option<f64>,
+) -> f64 {
     let (_, token_overlap, _) = lexical_overlap(new_content, existing_content);
     let mut similarity = token_overlap;
     if let Some(cos) = cosine
@@ -86,7 +90,7 @@ pub fn vector_similarity(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// Classifies how a new fact relates to its strongest existing candidate.
-pub fn classify_add_diff(
+pub(crate) fn classify_add_diff(
     similarity: f64,
     new_content: &str,
     existing_content: &str,

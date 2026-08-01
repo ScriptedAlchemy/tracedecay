@@ -72,7 +72,7 @@ mod legacy_reclamation {
 /// Observable record of one live legacy-payload purge, so a caller can report
 /// exactly what a destructive reclamation did rather than a bare boolean.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct MemoryV2LegacyPurgeReceipt {
+pub(crate) struct MemoryV2LegacyPurgeReceipt {
     owner: FactOwnerV1,
     source_store_id: SourceStoreId,
     fact_id: FactId,
@@ -82,7 +82,7 @@ pub struct MemoryV2LegacyPurgeReceipt {
 }
 
 impl MemoryV2LegacyPurgeReceipt {
-    pub fn payload_purged(&self) -> bool {
+    pub(crate) fn payload_purged(&self) -> bool {
         self.payload_purged
     }
 }

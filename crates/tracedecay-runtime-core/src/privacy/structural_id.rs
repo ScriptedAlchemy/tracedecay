@@ -12,7 +12,7 @@ pub struct StructuralIdProtectionError;
 
 /// True when `value` is already a protected structural-ID token or an opaque
 /// Claude observation source digest that must not be re-hashed.
-pub fn is_already_protected_structural_id(value: &str) -> bool {
+pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
     has_canonical_sha256_suffix(value, PROTECTION_PREFIX_V1)
         || has_canonical_sha256_suffix(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1)
 }

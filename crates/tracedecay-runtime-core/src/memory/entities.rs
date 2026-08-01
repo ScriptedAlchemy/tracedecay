@@ -22,7 +22,7 @@ pub fn normalize_entity(entity: &str) -> String {
 
 /// Canonicalizes an entity alias and rejects values that are unsafe or too
 /// broad for deterministic alias matching.
-pub fn normalize_entity_alias(alias: &str) -> Result<String, &'static str> {
+pub(crate) fn normalize_entity_alias(alias: &str) -> Result<String, &'static str> {
     let normalized = normalize_entity(alias);
     if normalized.is_empty() || !is_valid_entity(&normalized) {
         return Err("alias is empty or not a bounded entity name");

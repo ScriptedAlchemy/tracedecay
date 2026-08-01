@@ -87,7 +87,7 @@ pub mod registered_schema {
 
     /// Whether an installer has been registered yet.
     #[must_use]
-    pub fn is_registered() -> bool {
+    pub(crate) fn is_registered() -> bool {
         INSTALLER.get().is_some()
     }
 

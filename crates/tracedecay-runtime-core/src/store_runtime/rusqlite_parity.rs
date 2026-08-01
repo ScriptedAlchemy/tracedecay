@@ -43,7 +43,7 @@ static NEXT_INVOCATION: AtomicU64 = AtomicU64::new(0);
 ///
 /// The wire command itself is owned by `tracedecay-sqlite-parity-protocol`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RusqliteParityRequestV1 {
+pub(crate) struct RusqliteParityRequestV1 {
     store_identity: StoreRuntimeBindingV1,
     command: CommandV1,
 }
@@ -66,7 +66,7 @@ impl RusqliteParityRequestV1 {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RusqliteParityResultV1 {
+pub(crate) struct RusqliteParityResultV1 {
     store_identity: StoreRuntimeBindingV1,
     output: OutputV1,
 }
@@ -83,7 +83,7 @@ impl RusqliteParityResultV1 {
 
 /// Infrastructure-only failures from snapshotting, transport, or protocol validation.
 #[derive(Debug, thiserror::Error)]
-pub enum RusqliteParityInfrastructureErrorV1 {
+pub(crate) enum RusqliteParityInfrastructureErrorV1 {
     #[error("invalid rusqlite parity {field}: {message}")]
     InvalidPath {
         field: &'static str,
@@ -156,7 +156,7 @@ pub enum RusqliteParityInfrastructureErrorV1 {
 /// under one of those roots is rejected before a copy can be created.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(unix), allow(unreachable_code))] // early UnsupportedPlatform return
-pub async fn run_rusqlite_parity_v1(
+pub(crate) async fn run_rusqlite_parity_v1(
     helper_executable: &Path,
     authority_store_path: &Path,
     staging_root: &Path,

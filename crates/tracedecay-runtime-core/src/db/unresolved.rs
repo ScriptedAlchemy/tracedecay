@@ -20,7 +20,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub async fn insert_unresolved_ref_unguarded(
+    pub(crate) async fn insert_unresolved_ref_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         uref: &UnresolvedRef,
@@ -163,7 +163,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub async fn clear_unresolved_refs_unguarded(
+    pub(crate) async fn clear_unresolved_refs_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {

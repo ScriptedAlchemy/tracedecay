@@ -34,9 +34,9 @@ use super::projection::compatibility_required_mapping_tx;
 /// Per-repair-pass batch caps. The daemon scheduler treats a pass that hits
 /// either cap as incomplete and keeps ticking rather than going idle with a
 /// converging backlog.
-pub const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
+pub(crate) const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
 
-pub const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
+pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
 
 /// True when a repair pass filled either per-pass batch cap, so backlog may
 /// remain behind the cap. Only the store computes this — it owns the caps — so
