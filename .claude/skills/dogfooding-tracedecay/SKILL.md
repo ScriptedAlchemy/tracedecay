@@ -80,6 +80,44 @@ Then reproduce the changed host scenario with the ordinary global
 `tracedecay` command. Inspect relevant service/host logs. Restart a host only
 when its integration is in-process or its plugin module cannot hot-reload.
 
+## Verify the live daemon end-to-end
+
+The manual commands above confirm the binary. To confirm the *running daemon*
+behind it, use the live suite:
+
+```bash
+scripts/live-daemon-check.sh
+```
+
+It builds and runs `tests/live_daemon_suite.rs` against the real managed daemon
+and finishes with a PASS/FAIL table covering:
+
+- socket connect plus an MCP `initialize` whose `serverInfo.version` must equal
+  the installed binary's `--version` — this is the stale-daemon check, stated as
+  an assertion instead of two strings to eyeball;
+- `tools/list` sanity (full catalog, no duplicates, the always-loaded tools
+  present);
+- a daemon-brokered read battery (`status`, `search`, `grep`, `callers` on the
+  node the search resolved, `storage_status`, `git_status`);
+- latency bounds (every call under 30s, `status` under 5s);
+- a `tracedecay doctor` pass, which exits zero when it counted zero issues
+  regardless of warnings;
+- the daemon still being the same process, with the socket still accepting,
+  after the battery.
+
+The suite is read-only: it handshakes with `allow_init = false`, dispatches no
+writes, and never starts, stops, restarts, or signals the daemon. It excludes
+`tracedecay_memory_status`, whose handler repairs derived holographic vectors;
+set `TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS=1` to include it.
+
+Both guards must be satisfied for anything to run — every test is `#[ignore]`
+*and* gated on `TRACEDECAY_LIVE_DAEMON_TESTS=1` — so a plain `cargo test` and
+CI execute zero of them. Useful overrides: `TRACEDECAY_BIN` (binary to
+cross-check), `TRACEDECAY_LIVE_DAEMON_PROJECT` (indexed project to route to;
+must already be indexed, the suite refuses to create one),
+`TRACEDECAY_LIVE_DAEMON_SYMBOL` / `TRACEDECAY_LIVE_DAEMON_PATTERN` (probe
+inputs when running against a checkout other than TraceDecay itself).
+
 ## Guardrails
 
 - Invoke ordinary `cargo dogfood` without setting `CARGO_TARGET_DIR` or
