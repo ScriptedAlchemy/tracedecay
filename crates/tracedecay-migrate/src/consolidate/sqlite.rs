@@ -17,7 +17,7 @@ pub(super) mod projection;
 mod temporal;
 mod verify;
 
-pub(crate) use memory_v2::MemoryV2ArchiveMergeProof;
+pub use memory_v2::MemoryV2ArchiveMergeProof;
 use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority, merge_memory_v2_owner_archives};
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
@@ -218,7 +218,7 @@ pub(super) async fn merge_registered_graph_facts(
 /// mutation. Legacy rows are unioned with remapped numeric identities; any
 /// Memory V2 authority is then merged by its stable owner-bound identities,
 /// including assertions, lineage, evidence, tombstones and feedback history.
-pub(crate) async fn merge_branch_legacy_memory_snapshot(
+pub async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
     source: &crate::root_seam::sqlite_read_snapshot::SnapshotDatabase,
 ) -> Result<Vec<MemoryV2ArchiveMergeProof>> {
@@ -270,7 +270,7 @@ pub(crate) async fn merge_branch_legacy_memory_snapshot(
     Ok(proofs)
 }
 
-pub(crate) async fn rebuild_branch_cutover_memory_banks(target: &Database) -> Result<()> {
+pub async fn rebuild_branch_cutover_memory_banks(target: &Database) -> Result<()> {
     let transaction = target
         .begin_memory_write_transaction("rebuild branch-cutover memory banks")
         .await?;

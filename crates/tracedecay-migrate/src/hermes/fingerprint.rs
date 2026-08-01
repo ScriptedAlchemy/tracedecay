@@ -8,7 +8,7 @@ use super::copy::{MIGRATION_QUERY_PAGE_ROWS, quote_identifier, table_columns};
 use super::{COPIED_MEMORY_TABLES, COPIED_TABLES};
 use crate::root_seam::db::engine::{QueryExecutor, Value, params};
 
-pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
+pub fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     match value {
         Value::Null => hash.update(b"n"),
         Value::Integer(value) => {
@@ -32,7 +32,7 @@ pub(crate) fn hash_sqlite_value(hash: &mut Sha256, value: Value) {
     }
 }
 
-pub(crate) async fn hash_connection_tables<Q>(
+pub async fn hash_connection_tables<Q>(
     hash: &mut Sha256,
     source: &Q,
     tables: &[&str],
@@ -105,7 +105,7 @@ where
     Ok(())
 }
 
-pub(crate) async fn logical_source_fingerprint<S, M>(
+pub async fn logical_source_fingerprint<S, M>(
     source: Option<&S>,
     source_path: &Path,
     memory_source: Option<(&M, &Path)>,

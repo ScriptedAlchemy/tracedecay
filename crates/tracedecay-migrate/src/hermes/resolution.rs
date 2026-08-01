@@ -7,13 +7,13 @@ use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table
 use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
 
-pub(crate) struct ResolvedTargetProject {
-    pub(crate) root: PathBuf,
-    pub(crate) registry_project_id: Option<String>,
-    pub(crate) user_scope: bool,
+pub struct ResolvedTargetProject {
+    pub root: PathBuf,
+    pub registry_project_id: Option<String>,
+    pub user_scope: bool,
 }
 
-pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
+pub fn same_path(left: &Path, right: &Path) -> bool {
     canonicalize_with_missing_tail(left).unwrap_or_else(|| left.to_path_buf())
         == canonicalize_with_missing_tail(right).unwrap_or_else(|| right.to_path_buf())
 }
@@ -180,7 +180,7 @@ async fn resolve_project_candidate(
     )
 }
 
-pub(crate) async fn resolve_target_project<Q>(
+pub async fn resolve_target_project<Q>(
     source: Option<&Q>,
     registry: Option<&RegisteredGlobalDb>,
     config_path: &Path,

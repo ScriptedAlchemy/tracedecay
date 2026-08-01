@@ -47,7 +47,7 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
 
 /// Builds a read-only inventory through the daemon's existing database
 /// authority instead of opening a second process-local database client.
-pub(crate) async fn build_inventory_for_daemon(
+pub async fn build_inventory_for_daemon(
     options: MigrationInventoryOptions,
     global_db: &global_db::RegisteredGlobalDb,
 ) -> Result<MigrationInventory> {

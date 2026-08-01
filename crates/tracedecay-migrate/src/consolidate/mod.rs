@@ -11,7 +11,7 @@ mod finalize;
 mod preflight;
 mod prepare;
 mod runtime;
-pub(crate) mod sqlite;
+pub mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -150,7 +150,7 @@ struct ConsolidationLedger {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct ManifestRetirementReport {
+pub struct ManifestRetirementReport {
     pub retired: Vec<PathBuf>,
     pub retired_registry_projects: usize,
     pub warnings: Vec<String>,
@@ -931,7 +931,7 @@ async fn collision_summary(
     })
 }
 
-pub(crate) fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
+pub fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
     let mut ids = [source, target];
     ids.sort_unstable();
     let mut hash = Sha256::new();
@@ -1127,7 +1127,7 @@ fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
     PrivateStoreIo::write_file_atomically(path, &temp, &bytes).map_err(io_error)
 }
 
-pub(crate) async fn retire_applied_input_manifests(
+pub async fn retire_applied_input_manifests(
     profile_root: &Path,
     global_db: &RegisteredGlobalDb,
 ) -> ManifestRetirementReport {

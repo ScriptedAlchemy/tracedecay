@@ -252,7 +252,7 @@ impl MigrationRegistryRuntime {
     }
 }
 
-pub(crate) async fn diff_registry_reconstruction_report(
+pub async fn diff_registry_reconstruction_report(
     db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> RegistryReconstructionDiffReport {
@@ -419,7 +419,7 @@ where
     Ok(false)
 }
 
-pub(crate) async fn apply_registry_reconstruction_report(
+pub async fn apply_registry_reconstruction_report(
     db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
@@ -443,7 +443,7 @@ pub(crate) async fn apply_registry_reconstruction_report(
     Ok(applied)
 }
 
-pub(crate) async fn apply_single_registry_reconstruction_report(
+pub async fn apply_single_registry_reconstruction_report(
     db: &RegisteredGlobalDb,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
@@ -1042,7 +1042,7 @@ pub fn stale_code_projects<'a>(
 /// Builds the exact registry cleanup plan without mutating registry state.
 /// Both daemon-owned and offline maintenance paths must hold their mutation
 /// authority before applying this plan.
-pub(crate) async fn registry_gc_report(
+pub async fn registry_gc_report(
     db: &RegisteredGlobalDb,
     _profile_root: &Path,
     prefix: Option<String>,
@@ -1108,7 +1108,7 @@ pub(crate) async fn registry_gc_report(
     })
 }
 
-pub(crate) async fn apply_registry_gc(
+pub async fn apply_registry_gc(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
     prefix: Option<String>,
