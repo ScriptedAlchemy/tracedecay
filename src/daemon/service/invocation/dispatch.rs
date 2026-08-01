@@ -12,31 +12,6 @@ use super::*;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
-#[cfg(test)]
-mod future_size_guard {
-    use super::*;
-
-    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
-        std::mem::size_of::<F>()
-    }
-
-    /// Fails if a payload arm stops boxing its awaited future and the dispatch
-    /// coroutine grows back toward the size that overflowed default stacks.
-    #[test]
-    fn invoke_future_stays_within_budget() {
-        #![allow(unreachable_code, clippy::diverging_sub_expression)]
-        let size = future_size(|| {
-            DaemonInvocationService::invoke(loop {}, loop {}, loop {}, loop {}, loop {}, loop {})
-        });
-        assert!(
-            size <= INVOKE_FUTURE_SIZE_BUDGET,
-            "DaemonInvocationService::invoke future is {size} bytes, over the \
-             {INVOKE_FUTURE_SIZE_BUDGET} byte budget; box the awaited future of \
-             any large payload arm in the dispatch match",
-        );
-    }
-}
-
 #[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
@@ -617,5 +592,40 @@ impl DaemonInvocationService {
             );
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod future_size_guard {
+    use super::*;
+
+    fn future_size<F: std::future::Future>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    fn type_only<T>() -> T {
+        unreachable!("type-only future size placeholder must never execute")
+    }
+
+    /// Fails if a payload arm stops boxing its awaited future and the dispatch
+    /// coroutine grows back toward the size that overflowed default stacks.
+    #[test]
+    fn invoke_future_stays_within_budget() {
+        let size = future_size(|| {
+            DaemonInvocationService::invoke(
+                type_only(),
+                type_only(),
+                type_only(),
+                type_only(),
+                type_only(),
+                type_only(),
+            )
+        });
+        assert!(
+            size <= INVOKE_FUTURE_SIZE_BUDGET,
+            "DaemonInvocationService::invoke future is {size} bytes, over the \
+             {INVOKE_FUTURE_SIZE_BUDGET} byte budget; box the awaited future of \
+             any large payload arm in the dispatch match",
+        );
     }
 }
