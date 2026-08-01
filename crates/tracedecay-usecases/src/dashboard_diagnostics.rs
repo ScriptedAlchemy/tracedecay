@@ -25,7 +25,7 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum DashboardDiagnosticsErrorV1 {
+pub enum DashboardDiagnosticsErrorV1 {
     #[error("no code diagnostics adapter registered for language '{language}'")]
     AdapterUnavailable { language: String },
     #[error("code diagnostics language is disabled for '{language}'")]
@@ -45,7 +45,7 @@ pub(crate) enum DashboardDiagnosticsErrorV1 {
 /// store revision to hand out. Digesting the settings themselves gives an
 /// exact compare-and-set token: two writers agree only when they agree about
 /// the whole settings value.
-pub(crate) fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestDigest> {
+pub fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestDigest> {
     canonical_sha256(&("tracedecay.code-diagnostics.settings.v1", settings)).map_err(|error| {
         TraceDecayError::Config {
             message: format!("could not compute code diagnostics settings revision: {error}"),
@@ -68,7 +68,7 @@ pub fn diagnostic_broker(
 /// reading the project's persisted analyzer settings. Both the MCP server and
 /// the directly served dashboard route through here so the code-diagnostics
 /// surface does not depend on which entry point started the dashboard.
-pub(crate) async fn open_diagnostic_broker(
+pub async fn open_diagnostic_broker(
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
 ) -> Arc<Mutex<DiagnosticBroker>> {

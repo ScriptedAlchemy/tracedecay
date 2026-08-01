@@ -463,7 +463,7 @@ pub fn observatory_unavailable_read_model(
 }
 
 /// Canonical Observatory projection shared by CLI, MCP, and dashboard HTTP.
-pub(crate) async fn observatory_read_model(
+pub async fn observatory_read_model(
     db: &RegisteredGlobalDb,
     scope_ref: Option<&str>,
     since_seconds: i64,
@@ -845,7 +845,7 @@ pub fn costs_unavailable_read_model(
 
 /// Canonical Costs projection. Prices are recorded at ingest; transports never
 /// join a pricing table or recompute dollar formulas.
-pub(crate) async fn costs_read_model(
+pub async fn costs_read_model(
     db: &RegisteredGlobalDb,
     scope_ref: Option<&str>,
     since_seconds: i64,
