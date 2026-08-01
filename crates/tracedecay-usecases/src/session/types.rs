@@ -2,9 +2,9 @@ use std::fmt;
 
 use tracedecay_application::RequestContext;
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SessionId,
-    SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1, TemporalModeV1,
+    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
+pub use tracedecay_global_db::session_temporal::execution::SessionDataFreshness;
 pub use tracedecay_sessions::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionRetrievalScope,
 };
@@ -431,27 +431,6 @@ impl SessionFreshnessPolicy {
             (self, freshness),
             (Self::AllowStored, _) | (_, SessionDataFreshness::Fresh)
         )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionDataFreshness {
-    Fresh,
-    Stored { generation_lag: u64 },
-    Partial { generation_lag: u64 },
-}
-
-impl SessionDataFreshness {
-    pub fn from_source_coverage(receipt: &SessionSourceCoverageReceiptV1) -> Self {
-        match receipt.aggregate_state() {
-            SessionSourceCoverageAggregateStateV1::Fresh => Self::Fresh,
-            SessionSourceCoverageAggregateStateV1::Stale => Self::Stored {
-                generation_lag: receipt.max_frontier_lag(),
-            },
-            SessionSourceCoverageAggregateStateV1::Partial => Self::Partial {
-                generation_lag: receipt.max_frontier_lag(),
-            },
-        }
     }
 }
 

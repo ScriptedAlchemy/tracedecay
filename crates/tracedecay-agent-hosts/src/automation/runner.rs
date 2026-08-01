@@ -52,13 +52,14 @@ use crate::application::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalExecutionPort, SessionTemporalQuery,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
+use crate::ports::project_runtime::ProfileRuntime;
 #[cfg(test)]
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
+use crate::ports::session_store::AutomationSessionStore;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_global_db::RegisteredGlobalDb;
 #[cfg(test)]
 use tracedecay_temporal_query::TemporalKernelResult;
 #[cfg(test)]
@@ -131,8 +132,7 @@ pub(super) async fn project_automation_sessions(
             message: "project automation requires authoritative project session scope".to_string(),
         });
     };
-    cg.store_runtime_registry()
-        .project_sessions(project_id, [cg.store_layout().project_root.clone()])
+    cg.project_sessions(project_id, vec![cg.store_layout().project_root.clone()])
         .await
 }
 
@@ -156,7 +156,7 @@ pub struct UserSessionAutomationRun {
 
 pub async fn run_user_session_automation_with_backend(
     profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: UserSessionAutomationOptions,
@@ -175,7 +175,7 @@ pub async fn run_user_session_automation_with_backend(
 
 pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
     profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -248,7 +248,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
 
 pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -293,23 +293,27 @@ async fn run_skill_writer_for_store(
     {
         return Ok(rejected_skill_writer_run(&run, config, reason, None));
     }
-    let evidence_bundle =
-        match build_skill_writer_evidence(retrieval, analytics_project_root, analytics_db, options)
-            .await?
-        {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped {
+    let evidence_bundle = match build_skill_writer_evidence(
+        retrieval,
+        analytics_project_root,
+        analytics_db.map(|database| database as &dyn AutomationSessionStore),
+        options,
+    )
+    .await?
+    {
+        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+        SkillWriterEvidenceOutcome::Skipped {
+            reason,
+            evidence_hash,
+        } => {
+            return Ok(rejected_skill_writer_run(
+                &run,
+                config,
                 reason,
                 evidence_hash,
-            } => {
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-        };
+            ));
+        }
+    };
     let SkillWriterEvidenceBundle {
         profile_root,
         evidence,

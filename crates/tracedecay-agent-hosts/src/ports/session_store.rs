@@ -93,6 +93,67 @@ pub trait AutomationSessionStore: Send + Sync {
     ) -> StoreFuture<'a, Result<Vec<AnalyticsEventRecord>, String>>;
 }
 
+impl AutomationSessionStore for tracedecay_global_db::RegisteredGlobalDb {
+    fn database_path(&self) -> &Path {
+        self.db_path()
+    }
+
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.binding()
+    }
+
+    fn latest_session_activity_secs(&self) -> StoreFuture<'_, Option<i64>> {
+        Box::pin(self.latest_session_activity_secs())
+    }
+
+    fn read_snapshot(&self) -> StoreFuture<'_, Result<ReadSnapshot, String>> {
+        Box::pin(async move {
+            self.read_snapshot()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn query_analytics_events<'a>(
+        &'a self,
+        query: &'a AnalyticsEventQuery,
+    ) -> StoreFuture<'a, Result<Vec<AnalyticsEventRecord>, String>> {
+        Box::pin(async move {
+            let records = self
+                .query_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
+                    provider: query.provider.clone(),
+                    project_id: query.project_id.clone(),
+                    session_id: query.session_id.clone(),
+                    event_kind: query.event_kind.clone(),
+                    since: query.since,
+                    until: query.until,
+                    before_id: query.before_id,
+                    limit: query.limit,
+                })
+                .await?;
+            Ok(records
+                .into_iter()
+                .map(|record| AnalyticsEventRecord {
+                    id: record.id,
+                    provider: record.provider,
+                    project_id: record.project_id,
+                    session_id: record.session_id,
+                    timestamp: record.timestamp,
+                    event_kind: record.event_kind,
+                    hook_name: record.hook_name,
+                    tool_name: record.tool_name,
+                    tool_category: record.tool_category,
+                    skill_name: record.skill_name,
+                    hint_category: record.hint_category,
+                    hint_id: record.hint_id,
+                    outcome: record.outcome,
+                    metadata_json: record.metadata_json,
+                })
+                .collect())
+        })
+    }
+}
+
 /// Derives the profile database's project key from a project root.
 pub type CanonicalProjectKey = fn(&Path) -> String;
 

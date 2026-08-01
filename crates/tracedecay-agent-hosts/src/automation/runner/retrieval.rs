@@ -35,13 +35,13 @@ use crate::application::session::{
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionPort,
     SessionTemporalQuery,
 };
-use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
+use crate::ports::project_runtime::ProfileIdentity;
+use crate::ports::session_evidence::LcmScope;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::ports::session_evidence::LcmScope;
-use crate::tracedecay::TraceDecay;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -205,7 +205,7 @@ impl ProductionAutomationSessionRetrieval {
             &self.identity,
             None,
         ));
-        let cancellation = CancellationToken::for_application_request(&request_id);
+        let cancellation = CancellationToken::for_application_request(request_id.as_str());
         let budgets = RequestBudgets::new(
             AUTOMATION_SESSION_MAX_RESULTS,
             AUTOMATION_SESSION_MAX_BYTES,
@@ -569,7 +569,7 @@ async fn active_registered_automation_anchor(database: &RegisteredGlobalDb) -> O
     SessionId::new(session_id).ok()
 }
 
-fn profile_id(profile_identity: &LocalProfileIdentityAuthorityV1) -> Option<ProfileId> {
+fn profile_id(profile_identity: &dyn ProfileIdentity) -> Option<ProfileId> {
     ProfileId::new(profile_identity.profile_id().as_str().to_string()).ok()
 }
 
@@ -581,7 +581,7 @@ fn session_store_id(shard: &StoreShardIdV1) -> Option<SessionStoreId> {
 
 fn project_automation_identity(
     shard: &StoreShardIdV1,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
+    profile_identity: &dyn ProfileIdentity,
     project_id: &ProjectId,
 ) -> Option<ResolvedSessionIdentity> {
     Some(ResolvedSessionIdentity::for_project(
@@ -600,7 +600,7 @@ fn project_automation_identity(
 #[cfg(test)]
 fn profile_automation_identity(
     shard: &StoreShardIdV1,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
+    profile_identity: &dyn ProfileIdentity,
 ) -> Option<ResolvedSessionIdentity> {
     Some(ResolvedSessionIdentity::for_profile(
         profile_id(profile_identity)?,
@@ -616,7 +616,7 @@ fn profile_automation_identity(
 #[cfg(test)]
 pub(crate) async fn registered_profile_automation_retrieval(
     database: Arc<RegisteredGlobalDb>,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
+    profile_identity: &dyn ProfileIdentity,
 ) -> Result<Box<dyn AutomationSessionRetrieval>> {
     let shard = &database.binding().shard_id;
     if !registered_scope_matches(
@@ -648,7 +648,7 @@ pub(crate) async fn registered_profile_automation_retrieval(
 
 pub async fn registered_project_automation_retrieval(
     database: Arc<RegisteredGlobalDb>,
-    profile_identity: &LocalProfileIdentityAuthorityV1,
+    profile_identity: &dyn ProfileIdentity,
     project_id: &ProjectId,
 ) -> Result<Box<dyn AutomationSessionRetrieval>> {
     let shard = &database.binding().shard_id;
