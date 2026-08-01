@@ -358,6 +358,55 @@ pub(super) async fn recover_source_edit_transaction(
     if journal.recovery_files.is_empty() {
         return Ok(());
     }
+    // The journal is `Prepared` with captured preimages: the durable commit
+    // never finalized. But the edit primitive publishes every file to disk
+    // BEFORE the journal advances to `Applied`, so the worktree may already hold
+    // the finished edit. Inspect the on-disk state before touching a single
+    // byte — a crash after a successful write must never silently roll that
+    // written edit back to its preimage. This mirrors the client-timeout path,
+    // which surfaces `EffectUnknown` and lets `source_edit_reconcile` decide,
+    // rather than destroying bytes.
+    let observed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+
+    // (i) Roll forward. The worktree already holds the exact previewed result,
+    //     so the write succeeded and only the bookkeeping was lost. Finalize the
+    //     commit and keep every byte; the client-timeout `ConfirmCommitted`
+    //     disposition reaches the same durable record. `recovery_files` is only
+    //     ever populated alongside `predicted_state` (see `execute.rs`), so a
+    //     present predicted state is guaranteed here.
+    if journal.predicted_state.as_ref() == Some(&observed_state) {
+        graph
+            .commit_source_edit_postimages(&journal.recovery_files)
+            .await?;
+        let outcome = SourceEditOutcome::Reconciled {
+            success: true,
+            message: "source edit crash recovery confirmed the edit already committed to disk"
+                .to_owned(),
+        };
+        let record = applied_record(&journal, &outcome, observed_state, now_micros(), None)?;
+        durability.persist_receipt(&record)?;
+        return durability.clear_journal();
+    }
+
+    // (ii)/(iii) The write did not complete. When the worktree is still fully at
+    //     the preimage (ii) the write never landed and rollback is a no-op. When
+    //     it is a torn partial multi-file write (iii) — some files published,
+    //     others not — rolling back to a consistent pre-edit state lets the whole
+    //     atomic plan be retried, but it discards the bytes of the files that did
+    //     publish, so we WARN first. `recover_source_edit_preimages` restores
+    //     per file and REFUSES any foreign bytes outright, so it can only ever
+    //     touch files it can prove hold either the preimage or the intended edit;
+    //     genuinely unaccountable content fails recovery instead of being erased.
+    if observed_state != journal.expected_state {
+        tracing::warn!(
+            target: "tracedecay::source_edit::recovery",
+            effect_id = %journal.effect_id.as_str(),
+            files = ?journal.candidate_files,
+            "source edit crash recovery is rolling a torn partial write back to its \
+             preimage; on-disk edited bytes that did not match the completed preview \
+             are being discarded"
+        );
+    }
     graph
         .recover_source_edit_preimages(&journal.recovery_files)
         .await?;

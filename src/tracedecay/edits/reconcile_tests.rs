@@ -59,6 +59,86 @@ async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_e
     }
 }
 
+/// The exact live-verified durability defect: a daemon crash (kill -9) lands
+/// AFTER the edit's atomic writes reach disk but BEFORE the journal advances to
+/// `Applied`. Recovery must roll the finished edit forward and preserve every
+/// written byte — never silently revert it to the durable preimage.
+#[tokio::test]
+async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes() {
+    let fixture = effect_unknown_fixture().await;
+    // The worktree already holds the exact previewed result for every candidate:
+    // both files carry their intended post-edit content, as they would after a
+    // crash that interrupted only the durable bookkeeping.
+    fs::write(
+        fixture.project.path().join("src/a.rs"),
+        b"pub fn new_a() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.project.path().join("src/locked/b.rs"),
+        b"pub fn new_b() {}\n",
+    )
+    .unwrap();
+
+    let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
+    let result = execute_source_edit(
+        &fixture.graph,
+        &operation,
+        fixture.request.clone(),
+        &fixture.authorization,
+    )
+    .await
+    .unwrap();
+
+    // Roll forward: the completed edit is finalized, not reverted.
+    assert!(result.replayed);
+    assert_eq!(
+        result.effect.unwrap().receipt.outcome,
+        EffectTermination::Completed
+    );
+    // Every written byte is preserved on disk.
+    assert_eq!(
+        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
+        b"pub fn new_a() {}\n"
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
+        b"pub fn new_b() {}\n"
+    );
+}
+
+/// The write never landed: after the fixture the worktree still holds every
+/// preimage. Recovery rolls cleanly back (a no-op restore) and records the
+/// failure without disturbing any byte.
+#[tokio::test]
+async fn prepared_restart_with_untouched_preimages_rolls_back_cleanly() {
+    let fixture = effect_unknown_fixture().await;
+
+    let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
+    let result = execute_source_edit(
+        &fixture.graph,
+        &operation,
+        fixture.request.clone(),
+        &fixture.authorization,
+    )
+    .await
+    .unwrap();
+
+    assert!(result.replayed);
+    assert_eq!(
+        result.effect.unwrap().receipt.outcome,
+        EffectTermination::Failed
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join("src/a.rs")).unwrap(),
+        b"pub fn old_a() {}\n"
+    );
+    assert_eq!(
+        fs::read(fixture.project.path().join("src/locked/b.rs")).unwrap(),
+        b"pub fn old_b() {}\n"
+    );
+}
+
 #[tokio::test]
 async fn reconciliation_before_admission_cancellation_is_durable_and_replayable() {
     let fixture = effect_unknown_fixture().await;
