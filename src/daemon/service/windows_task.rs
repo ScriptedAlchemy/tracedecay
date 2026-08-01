@@ -1,16 +1,22 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(any(windows, test))]
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 
 use super::{DaemonServiceSpec, DaemonServiceState};
 
+#[cfg(any(windows, test))]
 const TASK_NAME_PREFIX: &str = "TraceDecay Daemon";
+#[cfg(any(windows, test))]
 const BETA_TASK_NAME_PREFIX: &str = "TraceDecay Beta Daemon";
+#[cfg(any(windows, test))]
 const SCOOP_STATE_SCHEMA: &str = "tracedecay.scoop-service-state.v1";
+#[cfg(any(windows, test))]
 const SCOOP_STATE_FILE_NAME: &str = "scoop-state.json";
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum WindowsPackageId {
@@ -20,7 +26,9 @@ pub(super) enum WindowsPackageId {
     Beta,
 }
 
+#[cfg(any(windows, test))]
 impl WindowsPackageId {
+    #[cfg(windows)]
     fn parse(value: &str) -> Result<Self> {
         match value {
             "tracedecay" => Ok(Self::Stable),
@@ -48,6 +56,7 @@ impl WindowsPackageId {
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ServiceRuntimeLayout {
     directory: PathBuf,
@@ -55,6 +64,7 @@ struct ServiceRuntimeLayout {
     state_file: PathBuf,
 }
 
+#[cfg(any(windows, test))]
 impl ServiceRuntimeLayout {
     fn below(local_app_data: &Path, package_id: WindowsPackageId) -> Self {
         let directory = local_app_data
@@ -71,10 +81,12 @@ impl ServiceRuntimeLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TaskIdentity {
+    #[cfg(any(windows, test))]
     package_id: WindowsPackageId,
     user_sid: String,
     task_name: String,
     task_path: String,
+    #[cfg(any(windows, test))]
     sddl: String,
 }
 
@@ -101,10 +113,12 @@ impl TaskIdentity {
         }
     }
 
+    #[cfg(test)]
     fn for_user_sid(user_sid: &str) -> Result<Self> {
         Self::for_package_user_sid(WindowsPackageId::Stable, user_sid)
     }
 
+    #[cfg(any(windows, test))]
     fn for_package_user_sid(package_id: WindowsPackageId, user_sid: &str) -> Result<Self> {
         let mut components = user_sid.split('-');
         let valid = components.next() == Some("S")
@@ -128,6 +142,7 @@ impl TaskIdentity {
     }
 }
 
+#[cfg(any(windows, test))]
 fn package_id_from_executable(executable: &Path) -> Option<WindowsPackageId> {
     let file_name = executable.file_name()?.to_str()?;
     if !file_name.eq_ignore_ascii_case("tracedecay.exe") {
@@ -173,12 +188,14 @@ struct TaskSnapshot {
     enabled: bool,
 }
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ScoopTaskAction {
     executable: PathBuf,
     arguments: String,
 }
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ScoopServiceState {
     schema: String,
@@ -194,6 +211,7 @@ struct ScoopServiceState {
     running: bool,
 }
 
+#[cfg(any(windows, test))]
 impl ScoopServiceState {
     fn capture(
         package_id: WindowsPackageId,
@@ -276,8 +294,10 @@ impl ScoopServiceState {
 trait TaskSchedulerApi {
     fn snapshot(&mut self) -> Result<Option<TaskSnapshot>>;
     fn registered_xml(&mut self) -> Result<Option<String>>;
+    #[cfg(windows)]
     fn registered_sddl(&mut self) -> Result<Option<String>>;
     fn register_xml(&mut self, xml: &str) -> Result<()>;
+    #[cfg(windows)]
     fn register_xml_with_sddl(&mut self, xml: &str, sddl: &str) -> Result<()> {
         let _ = sddl;
         self.register_xml(xml)
@@ -289,13 +309,14 @@ trait TaskSchedulerApi {
     fn delete(&mut self) -> Result<()>;
 }
 
+#[cfg(any(windows, test))]
 #[derive(Debug)]
 struct ControlObservation {
     satisfied: bool,
     diagnostic: String,
 }
 
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg(any(windows, test))]
 #[derive(Debug)]
 enum ShutdownRequestAttempt {
     Acknowledged,
@@ -303,6 +324,7 @@ enum ShutdownRequestAttempt {
     NotSent(String),
 }
 
+#[cfg(any(windows, test))]
 impl ShutdownRequestAttempt {
     fn may_have_been_delivered(&self) -> bool {
         !matches!(self, Self::NotSent(_))
@@ -319,6 +341,7 @@ impl ShutdownRequestAttempt {
     }
 }
 
+#[cfg(any(windows, test))]
 trait DaemonControlApi {
     fn request_shutdown(&mut self) -> ShutdownRequestAttempt;
     fn readiness(&mut self, timeout: std::time::Duration) -> ControlObservation;
@@ -327,10 +350,15 @@ trait DaemonControlApi {
     fn wait(&mut self, duration: std::time::Duration);
 }
 
+#[cfg(any(windows, test))]
 const LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+#[cfg(any(windows, test))]
 const CONTROL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+#[cfg(any(windows, test))]
 const START_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+#[cfg(any(windows, test))]
 const GRACEFUL_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+#[cfg(any(windows, test))]
 const HARD_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(windows)]
@@ -717,23 +745,59 @@ pub(super) fn registered_task_xml() -> Result<Option<String>> {
 }
 
 pub(super) fn apply_state(state: DaemonServiceState) -> Result<()> {
-    if state == DaemonServiceState::Missing {
-        return with_platform_api(delete_with);
+    #[cfg(any(windows, test))]
+    {
+        if state == DaemonServiceState::Missing {
+            return with_platform_api(delete_with);
+        }
+        with_platform_control_api(|api, control| apply_managed_state_with(api, control, state))
     }
-    with_platform_control_api(|api, control| apply_managed_state_with(api, control, state))
+    #[cfg(not(any(windows, test)))]
+    {
+        let _ = state;
+        control_api_unavailable()
+    }
 }
 
 pub(super) fn start() -> Result<()> {
-    with_platform_control_api(start_managed_with)
+    #[cfg(any(windows, test))]
+    {
+        with_platform_control_api(start_managed_with)
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        control_api_unavailable()
+    }
 }
 
 pub(super) fn stop() -> Result<()> {
-    with_platform_control_api(stop_managed_with)
+    #[cfg(any(windows, test))]
+    {
+        with_platform_control_api(stop_managed_with)
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        control_api_unavailable()
+    }
 }
 
 pub(super) fn deactivate() -> Result<()> {
-    with_platform_control_api(|api, control| {
-        apply_managed_state_with(api, control, DaemonServiceState::StoppedDisabled)
+    #[cfg(any(windows, test))]
+    {
+        with_platform_control_api(|api, control| {
+            apply_managed_state_with(api, control, DaemonServiceState::StoppedDisabled)
+        })
+    }
+    #[cfg(not(any(windows, test)))]
+    {
+        control_api_unavailable()
+    }
+}
+
+#[cfg(not(any(windows, test)))]
+fn control_api_unavailable<T>() -> Result<T> {
+    Err(TraceDecayError::Config {
+        message: "Windows Task Scheduler is unavailable on this platform".to_string(),
     })
 }
 
@@ -1099,6 +1163,7 @@ fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
 fn is_foreign_task_error(error: &TraceDecayError) -> bool {
     error
         .to_string()
@@ -1268,6 +1333,7 @@ fn stop_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn apply_managed_state_with(
     api: &mut dyn TaskSchedulerApi,
     control: &mut dyn DaemonControlApi,
@@ -1320,6 +1386,7 @@ fn apply_managed_state_with(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn start_managed_with(
     api: &mut dyn TaskSchedulerApi,
     control: &mut dyn DaemonControlApi,
@@ -1351,6 +1418,7 @@ fn start_managed_with(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn stop_managed_with(
     api: &mut dyn TaskSchedulerApi,
     control: &mut dyn DaemonControlApi,
@@ -1411,6 +1479,7 @@ fn stop_managed_with(
     }
 }
 
+#[cfg(any(windows, test))]
 fn wait_for_task_state_with(
     api: &mut dyn TaskSchedulerApi,
     control: &mut dyn DaemonControlApi,
@@ -1538,7 +1607,7 @@ fn state_from_snapshot(snapshot: Option<TaskSnapshot>) -> DaemonServiceState {
     }
 }
 
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[cfg(any(windows, test))]
 fn task_snapshot_from_scheduler_state(scheduler_state: i32, enabled: bool) -> Result<TaskSnapshot> {
     let running = match (scheduler_state, enabled) {
         (2 | 4, _) => true,
@@ -1621,6 +1690,7 @@ fn xml_element_text<'a>(xml: &'a str, element: &str) -> Option<&'a str> {
     Some(&after_start[..value_end])
 }
 
+#[cfg(any(windows, test))]
 fn xml_section_text<'a>(xml: &'a str, section: &str) -> Option<&'a str> {
     let opening_prefix = format!("<{section}");
     let opening_start = xml.find(&opening_prefix)?;
@@ -1630,6 +1700,7 @@ fn xml_section_text<'a>(xml: &'a str, section: &str) -> Option<&'a str> {
     Some(&xml[value_start..value_end])
 }
 
+#[cfg(any(windows, test))]
 fn task_action_from_xml(xml: &str) -> Option<ScoopTaskAction> {
     let action = xml_section_text(xml, "Exec")?;
     let executable = PathBuf::from(xml_unescape(xml_element_text(action, "Command")?));
@@ -1640,6 +1711,7 @@ fn task_action_from_xml(xml: &str) -> Option<ScoopTaskAction> {
     })
 }
 
+#[cfg(any(windows, test))]
 fn replace_task_action_executable(xml: &str, executable: &Path) -> Result<String> {
     let action =
         xml_section_text(xml, "Exec").ok_or_else(|| invalid_state("task XML has no Exec"))?;
@@ -1661,6 +1733,7 @@ fn replace_task_action_executable(xml: &str, executable: &Path) -> Result<String
     Ok(restored)
 }
 
+#[cfg(any(windows, test))]
 fn task_definition_is_owned(xml: &str, sddl: &str, identity: &TaskIdentity) -> bool {
     if xml.matches("<LogonTrigger").count() != 1 || xml.matches("<Principal ").count() != 1 {
         return false;
@@ -1676,6 +1749,7 @@ fn task_definition_is_owned(xml: &str, sddl: &str, identity: &TaskIdentity) -> b
         && task_sddl_is_private(sddl, &identity.user_sid)
 }
 
+#[cfg(any(windows, test))]
 fn task_sddl_is_private(sddl: &str, user_sid: &str) -> bool {
     let Some(dacl_start) = sddl.find("D:P") else {
         return false;
@@ -1705,6 +1779,7 @@ fn task_sddl_is_private(sddl: &str, user_sid: &str) -> bool {
     saw_user && saw_system
 }
 
+#[cfg(any(windows, test))]
 fn foreign_task(identity: &TaskIdentity) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -1716,6 +1791,7 @@ fn foreign_task(identity: &TaskIdentity) -> TraceDecayError {
     }
 }
 
+#[cfg(any(windows, test))]
 fn invalid_state(reason: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("invalid Scoop service state marker: {reason}"),
@@ -1815,29 +1891,23 @@ fn with_platform_api<T>(
     }
 }
 
+#[cfg(windows)]
 fn with_platform_api_for_package<T>(
     package_id: WindowsPackageId,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,
 ) -> Result<T> {
-    #[cfg(windows)]
-    {
-        let user_sid = tracedecay_runtime_core::windows_security::current_user_sid_string()
-            .map_err(|error| TraceDecayError::Config {
+    let user_sid =
+        tracedecay_runtime_core::windows_security::current_user_sid_string().map_err(|error| {
+            TraceDecayError::Config {
                 message: format!("could not determine current Windows user SID: {error}"),
-            })?;
-        let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?;
-        let mut api = native::NativeTaskScheduler::connect_for(identity)?;
-        operation(&mut api)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (package_id, operation);
-        Err(TraceDecayError::Config {
-            message: "Windows Task Scheduler is unavailable on this platform".to_string(),
-        })
-    }
+            }
+        })?;
+    let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?;
+    let mut api = native::NativeTaskScheduler::connect_for(identity)?;
+    operation(&mut api)
 }
 
+#[cfg(any(windows, test))]
 fn with_platform_control_api<T>(
     operation: impl FnOnce(&mut dyn TaskSchedulerApi, &mut dyn DaemonControlApi) -> Result<T>,
 ) -> Result<T> {
@@ -2306,6 +2376,7 @@ mod tests {
             Ok(self.xml.clone())
         }
 
+        #[cfg(windows)]
         fn registered_sddl(&mut self) -> Result<Option<String>> {
             Ok(self
                 .task
