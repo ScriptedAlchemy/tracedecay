@@ -11,8 +11,8 @@ use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS,
-    SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    ConvertSidToStringSidW, EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE,
+    SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CopySid,
@@ -101,6 +101,35 @@ impl OwnedSid {
     fn as_psid(&self) -> PSID {
         self.storage.as_ptr().cast_mut().cast()
     }
+}
+
+/// Return the canonical string SID for the current process token user.
+pub fn current_user_sid_string() -> io::Result<String> {
+    let current_user = current_user_sid()?;
+    let mut string_sid = null_mut();
+    // SAFETY: the copied token SID remains live and `string_sid` is writable.
+    if unsafe { ConvertSidToStringSidW(current_user.as_psid(), &raw mut string_sid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let allocation = LocalAllocation(string_sid.cast());
+    if string_sid.is_null() {
+        return Err(io::Error::other(
+            "ConvertSidToStringSidW returned a null string",
+        ));
+    }
+    let mut length = 0;
+    // SAFETY: successful `ConvertSidToStringSidW` returns a NUL-terminated
+    // LocalAlloc buffer that stays live through `allocation`.
+    while unsafe { *string_sid.add(length) } != 0 {
+        length += 1;
+    }
+    // SAFETY: `length` counts initialized UTF-16 code units before the NUL.
+    let units = unsafe { std::slice::from_raw_parts(string_sid, length) };
+    let value = String::from_utf16(units).map_err(|error| {
+        io::Error::other(format!("current user SID is invalid UTF-16: {error}"))
+    })?;
+    drop(allocation);
+    Ok(value)
 }
 
 /// Create one private directory without changing any existing ancestor ACL.
@@ -730,6 +759,17 @@ mod tests {
     use std::io::{Read, Write};
     use std::process::Command;
     use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MoveFileExW};
+
+    #[test]
+    fn current_user_sid_string_is_canonical() {
+        let sid = current_user_sid_string().unwrap();
+
+        assert!(sid.starts_with("S-1-"));
+        assert!(
+            sid.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        );
+    }
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
         let file = open_handle_with_share(
