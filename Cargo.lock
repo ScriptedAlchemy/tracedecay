@@ -6019,6 +6019,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dirs",
+ "filetime",
  "gix",
  "hex",
  "rayon",
@@ -6093,6 +6094,7 @@ dependencies = [
 name = "tracedecay-usecases"
 version = "0.1.0"
 dependencies = [
+ "cap-fs-ext",
  "cap-std",
  "fs2",
  "getrandom 0.2.17",
