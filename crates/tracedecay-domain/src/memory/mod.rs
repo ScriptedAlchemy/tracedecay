@@ -19,11 +19,7 @@ pub(crate) fn derive_memory_id(
     value: &impl Serialize,
 ) -> Result<String, DomainError> {
     let digest = canonical_sha256(&(namespace, value))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "memory identity digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "memory identity digest")?;
     Ok(format!("{namespace}.{encoded}"))
 }

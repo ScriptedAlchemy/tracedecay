@@ -135,11 +135,7 @@ fn derive_packet_id(
         termination,
         provider_states,
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "feedback packet digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "feedback packet digest")?;
     FeedbackPacketId::new(format!("feedback.packet.v1.{encoded}"))
 }

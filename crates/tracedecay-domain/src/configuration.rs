@@ -1721,11 +1721,7 @@ fn derive_configuration_snapshot_id(
         effective_behavior_digest,
         resolution_provenance_digest,
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "configuration snapshot digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "configuration snapshot digest")?;
     ConfigurationSnapshotId::new(format!("{CONFIGURATION_SNAPSHOT_ID_DOMAIN}.{encoded}"))
 }
