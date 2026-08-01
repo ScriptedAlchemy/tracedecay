@@ -135,6 +135,8 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
         });
     }
     if tool_name == "tracedecay_message_search" {
+        // `storage_scope=user` already refused `project_scope` above, so this
+        // profile lane never fans out over the registry.
         return session::message_search::handle_message_search_with_service(
             None,
             session::message_search::SessionRetrievalStoreScope::Profile,
@@ -1430,12 +1432,15 @@ async fn execute_project_retained_application_tool(
             .await
         }
         RetainedSurfaceOperation::MessageSearch => {
-            Box::pin(session::message_search::handle_message_search_with_service(
-                Some(cg.project_root()),
-                session::message_search::SessionRetrievalStoreScope::Project,
-                request.arguments,
-                options.session_authorities.project_retrieval,
-            ))
+            Box::pin(
+                session::message_search::handle_message_search_with_registry(
+                    Some(cg.project_root()),
+                    session::message_search::SessionRetrievalStoreScope::Project,
+                    request.arguments,
+                    options.session_authorities.project_retrieval,
+                    options.project_registry_reads,
+                ),
+            )
             .await
         }
         RetainedSurfaceOperation::SessionsFor => {
