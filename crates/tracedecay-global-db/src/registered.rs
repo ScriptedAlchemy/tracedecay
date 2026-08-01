@@ -1,6 +1,10 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+// Only the authority-gate fixtures below reach these; the production paths lost
+// their last use when the root-owned `work_runtime` factory moved to root.
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
 use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
 };
