@@ -138,7 +138,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::storage::StorageMode;
+use tracedecay_runtime_core::storage::{StorageMode, StoreLayout};
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
@@ -202,6 +202,27 @@ pub type DoctorReportReadFuture = Pin<
     >,
 >;
 pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sync + 'static>;
+
+/// Runtime authorities retained by one daemon-managed dashboard state.
+///
+/// This is deliberately not `Default`: the composition root must explicitly
+/// choose every optional authority and the automation writer for each state.
+#[derive(Clone)]
+pub struct DashboardStateCompositionV1 {
+    pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
+    pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
+    pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    pub automation_writer: DashboardAutomationWriter,
+    pub doctor_report_reader: Option<DoctorReportReader>,
+    pub doctor_remediation_dispatcher:
+        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
+    pub code_diagnostics_broker:
+        Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
+    pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+}
 
 #[derive(Clone)]
 pub struct AdmittedDoctorReportV1 {
@@ -408,16 +429,23 @@ pub async fn resolve_lcm_store(
     cg: &TraceDecay,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
 ) -> LcmStoreSelection {
+    resolve_lcm_store_for_layout(cg.store_layout(), registered_project_session_db)
+}
+
+fn resolve_lcm_store_for_layout(
+    layout: &StoreLayout,
+    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+) -> LcmStoreSelection {
     if let Some(db) = registered_project_session_db {
         return LcmStoreSelection {
             path: db.db_path().display().to_string(),
             lcm_db: Some(db),
-            scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
+            scope: storage_mode_label(&layout.storage_mode).to_string(),
         };
     }
     LcmStoreSelection {
         lcm_db: None,
-        path: cg.store_layout().sessions_db_path.display().to_string(),
+        path: layout.sessions_db_path.display().to_string(),
         scope: "unavailable".to_string(),
     }
 }
@@ -441,8 +469,11 @@ pub fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) 
 /// Dashboard routes must never infer ownership from a path, label, or
 /// optional display field after construction.
 pub fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
-    let raw = cg
-        .store_layout()
+    project_memory_owner_for_layout(cg.store_layout())
+}
+
+fn project_memory_owner_for_layout(layout: &StoreLayout) -> Result<FactOwnerV1> {
+    let raw = layout
         .identity
         .project_id
         .as_deref()
@@ -456,21 +487,22 @@ pub fn project_memory_owner(cg: &TraceDecay) -> Result<FactOwnerV1> {
 async fn build_state_inner(
     cg: &TraceDecay,
     project_graph: Option<Arc<TraceDecay>>,
-    project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     warm_token_counts: bool,
-    automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
-    automation_writer: DashboardAutomationWriter,
-    doctor_report_reader: Option<DoctorReportReader>,
-    doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
-    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
-    feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
-    code_diagnostics_broker: Option<
-        Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
-    >,
-    application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
+    let DashboardStateCompositionV1 {
+        project_graph_resolver,
+        registered_project_session_db,
+        registered_savings_db,
+        automation_scheduler_reconciler,
+        automation_writer,
+        doctor_report_reader,
+        doctor_remediation_dispatcher,
+        code_index_freshness_reader,
+        feedback_status_reader,
+        code_diagnostics_broker,
+        application_invocation_executor,
+    } = composition;
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
     let lcm = resolve_lcm_store(cg, registered_project_session_db).await;
@@ -544,55 +576,29 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
     build_state_inner(
         cg,
         None,
-        None,
-        None,
-        None,
         true,
-        None,
-        standalone_dashboard_automation_writer(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        DashboardStateCompositionV1 {
+            project_graph_resolver: None,
+            registered_project_session_db: None,
+            registered_savings_db: None,
+            automation_scheduler_reconciler: None,
+            automation_writer: standalone_dashboard_automation_writer(),
+            doctor_report_reader: None,
+            doctor_remediation_dispatcher: None,
+            code_index_freshness_reader: None,
+            feedback_status_reader: None,
+            code_diagnostics_broker: None,
+            application_invocation_executor: None,
+        },
     )
     .await
 }
 
 pub async fn build_state_with_automation_reconciler(
     cg: Arc<TraceDecay>,
-    project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
-    automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
-    automation_writer: DashboardAutomationWriter,
-    doctor_report_reader: Option<DoctorReportReader>,
-    doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
-    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
-    feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
-    code_diagnostics_broker: Option<
-        Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
-    >,
-    application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
+    composition: DashboardStateCompositionV1,
 ) -> Result<DashboardState> {
-    build_state_inner(
-        cg.as_ref(),
-        Some(Arc::clone(&cg)),
-        project_graph_resolver,
-        registered_project_session_db,
-        registered_savings_db,
-        true,
-        automation_scheduler_reconciler,
-        automation_writer,
-        doctor_report_reader,
-        doctor_remediation_dispatcher,
-        code_index_freshness_reader,
-        feedback_status_reader,
-        code_diagnostics_broker,
-        application_invocation_executor,
-    )
-    .await
+    build_state_inner(cg.as_ref(), Some(Arc::clone(&cg)), true, composition).await
 }
 
 /// Builds a lightweight cached state for a non-active project selected from the
@@ -605,22 +611,24 @@ pub async fn build_selected_project_state(
     build_state_inner(
         cg.as_ref(),
         Some(Arc::clone(&cg)),
-        active.project_graph_resolver.clone(),
-        None,
-        active.savings_db.clone(),
         false,
-        None,
-        Arc::clone(&active.automation_writer),
-        // Doctor authority is bound to the active project's exact scope.
-        // Freshness is different: its daemon registry reader resolves the
-        // selected state's exact canonical root and returns only a mounted
-        // scheduler, so the root-addressed read port is safe to reuse.
-        None,
-        None,
-        active.code_index_freshness_reader.clone(),
-        active.feedback_status_reader.clone(),
-        None,
-        active.application_invocation_executor.clone(),
+        DashboardStateCompositionV1 {
+            project_graph_resolver: active.project_graph_resolver.clone(),
+            registered_project_session_db: None,
+            registered_savings_db: active.savings_db.clone(),
+            automation_scheduler_reconciler: None,
+            automation_writer: Arc::clone(&active.automation_writer),
+            // Doctor authority is bound to the active project's exact scope.
+            // Freshness is different: its daemon registry reader resolves the
+            // selected state's exact canonical root and returns only a mounted
+            // scheduler, so the root-addressed read port is safe to reuse.
+            doctor_report_reader: None,
+            doctor_remediation_dispatcher: None,
+            code_index_freshness_reader: active.code_index_freshness_reader.clone(),
+            feedback_status_reader: active.feedback_status_reader.clone(),
+            code_diagnostics_broker: None,
+            application_invocation_executor: active.application_invocation_executor.clone(),
+        },
     )
     .await
 }
@@ -651,14 +659,16 @@ where
 {
     run_until_shutdown_inner(
         cg,
-        host,
-        port,
-        spa_routes,
+        DashboardRunRequest {
+            host,
+            port,
+            spa_routes,
+            options: DashboardRunOptions::production(open),
+            test_authority: None,
+            test_project_graph_resolver: None,
+            test_project_graph: None,
+        },
         shutdown,
-        DashboardRunOptions::production(open),
-        None,
-        None,
-        None,
     )
     .await
 }
@@ -676,14 +686,16 @@ where
 {
     run_until_shutdown_inner(
         cg,
-        host,
-        port,
-        spa_routes,
+        DashboardRunRequest {
+            host,
+            port,
+            spa_routes,
+            options: DashboardRunOptions::test(),
+            test_authority: None,
+            test_project_graph_resolver: None,
+            test_project_graph: None,
+        },
         shutdown,
-        DashboardRunOptions::test(),
-        None,
-        None,
-        None,
     )
     .await
 }
@@ -705,14 +717,16 @@ where
     let project_graph_resolver = project_graphs.resolver();
     run_until_shutdown_inner(
         cg.as_ref(),
-        host,
-        port,
-        spa_routes,
+        DashboardRunRequest {
+            host,
+            port,
+            spa_routes,
+            options: DashboardRunOptions::test(),
+            test_authority: Some(&authority),
+            test_project_graph_resolver: Some(project_graph_resolver),
+            test_project_graph: Some(Arc::clone(&cg)),
+        },
         shutdown,
-        DashboardRunOptions::test(),
-        Some(&authority),
-        Some(project_graph_resolver),
-        Some(Arc::clone(&cg)),
     )
     .await
 }
@@ -739,20 +753,33 @@ impl DashboardRunOptions {
     }
 }
 
-async fn run_until_shutdown_inner<F>(
-    cg: &TraceDecay,
-    host: &str,
+struct DashboardRunRequest<'a> {
+    host: &'a str,
     port: u16,
     spa_routes: Router,
-    shutdown: F,
     options: DashboardRunOptions,
-    test_authority: Option<&DashboardHostAdmissionTestAuthorityV1>,
+    test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
     test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
     test_project_graph: Option<Arc<TraceDecay>>,
+}
+
+async fn run_until_shutdown_inner<F>(
+    cg: &TraceDecay,
+    request: DashboardRunRequest<'_>,
+    shutdown: F,
 ) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    let DashboardRunRequest {
+        host,
+        port,
+        spa_routes,
+        options,
+        test_authority,
+        test_project_graph_resolver,
+        test_project_graph,
+    } = request;
     // A directly served dashboard is not handed a daemon-owned analyzer broker,
     // so it opens the same one the MCP server mounts. Without it the code
     // diagnostics surface would answer unsupported purely because of which
@@ -766,18 +793,22 @@ where
     let state = build_state_inner(
         cg,
         test_project_graph,
-        test_project_graph_resolver,
-        test_authority.map(|authority| Arc::clone(&authority.project_sessions)),
-        test_authority.map(|authority| Arc::clone(&authority.profile_database)),
         options.warm_token_counts,
-        None,
-        standalone_dashboard_automation_writer(),
-        None,
-        None,
-        None,
-        None,
-        Some(code_diagnostics_broker),
-        None,
+        DashboardStateCompositionV1 {
+            project_graph_resolver: test_project_graph_resolver,
+            registered_project_session_db: test_authority
+                .map(|authority| Arc::clone(&authority.project_sessions)),
+            registered_savings_db: test_authority
+                .map(|authority| Arc::clone(&authority.profile_database)),
+            automation_scheduler_reconciler: None,
+            automation_writer: standalone_dashboard_automation_writer(),
+            doctor_report_reader: None,
+            doctor_remediation_dispatcher: None,
+            code_index_freshness_reader: None,
+            feedback_status_reader: None,
+            code_diagnostics_broker: Some(code_diagnostics_broker),
+            application_invocation_executor: None,
+        },
     )
     .await?;
     let app = router(cg, state, spa_routes).await?;
@@ -1670,37 +1701,115 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 mod authority_tests {
     use super::*;
 
+    struct DashboardStateFixture {
+        state: DashboardState,
+        layout: StoreLayout,
+        _database_authority: tracedecay_runtime_core::db::DatabaseAuthority,
+        _temporary: tempfile::TempDir,
+    }
+
+    impl DashboardStateFixture {
+        async fn open(project_id: &str) -> Self {
+            let temporary = tempfile::tempdir().expect("dashboard fixture");
+            let project_root = temporary.path().join("project");
+            let profile_root = temporary.path().join("profile");
+            std::fs::create_dir_all(&project_root).expect("project root");
+            let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+                &project_root,
+                &profile_root,
+                &tracedecay_runtime_core::storage::EnrollmentMarker {
+                    project_id: project_id.to_owned(),
+                    storage_mode: StorageMode::ProfileSharded,
+                },
+            )
+            .expect("dashboard store layout");
+            let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+                &layout.graph_db_path,
+                "dashboard state fixture",
+            )
+            .expect("dashboard database authority");
+            let (database, _) = Database::publish_test_runtime(
+                &layout.graph_db_path,
+                &database_authority,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+            )
+            .await
+            .expect("dashboard database");
+            let database = Arc::new(database);
+            let memory_owner =
+                project_memory_owner_for_layout(&layout).expect("dashboard project memory owner");
+            let state = DashboardState {
+                project_id: layout.identity.project_id.clone(),
+                resolved_scope: scope::resolve_dashboard_scope(
+                    &project_root,
+                    layout.identity.project_id.as_deref(),
+                ),
+                project_graph: None,
+                project_graph_resolver: None,
+                memory_owner,
+                graph_conn: database.engine_conn(),
+                _database_guards: vec![Arc::clone(&database)],
+                graph_telemetry_handle: database.storage_telemetry_handle().ok(),
+                graph_db_path: layout.graph_db_path.display().to_string(),
+                mem_db: Arc::clone(&database),
+                mem_db_path: layout.graph_db_path.display().to_string(),
+                lcm_db: None,
+                lcm_db_path: layout.sessions_db_path.display().to_string(),
+                lcm_scope: "unavailable".to_owned(),
+                savings_db: None,
+                savings_db_path: String::new(),
+                project_root: project_root.clone(),
+                code_index_freshness_reader: None,
+                feedback_status_reader: None,
+                storage_mode: storage_mode_label(&layout.storage_mode).to_owned(),
+                store_root: layout.data_root.clone(),
+                config_path: layout.config_path.clone(),
+                dashboard_root: layout.dashboard_root.clone(),
+                retention_config: crate::config::RetentionConfig::default(),
+                user_settings: Arc::new(
+                    crate::application::configuration::ProductionUserSettingsDaemonClient,
+                ),
+                curation_activity: Arc::new(RwLock::new(Vec::new())),
+                token_counts: Arc::new(token_count::TokenCountCache::new()),
+                code_diagnostics_authority: None,
+                automation_scheduler_reconciler: None,
+                automation_writer: standalone_dashboard_automation_writer(),
+                doctor_report_reader: None,
+                doctor_remediation_dispatcher: None,
+                application_invocation_executor: None,
+            };
+            Self {
+                state,
+                layout,
+                _database_authority: database_authority,
+                _temporary: temporary,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn dashboard_state_resolves_exact_application_scope_once() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-resolved-scope",
-        )
-        .await
-        .expect("project init");
+        let fixture = DashboardStateFixture::open("project.dashboard-resolved-scope").await;
         let project_id = ProjectId::new(
-            cg.store_layout()
+            fixture
+                .layout
                 .identity
                 .project_id
                 .clone()
                 .expect("registered project id"),
         )
         .expect("valid project id");
-        let expected = crate::daemon::project_open_owners::resolved_scope_for_project(
-            cg.project_root(),
+        #[allow(deprecated)]
+        let expected = crate::application::context::resolve_exact_root_scope(
+            &fixture.layout.project_root,
             &project_id,
         )
-        .expect("daemon exact-root scope");
-
-        let state = build_state(&cg).await.expect("dashboard state");
+        .expect("application exact-root scope");
 
         // The exact-root HTTP surface resolves the same project and scope
         // through the application type, once, at state construction.
-        let scope = state
+        let scope = fixture
+            .state
             .resolved_scope
             .clone()
             .expect("exact resolved application scope");
@@ -1710,18 +1819,9 @@ mod authority_tests {
 
     #[tokio::test]
     async fn project_memory_owner_uses_validated_store_identity() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-project-memory",
-        )
-        .await
-        .expect("project init");
-        let raw = cg
-            .store_layout()
+        let fixture = DashboardStateFixture::open("project.dashboard-project-memory").await;
+        let raw = fixture
+            .layout
             .identity
             .project_id
             .as_deref()
@@ -1729,7 +1829,7 @@ mod authority_tests {
         let expected = ProjectId::new(raw).expect("validated project id");
 
         assert_eq!(
-            project_memory_owner(&cg).expect("project memory owner"),
+            project_memory_owner_for_layout(&fixture.layout).expect("project memory owner"),
             FactOwnerV1::Project {
                 project_id: expected,
             }
@@ -1738,19 +1838,9 @@ mod authority_tests {
 
     #[tokio::test]
     async fn dashboard_state_reuses_its_active_database_as_memory_authority() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-state",
-        )
-        .await
-        .expect("project init");
-
-        let expected_path = cg.dashboard_db_path().display().to_string();
-        let state = build_state(&cg).await.expect("dashboard state");
+        let fixture = DashboardStateFixture::open("project.dashboard-state").await;
+        let expected_path = fixture.layout.graph_db_path.display().to_string();
+        let state = fixture.state;
         let Json(capabilities) = capabilities(State(state.clone())).await;
 
         assert_eq!(state.mem_db_path, expected_path);
@@ -1768,18 +1858,8 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn daemon_dashboard_retains_the_exact_mounted_project_graph() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.daemon-dashboard",
-        )
-        .await
-        .expect("project init");
-        let cg = Arc::new(cg);
+    async fn daemon_dashboard_retains_the_admitted_authorities() {
+        let mut fixture = DashboardStateFixture::open("project.daemon-dashboard").await;
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
                 Err(
@@ -1798,32 +1878,22 @@ mod authority_tests {
         );
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
             crate::application::dashboard_diagnostics::diagnostic_broker(
-                cg.project_root().to_path_buf(),
+                fixture.layout.project_root.clone(),
                 tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
             ),
         ));
+        fixture.state.doctor_report_reader = Some(Arc::clone(&doctor_reader));
+        fixture.state.doctor_remediation_dispatcher = Some(doctor_dispatcher);
+        fixture.state.code_diagnostics_authority = Some(
+            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
+                fixture.layout.project_root.clone(),
+                fixture.layout.dashboard_root.clone(),
+                Arc::clone(&fixture.state.mem_db),
+                diagnostic_broker,
+            ),
+        );
+        let state = fixture.state;
 
-        let state = build_state_with_automation_reconciler(
-            Arc::clone(&cg),
-            None,
-            None,
-            None,
-            None,
-            standalone_dashboard_automation_writer(),
-            Some(Arc::clone(&doctor_reader)),
-            Some(doctor_dispatcher),
-            None,
-            None,
-            Some(diagnostic_broker),
-            None,
-        )
-        .await
-        .expect("dashboard state");
-
-        assert!(Arc::ptr_eq(
-            state.project_graph.as_ref().expect("retained graph"),
-            &cg,
-        ));
         assert!(Arc::ptr_eq(
             state
                 .doctor_report_reader
@@ -1840,39 +1910,22 @@ mod authority_tests {
 
     #[tokio::test]
     async fn retained_project_session_authority_is_reused_exactly() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _graph_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.retained-session",
+        let fixture = DashboardStateFixture::open("project.retained-session").await;
+        let profile_root = fixture._temporary.path().join("sessions-profile");
+        let project_id =
+            ProjectId::new("project.retained-session").expect("valid project identity");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+            profile_root,
+            &fixture.layout.project_root,
+            project_id,
         )
         .await
-        .expect("project init");
-        let project_id = ProjectId::new(
-            cg.store_layout()
-                .identity
-                .project_id
-                .clone()
-                .expect("project identity"),
-        )
-        .expect("valid project identity");
-        let runtime = Arc::new(
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
-                project.path().join(".profile"),
-                project.path(),
-                project_id,
-            )
-            .await
-            .expect("registered project sessions"),
-        );
-        let authority = runtime
-            .dashboard_test_authority()
-            .expect("dashboard test authority");
-        let retained = Arc::clone(&authority.project_sessions);
+        .expect("registered project sessions");
+        let retained = runtime
+            .project_database_arc()
+            .expect("project session authority");
 
-        let selected = resolve_lcm_store(&cg, Some(Arc::clone(&retained))).await;
+        let selected = resolve_lcm_store_for_layout(&fixture.layout, Some(Arc::clone(&retained)));
 
         assert!(Arc::ptr_eq(
             selected.lcm_db.as_ref().expect("retained LCM authority"),
@@ -1884,40 +1937,22 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_fails_closed() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-session-unavailable",
-        )
-        .await
-        .expect("project init");
-        let selected = resolve_lcm_store(&cg, None).await;
+        let fixture = DashboardStateFixture::open("project.dashboard-session-unavailable").await;
+        let selected = resolve_lcm_store_for_layout(&fixture.layout, None);
 
         // A display path is not read authority.
         assert!(selected.lcm_db.is_none());
         assert_eq!(selected.scope, "unavailable");
         assert_eq!(
             selected.path,
-            cg.store_layout().sessions_db_path.display().to_string()
+            fixture.layout.sessions_db_path.display().to_string()
         );
     }
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_is_read_only() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-session-read-only",
-        )
-        .await
-        .expect("project init");
-        let selected = resolve_lcm_store(&cg, None).await;
+        let fixture = DashboardStateFixture::open("project.dashboard-session-read-only").await;
+        let selected = resolve_lcm_store_for_layout(&fixture.layout, None);
 
         assert!(selected.lcm_db.is_none());
         assert_eq!(selected.scope, "unavailable");
@@ -1942,17 +1977,8 @@ mod authority_tests {
 
     #[tokio::test]
     async fn application_routes_are_active_project_only() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-application-route",
-        )
-        .await
-        .expect("project init");
-        let state = build_state(&cg).await.expect("dashboard state");
+        let fixture = DashboardStateFixture::open("project.dashboard-application-route").await;
+        let state = fixture.state;
         let project_id = state.project_id.clone().expect("active project id");
         let application = ActiveProjectApplicationRoutes {
             http_router: Router::new()
@@ -2054,17 +2080,8 @@ mod authority_tests {
     /// existing families are exposed.
     #[tokio::test]
     async fn v2_read_models_are_reachable_through_both_gateways() {
-        let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project.path(),
-            "project.dashboard-read-model-route",
-        )
-        .await
-        .expect("project init");
-        let state = build_state(&cg).await.expect("dashboard state");
+        let fixture = DashboardStateFixture::open("project.dashboard-read-model-route").await;
+        let state = fixture.state;
         let project_id = state.project_id.clone().expect("active project id");
         let app = router_with_active_application(state, None, Router::new());
 

@@ -13,14 +13,13 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::lcm_service::{self, SearchPayloadArgs};
 use super::*;
-use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::configuration::ProductionUserSettingsDaemonClient;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::runtime::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
-use crate::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_global_db::{ParseOffset, RegisteredGlobalDb};
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 const PROVIDER: &str = "cursor";
 const SESSION_ID: &str = "sess-lcm-fixes";
@@ -31,8 +30,7 @@ struct DashboardFixture {
     state: DashboardState,
     sessions: Arc<RegisteredGlobalDb>,
     linked_node_id: String,
-    _registry: DaemonSessionRuntimeRegistryV1,
-    _scope: DaemonDatabaseScope,
+    _runtime: RegisteredGlobalDbTestRuntime,
     _tmp: TempDir,
 }
 
@@ -45,44 +43,42 @@ impl DashboardFixture {
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let project_id =
             ProjectId::new(format!("project.lcm-dashboard-{nonce}")).expect("project identity");
-        let test_runtime =
-            HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
-                .await
-                .expect("registered dashboard LCM test runtime");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .expect("registered dashboard LCM test runtime");
+        let sessions = runtime
+            .project_database_arc()
+            .expect("registered project sessions");
         let linked_node_id = seed_lcm_fixture(
-            &test_runtime,
+            &sessions,
             &project_root,
             external_payload,
             provider_collision,
         )
         .await;
-        drop(test_runtime);
-
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-            &profile_root,
-            nonce,
-            "lcm-dashboard-fixes",
+        let memory_path = tmp.path().join("memory.db");
+        let memory_authority =
+            DatabaseAuthority::acquire_test(&memory_path, "LCM dashboard memory fixture")
+                .expect("memory database authority");
+        let (memory, _) = Database::publish_test_runtime(
+            &memory_path,
+            &memory_authority,
+            TestDatabaseRuntimeMode::Initialize,
         )
-        .expect("daemon database scope");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("session runtime registry");
-        let sessions = registry
-            .project_sessions(project_id.clone(), [project_root.clone()])
-            .await
-            .expect("registered project sessions");
-        let memory = registry.profile_memory().await.expect("profile memory");
+        .await
+        .expect("memory database");
+        let memory = Arc::new(memory);
         if external_payload {
             plant_external_needle(sessions.as_ref()).await;
         }
-        let memory_path = memory.database_path().display().to_string();
+        let memory_path = memory_path.display().to_string();
         let sessions_path = sessions.db_path().display().to_string();
-        let resolved_scope = crate::dashboard::scope::resolve_dashboard_scope(
-            &project_root,
-            Some(project_id.as_str()),
-        );
+        let resolved_scope =
+            crate::scope::resolve_dashboard_scope(&project_root, Some(project_id.as_str()));
         let state = DashboardState {
             project_id: Some(project_id.as_str().to_string()),
             resolved_scope,
@@ -122,8 +118,7 @@ impl DashboardFixture {
             state,
             sessions,
             linked_node_id,
-            _registry: registry,
-            _scope: scope,
+            _runtime: runtime,
             _tmp: tmp,
         }
     }
@@ -177,34 +172,27 @@ fn summary_draft(
 }
 
 async fn seed_lcm_fixture(
-    runtime: &HostAdmissionTestRuntimeV1,
+    sessions: &RegisteredGlobalDb,
     project_path: &Path,
     external_payload: bool,
     provider_collision: bool,
 ) -> String {
-    assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: PROVIDER.to_string(),
-                    session_id: SESSION_ID.to_string(),
-                    project_key: "tracedecay-lcm-fixes".to_string(),
-                    project_path: project_path.display().to_string(),
-                    title: Some("LCM fixes session".to_string()),
-                    started_at: Some(1_700_002_000),
-                    ended_at: None,
-                    transcript_path: None,
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                },
-            )
-            .await
-            .expect("seed dashboard LCM session")
-    );
+    let session = SessionRecord {
+        provider: PROVIDER.to_string(),
+        session_id: SESSION_ID.to_string(),
+        project_key: "tracedecay-lcm-fixes".to_string(),
+        project_path: project_path.display().to_string(),
+        title: Some("LCM fixes session".to_string()),
+        started_at: Some(1_700_002_000),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    assert!(sessions.upsert_session(&session).await);
 
     let msg_b = message(
         "msg-b",
@@ -231,10 +219,14 @@ async fn seed_lcm_fixture(
     msg_c.metadata_json = Some("{\"fixture_marker\":\"msg-c-meta\"}".to_string());
     for message in [&msg_b, &msg_a, &msg_c] {
         assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, message)
+            sessions
+                .upsert_transcript_batch(
+                    &session,
+                    std::slice::from_ref(message),
+                    &format!("lcm-dashboard-fixture:{}", message.message_id),
+                    ParseOffset::default(),
+                )
                 .await
-                .expect("seed dashboard LCM message")
         );
     }
 
@@ -254,13 +246,19 @@ async fn seed_lcm_fixture(
         )
     };
     if external_payload {
-        runtime
-            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &msg_x)
+        sessions
+            .lcm_ingest_raw_message(
+                sessions
+                    .db_path()
+                    .parent()
+                    .expect("registered session storage root"),
+                &msg_x,
+            )
             .await
             .expect("externalized message");
         assert!(matches!(
-            runtime
-                .lcm_load_raw_message_for_test(PROVIDER, "msg-x")
+            sessions
+                .lcm_load_raw_message(PROVIDER, "msg-x")
                 .await
                 .expect("externalized raw message")
                 .storage_kind,
@@ -268,83 +266,78 @@ async fn seed_lcm_fixture(
         ));
     } else {
         assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, &msg_x)
+            sessions
+                .upsert_transcript_batch(
+                    &session,
+                    std::slice::from_ref(&msg_x),
+                    "lcm-dashboard-fixture:msg-x",
+                    ParseOffset::default(),
+                )
                 .await
-                .expect("seed dashboard LCM message")
         );
     }
 
-    let store_a = runtime
-        .lcm_load_raw_message_for_test(PROVIDER, "msg-a")
+    let store_a = sessions
+        .lcm_load_raw_message(PROVIDER, "msg-a")
         .await
         .expect("msg-a raw projection")
         .store_id;
-    let store_b = runtime
-        .lcm_load_raw_message_for_test(PROVIDER, "msg-b")
+    let store_b = sessions
+        .lcm_load_raw_message(PROVIDER, "msg-b")
         .await
         .expect("msg-b raw projection")
         .store_id;
-    let store_c = runtime
-        .lcm_load_raw_message_for_test(PROVIDER, "msg-c")
+    let store_c = sessions
+        .lcm_load_raw_message(PROVIDER, "msg-c")
         .await
         .expect("msg-c raw projection")
         .store_id;
-    let linked = runtime
-        .lcm_insert_summary_node_for_test(
-            HostAdmissionScope::Project,
-            summary_draft(
-                "vector projection summary for caching decisions",
-                Some("expandhint drilldown"),
-                Some("{\"category\":\"general\",\"tags\":[\"vector\"]}"),
-                1_700_002_300,
-                vec![LcmSourceRef::RawMessage { store_id: store_c }],
-            ),
-        )
-        .await
-        .expect("insert linked dashboard summary");
+    let linked = insert_summary_node(
+        sessions,
+        summary_draft(
+            "vector projection summary for caching decisions",
+            Some("expandhint drilldown"),
+            Some("{\"category\":\"general\",\"tags\":[\"vector\"]}"),
+            1_700_002_300,
+            vec![LcmSourceRef::RawMessage { store_id: store_c }],
+        ),
+    )
+    .await
+    .expect("insert linked dashboard summary");
     for (text, time_end, store_id) in [
         ("second summary block two", 1_700_002_400, store_a),
         ("third summary block three", 1_700_002_500, store_b),
     ] {
-        runtime
-            .lcm_insert_summary_node_for_test(
-                HostAdmissionScope::Project,
-                summary_draft(
-                    text,
-                    None,
-                    None,
-                    time_end,
-                    vec![LcmSourceRef::RawMessage { store_id }],
-                ),
-            )
-            .await
-            .expect("insert dashboard summary");
+        insert_summary_node(
+            sessions,
+            summary_draft(
+                text,
+                None,
+                None,
+                time_end,
+                vec![LcmSourceRef::RawMessage { store_id }],
+            ),
+        )
+        .await
+        .expect("insert dashboard summary");
     }
     if provider_collision {
-        assert!(
-            runtime
-                .upsert_session_for_test(
-                    HostAdmissionScope::Project,
-                    &SessionRecord {
-                        provider: "codex".to_string(),
-                        session_id: SESSION_ID.to_string(),
-                        project_key: "provider-collision".to_string(),
-                        project_path: "/provider-collision".to_string(),
-                        title: Some("Provider collision".to_string()),
-                        started_at: Some(1_700_003_000),
-                        ended_at: None,
-                        transcript_path: None,
-                        metadata_json: None,
-                        parent_session_id: None,
-                        is_subagent: false,
-                        agent_id: None,
-                        parent_tool_use_id: None,
-                    },
-                )
-                .await
-                .expect("seed colliding provider session")
-        );
+        let colliding_session = SessionRecord {
+            provider: "codex".to_string(),
+            session_id: SESSION_ID.to_string(),
+            project_key: "provider-collision".to_string(),
+            project_path: "/provider-collision".to_string(),
+            title: Some("Provider collision".to_string()),
+            started_at: Some(1_700_003_000),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        };
+        assert!(sessions.upsert_session(&colliding_session).await);
         let mut colliding = message(
             "msg-collision",
             "user",
@@ -354,13 +347,38 @@ async fn seed_lcm_fixture(
         );
         colliding.provider = "codex".to_string();
         assert!(
-            runtime
-                .upsert_session_message_for_test(HostAdmissionScope::Project, &colliding)
+            sessions
+                .upsert_transcript_batch(
+                    &colliding_session,
+                    std::slice::from_ref(&colliding),
+                    "lcm-dashboard-fixture:msg-collision",
+                    ParseOffset::default(),
+                )
                 .await
-                .expect("seed colliding provider message")
         );
     }
     linked.node_id
+}
+
+async fn insert_summary_node(
+    sessions: &RegisteredGlobalDb,
+    draft: LcmSummaryNodeDraft,
+) -> std::result::Result<
+    tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+    tracedecay_sessions::runtime::lcm::LcmError,
+> {
+    let transaction = sessions
+        .begin_write_transaction()
+        .await
+        .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
+    let publisher =
+        tracedecay_global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
+            &transaction,
+        );
+    let summary =
+        tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft).await?;
+    transaction.commit().await?;
+    Ok(summary)
 }
 
 async fn plant_external_needle(db: &RegisteredGlobalDb) {
