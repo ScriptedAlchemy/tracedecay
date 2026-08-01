@@ -1,14 +1,7 @@
-use std::io;
-
-use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1};
-use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
-
-use super::super::*;
-use crate::application::observation::{
-    CaptureClaudeObservationRequestError, ObservationApplicationError,
-};
+use tracedecay_domain::ObservationSourceRangeV1;
 
 use super::super::test_support::*;
+use super::super::*;
 use super::*;
 
 #[test]

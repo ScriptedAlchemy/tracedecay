@@ -8,7 +8,6 @@ use crate::application::observation::{
     CaptureClaudeObservationRequestError, ObservationApplicationError,
 };
 
-use super::super::test_support::*;
 use super::*;
 
 #[test]

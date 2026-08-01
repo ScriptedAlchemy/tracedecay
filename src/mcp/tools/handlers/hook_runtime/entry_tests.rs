@@ -1,12 +1,4 @@
-use std::io;
-
-use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1};
-use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
-
 use super::*;
-use crate::application::observation::{
-    CaptureClaudeObservationRequestError, ObservationApplicationError,
-};
 
 #[test]
 fn required_str_rejects_missing_and_empty_values() {

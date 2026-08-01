@@ -1,37 +1,9 @@
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus, SharedHostAdmissionBroker,
-};
-use crate::application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
 use crate::automation::config_error;
-use crate::automation::run_ledger::AutomationRunStatus;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::tools::ToolResult;
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
-use crate::sessions::claude_observation::ClaudeObservationIngestError;
-use crate::sessions::source::TranscriptSource;
-use crate::tracedecay::TraceDecay;
-use serde_json::{Value, json};
+use crate::errors::Result;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracedecay_domain::{
-    CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProjectId, ProviderId, RetentionClass, SessionId, UtcMicros,
-};
-use tracedecay_store::StoreShardScopeV1;
-
-use super::super::SessionAuthorities;
-use super::super::support::tool_json;
+use tracedecay_domain::{ObservationSourceRangeV1, SessionId, UtcMicros};
 
 pub(super) fn hook_now() -> UtcMicros {
     UtcMicros(
