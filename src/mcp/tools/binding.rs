@@ -199,19 +199,21 @@ mod tests {
 
     /// Reads that resolve their own authority stay on the active project. A
     /// selector on one of these would silently read the wrong store.
+    ///
+    /// Only names with a `MCP_TOOL_BINDINGS` row belong here: for an unbound
+    /// name both predicates return `false` vacuously, so listing one asserts
+    /// nothing. The `tracedecay_git_*` application-surface tools were removed
+    /// for exactly that reason — they never consult this table, and their
+    /// selector policy is enforced by the surface schema, not a binding row.
     #[test]
     fn authority_bound_reads_are_active_project_only() {
-        for tool_name in [
-            "tracedecay_search",
-            "tracedecay_git_status",
-            "tracedecay_git_diff",
-            "tracedecay_git_history",
-            "tracedecay_git_blame",
-            "tracedecay_git_hunks",
-        ] {
-            assert!(!tool_accepts_registered_project_selector(tool_name));
-            assert!(!tool_dispatches_registered_project_reader(tool_name));
-        }
+        let tool_name = "tracedecay_search";
+        assert!(
+            binding(tool_name).is_some(),
+            "{tool_name} must have a binding row for these assertions to bind"
+        );
+        assert!(!tool_accepts_registered_project_selector(tool_name));
+        assert!(!tool_dispatches_registered_project_reader(tool_name));
     }
 
     /// A row without a group must be claimed by one of the surface predicates,
