@@ -2241,10 +2241,61 @@ impl DaemonInvocationState {
         project_path: Option<&Path>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
-        if let Some(response) = quarantined_invocation_response(&request) {
+        if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
         }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
+        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
+            request: scope_set_request,
+            observed_at,
+            deadline,
+            cancellation,
+        } = &request.payload
+        {
+            let Some(active_project_root) = request_project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id.clone(),
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let scope_set = self
+                .service
+                .persisted_scope_set(active_project_root, &scope_set_request.scope_set_id)
+                .await;
+            let Ok(application_request_id) =
+                tracedecay_application::RequestId::new(request.request_id.clone())
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            let Some((scope, outcome)) = self
+                .service
+                .multi_root_evidence(
+                    active_project_root,
+                    application_request_id,
+                    "scope_set_read",
+                    scope_set,
+                    *observed_at,
+                    deadline.clone(),
+                    cancellation.clone(),
+                )
+                .await
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            };
+            return DaemonInvocationResponse::with_outcome(
+                request.request_id,
+                service::invocation::DaemonInvocationOutcome::MultiRootScopeSetRead {
+                    scope,
+                    outcome,
+                },
+            );
+        }
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
             request: scope_set_request,
             observed_at,
@@ -7740,7 +7791,12 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     Ok(())
 }
 
-fn quarantined_invocation_response(
+/// Multi-root payloads are routed by `invoke_for_project`, which reaches the
+/// executor without passing through `DaemonInvocationService::invoke`'s own
+/// `validate` gate. Validating them here keeps a malformed multi-root request
+/// from costing a project admission before it is rejected; authorization stays
+/// with the `AuthorizedScopeSet` compare-and-swap on the executor side.
+fn invalid_multi_root_invocation_response(
     request: &DaemonInvocationRequest,
 ) -> Option<DaemonInvocationResponse> {
     let multi_root_payload = matches!(
@@ -7749,23 +7805,13 @@ fn quarantined_invocation_response(
             | service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | service::invocation::DaemonInvocationPayload::MultiRootExecute { .. }
     );
-    let multi_root_lsp = matches!(
-        &request.payload,
-        service::invocation::DaemonInvocationPayload::LspOpen {
-            workspace_folders,
-            ..
-        } if workspace_folders.len() > 1
-    );
-    if !multi_root_payload && !multi_root_lsp {
+    if !multi_root_payload {
         return None;
     }
-    Some(match request.validate() {
-        Ok(()) => DaemonInvocationResponse::problem(
-            request.request_id.clone(),
-            service::invocation::DaemonInvocationProblem::Unavailable,
-        ),
-        Err(problem) => DaemonInvocationResponse::problem(request.request_id.clone(), problem),
-    })
+    request
+        .validate()
+        .err()
+        .map(|problem| DaemonInvocationResponse::problem(request.request_id.clone(), problem))
 }
 
 #[cfg(any(not(unix), test))]
@@ -7779,7 +7825,7 @@ async fn execute_portable_daemon_invocation(
     request: DaemonInvocationRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = quarantined_invocation_response(&request) {
+    if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
     let request_id = request.request_id.clone();
@@ -8200,20 +8246,31 @@ async fn admitted_lsp_workspace_for_request(
 ) -> Option<AuthorizedLspWorkspace> {
     let requested_uris = match request.lsp_workspace_folders()? {
         [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
-        [folder] => vec![folder.clone()],
-        _ => return None,
+        folders => folders.to_vec(),
     };
+    if requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
+        return None;
+    }
+    // A single folder is only ever the active project: a lone sibling hint
+    // must not silently reroute the session. A multi-folder workspace may span
+    // registered roots, but the active project must be one of them so the
+    // session stays anchored to the admitted route.
+    let single_root = requested_uris.len() == 1;
     let active_project_path = project_path.canonicalize().ok()?;
     let graphs = store_administration.mounted_project_graphs().await;
     let mut resolved_roots = Vec::with_capacity(requested_uris.len());
+    let mut admits_active_project = false;
     for requested_uri in requested_uris {
         let uri = url::Url::parse(&requested_uri).ok()?;
         if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
             return None;
         }
         let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
-        if requested_path != active_project_path {
+        if single_root && requested_path != active_project_path {
             return None;
+        }
+        if requested_path == active_project_path {
+            admits_active_project = true;
         }
         let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
         let mut candidates = Vec::new();
@@ -8247,6 +8304,9 @@ async fn admitted_lsp_workspace_for_request(
             return None;
         };
         resolved_roots.push((registered_root.clone(), canonical_uri, scope.clone()));
+    }
+    if !admits_active_project {
+        return None;
     }
     service
         .authorize_lsp_workspace(resolved_roots, tracedecay_application::clock::now_micros())
@@ -8302,7 +8362,7 @@ async fn execute_daemon_invocation(
     handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = quarantined_invocation_response(&request) {
+    if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
     let request_id = request.request_id.clone();
