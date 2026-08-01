@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;

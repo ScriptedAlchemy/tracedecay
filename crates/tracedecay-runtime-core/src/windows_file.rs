@@ -14,7 +14,7 @@ pub(crate) struct FileInformation {
     pub number_of_links: u32,
 }
 
-pub fn information(file: &File) -> io::Result<FileInformation> {
+pub(crate) fn information(file: &File) -> io::Result<FileInformation> {
     let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
     // SAFETY: `file` owns a valid Windows file handle, and `information` points
     // to writable memory sized for the API's complete output structure.
