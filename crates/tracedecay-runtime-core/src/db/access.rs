@@ -9,6 +9,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 #[cfg(any(test, feature = "test-transport"))]
 use fs2::FileExt;
 
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
+
 use crate::errors::{Result, TraceDecayError};
 
 mod bootstrap;
@@ -69,6 +73,9 @@ Debug assertions alone do not enable daemonless writable authority:
 
 ```
 use tracedecay::db::DatabaseAuthority;
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
 
 let path = std::env::temp_dir().join(format!(
     "tracedecay-production-authority-boundary-{}.db",
@@ -631,6 +638,37 @@ fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
         }
         Err(error) if is_lock_contended(&error) => true,
         Err(_) => false,
+    }
+}
+
+/// Registered databases authorize every migration-SQL write through the
+/// retained authority. The impl lives beside `DatabaseAuthority` because the
+/// trait belongs to `tracedecay_rusqlite_runtime` and the orphan rule allows
+/// it only in the crate that owns the type.
+impl MigrationSqlWriteAuthority for DatabaseAuthority {
+    fn verify(&self, intent: MigrationSqlWriteIntent) -> std::result::Result<(), MigrationSqlError> {
+        let intent = match intent {
+            MigrationSqlWriteIntent::Validate => "validate registered global database statement",
+            MigrationSqlWriteIntent::Execute => "execute registered global database statement",
+            MigrationSqlWriteIntent::Query => "query registered global database writer",
+            MigrationSqlWriteIntent::ExecuteBatch => {
+                "execute registered global database statement batch"
+            }
+            MigrationSqlWriteIntent::Vacuum => {
+                if self.role() != DatabaseAuthorityRole::Maintenance {
+                    return Err(MigrationSqlError::AuthorityDenied(
+                        "whole-database vacuum requires exclusive maintenance authority".to_owned(),
+                    ));
+                }
+                "vacuum registered global database under exclusive maintenance"
+            }
+            MigrationSqlWriteIntent::BeginTransaction => {
+                "begin registered global database transaction"
+            }
+            MigrationSqlWriteIntent::Commit => "commit registered global database transaction",
+        };
+        self.require_active_write_scope(intent)
+            .map_err(|error| MigrationSqlError::AuthorityDenied(error.to_string()))
     }
 }
 

@@ -11,7 +11,9 @@ Status at hand-off:
 - `cargo check -p tracedecay-runtime-core` — **green**
 - `cargo check -p tracedecay-runtime-core --features test-transport` — 1 error (seam 1)
 - `cargo check -p tracedecay-runtime-core --tests` — 1 error (seam 1)
-- Root crate — red by design; the movers land first, the lead fixes to green.
+- `cargo check -p tracedecay` — **1 error** (seam 8), everything else this move
+  touched is wired. This is only a measure of *this* mover's landing; other
+  movers land on top of it.
 
 ---
 
@@ -50,6 +52,27 @@ Two ways out, in order of preference:
    compile-checked tests into runtime failures whenever a test process forgets
    to register — hence the preference for (1).
 
+### 8. `impl From<db::engine::Error> for LcmError` violates the orphan rule
+
+`src/sessions/lcm/types.rs:20` — the only remaining root error. `LcmError` is
+defined in `crates/tracedecay-sessions/src/lcm/contracts.rs` and
+`db::engine::Error` now lives in `tracedecay-runtime-core`, so neither type is
+local to the root crate any more.
+
+Deleting the impl is not an option: it carries 691 `?` sites across the LCM
+read paths (measured). Two viable fixes, both outside this mover's scope
+because they touch the sessions mover's crate:
+
+1. **Move `db::engine::Error`/`Result` down.** It is 117 lines with no
+   dependency beyond `std` (`crates/tracedecay-runtime-core/src/db/engine/
+   error.rs`). Both `tracedecay-runtime-core` and `tracedecay-sessions`
+   already depend on `tracedecay-domain`, so moving it there (or to
+   `tracedecay-store`, if sessions gains that dep) lets the `From` impl live
+   beside `LcmError` with no new heavy edge. **Recommended.**
+2. **Add `tracedecay-runtime-core` as a dependency of `tracedecay-sessions`**
+   and put the impl in `lcm/contracts.rs`. One line, but it hangs the whole
+   kernel off the sessions crate's compile graph for a single conversion.
+
 ### 2. `StoreRuntimeSource` port wiring (root side)
 
 `crates/tracedecay-runtime-core/src/ports.rs` defines `StoreRuntimeSource` and
@@ -63,9 +86,11 @@ retains that trait object instead of the concrete
 - `db/maintenance.rs` — `storage_page_counts`, `run_incremental_vacuum`
 - `store/memory/runtime.rs` — the fact-store read/write dispatch
 
-**Owed by the root:** `impl StoreRuntimeSource for StoreRuntimeHandle` and
-`Arc::new(handle)` at every `Database::publish_runtime` call. The trait covers
-every method the kernel used: `opened_file_identity`, `canonical_path`
+**Done, not owed:** `impl StoreRuntimeSource for StoreRuntimeHandle` landed in
+`src/daemon/store_runtime/registry.rs`, and all nine `Database::publish_runtime`
+call sites (`daemon/store_runtime/session_registry.rs`,
+`migrate/consolidate/runtime.rs`, `application/evidence_assembly.rs`) now pass
+`Arc::new(runtime)`. The trait covers every method the kernel used: `opened_file_identity`, `canonical_path`
 (was `locator().path()`), `verified_locator` (was `locator().verified()`),
 `binding`, `schema_migrated`, `writer_present` (was
 `physical_snapshot().writer_present`), `validate_registered_read`,
@@ -159,6 +184,7 @@ re-exported across a crate boundary) and is re-exported at
 | `crate::application::host_admission::{sync_directory, DirectorySyncPolicy}` (db/access/owner_io.rs) | Repointed at the canonical `tracedecay_application::framed_log`. |
 | `crate::global_db::{RegisteredGlobalDb, StoreInstanceRecord}` (storage.rs) | `try_classify_project_storage_with_registry` and `classify_registry_storage` lifted to the root `src/storage.rs` shim over a newly `pub` `classify_registry_storage_fields`. No trait object was needed. |
 | `include_str!("../tests/fixtures/redundancy_eval_labeled.json")` (redundancy.rs) | Repointed at `../../../tests/fixtures/…`; the fixture stays in the repo-root `tests/`. |
+| `impl MigrationSqlWriteAuthority for DatabaseAuthority` (src/global_db/registered.rs) | Moved into `runtime_core::db::access`. Both the trait (`tracedecay_rusqlite_runtime`) and the type (kernel) became foreign to the root, so the orphan rule allows it only beside `DatabaseAuthority`. |
 
 ## Feature map
 

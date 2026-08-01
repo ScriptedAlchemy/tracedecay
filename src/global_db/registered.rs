@@ -499,32 +499,9 @@ impl RegisteredGlobalDb {
     }
 }
 
-impl MigrationSqlWriteAuthority for DatabaseAuthority {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        let intent = match intent {
-            MigrationSqlWriteIntent::Validate => "validate registered global database statement",
-            MigrationSqlWriteIntent::Execute => "execute registered global database statement",
-            MigrationSqlWriteIntent::Query => "query registered global database writer",
-            MigrationSqlWriteIntent::ExecuteBatch => {
-                "execute registered global database statement batch"
-            }
-            MigrationSqlWriteIntent::Vacuum => {
-                if self.role() != crate::db::DatabaseAuthorityRole::Maintenance {
-                    return Err(MigrationSqlError::AuthorityDenied(
-                        "whole-database vacuum requires exclusive maintenance authority".to_owned(),
-                    ));
-                }
-                "vacuum registered global database under exclusive maintenance"
-            }
-            MigrationSqlWriteIntent::BeginTransaction => {
-                "begin registered global database transaction"
-            }
-            MigrationSqlWriteIntent::Commit => "commit registered global database transaction",
-        };
-        self.require_active_write_scope(intent)
-            .map_err(|error| MigrationSqlError::AuthorityDenied(error.to_string()))
-    }
-}
+// `impl MigrationSqlWriteAuthority for DatabaseAuthority` moved into
+// `tracedecay_runtime_core::db::access`: both the trait and the type are
+// now foreign to this crate, so the orphan rule forbids it here.
 
 pub(crate) struct RegisteredGlobalDbWriterConnection<'a> {
     connection: &'a Connection,

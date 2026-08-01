@@ -393,7 +393,7 @@ impl ConsolidationRuntimeOwnerV1 {
                 "mounted consolidation artifact identity differs from its ledger record",
             ));
         }
-        let database = match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
+        let database = match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
         {
             Ok(database) => database,
             Err(error) => {
@@ -751,7 +751,7 @@ impl FrozenInputRuntimeSetV1 {
                 "frozen input runtime identity differs from its exact record",
             ));
         }
-        let database = match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
+        let database = match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
         {
             Ok(database) => database,
             Err(error) => {
