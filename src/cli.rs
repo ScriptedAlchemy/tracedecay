@@ -487,6 +487,7 @@ pub enum Commands {
         no_reinstall: bool,
     },
     /// Install this source-built executable into the live user environment.
+    #[command(long_about = DOGFOOD_LONG_ABOUT, after_help = DOGFOOD_AFTER_HELP)]
     Dogfood,
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
