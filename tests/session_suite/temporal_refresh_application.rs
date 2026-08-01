@@ -174,7 +174,7 @@ fn project_context(
                 BranchId::new("branch.refresh-application").unwrap(),
             ),
         ),
-        CancellationToken::for_application_request(&RequestId::new(request).unwrap()),
+        CancellationToken::for_application_request(RequestId::new(request).unwrap().as_str()),
         UtcMicros(i64::MAX - 1),
     )
 }
@@ -188,7 +188,7 @@ fn profile_context(actor: &str, request: &str, profile: &str, root: &str) -> Tes
             SessionStoreId::new(format!("store.{profile}")).unwrap(),
             SessionRootId::new(root).unwrap(),
         ),
-        CancellationToken::for_application_request(&RequestId::new(request).unwrap()),
+        CancellationToken::for_application_request(RequestId::new(request).unwrap().as_str()),
         UtcMicros(i64::MAX - 1),
     )
 }
@@ -1014,11 +1014,13 @@ async fn expired_or_cancelled_requests_do_not_create_refresh_operations() {
         "request.refresh.expired",
         UtcMicros(0),
         CancellationToken::for_application_request(
-            &RequestId::new("request.refresh.expired").unwrap(),
+            RequestId::new("request.refresh.expired").unwrap().as_str(),
         ),
     );
     let cancellation = CancellationToken::for_application_request(
-        &RequestId::new("request.refresh.cancelled").unwrap(),
+        RequestId::new("request.refresh.cancelled")
+            .unwrap()
+            .as_str(),
     );
     cancellation.cancel();
     let cancelled = context_with_controls(
@@ -1098,11 +1100,15 @@ async fn request_abort_and_deadline_do_not_claim_durable_operation_cancellation(
         "request.refresh.status.expired",
         UtcMicros(0),
         CancellationToken::for_application_request(
-            &RequestId::new("request.refresh.status.expired").unwrap(),
+            RequestId::new("request.refresh.status.expired")
+                .unwrap()
+                .as_str(),
         ),
     );
     let cancellation = CancellationToken::for_application_request(
-        &RequestId::new("request.refresh.cancel.aborted").unwrap(),
+        RequestId::new("request.refresh.cancel.aborted")
+            .unwrap()
+            .as_str(),
     );
     cancellation.cancel();
     let aborted = context_with_controls(

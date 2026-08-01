@@ -742,7 +742,7 @@ fn context_for_identity(
         CapabilityDigest::new(capability_digest),
         PolicyDigest::new(policy_digest),
         ConfigurationDigest::new(configuration_digest),
-        CancellationToken::for_application_request(&request_id),
+        CancellationToken::for_application_request(request_id.as_str()),
         budgets,
         UtcMicros(application_observed_at().0.saturating_add(30_000_000)),
     )
@@ -1541,7 +1541,9 @@ async fn replayed_grant_cannot_escape_its_deadline_cancellation_or_budgets() {
             "request.replay-cancellation",
             issued_context.deadline().expires_at,
             CancellationToken::for_application_request(
-                &RequestId::new("request.replay-cancellation").unwrap(),
+                RequestId::new("request.replay-cancellation")
+                    .unwrap()
+                    .as_str(),
             ),
             issued_context.budgets(),
         ),
