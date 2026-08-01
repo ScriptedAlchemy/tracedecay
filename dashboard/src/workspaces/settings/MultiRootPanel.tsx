@@ -15,7 +15,7 @@
  */
 import { multiRootReading, useCapabilities } from '../../data/query/capabilities.ts';
 import type { MultiRootReading } from '../../data/query/capabilities.ts';
-import { CenteredState } from '../../ui/LegacyStates.tsx';
+import { CenteredState } from '../../ui/ReadSection.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { elideStart } from '../../ui/format.ts';
 
