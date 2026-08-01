@@ -903,13 +903,6 @@ impl TraceDecay {
             standalone_maintenance_scope: None,
         })
     }
-
-    /// Lists tracked branches from metadata. Returns `None` if no branch tracking.
-    pub fn list_tracked_branches(project_root: &Path) -> Option<Vec<String>> {
-        let store_layout = storage::resolve_layout_for_current_profile(project_root).ok()?;
-        let meta = branch_meta::load_branch_meta(&store_layout.data_root)?;
-        Some(meta.branches.keys().cloned().collect())
-    }
 }
 
 #[cfg(any(test, feature = "test-transport"))]
