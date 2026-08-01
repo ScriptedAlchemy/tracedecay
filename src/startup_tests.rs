@@ -1,10 +1,59 @@
 use super::{
-    AnalyticsAction, CommandFamily, Commands, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS,
-    PostUpdateMode, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
-    is_extract_worker, is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
+    AnalyticsAction, CommandFamily, Commands, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
+    MAX_BLOCKING_THREADS, PostUpdateMode, SilentReinstallAction, StderrTracingDefault,
+    async_worker_threads, is_extract_worker, is_local_install_command,
+    should_skip_agent_install_maintenance, should_skip_startup_maintenance,
+    silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
 };
 use tracedecay::user_config::UserConfig;
+
+/// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
+/// the lifecycle mutations. Without it a scripted wipe had to feed `go!`
+/// through a pipe on stdin, and `--yes` was rejected outright.
+#[test]
+fn wipe_accepts_the_global_confirmation_flag() {
+    let command = Commands::Wipe { all: true };
+    let options = HostBundleCliOptions {
+        component: None,
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+        .expect("wipe --yes must be accepted");
+}
+
+/// `wipe` owns no host component and has no preview, so the other two global
+/// lifecycle flags stay rejected on it.
+#[test]
+fn wipe_still_rejects_component_and_dry_run() {
+    let command = Commands::Wipe { all: false };
+    let family = CommandFamily::for_command(&command);
+    let dry_run = HostBundleCliOptions {
+        component: None,
+        dry_run: true,
+        yes: false,
+        adopt: false,
+    };
+    assert!(validate_host_bundle_options(&command, family, &dry_run).is_err());
+}
+
+/// The confirmation flag must not leak onto the other project commands, which
+/// have nothing to confirm.
+#[test]
+fn sibling_project_commands_still_reject_the_confirmation_flag() {
+    let command = Commands::List { all: false };
+    let options = HostBundleCliOptions {
+        component: None,
+        dry_run: false,
+        yes: true,
+        adopt: false,
+    };
+    assert!(
+        validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
+            .is_err()
+    );
+}
 
 #[test]
 fn async_runtime_bounds_parallel_allocators() {
