@@ -34,6 +34,28 @@ impl TraceDecay {
         Ok(())
     }
 
+    /// Roll a completed-but-unfinalized source edit forward: the intended bytes
+    /// are already published on disk, so this only reconciles the graph index to
+    /// the post-edit content. A crash between the atomic publish and the reindex
+    /// can leave the index pointing at the preimage; reindexing is idempotent, so
+    /// running it whether or not the original apply reached it is safe. This
+    /// never writes source bytes and so can never revert a written edit.
+    pub(crate) async fn commit_source_edit_postimages(
+        &self,
+        files: &[PlannedSourceEditFile],
+    ) -> Result<()> {
+        for file in files {
+            let Some(intended) = &file.intended else {
+                continue;
+            };
+            let authority =
+                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
+            self.reindex_file(&file.relative_path, intended, &authority)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Applies one immutable API-migration file family through the source-edit
     /// CAS authority. Every candidate is captured during preview. Real apply
     /// validates every preimage before the first write and restores all

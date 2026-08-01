@@ -226,6 +226,14 @@ pub trait GraphRuntimePort: Send + Sync {
         &'a self,
         files: &'a [PlannedSourceEditFile],
     ) -> GraphFuture<'a, ()>;
+    /// Reindex every candidate to its intended post-edit content when crash
+    /// recovery rolls a completed-but-unfinalized edit forward. The bytes are
+    /// already on disk; this only reconciles the graph index, which a crash
+    /// between the atomic publish and the reindex may have left at the preimage.
+    fn commit_source_edit_postimages<'a>(
+        &'a self,
+        files: &'a [PlannedSourceEditFile],
+    ) -> GraphFuture<'a, ()>;
 }
 
 pub type TraceDecay = dyn GraphRuntimePort;
