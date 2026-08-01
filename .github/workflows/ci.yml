@@ -220,6 +220,7 @@ jobs:
           python3 scripts/test-resolve-installed-binary.py
           python3 scripts/test-check-packaged-mcp-stdio.py
           python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-scoop-manifest-workflows.py
 
       - name: Test local dogfood command contract
         run: bash tests/dogfood_command_test.sh
