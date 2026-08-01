@@ -198,7 +198,9 @@ impl TraceDecay {
             if !entry.file_type().is_file() {
                 continue;
             }
-            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts) {
+            let metadata = entry.metadata().ok();
+            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts, metadata.as_ref())
+            {
                 files.push(rel_str);
             }
         }
@@ -265,7 +267,9 @@ impl TraceDecay {
             if !ft.is_file() {
                 continue;
             }
-            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts) {
+            let metadata = entry.metadata().ok();
+            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts, metadata.as_ref())
+            {
                 files.push(rel_str);
             }
         }
@@ -310,7 +314,8 @@ impl TraceDecay {
             if !entry.file_type().is_file() {
                 continue;
             }
-            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts)
+            let metadata = entry.metadata().ok();
+            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts, metadata.as_ref())
                 && is_included(&rel_str, &self.config)
             {
                 files.push(rel_str);
@@ -321,7 +326,19 @@ impl TraceDecay {
 
     /// Checks whether a file should be included: correct extension, not
     /// excluded by config globs, and within the max file size.
-    fn accept_file(&self, path: &Path, supported_exts: &[&str]) -> Option<String> {
+    ///
+    /// `metadata` should be the entry's already-stat'd metadata from the
+    /// walker (`walkdir::DirEntry::metadata` / `ignore::DirEntry::metadata`)
+    /// when the caller has one, so this doesn't re-stat a file the walker
+    /// already stat'd to determine its file type. Falls back to a fresh
+    /// `std::fs::metadata` call when the caller has none (or the walker's
+    /// own stat failed).
+    fn accept_file(
+        &self,
+        path: &Path,
+        supported_exts: &[&str],
+        metadata: Option<&std::fs::Metadata>,
+    ) -> Option<String> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !supported_exts.contains(&ext) {
             return None;
@@ -333,8 +350,11 @@ impl TraceDecay {
         if is_excluded(&rel_str, &self.config) && !is_included(&rel_str, &self.config) {
             return None;
         }
-        let metadata = std::fs::metadata(path).ok()?;
-        if metadata.len() > self.config.max_file_size {
+        let len = match metadata {
+            Some(m) => m.len(),
+            None => std::fs::metadata(path).ok()?.len(),
+        };
+        if len > self.config.max_file_size {
             return None;
         }
         Some(rel_str)
