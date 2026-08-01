@@ -5,4 +5,4 @@
 
 pub mod health;
 pub mod queries;
-mod scc;
+pub mod scc;
