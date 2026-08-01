@@ -97,6 +97,20 @@ pub(crate) fn validate_canonical_string(
     Ok(())
 }
 
+/// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
+///
+/// Identities that embed a digest under their own namespace all need the
+/// encoding alone, and all reject an untagged digest as non-canonical under
+/// their own field name — so only the stripping is shared, not the field.
+pub(crate) fn sha256_hex_body<'a>(
+    value: &'a str,
+    field: &'static str,
+) -> Result<&'a str, DomainError> {
+    value
+        .strip_prefix("sha256:")
+        .ok_or(DomainError::NonCanonical { field })
+}
+
 /// A native Git object id, rejected as non-canonical at any other shape.
 ///
 /// This is the shared body behind the identically-specified per-module Git

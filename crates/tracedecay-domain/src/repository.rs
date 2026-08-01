@@ -467,12 +467,10 @@ fn derive_capture_id(
             captured_at,
         },
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "repository capture identity digest",
-        })?;
+    let encoded = crate::canonical_text::sha256_hex_body(
+        digest.as_str(),
+        "repository capture identity digest",
+    )?;
     RepositoryCaptureId::new(format!("{CAPTURE_ID_NAMESPACE}.{encoded}"))
 }
 

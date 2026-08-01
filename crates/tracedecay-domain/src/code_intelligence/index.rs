@@ -551,13 +551,10 @@ impl CodeGenerationManifestV1 {
                 }
             }
             GenerationIdentityKind::Fingerprinted(fingerprint) => {
-                let expected = self
-                    .invalidation_digest
-                    .as_str()
-                    .strip_prefix("sha256:")
-                    .ok_or(DomainError::NonCanonical {
-                        field: "generation invalidation digest",
-                    })?;
+                let expected = crate::canonical_text::sha256_hex_body(
+                    self.invalidation_digest.as_str(),
+                    "generation invalidation digest",
+                )?;
                 if fingerprint != expected {
                     return Err(DomainError::DigestMismatch);
                 }
@@ -614,12 +611,7 @@ fn generation_identity_kind(
     if scheme != Some("generation")
         || version != Some("v1")
         || parts.next().is_some()
-        || discriminator.is_none_or(|value| {
-            value.len() != 8
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        || discriminator.is_none_or(|value| !crate::canonical_text::is_lowercase_hex(value, 8))
         || sequence.is_none_or(|value| {
             value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit())
         })
