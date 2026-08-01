@@ -419,8 +419,9 @@ fn cursor_native_extension_dir_is_tracedecay(dir: &Path) -> bool {
             manifest.get("publisher").and_then(Value::as_str) == Some("tracedecay")
                 && manifest.get("name").and_then(Value::as_str) == Some("cursor-native")
         }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::read_dir(dir)
-            .is_ok_and(|mut entries| entries.next().is_none()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_none())
+        }
         Err(_) => false,
     }
 }

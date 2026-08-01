@@ -1322,7 +1322,9 @@ mod tests {
     /// Doctor report a component-ownership conflict.
     #[test]
     fn canonical_component_set_hosts_are_not_refreshed_by_a_second_writer() {
-        for agent_id in ["claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode"] {
+        for agent_id in [
+            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
+        ] {
             assert!(
                 host_owns_canonical_component_set(agent_id),
                 "{agent_id} owns a canonical component set"
