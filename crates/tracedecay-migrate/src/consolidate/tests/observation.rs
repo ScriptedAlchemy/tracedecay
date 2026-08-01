@@ -2,10 +2,6 @@
 //! merge/rollback consolidation tests.
 
 use super::*;
-use crate::root_seam::application::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
-use crate::root_seam::global_db::RegisteredGlobalDb;
 
 struct ObservationDatabaseFixture {
     runtime: HostAdmissionTestRuntimeV1,
@@ -227,9 +223,7 @@ async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
         project_all_migration_observations(target.database()).await,
         2
     );
-    let checkpoint = target
-        .database()
-        .observation_store()
+    let checkpoint = test_observation_store(target.database())
         .projection_checkpoint()
         .await
         .unwrap();
@@ -320,9 +314,7 @@ async fn observation_projection_remap_survives_drain_and_rebuild_to_zero() {
         project_all_migration_observations(target.database()).await,
         2
     );
-    let rebuilt = target
-        .database()
-        .observation_store()
+    let rebuilt = test_observation_store(target.database())
         .rebuild_projection(0)
         .await
         .unwrap();
@@ -489,9 +481,7 @@ async fn shared_projection_owner_and_newer_source_owner_remain_lossless() {
     assert_message_text(target.database(), remapped_message_id, "newer source body").await;
     assert_no_orphaned_projection_provenance(target.database()).await;
 
-    let rebuilt = target
-        .database()
-        .observation_store()
+    let rebuilt = test_observation_store(target.database())
         .rebuild_projection(0)
         .await
         .unwrap();

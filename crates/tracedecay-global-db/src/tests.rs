@@ -6,6 +6,21 @@ use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
 pub mod harness;
 
+#[doc(hidden)]
+pub fn registered_schema_fixture_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for source in [
+        include_str!("schema_stages.rs"),
+        include_str!("schema_contract/definitions.rs"),
+        include_str!("schema_contract/invariants/triggers.rs"),
+    ] {
+        digest.update(source.as_bytes());
+    }
+    hex::encode(&digest.finalize()[..8])
+}
+
 #[cfg(test)]
 use harness::RegisteredGlobalDbHarness;
 
