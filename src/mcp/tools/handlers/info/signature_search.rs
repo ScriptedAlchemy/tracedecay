@@ -90,12 +90,11 @@ pub(crate) async fn handle_signature_search(
         "match_count": entries.len(),
         "matches": entries,
     });
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &payload,
         touched,
-        || render::generic_md(&payload),
     ))
 }
 

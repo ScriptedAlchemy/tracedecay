@@ -40,12 +40,11 @@ pub(crate) async fn handle_constructors(
             "match_count": 0,
             "sites": [],
         });
-        return Ok(rendered_tool_result(
+        return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
             &payload,
             vec![],
-            || render::generic_md(&payload),
         ));
     }
 
@@ -108,12 +107,11 @@ pub(crate) async fn handle_constructors(
         "match_count": sites.len(),
         "sites": sites,
     });
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &payload,
         touched,
-        || render::generic_md(&payload),
     ))
 }
 

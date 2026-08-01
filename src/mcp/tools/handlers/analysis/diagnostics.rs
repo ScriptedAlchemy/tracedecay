@@ -87,9 +87,7 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
         "target_dir": target_dir.display().to_string(),
         "diagnostic_count": 0,
     });
-    rendered_tool_result(Some(project_root), args, &payload, vec![], || {
-        render::generic_md(&payload)
-    })
+    generic_tool_result(Some(project_root), args, &payload, vec![])
 }
 
 /// Best-effort per-project session↔git correlation index health for the
@@ -209,12 +207,11 @@ pub(crate) async fn handle_diagnostics(
         "diagnostics": entries,
         "session_correlation": session_correlation_health_json(session_db).await,
     });
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &payload,
         unique_file_paths(diagnostics.iter().map(|d| d.file.as_str())),
-        || render::generic_md(&payload),
     ))
 }
 

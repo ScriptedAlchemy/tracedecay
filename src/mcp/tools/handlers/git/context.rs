@@ -101,12 +101,11 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         "affected_tests": tests_sorted,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 /// Handles `tracedecay_changelog` tool calls.
@@ -192,12 +191,11 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         "files_not_indexed": modified,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &result,
         touched_files,
-        || render::generic_md(&result),
     ))
 }
 
@@ -223,12 +221,11 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
             "recent_commits": git_recent_commits(cg.project_root(), 5).unwrap_or_default(),
             "summary": "No changes detected.",
         });
-        return Ok(rendered_tool_result(
+        return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
             &output,
             vec![],
-            || render::generic_md(&output),
         ));
     }
 
@@ -285,12 +282,11 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         "summary": format!("{} file(s) changed, {} symbol(s) affected", changed_files.len(), total_symbols),
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         changed_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -423,12 +419,11 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         "impacted_modules": impacted_sorted,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         changed_files,
-        || render::generic_md(&output),
     ))
 }
 

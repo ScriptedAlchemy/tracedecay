@@ -99,12 +99,11 @@ pub(crate) async fn handle_field_sites(
             "read_sites": reads,
         })
     };
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &payload,
         touched,
-        || render::generic_md(&payload),
     ))
 }
 

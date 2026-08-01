@@ -210,11 +210,10 @@ pub(crate) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         "target_only_symbols": target_only,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &result,
         touched_files,
-        || render::generic_md(&result),
     ))
 }

@@ -25,12 +25,11 @@ pub(crate) async fn handle_test_risk(
         message: format!("failed to serialize test risk report: {err}"),
     })?;
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }
 
@@ -112,11 +111,10 @@ pub(crate) async fn handle_test_map(
     });
 
     let touched_files = unique_file_paths(source_nodes.iter().map(|n| n.file_path.as_str()));
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
