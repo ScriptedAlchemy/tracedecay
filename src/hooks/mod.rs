@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookRouteMetadata};
 
 mod analytics;
 mod claude;
@@ -315,7 +316,7 @@ pub(crate) async fn reset_counter_for_project(
 
 pub(crate) async fn notify_hook_event_with_telemetry(
     project_root: &Path,
-    event: crate::daemon::DaemonHookEvent,
+    event: DaemonHookEvent,
     telemetry: &analytics::HookTimingSpan,
 ) {
     let payload_bytes = analytics::measure_json_payload_bytes(&event);
@@ -325,7 +326,7 @@ pub(crate) async fn notify_hook_event_with_telemetry(
 
 pub(crate) async fn notify_hook_event_with_optional_telemetry(
     project_root: &Path,
-    event: crate::daemon::DaemonHookEvent,
+    event: DaemonHookEvent,
     telemetry: Option<&analytics::HookTimingSpan>,
 ) {
     match telemetry {
@@ -340,7 +341,7 @@ pub(crate) async fn notify_hook_event_with_optional_telemetry(
 
 pub async fn hook_hermes_terminal_receipt() -> i32 {
     let event_json = read_hook_event!();
-    let Ok(event) = serde_json::from_str::<crate::daemon::DaemonHookEvent>(&event_json) else {
+    let Ok(event) = serde_json::from_str::<DaemonHookEvent>(&event_json) else {
         return 0;
     };
     if event.agent != "hermes"
@@ -573,7 +574,7 @@ fn take_test_daemon_hook_action(
 fn hook_route_metadata_from_event(
     event_json: &str,
     project_root: &Path,
-) -> Option<crate::daemon::HookRouteMetadata> {
+) -> Option<HookRouteMetadata> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
     Some(hook_route_metadata_from_parsed(&parsed, project_root))
 }
@@ -581,13 +582,13 @@ fn hook_route_metadata_from_event(
 fn hook_route_metadata_from_parsed(
     parsed: &Value,
     project_root: &Path,
-) -> crate::daemon::HookRouteMetadata {
+) -> HookRouteMetadata {
     let cwd = event_cwd_from_parsed(parsed);
     let route_root = cwd.as_deref().unwrap_or(project_root);
     let worktree = crate::worktree::git_worktree_root(route_root)
         .unwrap_or_else(|| project_root.to_path_buf());
     let branch = crate::branch::current_branch(&worktree);
-    crate::daemon::HookRouteMetadata {
+    HookRouteMetadata {
         session_id: hook_route_session_id(parsed),
         thread_id: text_field(
             parsed,
