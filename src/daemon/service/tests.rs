@@ -275,6 +275,22 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
 }
 
 #[test]
+fn daemon_shutdown_response_requires_matching_acknowledgement() {
+    assert!(super::probe::shutdown_response_accepted(
+        r#"{"jsonrpc":"2.0","id":2,"result":{"accepted":true}}"#,
+        2
+    ));
+    assert!(!super::probe::shutdown_response_accepted(
+        r#"{"jsonrpc":"2.0","id":3,"result":{"accepted":true}}"#,
+        2
+    ));
+    assert!(!super::probe::shutdown_response_accepted(
+        r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"no"}}"#,
+        2
+    ));
+}
+
+#[test]
 fn user_service_runs_daemon_with_socket_path() {
     let spec = DaemonServiceSpec {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
