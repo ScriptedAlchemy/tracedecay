@@ -1181,7 +1181,7 @@ fn assemble_replay_messages(
         Some(cap) => {
             let used = anchors
                 .iter()
-                .map(|message| estimate_tokens(&message.content))
+                .map(|message| crate::lcm::estimate_tokens(&message.content))
                 .sum::<i64>();
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
             let mut summary_budget = (cap - used - tail_tokens).max(0);
@@ -1191,7 +1191,7 @@ fn assemble_replay_messages(
                         if already_preserved {
                             return Some((store_id, part, already_preserved));
                         }
-                        let part_tokens = estimate_tokens(&part);
+                        let part_tokens = crate::lcm::estimate_tokens(&part);
                         if part_tokens <= summary_budget {
                             summary_budget -= part_tokens;
                             Some((store_id, part, already_preserved))
@@ -1361,7 +1361,7 @@ fn select_budget_summaries(
     let mut selected = vec![false; summaries.len()];
     let mut used = 0i64;
     for idx in by_depth {
-        let summary_tokens = estimate_tokens(&summaries[idx].node.summary_text);
+        let summary_tokens = crate::lcm::estimate_tokens(&summaries[idx].node.summary_text);
         if used + summary_tokens > summary_budget {
             continue;
         }
@@ -1468,7 +1468,7 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 fn replay_token_estimate(messages: &[Value]) -> i64 {
     messages
         .iter()
-        .map(|message| estimate_tokens(&message_content(message)))
+        .map(|message| crate::lcm::estimate_tokens(&message_content(message)))
         .sum()
 }
 
@@ -1513,7 +1513,7 @@ fn summary_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::estimate_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} raw messages", backlog.len())),
@@ -1556,7 +1556,7 @@ fn condensation_draft(
         summary_text: summary_text.to_string(),
         source_refs,
         source_token_count,
-        summary_token_count: estimate_tokens(summary_text),
+        summary_token_count: crate::lcm::estimate_tokens(summary_text),
         source_time_start,
         source_time_end,
         expand_hint: Some(format!("{} summary nodes", children.len())),
@@ -2158,14 +2158,10 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
     })
 }
 
-fn estimate_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
-}
-
 fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()
-        .map(|message| estimate_tokens(&message.content))
+        .map(|message| crate::lcm::estimate_tokens(&message.content))
         .sum::<i64>()
 }
 
@@ -2197,7 +2193,7 @@ fn rescuing_summary_text_from_texts(
     source_token_count: i64,
 ) -> (String, bool) {
     if source_token_count < MIN_SUMMARY_RESCUE_SOURCE_TOKENS
-        || estimate_tokens(&summary_text) < source_token_count
+        || crate::lcm::estimate_tokens(&summary_text) < source_token_count
     {
         return (summary_text, false);
     }
