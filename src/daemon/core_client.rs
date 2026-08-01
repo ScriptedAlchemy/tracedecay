@@ -268,7 +268,7 @@ pub(crate) async fn connect_to_current_daemon_within(
 ///
 /// Retrying here is safe: nothing has been written yet, so no request can be
 /// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 pub(crate) async fn connect_with_restart_grace(
     connection: &DaemonConnection,
     grace: Duration,

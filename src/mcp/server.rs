@@ -470,7 +470,7 @@ impl McpServer {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn new_with_global_db(
         cg: TraceDecay,
         scope_prefix: Option<String>,
