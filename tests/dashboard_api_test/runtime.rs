@@ -64,12 +64,21 @@ impl DashboardTestRuntimeV1 {
         project_root: &Path,
         _open_options: TraceDecayOpenOptions,
     ) -> Result<TraceDecay> {
+        self.initialize_project_graph_with_id_for_test(project_root, self.project_id.clone())
+            .await
+    }
+
+    pub(crate) async fn initialize_project_graph_with_id_for_test(
+        &self,
+        project_root: &Path,
+        project_id: ProjectId,
+    ) -> Result<TraceDecay> {
         let graph = self
             .graph
-            .initialize(project_root, self.project_id.clone())
+            .initialize(project_root, project_id.clone())
             .await?;
         self.profile_database
-            .upsert_code_project(self.project_id.as_str(), project_root, None, None, None)
+            .upsert_code_project(project_id.as_str(), project_root, None, None, None)
             .await
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!(

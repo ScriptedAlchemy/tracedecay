@@ -710,14 +710,14 @@ async fn start_dashboard_fixture_with_options(
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
-    let global_db_path = profile_root.join("global.db");
+    let requested_global_db_path = profile_root.join("global.db");
     // Skill lifecycle endpoints re-export managed skills into agent configs
     // under the process home; point HOME at the fixture so tests never touch
     // the developer's real agent installations.
     let home = tmp_root.join("home");
     std::fs::create_dir_all(&home)
         .unwrap_or_else(|err| panic!("failed to create fixture home: {err}"));
-    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
+    let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &requested_global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     let home_guard = EnvVarGuard::set("HOME", &home);
     let userprofile_guard = EnvVarGuard::set("USERPROFILE", &home);
@@ -734,6 +734,10 @@ async fn start_dashboard_fixture_with_options(
     // Root composition retains the exact graph and registered database
     // authorities for the server lifetime.
     let (cg, host_runtime) = setup_project(&project_root).await;
+    let global_db_path = host_runtime
+        .database_path(HostAdmissionScope::Profile)
+        .expect("dashboard fixture profile database path")
+        .to_path_buf();
     if seed_memory {
         seed_memory_fixture(&cg).await;
     }

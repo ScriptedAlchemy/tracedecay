@@ -1002,7 +1002,8 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
         tracedecay_usecases::config::install_runtime_configuration_authority(Arc::new(
             RootRuntimeConfigurationAuthority,
         ))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        install_dashboard_configuration_read_port().map_err(|error| error.to_string())
     });
     INSTALLATION
         .as_ref()

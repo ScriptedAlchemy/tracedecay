@@ -9,14 +9,18 @@ async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<Trace
         .canonicalize()
         .expect("fixture root should canonicalize")
         .join("target-project");
-    let (target_cg, _target_runtime) = setup_project(&target_root).await;
-    let target_cg = Arc::new(target_cg);
-    let target_project_id = project_id(&target_cg);
-    fixture
+    write_file(
+        &target_root.join("src/lib.rs"),
+        "pub fn target_fixture() -> &'static str { \"target\" }\n",
+    );
+    let target_project_id =
+        ProjectId::new("dashboard_fixture_target_project").expect("target project identity");
+    let target_cg = fixture
         .host_runtime
-        .upsert_code_project(&target_project_id, &target_root, None, None, None)
+        .initialize_project_graph_with_id_for_test(&target_root, target_project_id)
         .await
-        .expect("register retained target project");
+        .expect("initialize retained target project");
+    let target_cg = Arc::new(target_cg);
     fixture.project_graphs.register(target_cg.clone());
     (target_root, target_cg)
 }

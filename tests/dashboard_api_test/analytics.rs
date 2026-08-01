@@ -17,7 +17,6 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
     ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
@@ -30,6 +29,7 @@ struct Fixture {
     base_url: String,
     server: tokio::task::JoinHandle<()>,
     project_root: PathBuf,
+    store_root: PathBuf,
     host_runtime: Arc<DashboardTestRuntimeV1>,
 }
 
@@ -325,9 +325,8 @@ async fn seed_durable_analytics(runtime: &DashboardTestRuntimeV1, project_root: 
     }
 }
 
-fn seed_hook_analytics(project_root: &Path) {
-    let layout = resolve_layout_for_current_profile(project_root).expect("resolve store layout");
-    std::fs::create_dir_all(&layout.data_root).expect("create store root");
+fn seed_hook_analytics(store_root: &Path) {
+    std::fs::create_dir_all(store_root).expect("create store root");
     let rows = [
         serde_json::json!({
             "event": "hook_invoked",
@@ -354,7 +353,7 @@ fn seed_hook_analytics(project_root: &Path) {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(
-        layout.data_root.join("hook_analytics.jsonl"),
+        store_root.join("hook_analytics.jsonl"),
         format!("{content}\n"),
     )
     .expect("write hook analytics");
@@ -436,6 +435,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
         )
         .await
         .expect("tracedecay init");
+    let store_root = cg.store_layout().data_root.clone();
     seed_session_store(&host_runtime, &project_root).await;
     if seed_durable_events {
         seed_durable_analytics(&host_runtime, &project_root).await;
@@ -469,6 +469,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
         base_url,
         server,
         project_root,
+        store_root,
         host_runtime,
     }
 }
@@ -585,7 +586,7 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let fixture = start_fixture(true).await;
-        seed_hook_analytics(&fixture.project_root);
+        seed_hook_analytics(&fixture.store_root);
         let agent = http_agent();
 
         let (status, diagnostics) = get_json(
