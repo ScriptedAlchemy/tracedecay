@@ -78,11 +78,17 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
     // Hosts that render their own rule text, plus the shared renderer that
     // copilot/gemini/opencode/kimi/vibe delegate to.
     for (name, source) in [
-        ("claude", include_str!("../../src/agents/claude.rs")),
-        ("kiro", include_str!("../../src/agents/kiro.rs")),
+        (
+            "claude",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/claude.rs"),
+        ),
+        (
+            "kiro",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/kiro.rs"),
+        ),
         (
             "prompt_rules",
-            include_str!("../../src/agents/prompt_rules.rs"),
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/prompt_rules.rs"),
         ),
     ] {
         assert!(
@@ -96,11 +102,26 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
         );
     }
     for (name, source) in [
-        ("copilot", include_str!("../../src/agents/copilot.rs")),
-        ("gemini", include_str!("../../src/agents/gemini.rs")),
-        ("kimi", include_str!("../../src/agents/kimi.rs")),
-        ("opencode", include_str!("../../src/agents/opencode.rs")),
-        ("vibe", include_str!("../../src/agents/vibe.rs")),
+        (
+            "copilot",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/copilot.rs"),
+        ),
+        (
+            "gemini",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/gemini.rs"),
+        ),
+        (
+            "kimi",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/kimi.rs"),
+        ),
+        (
+            "opencode",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/opencode.rs"),
+        ),
+        (
+            "vibe",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/vibe.rs"),
+        ),
     ] {
         assert!(
             !source.contains(".tracedecay/tracedecay.db"),

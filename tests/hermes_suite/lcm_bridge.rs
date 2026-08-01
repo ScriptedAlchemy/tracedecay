@@ -12,7 +12,7 @@ use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
 use tracedecay::external_tools::ast_grep_command;
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
-use crate::common::{PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
+use crate::common::{PYYAML_FALLBACK_PRELUDE, host_sources, write_pyyaml_shim};
 
 // Compiles the generated plugin sources with py_compile (argv[1] is the
 // plugin dir). Only `generated_python_sources_compile` runs this: loading the
@@ -4978,7 +4978,7 @@ assert ctx.skills[0][1].name == "SKILL.md"
 
 #[test]
 fn generated_skill_mirrors_session_context_retrieval_contract() {
-    let template = include_str!("../../src/agents/hermes/templates/skill.md");
+    let template = host_sources::HERMES_SKILL_MD;
     let installed =
         std::fs::read_to_string(SHARED_INSTALL.plugin_dir.join("skills/tracedecay/SKILL.md"))
             .unwrap();
