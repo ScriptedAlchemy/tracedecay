@@ -213,7 +213,7 @@ fn github_source_access_uses_owner_bound_ureq_dtos() {
 #[tokio::test]
 async fn authentic_github_and_ci_responses_use_production_decoders() {
     let pull_request = captured_response(include_str!(
-        "../src/application/advisory/fixtures/pr13_branch_pr/pull_request.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/pull_request.json"
     ));
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestGetPullRequest,
@@ -256,7 +256,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
         ..request.clone()
     };
     let review = captured_response(include_str!(
-        "../src/application/advisory/fixtures/pr13_branch_pr/review.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review.json"
     ));
     assert!(
         decoder
@@ -285,7 +285,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let thread = captured_response(include_str!(
-        "../src/application/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json"
     ));
     let thread_request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -325,10 +325,18 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     );
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
-        include_str!("../src/application/advisory/fixtures/pr13_branch_pr/workflow_run.json"),
-        include_str!("../src/application/advisory/fixtures/pr13_branch_pr/workflow_job.json"),
-        include_str!("../src/application/advisory/fixtures/pr13_branch_pr/check_run.json"),
-        include_str!("../src/application/advisory/fixtures/pr13_branch_pr/check_annotations.json"),
+        include_str!(
+            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/workflow_run.json"
+        ),
+        include_str!(
+            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/workflow_job.json"
+        ),
+        include_str!(
+            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/check_run.json"
+        ),
+        include_str!(
+            "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/check_annotations.json"
+        ),
     )
     .expect("authentic CI responses decode");
     assert!(ci.failed_step().is_some());
@@ -338,7 +346,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 #[tokio::test]
 async fn corrupt_provider_identity_fails_production_decoder() {
     let mut pull_request = captured_response(include_str!(
-        "../src/application/advisory/fixtures/pr13_branch_pr/pull_request.json"
+        "../crates/tracedecay-usecases/src/advisory/fixtures/pr13_branch_pr/pull_request.json"
     ));
     pull_request["id"] = json!(0);
     let request = GitHubReviewReadRequestV1 {
