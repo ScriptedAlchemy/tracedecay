@@ -20,14 +20,14 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
-use crate::operation_stream::OperationId;
 use crate::application_surface::{
     ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
 };
+use crate::operation_stream::OperationId;
 use crate::request_identity::{
     derive_doctor_remediation_apply_operation, derive_doctor_remediation_preview_operation,
 };
+use tracedecay_host_integration::{HostBundleComponentV1, HostKindV1};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DoctorRemediationDispatchCommandV1 {
@@ -790,9 +790,10 @@ fn read_record_path(
         .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent)
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-    let _lock =
-        tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&tracedecay_runtime_core::storage::append_lock_path(path))
-            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let _lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
+        &tracedecay_runtime_core::storage::append_lock_path(path),
+    )
+    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(DoctorRemediationDispatchErrorV1::InvalidReference)
@@ -828,14 +829,17 @@ fn write_record_path(
         .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent)
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-    let _lock =
-        tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&tracedecay_runtime_core::storage::append_lock_path(path))
-            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let _lock = tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(
+        &tracedecay_runtime_core::storage::append_lock_path(path),
+    )
+    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
     let bytes = serde_json::to_vec(record)
         .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
     let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(path, &temp_path, &bytes)
-        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
+    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically(
+        path, &temp_path, &bytes,
+    )
+    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
 }
 
 fn validate_owner_outcome(

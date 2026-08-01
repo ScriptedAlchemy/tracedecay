@@ -17,11 +17,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
 };
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;
@@ -2195,15 +2195,14 @@ async fn run_source_edit(
             )
             .await?;
             validate_replanned_api_migration(&plan, &replanned)?;
+            let mut is_cancelled = || {
+                control
+                    .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
+                    .is_some()
+            };
             SourceEditOutcome::ApiMigration(
                 graph
-                    .apply_api_migration_plan(&replanned, dry_run, || {
-                        control
-                            .and_then(|control| {
-                                control.checkpoint(CancellationStage::EffectInFlight)
-                            })
-                            .is_some()
-                    })
+                    .apply_api_migration_plan(&replanned, dry_run, &mut is_cancelled)
                     .await?,
             )
         }
@@ -2383,10 +2382,7 @@ where
 }
 
 async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEditVerificationV1 {
-    let scope = crate::diagnostics::Scope::File {
-        path: file_path.to_owned(),
-    };
-    let diagnostics = match crate::diagnostics::run_all(graph.project_root(), &scope).await {
+    let diagnostics = match graph.run_diagnostics(file_path).await {
         Ok(diagnostics) => diagnostics,
         Err(error) => return failed_edit_verification(error),
     };
@@ -2403,7 +2399,7 @@ async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEdi
                 if first_errors.len() < 3 {
                     first_errors.push(SourceEditDiagnosticV1 {
                         line: diagnostic.line_start,
-                        code: diagnostic.code,
+                        code: diagnostic.code.unwrap_or_default(),
                         message: diagnostic.message,
                     });
                 }

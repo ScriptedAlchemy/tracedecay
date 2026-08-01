@@ -7,8 +7,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::automation::config::AutomationConfig;
 use crate::user_config::{ConfigSaveError, UserConfig};
+use tracedecay_automation::config::AutomationConfig;
 
 pub type UserSettingsFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, UserSettingsAuthorityError>> + Send + 'a>>;

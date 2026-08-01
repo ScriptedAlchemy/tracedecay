@@ -28,19 +28,35 @@ pub mod evidence_assembly;
 // external-source store through the root shim (see that crate's SEAMS.md).
 pub mod external_source_store;
 pub mod feedback;
+// Moved down from the root binary. `analytics_bridge` kept only its durable
+// hook-JSONL importer; `git_intelligence`/`git_query` are the native git
+// adapter and its read engine; `graph`/`retention`/`request_identity`/
+// `user_config` had kernel-only closures. See SEAMS.md.
+pub mod analytics_bridge;
+pub mod application_surface;
+pub mod git_intelligence;
+pub mod git_query;
 pub mod git_reads;
+pub mod graph;
 pub mod host_admission;
 pub mod lsp_runtime;
+mod lsp_support;
 pub mod memory;
 pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
+pub mod request_identity;
+pub mod response_handles;
+pub mod retention;
 pub(crate) mod retrieval_anchor_store;
 pub mod semantic_runtime;
 pub mod session;
 pub mod settings_control;
 pub mod source_authorization;
+pub mod store;
+pub mod tracedecay;
+pub mod user_config;
 
 pub use source_authorization::{
     ProjectSourceAccessDenial, ProjectSourceAccessOutcome, ProjectSourceAccessSnapshot,

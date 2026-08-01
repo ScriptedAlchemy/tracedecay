@@ -13,8 +13,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
-use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::activity::{active_languages_for_files, documents_for_adapter};
 use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::broker::{
@@ -23,6 +21,8 @@ use tracedecay_lsp::analyzer::broker::{
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DashboardDiagnosticsErrorV1 {
@@ -230,7 +230,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                 0,
                 0,
                 0,
-                Some(crate::tracedecay::current_timestamp()),
+                Some(tracedecay_runtime_core::tracedecay::current_timestamp()),
             );
             return Ok(());
         }
@@ -275,7 +275,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                             files_with_diagnostics,
                             refresh_result
                                 .is_ok()
-                                .then(crate::tracedecay::current_timestamp),
+                                .then(tracedecay_runtime_core::tracedecay::current_timestamp),
                         );
                         refresh_result
                     };
