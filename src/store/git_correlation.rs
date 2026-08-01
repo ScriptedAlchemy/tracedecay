@@ -4,6 +4,8 @@
 //! concrete registered-database binding, authority checks, and high-level
 //! façade methods.
 
+use std::borrow::Borrow;
+
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::ReadSnapshot;
@@ -17,19 +19,35 @@ use crate::sessions::git_correlation::{
     run_incremental_backfill, sessions_for_with_relation,
 };
 
-/// Borrowed adapter over an already-open project-sessions database.
-pub struct GlobalDbGitCorrelationStore<'a> {
-    db: &'a RegisteredGlobalDb,
+/// Adapter over an already-open project-sessions database.
+///
+/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
+/// `GitCorrelationSessionStore` impl apply only "for some specific lifetime",
+/// so any future that holds one across an await and must then prove `Send`
+/// raises a higher-ranked `for<'0> GlobalDbGitCorrelationStore<'0>: …`
+/// obligation the compiler cannot discharge. Owning the handle keeps the impl
+/// lifetime-free. Borrowed holders remain supported for call sites that never
+/// cross such a boundary.
+pub struct GlobalDbGitCorrelationStore<D> {
+    db: D,
 }
 
-impl<'a> GlobalDbGitCorrelationStore<'a> {
-    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
+impl<D> GlobalDbGitCorrelationStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
+    pub(crate) const fn new(db: D) -> Self {
         Self { db }
+    }
+
+    fn db(&self) -> &RegisteredGlobalDb {
+        self.db.borrow()
     }
 
     pub(crate) fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
         if matches!(
-            &self.db.binding().shard_id.scope,
+            &self.db().binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions { .. }
         ) {
             Ok(())
@@ -41,7 +59,7 @@ impl<'a> GlobalDbGitCorrelationStore<'a> {
     }
 
     pub(crate) async fn read_snapshot(&self) -> Result<ReadSnapshot, GitCorrelationError> {
-        self.db
+        self.db()
             .read_snapshot()
             .await
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
@@ -49,8 +67,8 @@ impl<'a> GlobalDbGitCorrelationStore<'a> {
 
     pub(crate) async fn open_write_transaction(
         &self,
-    ) -> Result<RegisteredGlobalDbWriteTransaction<'a>, GitCorrelationError> {
-        self.db
+    ) -> Result<RegisteredGlobalDbWriteTransaction<'_>, GitCorrelationError> {
+        self.db()
             .begin_write_transaction()
             .await
             .map_err(|error| GitCorrelationError::Db(error.to_string()))
@@ -88,18 +106,22 @@ impl<'a> GlobalDbGitCorrelationStore<'a> {
         Ok(attributed)
     }
 
-    pub(crate) async fn run_backfill<E: AnalyticsSessionTimestampSource>(
+    pub(crate) async fn run_backfill<E, G>(
         &self,
         analytics_events: &[E],
-        git: &dyn GitReflogSource,
+        git: &G,
         opts: &BackfillOptions,
-    ) -> Result<BackfillStats, GitCorrelationError> {
+    ) -> Result<BackfillStats, GitCorrelationError>
+    where
+        E: AnalyticsSessionTimestampSource,
+        G: GitReflogSource + ?Sized,
+    {
         run_backfill(self, analytics_events, git, opts).await
     }
 
-    pub(crate) async fn run_incremental_backfill(
+    pub(crate) async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
         &self,
-        git: &dyn GitReflogSource,
+        git: &G,
         limit_sessions: usize,
     ) -> Result<BackfillStats, GitCorrelationError> {
         run_incremental_backfill(self, git, limit_sessions).await
@@ -122,7 +144,10 @@ impl<'a> GlobalDbGitCorrelationStore<'a> {
     }
 }
 
-impl GitCorrelationSessionStore for GlobalDbGitCorrelationStore<'_> {
+impl<D> GitCorrelationSessionStore for GlobalDbGitCorrelationStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
     type WriteTxn<'txn>
         = RegisteredGlobalDbWriteTransaction<'txn>
     where

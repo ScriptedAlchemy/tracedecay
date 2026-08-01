@@ -357,15 +357,16 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-pub async fn run_backfill<S, E>(
+pub async fn run_backfill<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
-    git: &dyn GitReflogSource,
+    git: &G,
     opts: &BackfillOptions,
 ) -> Result<BackfillStats, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     E: AnalyticsSessionTimestampSource,
+    G: GitReflogSource + ?Sized,
 {
     session_store.require_project_sessions_authority()?;
     let snapshot = session_store.read_snapshot().await?;
@@ -408,11 +409,14 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// `tracedecay sessions git-backfill` remains the exhaustive, watermark-free,
 /// analytics-aware path); auto-backfill relies on session and reflog
 /// timestamps alone, which is enough to populate branch/worktree spans.
-pub async fn run_incremental_backfill<S: GitCorrelationSessionStore>(
+pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
     session_store: &S,
-    git: &dyn GitReflogSource,
+    git: &G,
     limit_sessions: usize,
-) -> Result<BackfillStats, GitCorrelationError> {
+) -> Result<BackfillStats, GitCorrelationError>
+where
+    G: GitReflogSource + ?Sized,
+{
     session_store.require_project_sessions_authority()?;
     let mut stats = BackfillStats::default();
     if limit_sessions == 0 {
@@ -479,8 +483,8 @@ pub async fn run_incremental_backfill<S: GitCorrelationSessionStore>(
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
 /// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
 /// or git fails, so the sweep holds its watermark and retries the target.
-fn scan_span_target(
-    git: &dyn GitReflogSource,
+fn scan_span_target<G: GitReflogSource + ?Sized>(
+    git: &G,
     target: &SpanScanTarget,
     gap_secs: i64,
     max_commits: usize,
@@ -512,9 +516,9 @@ fn scan_span_target(
 /// [`run_backfill`] and the incremental [`run_incremental_backfill`]. Indexes
 /// the supplied analytics timestamps once, then folds each row into the span
 /// and commit tables, counting skips instead of aborting.
-async fn backfill_rows<S, E>(
+async fn backfill_rows<S, E, G: GitReflogSource + ?Sized>(
     session_store: &S,
-    git: &dyn GitReflogSource,
+    git: &G,
     opts: &BackfillOptions,
     rows: &[SessionActivityRow],
     analytics_events: &[E],
@@ -547,9 +551,9 @@ where
     Ok(())
 }
 
-async fn backfill_one_session<S: GitCorrelationSessionStore>(
+async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource + ?Sized>(
     session_store: &S,
-    git: &dyn GitReflogSource,
+    git: &G,
     opts: &BackfillOptions,
     row: &SessionActivityRow,
     analytics_ts: &std::collections::HashMap<(String, String), Vec<i64>>,

@@ -382,7 +382,7 @@ impl DaemonLspInvocationOwner {
 /// authority.
 #[derive(Clone, Debug)]
 pub(super) struct AdmittedWorkspaceSessionAdmission {
-    workspace: AuthorizedLspWorkspace,
+    pub(super) workspace: AuthorizedLspWorkspace,
 }
 
 impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
@@ -410,8 +410,8 @@ impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
 
 #[derive(Clone)]
 pub(super) struct SharedGitTransactionPort {
-    service: Arc<DaemonProjectGitIndexTransactionService>,
-    cancellation: Option<OperationEmitter>,
+    pub(super) service: Arc<DaemonProjectGitIndexTransactionService>,
+    pub(super) cancellation: Option<OperationEmitter>,
 }
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {

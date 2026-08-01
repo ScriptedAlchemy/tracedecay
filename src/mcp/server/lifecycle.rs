@@ -129,7 +129,11 @@ pub(super) async fn run_startup_session_catch_up(
         return StartupSessionCatchUpOutcome::default();
     };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-    let project_authority = crate::store::GlobalDbSessionIngestAuthority::new(sessions.as_ref());
+    // Build the authority over an owned `Arc` rather than a borrow: a
+    // lifetime-free authority type keeps the downstream auto-trait obligation
+    // first-order, which is what lets the spawned startup future prove `Send`.
+    let project_authority =
+        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&sessions));
     let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
@@ -151,9 +155,9 @@ pub(super) async fn run_startup_session_catch_up(
     if let (Some(user_sessions), Some(registry_db)) = (user_sessions, registry_db) {
         if let Some(profile_root) = user_sessions.db_path().parent() {
             let user_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(user_sessions.as_ref());
+                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&user_sessions));
             let registry_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(registry_db.as_ref());
+                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&registry_db));
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
                 profile_identity.brain_id(),
                 profile_identity.profile_id(),

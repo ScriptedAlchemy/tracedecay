@@ -921,7 +921,7 @@ impl McpServer {
             server_stats,
             self.scope_prefix(),
             ToolCallRegistryOptions {
-                global_db: self.registry_db.as_deref(),
+                global_db: self.registry_db.as_ref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
                 workflow_index_reads: workflow_index_reads
                     .as_ref()
@@ -963,8 +963,8 @@ impl McpServer {
                 )
                 .with_profile_identity(self.profile_identity.as_ref())
                 .with_registered_databases(
-                    self.registered_session_db.as_deref(),
-                    self.registered_user_session_db.as_deref(),
+                    self.registered_session_db.as_ref(),
+                    self.registered_user_session_db.as_ref(),
                 )
                 .with_refresh_services(
                     self.project_session_refresh_service.as_deref(),

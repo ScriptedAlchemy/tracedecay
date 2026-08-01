@@ -213,7 +213,7 @@ pub(super) async fn projectless_tools_call_response(
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
                 .with_profile_identity(Some(profile_identity))
-                .with_registered_databases(None, Some(user_session_db.as_ref())),
+                .with_registered_databases(None, Some(&user_session_db)),
             host_admission_broker,
         )
         .await
