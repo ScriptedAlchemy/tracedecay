@@ -2926,7 +2926,7 @@ pub(crate) fn application_surface_catalog_ref()
 }
 
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
-    application_surface_catalog_ref().map(Clone::clone)
+    application_surface_catalog_ref().cloned()
 }
 
 pub fn application_surface_dispatch_input(
