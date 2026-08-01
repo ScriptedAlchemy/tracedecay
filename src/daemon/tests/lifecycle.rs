@@ -124,7 +124,8 @@ fn daemon_shutdown_requires_a_response_id() {
 async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     let profile = TempDir::new().expect("profile");
-    let client_identity = test_client_identity_for(profile.path().to_path_buf());
+    let mut client_identity = test_client_identity_for(profile.path().to_path_buf());
+    client_identity.global_db_path = profile.path().join("mismatched.db");
     let store_administration = test_store_administration_for_profile(profile.path());
     let lifecycle = DaemonLifecycle::default();
     let server_lifecycle = lifecycle.clone();

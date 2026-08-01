@@ -200,7 +200,13 @@ fn query_daemon_identity_stream(
 }
 
 #[cfg(not(unix))]
-pub(super) fn request_daemon_shutdown(transport_hint: &Path) -> Result<()> {
+pub(super) enum DaemonShutdownRequest {
+    Acknowledged,
+    SentWithoutAcknowledgement(String),
+}
+
+#[cfg(not(unix))]
+pub(super) fn request_daemon_shutdown(transport_hint: &Path) -> Result<DaemonShutdownRequest> {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let (address, auth_token) =
         current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
@@ -215,7 +221,7 @@ fn request_daemon_shutdown_stream(
     mut stream: impl ProbeStream,
     auth_token: &str,
     shutdown_timeout: std::time::Duration,
-) -> Result<()> {
+) -> Result<DaemonShutdownRequest> {
     const REQUEST_ID: i64 = 2;
     let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
     let request = serde_json::json!({
@@ -224,42 +230,51 @@ fn request_daemon_shutdown_stream(
         "method": super::super::DAEMON_SHUTDOWN_METHOD,
     });
     let preface = super::super::transport::DaemonAuthPreface::new(auth_token).to_line()?;
-    writeln!(stream, "{preface}")?;
-    writeln!(stream, "{}", handshake.to_line()?)?;
-    writeln!(stream, "{request}")?;
-    IoWrite::flush(&mut stream)?;
+    let handshake = handshake.to_line()?;
+    let request = request.to_string();
+    let preamble = format!("{preface}\n{handshake}\n{request}\n");
 
     let deadline = std::time::Instant::now() + shutdown_timeout;
-    let mut reader = BufReader::new(stream);
-    loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
+    let acknowledgement = (|| -> Result<()> {
+        IoWrite::write_all(&mut stream, preamble.as_bytes())?;
+        IoWrite::flush(&mut stream)?;
+        let mut reader = BufReader::new(stream);
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(TraceDecayError::Config {
+                    message: "daemon shutdown request exceeded its absolute deadline".to_string(),
+                });
+            }
+            reader
+                .get_ref()
+                .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(TraceDecayError::Config {
+                    message: "daemon closed the shutdown request before acknowledging it"
+                        .to_string(),
+                });
+            }
+            let response: serde_json::Value = serde_json::from_str(line.trim())?;
+            if response.get("id") != Some(&serde_json::json!(REQUEST_ID)) {
+                continue;
+            }
+            if shutdown_response_accepted(line.trim(), REQUEST_ID) {
+                return Ok(());
+            }
             return Err(TraceDecayError::Config {
-                message: "daemon shutdown request exceeded its absolute deadline".to_string(),
+                message: format!("daemon rejected the authenticated shutdown request: {response}"),
             });
         }
-        reader
-            .get_ref()
-            .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Err(TraceDecayError::Config {
-                message: "daemon closed the shutdown request before acknowledging it".to_string(),
-            });
-        }
-        let response: serde_json::Value = serde_json::from_str(line.trim())?;
-        if response.get("id") != Some(&serde_json::json!(REQUEST_ID)) {
-            continue;
-        }
-        if shutdown_response_accepted(line.trim(), REQUEST_ID) {
-            return Ok(());
-        }
-        return Err(TraceDecayError::Config {
-            message: format!("daemon rejected the authenticated shutdown request: {response}"),
-        });
-    }
+    })();
+    Ok(match acknowledgement {
+        Ok(()) => DaemonShutdownRequest::Acknowledged,
+        Err(error) => DaemonShutdownRequest::SentWithoutAcknowledgement(error.to_string()),
+    })
 }
 
+#[cfg(any(not(unix), test))]
 pub(super) fn shutdown_response_accepted(line: &str, request_id: i64) -> bool {
     let Ok(response) = serde_json::from_str::<serde_json::Value>(line) else {
         return false;
@@ -306,12 +321,20 @@ pub(super) fn daemon_socket_state(socket_path: &Path) -> DaemonSocketState {
 
 #[cfg(not(unix))]
 pub(super) fn daemon_socket_state(transport_hint: &Path) -> DaemonSocketState {
+    daemon_socket_state_with_timeout(transport_hint, std::time::Duration::from_millis(250))
+}
+
+#[cfg(not(unix))]
+pub(super) fn daemon_socket_state_with_timeout(
+    transport_hint: &Path,
+    timeout: std::time::Duration,
+) -> DaemonSocketState {
     let address = match current_loopback_authority(transport_hint) {
         Ok(Some((address, _))) => address,
         Ok(None) => return DaemonSocketState::Missing,
         Err(_) => return DaemonSocketState::PresentUnreachable,
     };
-    match StdTcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)) {
+    match StdTcpStream::connect_timeout(&address, timeout) {
         Ok(_) => DaemonSocketState::Connectable,
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
             DaemonSocketState::Stale
