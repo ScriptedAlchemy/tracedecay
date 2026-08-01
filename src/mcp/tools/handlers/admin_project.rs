@@ -963,8 +963,14 @@ mod tests {
             "end_time": 20
         }))
         .unwrap();
-        assert_eq!(session.scope, crate::sessions::lcm::LcmScope::Session);
-        assert_eq!(session.sort, crate::sessions::lcm::LcmGrepSort::Hybrid);
+        assert_eq!(
+            session.scope,
+            tracedecay_agent_hosts::ports::session_evidence::LcmScope::Session
+        );
+        assert_eq!(
+            session.sort,
+            tracedecay_agent_hosts::ports::session_evidence::LcmGrepSort::Hybrid
+        );
 
         let skill = decode_options::<SkillWritingOptions>(json!({
             "provider": "all",
