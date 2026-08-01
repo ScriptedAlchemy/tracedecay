@@ -107,11 +107,11 @@ pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value
 
 /// Rejects tool arguments that are not a JSON object.
 ///
-/// Handlers that read named parameters used to `debug_assert!` this. The
-/// argument value comes straight off the wire (an MCP client, the `tracedecay
-/// tool --args` CLI, or an internal dispatch probe), so a scalar or array is
-/// caller error, not a broken invariant — asserting it panicked the daemon's
-/// client task and the caller saw only a dropped connection.
+/// The argument value comes straight off the wire (an MCP client, the
+/// `tracedecay tool --args` CLI, or an internal dispatch probe), so a scalar
+/// or array is caller error, not a broken invariant — asserting it would
+/// panic the daemon's client task and the caller would see only a dropped
+/// connection.
 pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     if args.is_object() {
         return Ok(());
@@ -135,11 +135,9 @@ pub(crate) fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
 /// confusing error when that happens.
 ///
-/// A present-but-blank value is rejected here rather than forwarded. An empty
-/// `node_id` used to reach the graph traversal layer and trip a
-/// `debug_assert!`, panicking the daemon's client task so the caller saw only
-/// "daemon closed the connection"; every handler that takes a node id shares
-/// this one guard so the failure is a typed argument error instead.
+/// A present-but-blank value is rejected here rather than forwarded to the
+/// graph traversal layer; every handler that takes a node id shares this one
+/// guard, so the failure is a typed argument error naming the parameter.
 pub(super) fn require_node_id(args: &Value) -> Result<&str> {
     let node_id = args
         .get("node_id")
