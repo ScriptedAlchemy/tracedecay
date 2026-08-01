@@ -1064,12 +1064,12 @@ mod legacy_configuration_migration_input {
     };
 
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::registry::legacy_decoder::{
+    use crate::config::resolver::resolve_configuration;
+    use crate::config::{
         LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
         decode_legacy_configuration_inputs, decode_legacy_environment_overrides,
         resolve_legacy_configuration_inputs,
     };
-    use crate::config::resolver::resolve_configuration;
     use crate::global_db::configuration::migration::{
         ConfigurationMigrationQuarantineReasonV1, ReadonlyLegacyConfigurationInputsV1,
     };
@@ -1412,10 +1412,6 @@ mod runtime_configuration_cutover {
     };
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::registry::legacy_decoder::{
-        LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
-        resolve_legacy_configuration_inputs,
-    };
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
         ConfigurationDaemonClient, PinnedRuntimeConfiguration, RuntimeConfigurationCache,
@@ -1424,6 +1420,10 @@ mod runtime_configuration_cutover {
         commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
         install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
         runtime_configuration_for_layout,
+    };
+    use crate::config::{
+        LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
+        resolve_legacy_configuration_inputs,
     };
 
     fn project_id(value: &str) -> ProjectId {

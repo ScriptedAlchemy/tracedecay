@@ -27,6 +27,11 @@ pub use migration::{
     migrate_legacy_configuration, migrate_legacy_configuration_inputs,
     migrate_legacy_configuration_inputs_with_genesis,
 };
+pub use registry::legacy_decoder::{
+    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
+    decode_legacy_configuration_inputs, decode_legacy_environment_overrides,
+    resolve_legacy_configuration_inputs,
+};
 pub use schema::ensure_configuration_schema;
 pub use schema::{
     ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION,

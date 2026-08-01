@@ -34,7 +34,11 @@ use crate::global_db::configuration::{
     migrate_legacy_configuration_inputs_with_genesis,
 };
 
-pub use tracedecay_global_db::configuration::{registry, resolver};
+pub use tracedecay_global_db::configuration::{
+    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
+    decode_legacy_configuration_inputs, decode_legacy_environment_overrides, registry,
+    resolve_legacy_configuration_inputs, resolver,
+};
 pub use tracedecay_usecases::config::retrieval;
 pub mod scope_control;
 pub mod topology;
@@ -974,7 +978,7 @@ async fn open_runtime_configuration_from_store(
             ConfigurationRevisionId::new("configuration.initial.migration.v1").map_err(
                 |error| config_error(format!("invalid initial configuration revision: {error}")),
             )?;
-        let legacy_target = registry::legacy_decoder::LegacyConfigurationDecodeTargetV1 {
+        let legacy_target = LegacyConfigurationDecodeTargetV1 {
             target_layer: target_layer.clone(),
             target_revision_id: initial_revision_id.clone(),
         };
@@ -1338,7 +1342,7 @@ async fn commit_runtime_configuration_mutation(
 pub fn read_legacy_configuration_inputs(
     config_path: &Path,
     environment: &BTreeMap<String, String>,
-    target: &registry::legacy_decoder::LegacyConfigurationDecodeTargetV1,
+    target: &LegacyConfigurationDecodeTargetV1,
 ) -> Result<crate::global_db::configuration::migration::ReadonlyLegacyConfigurationInputsV1> {
     let config_json = if config_path.exists() {
         fs::read_to_string(config_path).map_err(|error| {
@@ -1350,7 +1354,7 @@ pub fn read_legacy_configuration_inputs(
     } else {
         "{}".to_owned()
     };
-    registry::legacy_decoder::decode_legacy_configuration_inputs(&config_json, environment, target)
+    decode_legacy_configuration_inputs(&config_json, environment, target)
         .map_err(|error| config_error(format!("legacy configuration input is invalid: {error}")))
 }
 
