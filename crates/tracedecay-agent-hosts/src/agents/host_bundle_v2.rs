@@ -2849,15 +2849,19 @@ impl HostBundleWriterV1 {
         }
 
         if journal.state == HostComponentSetJournalStateV1::RolledBack {
-            if journal.registration_staged || journal.registration_applied {
-                registration.rollback(&component_set, &request)?;
-            }
+            // A rolled-back journal keeps whichever flags the failed attempt
+            // had reached, so they describe the interrupted work rather than
+            // the compensation still owed. Re-attempt it unconditionally: the
+            // adapter contract is idempotent and no-ops when it finds no staged
+            // registration backup, while skipping it would strand a mutated
+            // native host configuration with nothing left to compensate it.
+            registration.rollback(&component_set, &request)?;
             self.cleanup_component_set_boundary(journal.operation_id)?;
             self.remove_component_set_journal(journal.host)?;
             return Ok(());
         }
 
-        if journal.registration_staged || journal.registration_applied {
+        if journal.registration_compensation_required() {
             registration.rollback(&component_set, &request)?;
         }
         self.restore_component_set_artifacts(&journal)?;
@@ -3083,7 +3087,7 @@ impl HostBundleWriterV1 {
         registration: &mut R,
         journal: &mut HostComponentSetJournalV1,
     ) -> Result<(), HostBundleError> {
-        if journal.registration_staged || journal.registration_applied {
+        if journal.registration_compensation_required() {
             registration.rollback(component_set, request)?;
         }
         self.restore_component_set_artifacts(journal)?;
@@ -4632,6 +4636,14 @@ fn validate_component_set_journal(
     {
         return Err(HostBundleError::ReceiptCorrupted);
     }
+    // The recorded phase and the two registration flags are not independent:
+    // the writer raises each flag before the hook it names and advances the
+    // phase after that hook returns. A journal claiming a phase its flags
+    // cannot support was never written by this lifecycle, so recovery must not
+    // act on its registration story at all.
+    if !journal.registration_flags_match_state() {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
     let mut components = BTreeMap::new();
     let mut paths = BTreeMap::new();
     let mut configuration_authority = None;
@@ -5284,6 +5296,223 @@ mod tests {
         );
         drop(writer);
         HostBundleWriterV1::open(root.path()).expect("reopen after recovery");
+    }
+
+    /// Drive the two-component `OpenCode` set to a durable `RolledBack`
+    /// journal: install, then fail the update at registration verification so
+    /// the completed rollback boundary is left behind for restart recovery.
+    fn wedged_rolled_back_component_set_journal(root: &Path) {
+        let initial = component_set(HostKindV1::OpenCode, b"core-v1", b"agent-v1");
+        let initial_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Install, 81);
+        let initial_verifier = ComponentSetVerifier::from_set(&initial);
+        let mut writer = HostBundleWriterV1::open(root).unwrap();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &initial,
+                &initial_request,
+                &initial_verifier,
+                &mut ArtifactOnlyTestRegistration,
+            )
+            .unwrap();
+
+        let updated = component_set(HostKindV1::OpenCode, b"core-v2", b"agent-v2");
+        let update_request =
+            component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 82);
+        let updated_verifier = ComponentSetVerifier::from_set(&updated);
+        let mut failing = FailingSetRegistration::default();
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer).execute(
+                &updated,
+                &update_request,
+                &updated_verifier,
+                &mut failing,
+            ),
+            Err(HostBundleError::StorageFailure)
+        );
+        assert_eq!(
+            writer
+                .load_component_set_journal_for(HostKindV1::OpenCode)
+                .unwrap()
+                .expect("a completed rollback journal remains")
+                .state,
+            HostComponentSetJournalStateV1::RolledBack
+        );
+        drop(writer);
+    }
+
+    /// Rewrite the pending `OpenCode` journal on disk under `file_name`, as a
+    /// differently shaped binary or a corrupted control file would leave it.
+    fn reshape_component_set_journal(
+        root: &Path,
+        file_name: &str,
+        reshape: impl FnOnce(&mut HostComponentSetJournalV1),
+    ) {
+        let control = root.join(HOST_BUNDLE_CONTROL_DIR);
+        let host_scoped = control.join(component_set_journal_file(HostKindV1::OpenCode));
+        let mut journal: HostComponentSetJournalV1 =
+            serde_json::from_slice(&fs::read(&host_scoped).unwrap()).unwrap();
+        reshape(&mut journal);
+        if file_name != component_set_journal_file(HostKindV1::OpenCode) {
+            fs::remove_file(&host_scoped).unwrap();
+        }
+        fs::write(
+            control.join(file_name),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Defect: recovery read `registration_staged`/`registration_applied` as
+    /// proof that a rolled-back journal owed no host-native compensation. Those
+    /// flags describe the interrupted attempt, not the outstanding work, so a
+    /// `RolledBack` journal with both flags clear silently skipped
+    /// `registration.rollback` and left the native host configuration mutated.
+    #[test]
+    fn a_rolled_back_component_set_journal_compensates_registration_without_its_flags() {
+        let root = tempfile::tempdir().unwrap();
+        wedged_rolled_back_component_set_journal(root.path());
+        reshape_component_set_journal(
+            root.path(),
+            &component_set_journal_file(HostKindV1::OpenCode),
+            |journal| {
+                journal.registration_staged = false;
+                journal.registration_applied = false;
+            },
+        );
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = FailingSetRegistration::default();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .recover_host(HostKindV1::OpenCode, &mut registration)
+            .unwrap();
+        assert!(
+            registration.rolled_back,
+            "a rolled-back journal must always re-attempt registration compensation"
+        );
+        assert!(
+            !root
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(component_set_journal_file(HostKindV1::OpenCode))
+                .exists(),
+            "recovery still clears the completed rollback boundary"
+        );
+    }
+
+    /// The recorded phase and the registration flags are not independent, so a
+    /// journal claiming a phase its flags cannot support was never written by
+    /// this lifecycle. It must be refused at load rather than recovered from.
+    #[test]
+    fn an_unrepresentable_component_set_journal_phase_and_flag_pair_is_rejected() {
+        use HostComponentSetJournalStateV1 as State;
+
+        let root = tempfile::tempdir().unwrap();
+        wedged_rolled_back_component_set_journal(root.path());
+        reshape_component_set_journal(
+            root.path(),
+            &component_set_journal_file(HostKindV1::OpenCode),
+            |journal| {
+                journal.state = HostComponentSetJournalStateV1::Applied;
+                journal.registration_staged = false;
+                journal.registration_applied = false;
+            },
+        );
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let mut registration = FailingSetRegistration::default();
+        assert_eq!(
+            HostComponentSetTransactionV1::new(&mut writer)
+                .recover_host(HostKindV1::OpenCode, &mut registration),
+            Err(HostBundleError::ReceiptCorrupted)
+        );
+        assert_eq!(
+            writer.pending_component_set_journal_operation(HostKindV1::OpenCode),
+            Err(HostBundleError::ReceiptCorrupted)
+        );
+        assert!(
+            !registration.rolled_back,
+            "a journal no writer could produce never drives host-native compensation"
+        );
+
+        let journal: HostComponentSetJournalV1 = serde_json::from_slice(
+            &fs::read(
+                root.path()
+                    .join(HOST_BUNDLE_CONTROL_DIR)
+                    .join(component_set_journal_file(HostKindV1::OpenCode)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (state, staged, applied, representable) in [
+            (State::Prepared, false, false, true),
+            (State::Prepared, true, false, true),
+            (State::Prepared, false, true, false),
+            (State::Staged, true, false, true),
+            (State::Staged, false, false, false),
+            (State::Applied, true, true, true),
+            (State::Applied, true, false, false),
+            (State::Verified, false, true, false),
+            (State::Committed, true, true, true),
+            // Rollback preserves whichever flags the failed attempt reached, so
+            // every combination is authentic in this state.
+            (State::RolledBack, false, false, true),
+            (State::RolledBack, true, false, true),
+            (State::RolledBack, true, true, true),
+        ] {
+            let candidate = HostComponentSetJournalV1 {
+                state,
+                registration_staged: staged,
+                registration_applied: applied,
+                ..journal.clone()
+            };
+            assert_eq!(
+                candidate.registration_flags_match_state(),
+                representable,
+                "{state:?} staged={staged} applied={applied}"
+            );
+            assert_eq!(
+                validate_component_set_journal(&candidate).is_ok(),
+                representable,
+                "{state:?} staged={staged} applied={applied}"
+            );
+        }
+    }
+
+    /// A journal written by an older binary lives under the shared legacy name
+    /// and may carry any flag combination its rollback happened to reach. It
+    /// must still load, and its compensation must still run.
+    #[test]
+    fn a_legacy_named_rolled_back_component_set_journal_still_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        wedged_rolled_back_component_set_journal(root.path());
+        reshape_component_set_journal(root.path(), HOST_COMPONENT_SET_JOURNAL_FILE, |journal| {
+            journal.registration_staged = false;
+            journal.registration_applied = false;
+        });
+
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        assert_eq!(
+            writer.pending_component_set_journal_hosts().unwrap(),
+            vec![HostKindV1::OpenCode],
+            "a legacy-named journal is still discovered"
+        );
+        let mut registration = FailingSetRegistration::default();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .recover(&mut registration)
+            .unwrap();
+        assert!(
+            registration.rolled_back,
+            "a legacy rolled-back journal still owes registration compensation"
+        );
+        assert!(
+            !root
+                .path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(HOST_COMPONENT_SET_JOURNAL_FILE)
+                .exists(),
+            "recovery retires the legacy boundary it just resolved"
+        );
     }
 
     /// Stand-in for the compatibility registration adapter, which re-runs a
