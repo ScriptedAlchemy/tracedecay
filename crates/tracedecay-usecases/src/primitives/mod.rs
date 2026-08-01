@@ -17,7 +17,8 @@ pub use grep_analysis::{
     production_grep_analysis_operations,
 };
 pub use production::{
-    TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
+    Pr12ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1,
+    admitted_root_uri_for_project, locator_digest_for_project,
     open_pr12_production_primitive_runtime,
 };
 pub use runtime::{

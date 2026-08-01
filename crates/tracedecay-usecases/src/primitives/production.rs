@@ -2104,8 +2104,9 @@ fn operational_problem(
     )
 }
 
-/// Opens the complete owned PR12 primitive runtime from production authorities.
-pub async fn open_pr12_production_primitive_runtime(
+/// Owned authorities and admitted project state required to open the complete
+/// PR12 primitive runtime.
+pub struct Pr12ProductionPrimitiveOpenRequestV1 {
     database: Database,
     graph: Arc<TraceDecay>,
     session_db: Arc<RegisteredGlobalDb>,
@@ -2117,7 +2118,55 @@ pub async fn open_pr12_production_primitive_runtime(
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
     configuration_digest: ManifestDigest,
+}
+
+impl Pr12ProductionPrimitiveOpenRequestV1 {
+    pub fn new(
+        graph: Arc<TraceDecay>,
+        session_db: Arc<RegisteredGlobalDb>,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+        access: ProjectSourceAccessSnapshot,
+        admitted_root_uri: String,
+        operation_events: OperationEventAuthority,
+    ) -> Self {
+        let database = graph.db().clone();
+        let project_root = graph.project_root().to_path_buf();
+        let scope = access.scope.clone();
+        let configuration_digest = access.configuration_digest.clone();
+        Self {
+            database,
+            graph,
+            session_db,
+            project_root,
+            code_index,
+            diagnostic_identity,
+            scope,
+            access,
+            admitted_root_uri,
+            operation_events,
+            configuration_digest,
+        }
+    }
+}
+
+/// Opens the complete owned PR12 primitive runtime from production authorities.
+pub async fn open_pr12_production_primitive_runtime(
+    request: Pr12ProductionPrimitiveOpenRequestV1,
 ) -> Result<Pr12PrimitiveProjectRuntime, ApplicationContractError> {
+    let Pr12ProductionPrimitiveOpenRequestV1 {
+        database,
+        graph,
+        session_db,
+        project_root,
+        code_index,
+        diagnostic_identity,
+        scope,
+        access,
+        admitted_root_uri,
+        operation_events,
+        configuration_digest,
+    } = request;
     let key = session_db
         .as_ref()
         .ensure_active_session_cursor_key_result()
