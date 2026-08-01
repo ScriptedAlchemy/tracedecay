@@ -149,7 +149,7 @@ fn refresh_generated_plugins_at(
 fn refresh_daemon_service(
     previous_state: tracedecay::daemon::DaemonServiceState,
 ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
     let tracedecay_bin = tracedecay_bin_on_path()?;
@@ -169,6 +169,17 @@ fn refresh_daemon_service_with_spec(
     )
 }
 
+fn print_daemon_transport_location(socket_path: &Path) {
+    if cfg!(windows) {
+        if let Some(profile_root) = socket_path.parent() {
+            eprintln!("Daemon profile root: {}", profile_root.display());
+        }
+        eprintln!("Daemon endpoint: authenticated loopback (authority-discovered)");
+    } else {
+        eprintln!("Daemon socket: {}", socket_path.display());
+    }
+}
+
 fn refresh_daemon_service_after_update(
     previous_state: tracedecay::daemon::DaemonServiceState,
 ) -> tracedecay::errors::Result<()> {
@@ -178,7 +189,7 @@ fn refresh_daemon_service_after_update(
                 "\x1b[32m✔\x1b[0m Daemon service refreshed at {}",
                 service_path.display()
             );
-            eprintln!("Daemon socket: {}", socket_path.display());
+            print_daemon_transport_location(&socket_path);
         }
         None if tracedecay::daemon::daemon_reachable() => {
             eprintln!(
@@ -240,7 +251,7 @@ fn refresh_forward_only_daemon_service_after_update(
                 "\x1b[32m✔\x1b[0m Forward-only daemon service refreshed at {}",
                 service_path.display()
             );
-            eprintln!("Daemon socket: {}", socket_path.display());
+            print_daemon_transport_location(&socket_path);
             Ok(())
         }
         None if tracedecay::daemon::daemon_reachable() => {
@@ -293,7 +304,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
                 "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
                 service_path.display()
             );
-            eprintln!("Daemon socket: {}", socket_path.display());
+            print_daemon_transport_location(&socket_path);
             Ok(())
         }
         None => unreachable!("installed service disappeared during daemon restart"),

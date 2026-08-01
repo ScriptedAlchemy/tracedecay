@@ -271,16 +271,19 @@ Related: tracedecay tool (same tools from the shell), tracedecay install
 
 pub(crate) const DAEMON_LONG_ABOUT: &str = "\
 Manages the shared background daemon that MCP clients and `tracedecay tool` \
-connect to over a Unix socket, so repeated calls skip per-process startup. \
+connect to over a local authenticated transport, so repeated calls skip per-process startup. \
 Usually installed as a user service; check `daemon status` first when tool \
 calls hang or version-mismatch errors appear.";
 
 pub(crate) const DAEMON_AFTER_HELP: &str = "\
 Examples:
-  tracedecay daemon status                       Service and socket state
+  tracedecay daemon status                       Service and transport state
   tracedecay daemon install-service              Install + start the user service
+  tracedecay daemon start                        Start the installed service
+  tracedecay daemon stop                         Stop the installed service
   tracedecay daemon restart                      Restart after a version mismatch
   tracedecay daemon run --socket /tmp/td.sock    Foreground run (debugging)
+  tracedecay daemon run --profile-root <path>    Foreground run for one profile
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";
 
