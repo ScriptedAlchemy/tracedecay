@@ -372,6 +372,101 @@ fn writer_lease_contends_and_releases_across_processes() {
     assert!(run_child("released").success());
 }
 
+/// The writer lease is single-shot: once the caller's clock passes the
+/// acquisition deadline the handle fails closed, and the documented recovery
+/// (drop + reopen) restores a working writer without losing durable records.
+/// This is the guard against a silent, permanent append-rejection loop: a
+/// caller that reads a fresh clock per mutation must reopen rather than retry.
+#[test]
+fn an_elapsed_writer_lease_fails_closed_and_reopening_restores_the_writer() {
+    let root = TestDir::new("lease-expiry");
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let queued = spool
+        .append(envelope(1, 9), &binding(), UtcMicros(10))
+        .unwrap();
+
+    // config().writer_lease_micros is 100, so the lease acquired at 10 is dead.
+    let expired = UtcMicros(10 + 100);
+    assert_eq!(
+        spool
+            .append(envelope(2, 9), &binding(), expired)
+            .unwrap_err(),
+        HookSpoolError::WriterLeaseLost
+    );
+    assert_eq!(
+        spool
+            .acknowledge(
+                HookSpoolAckV1 {
+                    sequence: queued.sequence,
+                    receipt_id: [31; 16],
+                    disposition: HookSpoolAckDispositionV1::Committed,
+                },
+                expired,
+            )
+            .unwrap_err(),
+        HookSpoolError::WriterLeaseLost
+    );
+    // Retrying on the same handle can never recover: there is no renewal path.
+    assert_eq!(
+        spool
+            .append(envelope(2, 9), &binding(), UtcMicros(expired.0 + 1_000))
+            .unwrap_err(),
+        HookSpoolError::WriterLeaseLost
+    );
+    drop(spool);
+
+    let (mut reopened, report) = HookSpoolV1::open(&root.0, config(), expired).unwrap();
+    assert_eq!(
+        report.pending_records, 1,
+        "an elapsed lease must not discard durable records"
+    );
+    reopened
+        .append(envelope(2, 9), &binding(), expired)
+        .expect("a fresh lease admits appends again");
+    assert!(
+        reopened
+            .acknowledge(
+                HookSpoolAckV1 {
+                    sequence: queued.sequence,
+                    receipt_id: [31; 16],
+                    disposition: HookSpoolAckDispositionV1::Committed,
+                },
+                expired,
+            )
+            .unwrap(),
+        "the record spooled under the previous lease is still acknowledgeable"
+    );
+}
+
+/// The production writer lifecycle: one clock reading is taken at open and
+/// reused for every mutation of that session, so a bounded-but-slow pass (a
+/// daemon drain awaiting admission per record) can never expire underneath
+/// itself no matter how much wall-clock time elapses.
+#[test]
+fn a_writer_reusing_its_acquisition_timestamp_never_expires_mid_session() {
+    let root = TestDir::new("lease-single-shot");
+    let now = UtcMicros(10);
+    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), now).unwrap();
+    for event in 1..=4 {
+        let record = spool
+            .append(envelope(event, 9), &binding(), now)
+            .expect("append under the acquisition timestamp");
+        assert!(
+            spool
+                .acknowledge(
+                    HookSpoolAckV1 {
+                        sequence: record.sequence,
+                        receipt_id: [event.wrapping_add(40); 16],
+                        disposition: HookSpoolAckDispositionV1::Committed,
+                    },
+                    now,
+                )
+                .unwrap()
+        );
+    }
+    assert!(spool.pending.is_empty());
+}
+
 #[test]
 fn quotas_are_never_evicted_and_expired_records_need_tombstones() {
     let root = TestDir::new("quota");
