@@ -52,11 +52,6 @@ fn is_identifier(s: &str) -> bool {
     matches!(s.chars().next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
 }
 
-/// Whether `name` appears as a standalone identifier in `text`.
-pub(super) fn word_present(text: &str, name: &str) -> bool {
-    body_identifiers(text).contains(name)
-}
-
 /// Parses `use` statements from Rust source into their brought-in bindings.
 /// Handles `use a::B;`, `use a::B as C;`, grouped `use a::{B, C};`, and
 /// multi-line grouped imports. Uses a tree-sitter walk so grouped imports that
