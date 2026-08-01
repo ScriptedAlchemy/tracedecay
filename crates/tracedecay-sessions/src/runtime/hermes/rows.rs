@@ -8,7 +8,7 @@ use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 use super::MAX_HERMES_VALUE_BYTES;
 
 /// One joined `messages` × `sessions` row read past the cursor.
-pub(super) struct HermesRow {
+pub struct HermesRow {
     pub id: i64,
     pub session_id: String,
     pub role: String,

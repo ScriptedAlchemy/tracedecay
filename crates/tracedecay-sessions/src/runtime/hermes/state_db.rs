@@ -28,13 +28,13 @@ use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HE
 /// Column names of the `messages` table — `active` (v12 rewind soft-delete)
 /// and `reasoning` arrived in later Hermes schema revisions, so the sweep
 /// probes before selecting to stay readable on legacy stores.
-pub(super) async fn message_columns(
+pub async fn message_columns(
     conn: &SqliteReadConn,
 ) -> Result<std::collections::BTreeSet<String>, String> {
     table_columns(conn, "messages").await
 }
 
-pub(super) async fn table_columns(
+pub async fn table_columns(
     conn: &SqliteReadConn,
     table: &str,
 ) -> Result<std::collections::BTreeSet<String>, String> {
@@ -153,7 +153,7 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-pub(super) fn select_new_messages_sql(
+pub fn select_new_messages_sql(
     message_columns: &std::collections::BTreeSet<String>,
     session_columns: &std::collections::BTreeSet<String>,
 ) -> String {
@@ -607,7 +607,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
 
 /// Opens a Hermes `state.db` strictly read-only so the sweep can never write
 /// to (or create) another agent's live store.
-pub(super) async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
+pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
     let opened = tokio::task::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
@@ -619,7 +619,7 @@ pub(super) async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn,
         .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))
 }
 
-pub(super) async fn read_new_rows_strict(
+pub async fn read_new_rows_strict(
     conn: &SqliteReadConn,
     select_sql: &str,
     prev: StoredCursor,

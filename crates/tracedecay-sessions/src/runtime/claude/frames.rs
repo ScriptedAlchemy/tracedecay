@@ -177,7 +177,7 @@ pub fn scan_claude_source_frames(
     }
 }
 
-pub(super) fn try_scan_claude_source_frames(
+pub fn try_scan_claude_source_frames(
     identity: ClaudeSourceScanIdentity,
     previous: StoredCursor,
     max_new_bytes: Option<u64>,

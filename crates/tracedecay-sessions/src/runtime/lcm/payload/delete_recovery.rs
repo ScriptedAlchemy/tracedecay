@@ -247,7 +247,7 @@ pub fn remove_committed_payload_file(
     )
 }
 
-pub(super) fn remove_committed_payload_file_with<F>(
+pub fn remove_committed_payload_file_with<F>(
     storage_root: &Path,
     payload_ref: &str,
     expected_hash: Option<&str>,
