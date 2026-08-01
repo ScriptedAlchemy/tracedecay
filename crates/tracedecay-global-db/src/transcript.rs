@@ -27,7 +27,7 @@ fn estimated_tokens_from_chars(char_count: i64) -> i64 {
 }
 
 fn estimate_summary_tokens(text: &str) -> i64 {
-    i64::from(crate::context::read_modes::estimate_tokens(text))
+    i64::from(crate::estimate_tokens(text))
 }
 
 fn transcript_summary_text(
