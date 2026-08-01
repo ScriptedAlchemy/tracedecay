@@ -18,16 +18,12 @@ pub use delete_recovery::{
 };
 pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 #[cfg(test)]
-pub use delete_recovery::{
-    reconcile_committed_payload_drain, remove_committed_payload_file_with,
-};
+pub use delete_recovery::{reconcile_committed_payload_drain, remove_committed_payload_file_with};
 pub use filesystem_authority::VerifiedPayloadAuthority;
 use filesystem_authority::{
     PayloadFileWrite, prepare_payload_dir, read_verified_payload_file, write_private_file,
 };
-pub use filesystem_authority::{
-    ensure_contained, existing_payload_dir, existing_payload_dir_opt,
-};
+pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
 pub use rollback::PayloadFileRollback;
 
 pub async fn delete_external_payload_in_transaction(

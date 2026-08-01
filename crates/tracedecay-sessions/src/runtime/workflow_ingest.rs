@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
 
-use crate::host_ports::parse_timestamp;
 use crate::admission::DEFAULT_MAX_RECORDS;
+use crate::host_ports::parse_timestamp;
 use crate::runtime::shared::ProjectRootMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -21,8 +21,8 @@ use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader, TranscriptDiscoveryBounds,
     collect_files_with_ext_bounded, path_byte_len,
 };
-use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
 use crate::runtime::workflow_index::WorkflowIngestSink;
+use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
 
 const RESULT_SUMMARY_CAP: usize = 600;
 const MAX_WORKFLOW_RUNS: usize = DEFAULT_MAX_RECORDS;

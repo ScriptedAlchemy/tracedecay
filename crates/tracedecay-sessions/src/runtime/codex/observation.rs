@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub use tracedecay_capture::codex::codex_native_record_id;
+pub(super) use tracedecay_capture::codex::codex_native_record_id;
 #[cfg(test)]
 pub use tracedecay_capture::codex::normalize_codex_observation;
 use tracedecay_capture::codex::{
@@ -21,13 +21,15 @@ use super::meta::session_meta_with_provenance;
 use crate::admission::HostAdmission;
 use crate::host_ports::unregistered_admission;
 use crate::observation::ObservationCancellation;
-use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
     admit_jsonl_observations,
 };
-use crate::runtime::shared::path_belongs_to_project;
+use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
+use tracedecay_runtime_core::privacy::{
+    ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
+};
 
 const CODEX_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
@@ -169,7 +171,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
     .await
 }
 
-pub enum CodexObservationAdmission<'a> {
+pub(super) enum CodexObservationAdmission<'a> {
     Project {
         root: &'a Path,
         project_id: ProjectId,
@@ -181,7 +183,7 @@ pub enum CodexObservationAdmission<'a> {
 }
 
 impl CodexObservationAdmission<'_> {
-    pub fn scope(&self) -> ObservationScopeV1 {
+    pub(super) fn scope(&self) -> ObservationScopeV1 {
         match self {
             Self::Project { project_id, .. } => ObservationScopeV1::Project {
                 project_id: project_id.clone(),
@@ -190,20 +192,18 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    pub fn accepts(&self, cwd: Option<&Path>) -> bool {
+    /// Resolve this rollout's scope boundary once, so the per-record admission
+    /// test does not re-resolve the git identity of an unchanging root.
+    pub(super) fn scope_matcher(&self) -> TranscriptScopeMatcher {
         match self {
-            Self::Project { root, .. } => cwd.is_some_and(|cwd| path_belongs_to_project(cwd, root)),
+            Self::Project { root, .. } => TranscriptScopeMatcher::project(root),
             Self::Profile {
                 registered_roots, ..
-            } => cwd.is_none_or(|cwd| {
-                !registered_roots
-                    .iter()
-                    .any(|root| path_belongs_to_project(cwd, root))
-            }),
+            } => TranscriptScopeMatcher::profile(registered_roots),
         }
     }
 
-    pub fn accepts_session(&self, session_id: &str) -> bool {
+    pub(super) fn accepts_session(&self, session_id: &str) -> bool {
         !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
     }
 
@@ -244,6 +244,7 @@ async fn try_admit_codex_jsonl_observations(
         SessionId::new(meta.session_id.clone())?,
     )?;
     let scope = admission_scope.scope();
+    let scope_matcher = admission_scope.scope_matcher();
     let request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -273,7 +274,7 @@ async fn try_admit_codex_jsonl_observations(
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
                     context_state.observe_context_record(&native, path, &meta);
-                    if !admission_scope.accepts(context_state.cwd.as_deref()) {
+                    if !scope_matcher.accepts(context_state.cwd.as_deref()) {
                         non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                         return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                     }

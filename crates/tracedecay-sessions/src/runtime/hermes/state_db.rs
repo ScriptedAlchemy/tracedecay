@@ -433,7 +433,7 @@ where
     }
 }
 
-pub async fn try_ingest_state_db_bounded_with_admission(
+pub(super) async fn try_ingest_state_db_bounded_with_admission(
     source: &HermesProfileSource,
     project_root: &Path,
     project_id: ProjectId,
@@ -472,7 +472,7 @@ pub async fn try_ingest_state_db_bounded_with_admission(
 /// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
 /// once, then each destination independently admits routed rows against its own
 /// authoritative observation cursor.
-pub async fn try_ingest_state_db_for_projects(
+pub(super) async fn try_ingest_state_db_for_projects(
     source: &HermesProfileSource,
     destinations: &[ProjectIngestDestination<'_>],
     budget: &mut IngestByteBudget,
@@ -561,7 +561,7 @@ pub async fn try_ingest_state_db_for_projects(
     }
 }
 
-pub async fn try_ingest_user_state_db_bounded_with_admission(
+pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
     admission: &dyn HostAdmission,
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],

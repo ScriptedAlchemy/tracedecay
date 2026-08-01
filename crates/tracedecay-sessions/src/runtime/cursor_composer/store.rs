@@ -48,7 +48,7 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-pub fn encode_hex(bytes: &[u8]) -> String {
+pub(super) fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         let _ = write!(out, "{byte:02x}");
@@ -59,7 +59,7 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 /// Extract length-delimited field-1 entries that are exactly 32 bytes long and
 /// hex-encode them — the content-addressed child ids of a DAG node blob. A
 /// light protobuf scanner that skips unrelated fields by wire type.
-pub fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
+pub(super) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
     let mut refs = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -176,7 +176,7 @@ async fn fetch_store_blob_bounded(
         .unwrap_or(BoundedSqliteValue::Corrupt)
 }
 
-pub async fn read_store_meta_bounded(
+pub(super) async fn read_store_meta_bounded(
     conn: &CursorConn,
     remaining: Option<u64>,
 ) -> BoundedSqliteValue<StoreMeta> {
@@ -272,7 +272,7 @@ fn read_store_meta_bounded_sync(
 /// Walk the blob DAG from `root` (or id-sorted fallback), fetching each blob by
 /// primary key with SQL length/budget gates. Never `SELECT`s the full `blobs`
 /// table. Charges reachable blob bytes against `byte_budget` as they materialize.
-pub async fn order_store_messages_bounded(
+pub(super) async fn order_store_messages_bounded(
     conn: &CursorConn,
     root: Option<&str>,
     byte_budget: &mut IngestByteBudget,
@@ -450,24 +450,24 @@ async fn walk_store_blob_bounded(
 // store.db blob-DAG reader (SQL length-gated, reachable-only)
 // ---------------------------------------------------------------------------
 
-pub struct StoreMeta {
+pub(super) struct StoreMeta {
     pub agent_id: String,
     pub latest_root_blob_id: Option<String>,
     pub created_at: Option<i64>,
 }
 
-pub enum StoreWalkOutcome {
+pub(super) enum StoreWalkOutcome {
     Messages(Vec<(String, Value, u64)>),
     DeferredEmpty,
 }
 
 /// Maximum bytes materializable for `store.db` `meta` hex/JSON.
-pub const MAX_COMPOSER_STORE_META_BYTES: u64 = MAX_SNAPSHOT_METADATA_BYTES;
+pub(super) const MAX_COMPOSER_STORE_META_BYTES: u64 = MAX_SNAPSHOT_METADATA_BYTES;
 
 /// `meta.value` is hexadecimal text, so its encoded byte ceiling is twice the
 /// decoded metadata ceiling.
-pub const MAX_COMPOSER_STORE_META_HEX_BYTES: u64 = MAX_COMPOSER_STORE_META_BYTES * 2;
+pub(super) const MAX_COMPOSER_STORE_META_HEX_BYTES: u64 = MAX_COMPOSER_STORE_META_BYTES * 2;
 
 /// Cap on DAG blob visits / child refs per store — aligns with the default
 /// ingest discovery unit ceiling (`IngestPassBounds::discovered_units`).
-pub const MAX_COMPOSER_STORE_BLOB_VISITS: usize = 4096;
+pub(super) const MAX_COMPOSER_STORE_BLOB_VISITS: usize = 4096;

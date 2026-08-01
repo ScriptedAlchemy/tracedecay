@@ -14,11 +14,11 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
+use crate::runtime::shared::path_belongs_to_project;
 use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };
-use crate::runtime::shared::path_belongs_to_project;
 
 use super::ingest::HermesProfileSource;
 use super::rows::{HermesRow, hermes_native_payload_bytes};
@@ -39,7 +39,7 @@ pub struct HermesProjectionMetadata {
     pub location_provenance: Option<&'static str>,
 }
 
-pub fn project_projection_metadata(
+pub(super) fn project_projection_metadata(
     row: &HermesRow,
     source: &HermesProfileSource,
     authority_project_root: &Path,
@@ -65,7 +65,7 @@ pub enum HermesAdmissionAction {
     Cover(ObservationCoverageReason),
 }
 
-pub struct HermesAdmission {
+pub(super) struct HermesAdmission {
     pub source: ObservationSourceIdentityV1,
     pub range: ObservationSourceRangeV1,
     pub expected_cursor: Option<ObservationSourceCursorV1>,
@@ -443,7 +443,7 @@ pub fn prepare_observation_row(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_observation_row_with_cancellation(
+pub(super) fn prepare_observation_row_with_cancellation(
     row: &HermesRow,
     projection: Option<&HermesProjectionMetadata>,
     scope: &ObservationScopeV1,

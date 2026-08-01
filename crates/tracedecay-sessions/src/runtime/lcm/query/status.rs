@@ -579,7 +579,7 @@ async fn store_status_within(
             // Externalized rows count their inline placeholder, matching what the
             // engine replays into active context.
             let text: String = row.get(1)?;
-            estimated_tokens += estimate_tokens(&text);
+            estimated_tokens += crate::lcm::estimate_tokens(&text);
             scanned_bytes =
                 scanned_bytes.saturating_add(i64::try_from(text.len()).unwrap_or(i64::MAX));
             after_store_id = store_id;
@@ -754,8 +754,8 @@ struct LcmLifecycleMetadata {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_runtime_core::db::engine::{Connection, TestConnection};
     use tempfile::TempDir;
+    use tracedecay_runtime_core::db::engine::{Connection, TestConnection};
 
     use super::*;
 

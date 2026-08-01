@@ -152,12 +152,8 @@ fn active_replay_value(message: &LcmRawMessage) -> Option<Value> {
     active_replay_message_from_metadata(message)
 }
 
-fn estimate_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
-}
-
 fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
-    let mut tokens = estimate_tokens(&message.content);
+    let mut tokens = crate::lcm::estimate_tokens(&message.content);
     if let Some(mut replay) = active_replay_value(message) {
         if let Some(object) = replay.as_object_mut() {
             object.remove("content");

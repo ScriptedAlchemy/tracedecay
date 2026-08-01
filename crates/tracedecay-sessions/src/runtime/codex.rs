@@ -79,7 +79,7 @@ pub use usage::{CodexTurnUsage, flush_turn_usage, merge_usage_counters};
 use crate::runtime::jsonl_observation_admission::{
     namespace_replacement_message_ids, preflight_and_parse_new,
 };
-use crate::runtime::shared::{StoredCursor, path_belongs_to_project, title_from_messages};
+use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher, title_from_messages};
 use crate::runtime::source::{
     FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
@@ -220,26 +220,17 @@ impl TranscriptSource for CodexSource {
         } else {
             CodexContextState::from_meta(&meta)
         };
+        let scope_matcher = TranscriptScopeMatcher::for_scope(
+            project_root,
+            self.user_scope
+                .as_ref()
+                .map(|scope| scope.registered_roots.as_slice()),
+        );
         let mut last_in_scope_cwd = None;
         let mut last_in_scope_git = None;
         for line in &new.lines {
             let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            let in_scope = self.user_scope.as_ref().map_or_else(
-                || {
-                    context_state
-                        .cwd
-                        .as_deref()
-                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
-                },
-                |scope| {
-                    context_state.cwd.as_deref().is_none_or(|cwd| {
-                        !scope
-                            .registered_roots
-                            .iter()
-                            .any(|root| path_belongs_to_project(cwd, root))
-                    })
-                },
-            );
+            let in_scope = scope_matcher.accepts(context_state.cwd.as_deref());
             if !in_scope {
                 if compacted_summary_from_line(
                     &line.value,

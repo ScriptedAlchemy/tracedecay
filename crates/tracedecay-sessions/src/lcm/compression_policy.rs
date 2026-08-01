@@ -91,7 +91,7 @@ pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Op
     let message_tokens = input
         .messages
         .iter()
-        .map(|message| estimate_tokens(&message_content(message)))
+        .map(|message| crate::lcm::estimate_tokens(&message_content(message)))
         .sum::<i64>();
     let overhead_tokens = (current_tokens - message_tokens).max(0);
     Some((assembly_cap - overhead_tokens).max(1))
@@ -146,7 +146,7 @@ pub fn bounded_leaf_chunk_len(
     let mut selected_len = 0;
     let mut selected_tokens = 0;
     for message in backlog.iter().take(max_messages) {
-        let message_tokens = estimate_tokens(&message.content);
+        let message_tokens = crate::lcm::estimate_tokens(&message.content);
         if let Some(token_limit) = token_limit
             && selected_tokens + message_tokens > token_limit
         {
@@ -195,7 +195,7 @@ pub fn forced_overflow_pressure(
 pub fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
     backlog
         .iter()
-        .map(|message| estimate_tokens(&message.content))
+        .map(|message| crate::lcm::estimate_tokens(&message.content))
         .sum::<i64>()
 }
 
@@ -208,8 +208,4 @@ fn message_content(message: &Value) -> String {
         Value::String(text) => text.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
-}
-
-fn estimate_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
 }

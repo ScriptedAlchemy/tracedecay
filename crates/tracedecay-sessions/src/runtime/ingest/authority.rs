@@ -64,8 +64,7 @@ pub trait SessionIngestAuthority: Sync {
     fn shard_id(&self) -> &StoreShardIdV1;
 
     /// Builds the admission facade for one pass.
-    fn admission<'a>(&'a self, binding: IngestAdmissionBinding<'a>)
-    -> Box<dyn HostAdmission + 'a>;
+    fn admission<'a>(&'a self, binding: IngestAdmissionBinding<'a>) -> Box<dyn HostAdmission + 'a>;
 
     /// Borrows the git-correlation store over this authority.
     fn git_correlation_store(&self) -> Self::GitStore<'_>;

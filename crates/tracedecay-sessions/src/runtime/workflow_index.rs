@@ -17,13 +17,13 @@
 //! that discovers run directories and parses transcripts, and the
 //! `tracedecay_workflows` query surface, build on the APIs defined here.
 
-use std::fmt::Write as _;
 pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
+use std::fmt::Write as _;
 
+use crate::runtime::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
-use crate::runtime::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 
 /// Schema version recorded in `session_schema_migrations` under
 /// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
@@ -79,9 +79,7 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
 /// through the shared `session_schema_migrations` table exactly like
 /// [`crate::runtime::git_correlation::ensure_git_correlation_schema`], so both
 /// stores register under their own migration name in one table.
-pub async fn ensure_workflow_index_schema(
-    conn: &impl Executor,
-) -> Result<(), WorkflowIndexError> {
+pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
         .await
         .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)
@@ -213,10 +211,7 @@ fn opt_int(value: Option<i64>) -> Value {
 /// whose transcripts grew (e.g. a `running` run that later `completed`)
 /// overwrites the mutable columns and refreshes `updated_at`. `created_at` is
 /// preserved.
-pub async fn upsert_run(
-    conn: &impl Executor,
-    run: &WorkflowRun,
-) -> Result<(), WorkflowIndexError> {
+pub async fn upsert_run(conn: &impl Executor, run: &WorkflowRun) -> Result<(), WorkflowIndexError> {
     if run.run_id.trim().is_empty() {
         return Err(WorkflowIndexError::InvalidArgument(
             "workflow run_id must not be empty".to_string(),
@@ -460,10 +455,7 @@ impl RegisteredWorkflowIndexSnapshot {
         Ok(agents)
     }
 
-    pub async fn agent_count_for_run(
-        &self,
-        run_id: &str,
-    ) -> Result<i64, WorkflowIndexError> {
+    pub async fn agent_count_for_run(&self, run_id: &str) -> Result<i64, WorkflowIndexError> {
         if !self
             .has_tables(&["workflow_runs", "workflow_agents"])
             .await?
@@ -716,8 +708,9 @@ mod detail_coverage_tests {
     #[tokio::test]
     async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let connection =
-            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("sessions.db"),
+        );
         ensure_workflow_index_schema(&connection)
             .await
             .expect("workflow schema");
