@@ -376,6 +376,20 @@ pub(super) async fn advance_compatibility_legacy_memory_cutover_tx(
     request: &CompatibilityLegacyMemoryCutoverCommandV1,
 ) -> FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1> {
     let source_store_id = compatibility_source_store_id()?;
+    // A store that never held V1 legacy memory has nothing to cut over.
+    // Running the ladder anyway would insert an all-zero backfill row and a
+    // cutover receipt describing a migration that never happened, and every
+    // later pass would then re-read that manufactured state. Report the
+    // cutover complete without writing anything.
+    if db
+        .memory_v2_cutover_is_vacuous(request.owner(), &source_store_id)
+        .await
+        .map_err(|error| {
+            FactCompatibilityStoreError::Store(storage_error(COMPATIBILITY_WRITE_OPERATION, error))
+        })?
+    {
+        return Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete);
+    }
     let frontiers = db
         .load_or_capture_memory_v2_frontiers(request.owner(), &source_store_id)
         .await

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     FactAssertionId, FactAssertionKindV1, FactEventId, FactId, FactOwnerV1, PayloadAccessState,
     PayloadReferenceV1, ProvenanceId, SourceStoreId, UtcMicros,
@@ -39,7 +39,12 @@ pub enum MemoryV2FeedbackHistoryRepairBatchOutcome {
     NotRequired,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// Deserialization exists so a receipt that already carries a verified
+/// coverage witness can be read back instead of recomputed: the counts are
+/// frozen once the cutover completes, and the join that produces them is not
+/// cheap enough to re-run on every daemon tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct MemoryV2CutoverCoverage {
     pub(super) source_fact_count: i64,
     pub(super) represented_fact_count: i64,

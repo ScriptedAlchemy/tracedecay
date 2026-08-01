@@ -28,7 +28,7 @@ pub use archive::{
 };
 pub(super) use cutover::{
     backfill_memory_v2_batch, finalize_memory_v2_cutover, load_or_capture_memory_v2_frontiers,
-    reopen_memory_v2_cutover_for_legacy_union,
+    memory_v2_cutover_is_vacuous, reopen_memory_v2_cutover_for_legacy_union,
 };
 pub(super) use repair::{
     feedback_history_repair_progress, repair_memory_v2_feedback_history_batch_in_transaction,
