@@ -16,9 +16,13 @@ default = []
 # Mirrors the root crate's `semantic-fastembed`: gates the embedded fastembed
 # provider wiring inside `semantic_runtime`.
 semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
+# Exposes test-only helper surfaces to dependent crates' test builds without
+# enabling in-process transports or forwarding dependency features.
+test-helpers = []
 # Mirrors the root crate's `test-transport`: enables the in-process transport
 # seams used by integration harnesses.
 test-transport = [
+    "test-helpers",
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
 ]
