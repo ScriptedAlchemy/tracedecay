@@ -11,7 +11,7 @@ use tracedecay_sessions::lcm::contracts::{
     LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessage, LcmRawMessageOverview, LcmSourceRef,
     LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
-use crate::application::session::lcm::render::apply_canonical_content;
+use super::render::apply_canonical_content;
 use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 
 macro_rules! field {
