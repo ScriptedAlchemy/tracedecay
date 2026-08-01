@@ -126,11 +126,14 @@ pub(super) async fn inspect_data_dir_candidate(
     if role == StoreRole::CodeProjectStore
         && dir_name == TRACEDECAY_DIR
         && !db_path.is_file()
-        && tracedecay_runtime_core::storage::read_enrollment_marker(project_root).is_ok_and(|marker| {
-            marker.is_some_and(|marker| {
-                marker.storage_mode == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
-            })
-        })
+        && tracedecay_runtime_core::storage::read_enrollment_marker(project_root).is_ok_and(
+            |marker| {
+                marker.is_some_and(|marker| {
+                    marker.storage_mode
+                        == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
+                })
+            },
+        )
     {
         return Ok(());
     }

@@ -450,7 +450,8 @@ fn rebind_restored_store_manifests(
         if !metadata.is_dir() {
             continue;
         }
-        let manifest_path = store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path =
+            store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

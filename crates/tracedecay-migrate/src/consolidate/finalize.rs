@@ -23,10 +23,12 @@ pub(super) async fn verify_destination(
     let destination_graphs = graph_db_paths_for_root(destination, &meta)?;
     let mut destination_identities = sqlite::GraphLogicalIdentities::default();
     for path in &destination_graphs {
-        let snapshot =
-            tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, resolved.scratch_root.path())
-                .await
-                .map_err(io_error)?;
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(
+            path,
+            resolved.scratch_root.path(),
+        )
+        .await
+        .map_err(io_error)?;
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
         if path == &graph {
             sqlite::extend_graph_identities(snapshot.connection(), &mut destination_identities)
@@ -73,12 +75,13 @@ pub(super) async fn verify_destination(
             "destination external source state union differs from frozen inputs",
         ));
     }
-    let destination_snapshots = tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet::capture_in(
-        std::slice::from_ref(&sessions),
-        resolved.scratch_root.path(),
-    )
-    .await
-    .map_err(io_error)?;
+    let destination_snapshots =
+        tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet::capture_in(
+            std::slice::from_ref(&sessions),
+            resolved.scratch_root.path(),
+        )
+        .await
+        .map_err(io_error)?;
     sqlite::quick_check_in(&destination_snapshots, &sessions).await?;
     let input_root = destination.join(INPUT_DIR);
     let source_input = input_root.join("source-sessions.db");

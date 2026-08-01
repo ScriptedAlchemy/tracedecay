@@ -230,11 +230,12 @@ async fn apply_planned(
                 source.path.display()
             )));
         }
-        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(&source.path, &scratch)
-            .await
-            .map_err(|error| {
-                migration_error(format!("snapshot '{}': {error}", source.path.display()))
-            })?;
+        let snapshot =
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(&source.path, &scratch)
+                .await
+                .map_err(|error| {
+                    migration_error(format!("snapshot '{}': {error}", source.path.display()))
+                })?;
         let proofs =
             crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
                 .await?;
@@ -674,8 +675,11 @@ fn branch_v2_authority_tables(path: &Path) -> Vec<&'static str> {
     ]
     .into_iter()
     .filter(|table| {
-        tracedecay_runtime_core::sqlite_read_snapshot::checkpointed_database_has_any_rows(path, &[*table])
-            .is_ok_and(|has_rows| has_rows)
+        tracedecay_runtime_core::sqlite_read_snapshot::checkpointed_database_has_any_rows(
+            path,
+            &[*table],
+        )
+        .is_ok_and(|has_rows| has_rows)
     })
     .collect()
 }
@@ -1194,9 +1198,10 @@ mod tests {
 
         let scratch = fixture.data_root.join("scratch").join("test-cutover");
         storage::PrivateStoreIo::create_dir_all(&scratch).unwrap();
-        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(&branch_path, &scratch)
-            .await
-            .unwrap();
+        let snapshot =
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(&branch_path, &scratch)
+                .await
+                .unwrap();
         let proofs =
             crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
                 .await

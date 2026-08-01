@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table_columns};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 pub struct ResolvedTargetProject {
     pub root: PathBuf,

@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
+use tracedecay_runtime_core::db::engine::{
+    Executor, QueryExecutor, Value, params, params_from_iter,
+};
 
 pub const MIGRATION_QUERY_PAGE_ROWS: i64 = 256;
 pub const MAX_MIGRATION_MATERIALIZED_ROWS: usize = 1_000_000;

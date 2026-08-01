@@ -377,8 +377,10 @@ async fn apply_migration_manifest_with_lease(
             continue;
         }
         lifecycle_leases.push(
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(root, &operation)
-                .map_err(|error| invalid_manifest(&error.to_string()))?,
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
+                root, &operation,
+            )
+            .map_err(|error| invalid_manifest(&error.to_string()))?,
         );
     }
     let mut database_scopes = Vec::with_capacity(lifecycle_leases.len());
@@ -403,8 +405,9 @@ async fn apply_migration_manifest_with_lease(
     source_databases.dedup();
     let mut source_authorities = Vec::with_capacity(source_databases.len());
     for database in source_databases {
-        let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(&database, &operation)
-            .map_err(|error| invalid_manifest(&error.to_string()))?;
+        let authority =
+            tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(&database, &operation)
+                .map_err(|error| invalid_manifest(&error.to_string()))?;
         source_authorities.push((database, authority));
     }
     apply_migration_manifest_in_scope(
@@ -989,8 +992,10 @@ fn copy_file_atomically(source: &Path, target: &Path, label: &str) -> io::Result
     remove_stale_snapshot_temp(&temporary)?;
     PrivateStoreIo::copy_artifact(source, &temporary)?;
     sync_file(&temporary)?;
-    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(&temporary, target, label)
-        .map_err(io::Error::other)?;
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        &temporary, target, label,
+    )
+    .map_err(io::Error::other)?;
     sync_parent_directory(target)
 }
 
@@ -1401,7 +1406,8 @@ async fn verify_sqlite_integrity(
     let _authority = authority
         .hold_for(path, "verify migration SQLite snapshot")
         .map_err(io::Error::other)?;
-    let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await?;
+    let snapshot =
+        tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await?;
     let mut rows = snapshot
         .connection()
         .query("PRAGMA quick_check", ())

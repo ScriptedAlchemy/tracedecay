@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::inventory::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
-use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::root_seam::global_db::{self, RegisteredGlobalDb};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor, params};
 
 pub(super) async fn inspect_global_db(
     path: &Path,
@@ -164,7 +164,8 @@ pub(super) async fn sqlite_quick_check(path: &Path) -> SqliteIntegrityOutcome {
     };
     drop(authority);
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = match tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await {
+    let db = match tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await
+    {
         Ok(db) => db,
         Err(error) => {
             return SqliteIntegrityOutcome::Unavailable {

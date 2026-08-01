@@ -4,9 +4,9 @@ use tracedecay_runtime_core::db::{
     list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
 };
 
-use tracedecay_runtime_core::errors::Result;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::FactOwnerV1;
+use tracedecay_runtime_core::errors::Result;
 use tracedecay_store::MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1;
 
 use super::{db_error, db_message, query_i64};

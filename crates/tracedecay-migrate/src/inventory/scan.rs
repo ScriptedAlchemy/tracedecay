@@ -6,9 +6,9 @@ use std::path::Path;
 
 use super::*;
 
+use crate::root_seam::global_db;
 use tracedecay_runtime_core::config::TRACEDECAY_DIR;
 use tracedecay_runtime_core::errors::Result;
-use crate::root_seam::global_db;
 
 pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<MigrationInventory> {
     let profile_root = options

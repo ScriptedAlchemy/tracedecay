@@ -149,8 +149,8 @@ pub(super) async fn capture_input_evidence(
     let mut session_fingerprints = BTreeMap::new();
     for path in session_paths {
         sessions.get(path).map_err(io_error)?;
-        let fingerprint =
-            tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+        let fingerprint = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
+            .map_err(io_error)?;
         session_fingerprints.insert(path.clone(), fingerprint);
     }
     sessions.validate_sources_unchanged().map_err(io_error)?;
@@ -181,8 +181,8 @@ async fn capture_graph_evidence(
         }
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
         sqlite::extend_graph_identities(snapshot.connection(), &mut identities).await?;
-        let fingerprint =
-            tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+        let fingerprint = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
+            .map_err(io_error)?;
         snapshot.validate_source().map_err(io_error)?;
         generations.insert(path.clone(), snapshot.source_generation());
         fingerprints.insert(path.clone(), fingerprint);

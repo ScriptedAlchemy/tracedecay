@@ -25,7 +25,6 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::RefId;
 use tracedecay_store::{CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
-use tracedecay_runtime_core::db::engine::params;
 use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 #[cfg(test)]
 use files::sqlite_sidecar;
@@ -41,12 +40,13 @@ use runtime::{
     ConsolidationArtifactAuthorityV1, ConsolidationArtifactRecordV1, ConsolidationArtifactRoleV1,
     ConsolidationRuntimeOwnerV1, FrozenInputRuntimeSetV1,
 };
+use tracedecay_runtime_core::db::engine::params;
 
-use tracedecay_runtime_core::branch_meta::{self, BranchEntry, BranchMeta};
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::root_seam::global_db::{
     GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use tracedecay_runtime_core::branch_meta::{self, BranchEntry, BranchMeta};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
