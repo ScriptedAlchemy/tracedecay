@@ -3,6 +3,43 @@
 
 use super::*;
 
+#[cfg(unix)]
+fn workflow_provider_fixture_path(project: &std::path::Path) -> std::path::PathBuf {
+    project.join("codex-workflow-fixture")
+}
+
+#[cfg(windows)]
+fn workflow_provider_fixture_path(project: &std::path::Path) -> std::path::PathBuf {
+    project.join("codex-workflow-fixture.cmd")
+}
+
+#[cfg(unix)]
+fn write_workflow_provider_fixture(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, script).expect("workflow provider fixture");
+    let mut permissions = std::fs::metadata(path)
+        .expect("workflow provider metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).expect("workflow provider mode");
+}
+
+#[cfg(windows)]
+fn write_workflow_provider_fixture(path: &std::path::Path, script: &str) {
+    let script_path = path.with_extension("py");
+    std::fs::write(&script_path, script).expect("workflow provider script");
+    let script_name = script_path
+        .file_name()
+        .expect("workflow provider script name")
+        .to_string_lossy();
+    std::fs::write(
+        path,
+        format!("@echo off\r\npython \"%~dp0{script_name}\" %*\r\n"),
+    )
+    .expect("workflow provider launcher");
+}
+
 #[tokio::test]
 async fn registered_work_services_dispatch_the_core_lifecycle() {
     let _pin = crate::config::PinnedUserDataDir::new();
@@ -317,7 +354,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
 async fn registered_workflow_services_dispatch_durable_fan_out_and_handoff() {
     let _pin = crate::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
-    let fixture = project.path().join("codex-workflow-fixture");
+    let fixture = workflow_provider_fixture_path(project.path());
     let fixture_script = r#"#!/usr/bin/env python3
 import json
 import sys
@@ -334,12 +371,7 @@ for line in sys.stdin:
         print(json.dumps({"method": "item/completed", "params": {"model": "gpt-workflow-fixture", "item": {"content": [{"type": "output_text", "text": "canonical workflow child completed"}]}}}), flush=True)
         print(json.dumps({"method": "turn/completed"}), flush=True)
 "#;
-    std::fs::write(&fixture, fixture_script).expect("workflow provider fixture");
-    let mut permissions = std::fs::metadata(&fixture)
-        .expect("workflow provider metadata")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    std::fs::set_permissions(&fixture, permissions).expect("workflow provider mode");
+    write_workflow_provider_fixture(&fixture, fixture_script);
     let now = current_micros();
     let project_id = ProjectId::new("project.workflow.invocation").expect("project id");
     let host = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
@@ -728,12 +760,7 @@ for line in sys.stdin:
         &interrupted_plan.children[0].attempt_identity
     );
 
-    std::fs::write(&fixture, fixture_script).expect("restore workflow provider fixture");
-    let mut permissions = std::fs::metadata(&fixture)
-        .expect("restored workflow provider metadata")
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-    std::fs::set_permissions(&fixture, permissions).expect("restored workflow provider mode");
+    write_workflow_provider_fixture(&fixture, fixture_script);
     interrupted_fan_out.fence.attempt_id =
         tracedecay_domain::AttemptId::new("attempt.workflow.invocation.interrupted.retry")
             .expect("interrupted retry attempt id");
@@ -855,9 +882,9 @@ for line in sys.stdin:
         });
     let failed_plan =
         tracedecay_application::prepare_workflow_fan_out(&failed_fan_out).expect("failed plan");
-    std::fs::write(
-            &fixture,
-            r#"#!/usr/bin/env python3
+    write_workflow_provider_fixture(
+        &fixture,
+        r#"#!/usr/bin/env python3
 import json
 import sys
 
@@ -871,8 +898,7 @@ for line in sys.stdin:
     elif request_id == 2:
         sys.exit(2)
 "#,
-        )
-        .expect("provider failure fixture");
+    );
     let failed = invoke!(
         "request.workflow.execute-provider-failure",
         WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(failed_fan_out.clone()))

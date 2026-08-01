@@ -95,7 +95,7 @@ async fn notify_hook_event_to_connection(
     HookEventNotifyOutcomeV1::Delivered
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::time::Instant;
 

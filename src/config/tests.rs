@@ -1413,6 +1413,7 @@ mod legacy_configuration_migration_input {
 
 mod runtime_configuration_cutover {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::Mutex;
 

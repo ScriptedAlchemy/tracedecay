@@ -105,7 +105,9 @@ pub(super) fn ensure_text_unchanged(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_text_unchanged, same_existing_file, write_path_preserving_final_symlink};
+    #[cfg(unix)]
+    use super::write_path_preserving_final_symlink;
+    use super::{ensure_text_unchanged, same_existing_file};
 
     #[test]
     fn same_existing_file_detects_hard_link() {
