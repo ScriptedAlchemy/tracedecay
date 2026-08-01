@@ -139,8 +139,27 @@ pub struct OpenedRuntimeConfiguration {
     pub(crate) registered_database: Arc<RegisteredGlobalDb>,
 }
 
+impl OpenedRuntimeConfiguration {
+    pub fn new(
+        configuration: PinnedRuntimeConfiguration,
+        registered_database: Arc<RegisteredGlobalDb>,
+    ) -> Self {
+        Self {
+            configuration,
+            registered_database,
+        }
+    }
+}
+
 pub trait RuntimeConfigurationAuthorityPort: Send + Sync {
     fn open<'a>(
+        &'a self,
+        project_root: &'a Path,
+        layout: &'a StoreLayout,
+        database: Arc<RegisteredGlobalDb>,
+    ) -> RuntimeConfigurationFuture<'a, OpenedRuntimeConfiguration>;
+
+    fn open_read_only<'a>(
         &'a self,
         project_root: &'a Path,
         layout: &'a StoreLayout,
@@ -173,13 +192,23 @@ pub fn install_runtime_configuration_authority(
         .map_err(|_| config_error("runtime configuration authority is already installed"))
 }
 
-pub(crate) async fn open_runtime_configuration_for_registered_database(
+pub async fn open_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &StoreLayout,
     database: Arc<RegisteredGlobalDb>,
 ) -> Result<OpenedRuntimeConfiguration> {
     runtime_configuration_authority()?
         .open(project_root, layout, database)
+        .await
+}
+
+pub async fn open_runtime_configuration_for_registered_database_read_only(
+    project_root: &Path,
+    layout: &StoreLayout,
+    database: Arc<RegisteredGlobalDb>,
+) -> Result<OpenedRuntimeConfiguration> {
+    runtime_configuration_authority()?
+        .open_read_only(project_root, layout, database)
         .await
 }
 
@@ -257,6 +286,17 @@ pub fn install_configuration_daemon_client_for_project(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clients
         .insert(target.project_id.as_str().to_owned(), client);
+}
+
+pub fn configuration_daemon_client_for_project(
+    project_id: &ProjectId,
+) -> Option<Arc<dyn ConfigurationDaemonClient>> {
+    runtime_configuration_state()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clients
+        .get(project_id.as_str())
+        .cloned()
 }
 
 pub fn uninstall_configuration_daemon_client_for_project(

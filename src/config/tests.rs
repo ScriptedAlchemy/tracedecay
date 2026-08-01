@@ -1406,6 +1406,12 @@ mod runtime_configuration_cutover {
         SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::{ProjectId, UtcMicros};
+    use tracedecay_usecases::config::{
+        ConfigurationDaemonClient as UsecaseConfigurationDaemonClient,
+        PinnedRuntimeConfiguration as UsecasePinnedRuntimeConfiguration,
+        RuntimeConfigurationFuture as UsecaseRuntimeConfigurationFuture,
+        RuntimeConfigurationTarget as UsecaseRuntimeConfigurationTarget,
+    };
 
     use crate::application::configuration::{
         ConfigurationControlStore, DirectConfigurationMutation,
@@ -1414,16 +1420,15 @@ mod runtime_configuration_cutover {
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
-        ConfigurationDaemonClient, PinnedRuntimeConfiguration, RuntimeConfigurationCache,
-        RuntimeConfigurationFuture, RuntimeConfigurationTarget, TraceDecayConfig,
-        cached_runtime_configuration, cached_sync_config, cached_telemetry_config,
-        commit_runtime_configuration_mutation, direct_mutation_for_runtime_config_diff,
-        install_pinned_runtime_configuration, mutate_pinned_runtime_configuration,
-        runtime_configuration_for_layout,
-    };
-    use crate::config::{
         LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
         resolve_legacy_configuration_inputs,
+    };
+    use crate::config::{
+        PinnedRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
+        TraceDecayConfig, cached_runtime_configuration, cached_sync_config,
+        cached_telemetry_config, commit_runtime_configuration_mutation,
+        direct_mutation_for_runtime_config_diff, install_pinned_runtime_configuration,
+        mutate_pinned_runtime_configuration, runtime_configuration_for_layout,
     };
 
     fn project_id(value: &str) -> ProjectId {
@@ -1435,23 +1440,23 @@ mod runtime_configuration_cutover {
     }
 
     struct RecordingDaemonClient {
-        next: PinnedRuntimeConfiguration,
+        next: UsecasePinnedRuntimeConfiguration,
         calls: Mutex<
             Vec<(
-                RuntimeConfigurationTarget,
+                UsecaseRuntimeConfigurationTarget,
                 DirectConfigurationMutation,
                 ConfigurationRevisionId,
             )>,
         >,
     }
 
-    impl ConfigurationDaemonClient for RecordingDaemonClient {
+    impl UsecaseConfigurationDaemonClient for RecordingDaemonClient {
         fn mutate_direct(
             &self,
-            target: RuntimeConfigurationTarget,
+            target: UsecaseRuntimeConfigurationTarget,
             mutation: DirectConfigurationMutation,
             expected_revision: ConfigurationRevisionId,
-        ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration> {
+        ) -> UsecaseRuntimeConfigurationFuture<'_, UsecasePinnedRuntimeConfiguration> {
             self.calls
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1622,8 +1627,8 @@ mod runtime_configuration_cutover {
                 .expect("runtime fields have typed settings")
                 .expect("gitignore update requires a mutation");
         let expected_mutation = mutation.clone();
-        let next = PinnedRuntimeConfiguration::new(
-            RuntimeConfigurationTarget {
+        let next = UsecasePinnedRuntimeConfiguration::new(
+            UsecaseRuntimeConfigurationTarget {
                 project_id: project_id.clone(),
                 project_root: returned_root.path().to_path_buf(),
             },
@@ -1659,7 +1664,8 @@ mod runtime_configuration_cutover {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, current.target);
+        assert_eq!(calls[0].0.project_id, current.target.project_id);
+        assert_eq!(calls[0].0.project_root, current.target.project_root);
         assert_eq!(calls[0].1, expected_mutation);
         assert_eq!(calls[0].2, current_revision);
         assert_eq!(published.revision_id, next_revision);
