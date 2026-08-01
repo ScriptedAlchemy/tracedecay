@@ -5723,14 +5723,20 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower",
+ "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
+ "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-global-db",
+ "tracedecay-hooks",
  "tracedecay-lsp",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-tool-catalog",
+ "tracedecay-usecases",
  "tracing",
 ]
 
@@ -5828,6 +5834,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "fs2",
+ "getrandom 0.2.17",
  "gix",
  "hex",
  "rusqlite",

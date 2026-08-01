@@ -9,12 +9,16 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [features]
 # Fault injection for cutover receipts, matching the root crate's feature of
 # the same name so `--all-features` keeps exercising the same code.
-test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+test-transport = [
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+]
 
 [dependencies]
 dirs = "6"
 fs2 = "0.4"
 gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+getrandom = "0.2"
 hex = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 serde = { version = "1", features = ["derive"] }

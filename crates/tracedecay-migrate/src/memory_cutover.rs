@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId};
+use tracedecay_domain::{FactOwnerV1, ProjectId, ProvenanceId, SourceStoreId};
 use tracedecay_store::{
-    CompatibilityLegacyMemoryCutoverProgressV1, MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1,
-    plan_memory_v2_owner_merge,
+    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
+    FactCompatibilityStore, MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, plan_memory_v2_owner_merge,
 };
 
 use tracedecay_runtime_core::branch_meta;
@@ -25,7 +25,7 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage;
-use crate::root_seam::tracedecay_root::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
 const LEGACY_SOURCE_STORE: &str = "legacy-memory-v1";
 const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
@@ -180,16 +180,14 @@ pub async fn apply(
         &resolved.profile_root,
         "project-wide branch memory cutover",
     )?;
-    let graph = TraceDecay::open_with_exclusive_maintenance(
-        &resolved.project_root,
-        TraceDecayOpenOptions {
-            profile_root: Some(resolved.profile_root.clone()),
-            global_db_path: None,
-        },
-        &lifecycle,
-    )
-    .await?;
-    apply_planned(&resolved, &graph, planned).await
+    let identity = crate::profile_identity::load_or_create(&resolved.profile_root)?;
+    let runtime = crate::session_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
+    let project_id = ProjectId::new(resolved.project_id.clone())
+        .map_err(|error| migration_error(error.to_string()))?;
+    let target = runtime
+        .project_memory(project_id, [resolved.project_root.clone()])
+        .await?;
+    apply_planned(&resolved, &target, planned).await
 }
 
 /// Runs the same generation-bound cutover as the offline migration command
@@ -197,29 +195,33 @@ pub async fn apply(
 /// project-store writers for the duration; source generations are still
 /// verified before the receipt is published, so external or ambiguous changes
 /// fail closed.
-pub async fn apply_for_retained_project(graph: &TraceDecay) -> Result<MemoryCutoverReport> {
+pub async fn apply_for_retained_project(
+    project_root: &Path,
+    profile_root: &Path,
+    store_layout: &storage::StoreLayout,
+    target: &tracedecay_runtime_core::db::Database,
+) -> Result<MemoryCutoverReport> {
     let options = MemoryCutoverOptions {
-        project_root: graph.project_root().to_path_buf(),
-        profile_root: graph.retained_profile_root()?,
+        project_root: project_root.to_path_buf(),
+        profile_root: profile_root.to_path_buf(),
     };
     let resolved = resolve(&options)?;
-    if graph.store_layout().data_root != resolved.data_root
-        || graph.store_layout().graph_db_path != resolved.graph_db_path
+    if store_layout.data_root != resolved.data_root
+        || store_layout.graph_db_path != resolved.graph_db_path
     {
         return Err(migration_error(
             "retained project graph does not match the resolved project-memory cutover store",
         ));
     }
     let planned = plan_resolved(&resolved).await?;
-    apply_planned(&resolved, graph, planned).await
+    apply_planned(&resolved, target, planned).await
 }
 
 async fn apply_planned(
     resolved: &ResolvedMemoryCutover,
-    graph: &TraceDecay,
+    target: &tracedecay_runtime_core::db::Database,
     planned: MemoryCutoverReport,
 ) -> Result<MemoryCutoverReport> {
-    let target = graph.open_project_store_db().await?;
     let scratch = resolved.data_root.join("scratch").join("memory-cutover");
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
     let mut archive_proofs = Vec::with_capacity(planned.sources.len());
@@ -237,7 +239,7 @@ async fn apply_planned(
                     migration_error(format!("snapshot '{}': {error}", source.path.display()))
                 })?;
         let proofs =
-            crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
+            crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(target, &snapshot)
                 .await?;
         if source.memory_v2_fact_count > 0 && proofs.is_empty() {
             return Err(migration_error(format!(
@@ -247,7 +249,7 @@ async fn apply_planned(
         }
         archive_proofs.push((source.path.clone(), proofs));
     }
-    crate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(&target).await?;
+    crate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(target).await?;
 
     let owner = FactOwnerV1::Project {
         project_id: ProjectId::new(resolved.project_id.clone())
@@ -259,6 +261,13 @@ async fn apply_planned(
         .reopen_memory_v2_cutover_for_legacy_union(&owner, &source_store_id)
         .await?;
 
+    let cutover = CompatibilityLegacyMemoryCutoverCommandV1::new(
+        owner,
+        ProvenanceId::new("v1-cutover".to_owned())
+            .map_err(|error| migration_error(error.to_string()))?,
+    )
+    .map_err(|error| migration_error(error.to_string()))?;
+    let store = DatabaseFactStore::new(target);
     let mut cutover_passes = 0;
     loop {
         cutover_passes += 1;
@@ -267,7 +276,10 @@ async fn apply_planned(
                 "memory cutover exceeded its bounded pass limit",
             ));
         }
-        if graph.advance_project_memory_cutover_once().await?
+        if store
+            .advance_compatibility_legacy_memory_cutover(cutover.clone())
+            .await
+            .map_err(|error| migration_error(error.to_string()))?
             == CompatibilityLegacyMemoryCutoverProgressV1::Complete
         {
             break;
