@@ -2674,10 +2674,10 @@ mod tests {
         .expect("render task XML");
 
         assert!(xml.contains(
-            r#"<Command>C:\Program Files\Trace&lt;&amp;&quot;&apos;Decay\tracedecay.exe</Command>"#
+            r"<Command>C:\Program Files\Trace&lt;&amp;&quot;&apos;Decay\tracedecay.exe</Command>"
         ));
         assert!(xml.contains(
-            r#"<Arguments>daemon run --profile-root &quot;C:\Users\Zack &amp; &lt;Trace&gt;\&quot;&apos;Decay&quot;</Arguments>"#
+            r"<Arguments>daemon run --profile-root &quot;C:\Users\Zack &amp; &lt;Trace&gt;\&quot;&apos;Decay&quot;</Arguments>"
         ));
         assert!(xml.contains("<LogonTrigger>"));
         assert_eq!(

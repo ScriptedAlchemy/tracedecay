@@ -1,7 +1,6 @@
 use tracedecay_domain::ObservationSourceRangeV1;
 
 use super::super::test_support::*;
-use super::super::*;
 use super::*;
 
 #[test]

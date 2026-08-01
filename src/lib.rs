@@ -103,6 +103,7 @@ pub mod memory;
 pub mod migrate;
 pub mod monitor;
 mod open_store_holders;
+#[cfg(test)]
 mod os_str_bytes;
 mod path_scope;
 mod path_tree;
