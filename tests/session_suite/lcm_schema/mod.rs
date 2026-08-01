@@ -6,21 +6,23 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-use crate::db::engine::{Connection, TestConnection, TransactionBehavior, params};
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::engine::{
+    Connection, TestConnection, TransactionBehavior, params,
+};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-async fn open_global_db(db_path: &Path) -> crate::errors::Result<TestConnection> {
+async fn open_global_db(db_path: &Path) -> tracedecay_runtime_core::errors::Result<TestConnection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let connection = TestConnection::open(db_path);
-    crate::global_db::ensure_registered_schema(&connection).await?;
+    crate::ensure_registered_schema(&connection).await?;
     Ok(connection)
 }
 
 async fn open_read_only_global_db(
     db_path: &Path,
-) -> crate::errors::Result<Option<(DatabaseAuthority, Database)>> {
+) -> tracedecay_runtime_core::errors::Result<Option<(DatabaseAuthority, Database)>> {
     if !db_path.try_exists()? {
         return Ok(None);
     }

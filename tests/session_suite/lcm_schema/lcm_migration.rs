@@ -10,12 +10,16 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
         schema_version_on(&db).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
 
-    let legacy = crate::sessions::lcm::schema::load_raw_message(&*db, "cursor", "legacy-message")
-        .await
-        .expect("legacy message should be carried into raw store");
+    let legacy = tracedecay_sessions::runtime::lcm::schema::load_raw_message(
+        &*db,
+        "cursor",
+        "legacy-message",
+    )
+    .await
+    .expect("legacy message should be carried into raw store");
     assert_eq!(legacy.provider, "cursor");
     assert_eq!(legacy.message_id, "legacy-message");
     assert_eq!(legacy.session_id, "legacy-session");
@@ -24,7 +28,7 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
     assert_eq!(legacy.content, "legacy text");
     assert_eq!(
         legacy.storage_kind,
-        crate::sessions::lcm::LcmStorageKind::Inline
+        tracedecay_sessions::runtime::lcm::LcmStorageKind::Inline
     );
     assert!(legacy.legacy_source);
     assert!(!legacy.legacy_truncated);
@@ -47,9 +51,13 @@ async fn lcm_schema_marks_legacy_truncated_messages() {
     create_legacy_sessions_db_with_text(&db_path, legacy_text).await;
 
     let db = open_global_db(&db_path).await.expect("global db open");
-    let legacy = crate::sessions::lcm::schema::load_raw_message(&*db, "cursor", "legacy-message")
-        .await
-        .expect("legacy message should be carried into raw store");
+    let legacy = tracedecay_sessions::runtime::lcm::schema::load_raw_message(
+        &*db,
+        "cursor",
+        "legacy-message",
+    )
+    .await
+    .expect("legacy message should be carried into raw store");
 
     assert_eq!(legacy.content, legacy_text);
     assert!(legacy.legacy_source);
@@ -65,19 +73,19 @@ async fn lcm_schema_migration_is_idempotent() {
     let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
         schema_version_on(&db).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
     let reopened = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
         schema_version_on(&reopened).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(
         schema_version(&db_path).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     assert_eq!(row_count(&db_path, "lcm_raw_messages").await, 1);
     assert_eq!(
@@ -207,14 +215,14 @@ async fn lcm_schema_v6_migrates_bounded_codex_pending_queue_indexes() {
 
     #[allow(clippy::assertions_on_constants)]
     {
-        assert!(crate::sessions::lcm::LCM_SCHEMA_VERSION > 6);
+        assert!(tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION > 6);
     }
     let migrated = open_global_db(&db_path)
         .await
         .expect("v6 database should migrate");
     assert_eq!(
         schema_version_on(&migrated).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(migrated);
 
@@ -295,7 +303,7 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
     let migrated = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
         schema_version_on(&migrated).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(migrated);
 
@@ -326,7 +334,7 @@ async fn lcm_schema_v3_migration_restructures_raw_fts_and_preserves_search() {
     let reopened = open_global_db(&db_path).await.expect("idempotent reopen");
     assert_eq!(
         schema_version_on(&reopened).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(
@@ -354,14 +362,14 @@ async fn lcm_schema_future_version_is_preserved_without_remigration() {
     let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
         schema_version_on(&db).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
     // Simulate a database last touched by a newer tracedecay: bump the version
     // marker past this binary and have the newer schema relocate carried rows
     // out of lcm_raw_messages.
-    let future_version = crate::sessions::lcm::LCM_SCHEMA_VERSION + 97;
+    let future_version = tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION + 97;
     set_migration_version(&db_path, future_version).await;
     set_migration_applied_at(&db_path, 456).await;
     {
@@ -398,7 +406,7 @@ async fn lcm_schema_current_version_reopen_skips_migration_update() {
     let db = open_global_db(&db_path).await.expect("global db open");
     assert_eq!(
         schema_version_on(&db).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(db);
 
@@ -408,7 +416,7 @@ async fn lcm_schema_current_version_reopen_skips_migration_update() {
     let reopened = open_global_db(&db_path).await.expect("global db reopen");
     assert_eq!(
         schema_version_on(&reopened).await,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION
+        tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
     assert_eq!(migration_applied_at(&db_path).await, 123);
