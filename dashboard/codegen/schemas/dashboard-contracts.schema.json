@@ -38,6 +38,10 @@
       ],
       "type": "object"
     },
+    "AccessRuleId": {
+      "description": "Strongly typed canonical identity: `AccessRuleId`.",
+      "type": "string"
+    },
     "ActorId": {
       "description": "Strongly typed canonical identity: `ActorId`.",
       "type": "string"
@@ -222,7 +226,7 @@
         {
           "properties": {
             "id": {
-              "type": "string"
+              "$ref": "#/$defs/UserProfileId"
             },
             "kind": {
               "const": "projectless_hermes",
@@ -817,6 +821,10 @@
       "description": "Strongly typed canonical identity: `CapabilityId`.",
       "type": "string"
     },
+    "ChangePlanId": {
+      "description": "Strongly typed canonical identity: `ChangePlanId`.",
+      "type": "string"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -929,20 +937,24 @@
       ],
       "type": "object"
     },
+    "ConfigurationIdempotencyKey": {
+      "description": "Strongly typed canonical identity: `ConfigurationIdempotencyKey`.",
+      "type": "string"
+    },
     "ConfigurationProtectedApplySurfaceRequest": {
       "additionalProperties": false,
       "properties": {
         "expected_base_revision_id": {
-          "type": "string"
+          "$ref": "#/$defs/ConfigurationRevisionId"
         },
         "idempotency_key": {
-          "type": "string"
+          "$ref": "#/$defs/ConfigurationIdempotencyKey"
         },
         "operation_digest": {
           "$ref": "#/$defs/ManifestDigest"
         },
         "plan_id": {
-          "type": "string"
+          "$ref": "#/$defs/ChangePlanId"
         }
       },
       "required": [
@@ -960,7 +972,7 @@
           "$ref": "#/$defs/ProtectedChange"
         },
         "expected_revision": {
-          "type": "string"
+          "$ref": "#/$defs/ConfigurationRevisionId"
         }
       },
       "required": [
@@ -968,6 +980,10 @@
         "expected_revision"
       ],
       "type": "object"
+    },
+    "ConfigurationRevisionId": {
+      "description": "Strongly typed canonical identity: `ConfigurationRevisionId`.",
+      "type": "string"
     },
     "CostsReadModelV1": {
       "properties": {
@@ -8007,7 +8023,7 @@
             "value": {
               "properties": {
                 "binding_id": {
-                  "type": "string"
+                  "$ref": "#/$defs/SourceBindingId"
                 }
               },
               "required": [
@@ -8047,7 +8063,7 @@
             "value": {
               "properties": {
                 "rule_id": {
-                  "type": "string"
+                  "$ref": "#/$defs/AccessRuleId"
                 }
               },
               "required": [
@@ -9120,7 +9136,7 @@
           ]
         },
         "rule_id": {
-          "type": "string"
+          "$ref": "#/$defs/AccessRuleId"
         },
         "subject": {
           "$ref": "#/$defs/ScopeAccessSubjectV1"
@@ -9393,7 +9409,7 @@
           "$ref": "#/$defs/AuthorityRef"
         },
         "binding_id": {
-          "type": "string"
+          "$ref": "#/$defs/SourceBindingId"
         },
         "source_kind": {
           "$ref": "#/$defs/SourceKindV1"
@@ -9541,6 +9557,10 @@
         "current_observed_at"
       ],
       "type": "object"
+    },
+    "SourceBindingId": {
+      "description": "Strongly typed canonical identity: `SourceBindingId`.",
+      "type": "string"
     },
     "SourceKindV1": {
       "enum": [
@@ -11376,6 +11396,10 @@
     },
     "UseCaseId": {
       "description": "Stable, canonical catalog identity for `UseCaseId`.",
+      "type": "string"
+    },
+    "UserProfileId": {
+      "description": "Strongly typed canonical identity: `UserProfileId`.",
       "type": "string"
     },
     "UserSettingsPatch": {
