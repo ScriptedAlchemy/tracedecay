@@ -226,12 +226,15 @@ use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,
     portable_project_server_for_request, schedule_portable_project_server_warmup,
 };
+// The portable reconciler only exists off-unix (or under test transports), so
+// its import carries the same gate as its definition.
+#[cfg(any(not(unix), test, feature = "test-transport"))]
+use project_routing::portable_database_owner_reconciler;
 use project_routing::{
     CatalogRefreshClientKey, bind_authenticated_profile_identity, maintenance_transition_gate,
-    portable_database_owner_reconciler, project_open_cancellation_checkpoint,
-    project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_warming_error,
+    project_open_cancellation_checkpoint, project_open_cancellation_error, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
+    project_server_capacity_error, project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
