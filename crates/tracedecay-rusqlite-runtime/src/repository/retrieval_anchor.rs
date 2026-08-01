@@ -6,7 +6,7 @@ use tracedecay_store::{
     RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
 };
 
-use super::support::{decode, encode, invalid};
+use super::support::{decode, encode, idempotent_insert, invalid};
 
 #[derive(Clone, Default)]
 pub struct RetrievalAnchorExecutor;
@@ -91,41 +91,24 @@ impl RetrievalAnchorExecutor {
                 "cannot publish lineage from an unavailable retrieval anchor",
             ));
         }
-        let changed = savepoint.execute(
-            "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
-                source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                derivative.source_anchor_id().as_str(),
-                owner,
-                derivative.kind().as_str(),
-                derivative.derivative_id(),
-                i64::from(derivative.is_direct_evidence()),
+        idempotent_insert(
+            savepoint,
+            "retrieval_anchor_reverse_lineage",
+            &[
+                (
+                    "source_anchor_id",
+                    derivative.source_anchor_id().as_str().into(),
+                ),
+                ("owner_json", owner.into()),
+                ("derivative_kind", derivative.kind().as_str().into()),
+                ("derivative_id", derivative.derivative_id().into()),
             ],
-        )?;
-        if changed == 1 {
-            return Ok(());
-        }
-        let replayed = savepoint
-            .query_row(
-                "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
-                 WHERE source_anchor_id = ?1 AND owner_json = ?2
-                   AND derivative_kind = ?3 AND derivative_id = ?4",
-                params![
-                    derivative.source_anchor_id().as_str(),
-                    encode(derivative.owner())?,
-                    derivative.kind().as_str(),
-                    derivative.derivative_id(),
-                ],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            == Some(i64::from(derivative.is_direct_evidence()));
-        if replayed {
-            Ok(())
-        } else {
-            Err(invalid("retrieval anchor derivative replay conflict"))
-        }
+            &[(
+                "direct_evidence",
+                i64::from(derivative.is_direct_evidence()).into(),
+            )],
+            "retrieval anchor derivative replay conflict",
+        )
     }
 
     pub fn execute_read(

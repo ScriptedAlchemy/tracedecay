@@ -7,7 +7,9 @@ use tracedecay_store::{
     RetrievalAnchorOwnerV1, RetrieverContributionRecordV1,
 };
 
-use super::support::{canonical_digest, decode, encode, invalid, u64_to_i64, usize_to_i64};
+use super::support::{
+    canonical_digest, decode, encode, idempotent_insert, invalid, u64_to_i64, usize_to_i64,
+};
 
 #[derive(Clone, Default)]
 pub struct EvidenceAssemblyExecutor;
@@ -633,42 +635,25 @@ fn insert_anchor(
     anchor: &RetrievalAnchorRecordV3,
 ) -> rusqlite::Result<()> {
     anchor.validate().map_err(invalid)?;
-    let anchor_json = encode(anchor)?;
-    let owner_json = encode(anchor.owner())?;
-    let projection_generation = anchor.projection_generation().as_str();
-    let changed = connection.execute(
-        "INSERT OR IGNORE INTO retrieval_anchors (
-            anchor_id, anchor_json, owner_json, projection_generation
-         ) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            anchor.anchor_id().as_str(),
-            anchor_json,
-            owner_json,
-            projection_generation,
+    idempotent_insert(
+        connection,
+        "retrieval_anchors",
+        &[("anchor_id", anchor.anchor_id().as_str().into())],
+        &[
+            ("anchor_json", encode(anchor)?.into()),
+            ("owner_json", encode(anchor.owner())?.into()),
+            (
+                "projection_generation",
+                anchor.projection_generation().as_str().into(),
+            ),
         ],
-    )?;
-    if changed == 1 {
-        return Ok(());
-    }
-    let existing = connection.query_row(
-        "SELECT anchor_json, owner_json, projection_generation
-         FROM retrieval_anchors WHERE anchor_id = ?1",
-        [anchor.anchor_id().as_str()],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    if existing == (anchor_json, owner_json, projection_generation.to_owned()) {
-        Ok(())
-    } else {
-        Err(invalid("retrieval anchor replay conflict"))
-    }
+        "retrieval anchor replay conflict",
+    )
 }
 
+/// Writes one row of an immutable record table, which is any table keyed by a
+/// single id and carrying the canonical `record_digest`/`record_json` pair plus
+/// whatever columns it denormalizes out of that record for indexing.
 fn insert_immutable(
     connection: &rusqlite::Connection,
     table: &'static str,
@@ -678,47 +663,22 @@ fn insert_immutable(
     record_json: String,
     extra: &[(&'static str, String)],
 ) -> rusqlite::Result<()> {
-    let mut columns = vec![id_column, "record_digest", "record_json"];
-    columns.extend(extra.iter().map(|(column, _)| *column));
-    let placeholders = (1..=columns.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "INSERT OR IGNORE INTO {table} ({}) VALUES ({placeholders})",
-        columns.join(", ")
+    let mut values = vec![
+        ("record_digest", record_digest.into()),
+        ("record_json", record_json.into()),
+    ];
+    values.extend(
+        extra
+            .iter()
+            .map(|(column, value)| (*column, value.clone().into())),
     );
-    let mut values = vec![id.to_owned(), record_digest.clone(), record_json.clone()];
-    values.extend(extra.iter().map(|(_, value)| value.clone()));
-    let changed = connection.execute(&sql, rusqlite::params_from_iter(values))?;
-    if changed == 1 {
-        return Ok(());
-    }
-    let projected_extra = extra
-        .iter()
-        .map(|(column, _)| format!("CAST({column} AS TEXT)"))
-        .collect::<Vec<_>>();
-    let extra_projection = if projected_extra.is_empty() {
-        String::new()
-    } else {
-        format!(", {}", projected_extra.join(", "))
-    };
-    let sql = format!(
-        "SELECT record_digest, record_json{extra_projection}
-         FROM {table} WHERE {id_column} = ?1"
-    );
-    let existing = connection.query_row(&sql, [id], |row| {
-        (0..(2 + extra.len()))
-            .map(|index| row.get::<_, String>(index))
-            .collect::<rusqlite::Result<Vec<_>>>()
-    })?;
-    let mut expected = vec![record_digest, record_json];
-    expected.extend(extra.iter().map(|(_, value)| value.clone()));
-    if existing == expected {
-        Ok(())
-    } else {
-        Err(invalid(format!("{table} immutable replay conflict")))
-    }
+    idempotent_insert(
+        connection,
+        table,
+        &[(id_column, id.into())],
+        &values,
+        &format!("{table} immutable replay conflict"),
+    )
 }
 
 fn insert_membership(
@@ -730,39 +690,19 @@ fn insert_membership(
     ordinal: usize,
     occurrence_id: &str,
 ) -> rusqlite::Result<()> {
-    let sql = format!(
-        "INSERT OR IGNORE INTO {table} (
-            {parent_column}, {ordinal_column}, occurrence_id
-         ) VALUES (?1, ?2, ?3)"
-    );
-    let changed = connection.execute(
-        &sql,
-        params![
-            parent_id,
-            usize_to_i64(ordinal, "evidence membership ordinal")?,
-            occurrence_id
+    idempotent_insert(
+        connection,
+        table,
+        &[
+            (parent_column, parent_id.into()),
+            (
+                ordinal_column,
+                usize_to_i64(ordinal, "evidence membership ordinal")?.into(),
+            ),
         ],
-    )?;
-    if changed == 1 {
-        return Ok(());
-    }
-    let sql = format!(
-        "SELECT occurrence_id FROM {table}
-         WHERE {parent_column} = ?1 AND {ordinal_column} = ?2"
-    );
-    let existing = connection.query_row(
-        &sql,
-        params![
-            parent_id,
-            usize_to_i64(ordinal, "evidence membership ordinal")?
-        ],
-        |row| row.get::<_, String>(0),
-    )?;
-    if existing == occurrence_id {
-        Ok(())
-    } else {
-        Err(invalid(format!("{table} immutable replay conflict")))
-    }
+        &[("occurrence_id", occurrence_id.into())],
+        &format!("{table} immutable replay conflict"),
+    )
 }
 
 fn insert_span_membership(
@@ -773,48 +713,29 @@ fn insert_span_membership(
     run_member_ordinal: usize,
     occurrence_id: &str,
 ) -> rusqlite::Result<()> {
-    let changed = connection.execute(
-        "INSERT OR IGNORE INTO evidence_span_members (
-            span_id, assembly_ordinal, run_ordinal, run_member_ordinal, occurrence_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            span_id,
-            usize_to_i64(assembly_ordinal, "evidence assembly ordinal")?,
-            usize_to_i64(run_ordinal, "evidence run ordinal")?,
-            usize_to_i64(run_member_ordinal, "evidence run member ordinal")?,
-            occurrence_id,
+    idempotent_insert(
+        connection,
+        "evidence_span_members",
+        &[
+            ("span_id", span_id.into()),
+            (
+                "assembly_ordinal",
+                usize_to_i64(assembly_ordinal, "evidence assembly ordinal")?.into(),
+            ),
         ],
-    )?;
-    if changed == 1 {
-        return Ok(());
-    }
-    let existing = connection.query_row(
-        "SELECT run_ordinal, run_member_ordinal, occurrence_id
-         FROM evidence_span_members
-         WHERE span_id = ?1 AND assembly_ordinal = ?2",
-        params![
-            span_id,
-            usize_to_i64(assembly_ordinal, "evidence assembly ordinal")?
+        &[
+            (
+                "run_ordinal",
+                usize_to_i64(run_ordinal, "evidence run ordinal")?.into(),
+            ),
+            (
+                "run_member_ordinal",
+                usize_to_i64(run_member_ordinal, "evidence run member ordinal")?.into(),
+            ),
+            ("occurrence_id", occurrence_id.into()),
         ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
-    )?;
-    if existing
-        == (
-            usize_to_i64(run_ordinal, "evidence run ordinal")?,
-            usize_to_i64(run_member_ordinal, "evidence run member ordinal")?,
-            occurrence_id.to_owned(),
-        )
-    {
-        Ok(())
-    } else {
-        Err(invalid("evidence span membership replay conflict"))
-    }
+        "evidence span membership replay conflict",
+    )
 }
 
 fn publish_reverse_lineage(
@@ -831,35 +752,21 @@ fn publish_reverse_lineage(
             ("span", write.span.span_id.as_str()),
             ("contribution", write.contribution.contribution_id.as_str()),
         ] {
-            let changed = connection.execute(
-                "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
-                    source_anchor_id, owner_json, derivative_kind, derivative_id,
-                    direct_evidence
-                 ) VALUES (?1, ?2, ?3, ?4, 1)",
-                params![
-                    occurrence.exact_source_anchor.as_str(),
-                    owner_json,
-                    kind,
-                    derivative_id,
+            idempotent_insert(
+                connection,
+                "retrieval_anchor_reverse_lineage",
+                &[
+                    (
+                        "source_anchor_id",
+                        occurrence.exact_source_anchor.as_str().into(),
+                    ),
+                    ("owner_json", owner_json.clone().into()),
+                    ("derivative_kind", kind.into()),
+                    ("derivative_id", derivative_id.into()),
                 ],
+                &[("direct_evidence", 1_i64.into())],
+                "evidence reverse lineage replay conflict",
             )?;
-            if changed == 0 {
-                let direct = connection.query_row(
-                    "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
-                     WHERE source_anchor_id = ?1 AND owner_json = ?2
-                       AND derivative_kind = ?3 AND derivative_id = ?4",
-                    params![
-                        occurrence.exact_source_anchor.as_str(),
-                        owner_json,
-                        kind,
-                        derivative_id,
-                    ],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                if direct != 1 {
-                    return Err(invalid("evidence reverse lineage replay conflict"));
-                }
-            }
         }
     }
     Ok(())
@@ -871,47 +778,18 @@ fn insert_derived_anchor(
     owner_digest: &str,
 ) -> rusqlite::Result<()> {
     let (target_kind, target_id) = evidence_target(anchor)?;
-    let anchor_json = encode(anchor)?;
-    let changed = connection.execute(
-        "INSERT OR IGNORE INTO evidence_derived_anchors (
-            anchor_id, owner_digest, target_kind, target_id, anchor_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            anchor.anchor_id().as_str(),
-            owner_digest,
-            target_kind,
-            target_id,
-            anchor_json,
+    idempotent_insert(
+        connection,
+        "evidence_derived_anchors",
+        &[("anchor_id", anchor.anchor_id().as_str().into())],
+        &[
+            ("owner_digest", owner_digest.into()),
+            ("target_kind", target_kind.into()),
+            ("target_id", target_id.into()),
+            ("anchor_json", encode(anchor)?.into()),
         ],
-    )?;
-    if changed == 1 {
-        return Ok(());
-    }
-    let existing = connection.query_row(
-        "SELECT owner_digest, target_kind, target_id, anchor_json
-         FROM evidence_derived_anchors WHERE anchor_id = ?1",
-        [anchor.anchor_id().as_str()],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
-    )?;
-    if existing
-        == (
-            owner_digest.to_owned(),
-            target_kind.to_owned(),
-            target_id.to_owned(),
-            anchor_json,
-        )
-    {
-        Ok(())
-    } else {
-        Err(invalid("evidence derived anchor replay conflict"))
-    }
+        "evidence derived anchor replay conflict",
+    )
 }
 
 fn evidence_target(anchor: &RetrievalAnchorRecordV3) -> rusqlite::Result<(&'static str, &str)> {
