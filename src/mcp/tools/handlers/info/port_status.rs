@@ -70,10 +70,7 @@ fn port_parent_qualifier(node: &crate::types::Node) -> Option<String> {
 
 /// Handles `tracedecay_port_status` tool calls.
 pub(crate) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_port_status expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_port_status")?;
 
     let source_dir = args
         .get("source_dir")

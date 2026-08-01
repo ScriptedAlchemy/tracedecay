@@ -9,7 +9,7 @@ pub(crate) async fn handle_rank(
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     use crate::types::EdgeKind;
-    debug_assert!(args.is_object(), "handle_rank expects an object argument");
+    require_object_args(&args, "tracedecay_rank")?;
 
     let edge_kind_str = args
         .get("edge_kind")
@@ -246,10 +246,7 @@ pub(crate) async fn handle_distribution(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_distribution expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_distribution")?;
     let path_prefix = effective_path(&args, scope_prefix);
     let summary = args
         .get("summary")

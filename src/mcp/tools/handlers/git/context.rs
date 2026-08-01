@@ -8,10 +8,7 @@ use super::*;
 
 /// Handles `tracedecay_diff_context` tool calls.
 pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_diff_context expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_diff_context")?;
     let files = require_string_array_arg(&args, "files")?;
     let depth = clamped_depth_arg(&args, "depth", 2, 10);
 
@@ -114,10 +111,7 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
 }
 /// Handles `tracedecay_changelog` tool calls.
 pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_changelog expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_changelog")?;
     let from_ref = args
         .get("from_ref")
         .and_then(|v| v.as_str())

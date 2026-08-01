@@ -59,7 +59,7 @@ use super::project_registry::{
 };
 use super::support::{
     effective_path, filter_by_scope, generic_tool_result, is_explicit_project_path_selector,
-    rendered_tool_result, require_node_id, unique_file_paths,
+    rendered_tool_result, require_node_id, require_object_args, unique_file_paths,
 };
 
 fn display_path(path: &std::path::Path) -> String {

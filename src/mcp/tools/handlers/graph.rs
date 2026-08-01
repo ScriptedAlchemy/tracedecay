@@ -30,8 +30,8 @@ use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
     self, CONTEXT_MEMORY_ANALYTICS_KEY, effective_path, filter_by_scope, require_node_id,
-    string_array_values, take_internal_context_memory_analytics, text_tool_result,
-    unique_file_paths,
+    require_object_args, string_array_values, take_internal_context_memory_analytics,
+    text_tool_result, unique_file_paths,
 };
 
 fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSearchModeV1> {
@@ -1194,10 +1194,7 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
 /// Handles `tracedecay_similar` tool calls.
 pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_similar expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_similar")?;
     let symbol =
         args.get("symbol")
             .and_then(|v| v.as_str())
