@@ -8,11 +8,10 @@ use tracedecay::automation::managed_skills::{
     update_managed_skill,
 };
 use tracedecay::automation::skill_usage::{
-    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
-    record_skill_usage, record_skill_usage_event, skill_usage_ledger_path, summarize_skill_usage,
-    summarize_skill_usage_for,
+    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
+    load_skill_usage_records, record_skill_usage, record_skill_usage_event,
+    skill_usage_ledger_path, summarize_skill_usage, summarize_skill_usage_for,
 };
-use tracedecay::global_db::AnalyticsEventRecord;
 
 fn draft() -> ManagedSkillDraft {
     ManagedSkillDraft {

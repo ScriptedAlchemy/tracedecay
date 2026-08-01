@@ -3,11 +3,10 @@ use tracedecay::automation::managed_skills::{
     default_managed_skill_targets,
 };
 use tracedecay::automation::skill_usage::{
-    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, record_skill_usage,
-    record_skill_usage_event, skill_improvement_recommendations, stale_skill_recommendations,
-    summarize_skill_usage,
+    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
+    record_skill_usage, record_skill_usage_event, skill_improvement_recommendations,
+    stale_skill_recommendations, summarize_skill_usage,
 };
-use tracedecay::global_db::AnalyticsEventRecord;
 
 fn draft(id: &str, source: ManagedSkillSource) -> ManagedSkillDraft {
     ManagedSkillDraft {

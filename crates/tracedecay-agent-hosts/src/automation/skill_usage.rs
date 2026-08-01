@@ -12,6 +12,7 @@ mod analytics;
 mod overlap;
 mod recommendations;
 
+pub use crate::ports::session_store::AnalyticsEventRecord;
 pub use analytics::analytics_import_key_for_request;
 pub use analytics::ingest_analytics_events;
 pub use analytics::ingest_project_analytics_events;
