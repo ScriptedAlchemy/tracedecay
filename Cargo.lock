@@ -5491,7 +5491,6 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
- "fastembed",
  "filetime",
  "flate2",
  "fs2",
@@ -5501,7 +5500,6 @@ dependencies = [
  "gix",
  "glob",
  "hex",
- "hf-hub",
  "hmac 0.13.0",
  "hyper",
  "hyper-util",
@@ -5541,22 +5539,28 @@ dependencies = [
  "toml",
  "toml_edit",
  "tower",
+ "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
+ "tracedecay-global-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
+ "tracedecay-jsonrpc",
  "tracedecay-lsp",
  "tracedecay-migrate",
  "tracedecay-policy",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
  "tracedecay-search-eval",
+ "tracedecay-semantic",
  "tracedecay-sessions",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",
@@ -5574,6 +5578,43 @@ dependencies = [
  "yaml-edit",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "dirs",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-hooks",
+ "tracedecay-host-integration",
+ "tracedecay-lsp",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "url",
+ "webpki-roots",
+ "xattr",
+ "yaml-edit",
 ]
 
 [[package]]
@@ -5628,6 +5669,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "tracedecay-domain",
+ "tracedecay-store",
 ]
 
 [[package]]
@@ -5664,6 +5706,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-dashboard-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dirs",
+ "open",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-tool-catalog",
+ "tracing",
+]
+
+[[package]]
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
@@ -5673,6 +5739,35 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "url",
+]
+
+[[package]]
+name = "tracedecay-global-db"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac 0.13.0",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-capture",
+ "tracedecay-domain",
+ "tracedecay-migrate",
+ "tracedecay-query",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -5699,6 +5794,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-jsonrpc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
@@ -5716,11 +5819,22 @@ dependencies = [
 name = "tracedecay-migrate"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "fs2",
+ "gix",
+ "hex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-store",
+ "tracing",
 ]
 
 [[package]]
@@ -5745,11 +5859,50 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror",
+ "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-temporal-query",
  "zeroize",
+]
+
+[[package]]
+name = "tracedecay-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "amari-holographic",
+ "bincode",
+ "dirs",
+ "fs2",
+ "fsys",
+ "getrandom 0.2.17",
+ "gix",
+ "hex",
+ "libc",
+ "reflink-copy",
+ "regex",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-capture",
+ "tracedecay-code-extraction",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracing",
+ "tree-sitter",
+ "windows-sys 0.61.2",
+ "xattr",
 ]
 
 [[package]]
@@ -5817,14 +5970,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-semantic"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fastembed",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "hf-hub",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-query",
+ "url",
+]
+
+[[package]]
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
+ "dirs",
+ "gix",
+ "hex",
+ "rayon",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracedecay-application",
+ "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "url",
 ]
 
 [[package]]
