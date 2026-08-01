@@ -170,7 +170,7 @@ fn platform_data_dir(home: &Path, product: &str) -> PathBuf {
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
             let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.is_absolute() {
+            if appdata_path.starts_with(home) {
                 return appdata_path.join(product);
             }
         }

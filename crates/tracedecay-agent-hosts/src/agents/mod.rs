@@ -1904,30 +1904,10 @@ pub fn load_jsonc_file_strict(path: &Path) -> Result<serde_json::Value> {
 }
 
 /// Returns the VS Code user data directory, platform-specific.
-pub fn vscode_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Code")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Code")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Code");
-            }
-        }
-        home.join("AppData/Roaming/Code")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Code")
-    }
-}
+///
+/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
+/// dependency graph; see SEAMS.md).
+pub use tracedecay_sessions::host_ports::vscode_data_dir;
 
 /// Returns the platform-specific VS Code Insiders data directory.
 pub fn vscode_insiders_data_dir(home: &Path) -> PathBuf {
@@ -1961,30 +1941,10 @@ pub fn copilot_cli_dir(home: &Path) -> PathBuf {
 }
 
 /// Returns the Kiro IDE user data directory (VS Code-style layout).
-pub fn kiro_data_dir(home: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        home.join("Library/Application Support/Kiro")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        home.join(".config/Kiro")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_path = PathBuf::from(&appdata);
-            if appdata_path.starts_with(home) {
-                return appdata_path.join("Kiro");
-            }
-        }
-        home.join("AppData/Roaming/Kiro")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        home.join(".config/Kiro")
-    }
-}
+///
+/// Canonical copy lives in `tracedecay_sessions::host_ports` (lower in the
+/// dependency graph; see SEAMS.md).
+pub use tracedecay_sessions::host_ports::kiro_data_dir;
 
 /// Returns agent IDs that have tracedecay configured under `home` but are
 /// absent from `current`. Pure — does no I/O on the config file.
