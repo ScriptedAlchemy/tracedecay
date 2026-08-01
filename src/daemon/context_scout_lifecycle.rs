@@ -54,9 +54,9 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     if authority_project_id != &project_id {
         return false;
     }
-    let Ok(mut authorities) = registered_context_scout_lifecycle_authorities().lock() else {
-        return false;
-    };
+    let mut authorities = registered_context_scout_lifecycle_authorities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = (hook_project_id, hook_worktree_id);
     if let Some(existing) = authorities.get(&key)
         && let Some(existing_sessions) = existing.sessions.upgrade()
@@ -79,23 +79,41 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     true
 }
 
+/// Looks up the registered lifecycle authority for a hook-scoped
+/// (project, worktree) pair and upgrades its `Weak` session handle.
+///
+/// Shared prologue for both replay entry points below: resolve the
+/// native profile/project/worktree identity and a live session handle,
+/// or `None` if no authority is registered or its session store has
+/// since been dropped.
+fn resolve_authority(
+    hook_project_id: [u8; 16],
+    hook_worktree_id: [u8; 16],
+) -> Option<(
+    UserProfileId,
+    ProjectId,
+    WorktreeId,
+    Arc<RegisteredGlobalDb>,
+)> {
+    let authorities = registered_context_scout_lifecycle_authorities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
+    Some((
+        authority.profile_id.clone(),
+        authority.project_id.clone(),
+        authority.worktree_id.clone(),
+        authority.sessions.upgrade()?,
+    ))
+}
+
 pub(crate) async fn lookup_registered_context_scout_lifecycle(
     hook_project_id: [u8; 16],
     hook_worktree_id: [u8; 16],
     session_id: &SessionId,
 ) -> Option<ContextScoutLifecycleAddressV1> {
-    let (profile_id, project_id, worktree_id, sessions) = {
-        let authorities = registered_context_scout_lifecycle_authorities()
-            .lock()
-            .ok()?;
-        let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
-        (
-            authority.profile_id.clone(),
-            authority.project_id.clone(),
-            authority.worktree_id.clone(),
-            authority.sessions.upgrade()?,
-        )
-    };
+    let (profile_id, project_id, worktree_id, sessions) =
+        resolve_authority(hook_project_id, hook_worktree_id)?;
     lookup_context_scout_lifecycle(
         &profile_id,
         &project_id,
@@ -120,18 +138,8 @@ pub(crate) async fn lookup_registered_context_scout_native_session(
     if protected_session_id == [0; 32] {
         return None;
     }
-    let (profile_id, project_id, worktree_id, sessions) = {
-        let authorities = registered_context_scout_lifecycle_authorities()
-            .lock()
-            .ok()?;
-        let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
-        (
-            authority.profile_id.clone(),
-            authority.project_id.clone(),
-            authority.worktree_id.clone(),
-            authority.sessions.upgrade()?,
-        )
-    };
+    let (profile_id, project_id, worktree_id, sessions) =
+        resolve_authority(hook_project_id, hook_worktree_id)?;
     let session_id = {
         let snapshot = sessions.read_snapshot().await.ok()?;
         let mut rows = snapshot
