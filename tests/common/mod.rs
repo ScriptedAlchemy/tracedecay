@@ -43,12 +43,27 @@ static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
+/// Installs the canonical registered global/session schema installer into the
+/// kernel's fail-closed port before any integration fixture opens a `Database`.
+///
+/// The kernel's `Database::publish_test_runtime` initialises a profile shard
+/// through `tracedecay_runtime_core::ports::registered_schema`, which fails
+/// closed until the root registers the real schema. The daemon does this in
+/// production; suites reuse the identical installer from `tracedecay-global-db`
+/// (a `test-helpers` dev-dependency). The port keeps the first registration, so
+/// calling this at every fixture entry point is safe and idempotent.
+pub fn register_test_schema_installer() {
+    tracedecay_global_db::register_test_schema_installer();
+}
+
 pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize).await
 }
 
 pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
 }
@@ -56,6 +71,7 @@ pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Data
 pub async fn open_test_database_read_only(
     path: &Path,
 ) -> tracedecay::errors::Result<(Database, bool)> {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::ReadOnly).await
 }
@@ -1097,16 +1113,23 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
     let bytes = EMPTY_GRAPH_DB_TEMPLATE
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
-            let template_path = tmp.path().join("template-graph.db");
-            let (db, _) = initialize_test_database(&template_path)
+            let init_path = tmp.path().join("template-graph-init.db");
+            let snapshot_path = tmp.path().join("template-graph.db");
+            let (db, _) = initialize_test_database(&init_path)
                 .await
                 .expect("template graph db initialize");
-            db.checkpoint().await.expect("template graph db checkpoint");
+            // The registered runtime's bounded `checkpoint` can leave a fresh
+            // schema in the WAL, so a bare file read would capture an empty (v0)
+            // database. Snapshot a transactionally consistent standalone copy
+            // instead — the same primitive the global-db/session templates use.
+            db.snapshot_to(&snapshot_path)
+                .await
+                .expect("template graph db snapshot");
             db.close();
-            fs::read(&template_path).unwrap_or_else(|err| {
+            fs::read(&snapshot_path).unwrap_or_else(|err| {
                 panic!(
                     "failed to read graph test DB template '{}': {err}",
-                    template_path.display()
+                    snapshot_path.display()
                 )
             })
         })
