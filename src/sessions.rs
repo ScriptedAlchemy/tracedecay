@@ -11,3 +11,6 @@
 //! are catalogued in `crates/tracedecay-sessions/SEAMS.md`.
 
 pub use tracedecay_sessions::runtime::*;
+
+#[cfg(test)]
+mod claude_observation_benchmark;

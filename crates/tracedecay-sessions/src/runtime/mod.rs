@@ -7,8 +7,6 @@ pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
 // boundary and silently drop that surface from the root shim.
 pub mod claude;
 pub mod claude_observation;
-#[cfg(test)]
-mod claude_observation_benchmark;
 pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;
