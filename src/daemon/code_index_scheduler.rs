@@ -751,6 +751,10 @@ impl Drop for AtomicFlagReset {
 pub(super) struct CodeIndexWorktreeSchedulerV1 {
     project_id: ProjectId,
     project_root: PathBuf,
+    /// Scoped store root for this worktree's sealed generations. Also holds the
+    /// restore-time freshness witness sidecar used to skip a redundant cold
+    /// reconcile when the on-disk source still equals the restored generation.
+    store_root: PathBuf,
     /// The exact indexing identity this worktree is bound to. Re-resolved
     /// before each reconciliation so a HEAD move never mis-attributes a served
     /// generation to a newer revision.
@@ -867,7 +871,29 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ));
             }
         }
-        let freshness_unknown = restored.is_some();
+        // Restore-time freshness witness (P2). A durable witness records the
+        // tier-1 git-metadata and tier-2 stat signatures the restored generation
+        // was reconciled against. When BOTH still match the current on-disk
+        // source, the sealed generation provably equals the working tree, so the
+        // scheduler may adopt it as verified and skip the forced cold reconcile
+        // (a whole-repo read+sanitize+hash over every file). Any mismatch, a
+        // generation-id mismatch, or an absent/corrupt witness keeps the
+        // conservative unverified state and the worker performs a full reconcile,
+        // so the witness only ever SKIPS redundant work and never serves stale.
+        let restore_verified_stat = restored.as_ref().and_then(|generation| {
+            let witness = RestoreFreshnessWitnessV1::load(&store_root)?;
+            if witness.generation_id != generation.manifest().generation_id.as_str() {
+                return None;
+            }
+            if witness.git_metadata_signature != git_metadata.stable_signature() {
+                return None;
+            }
+            let current_stat = worktree_stat_signature_for(&project_root).ok()?;
+            (witness.stat_signature == current_stat).then_some(current_stat)
+        });
+        let verified_against_source = restore_verified_stat.is_some();
+        let freshness_unknown = restored.is_some() && !verified_against_source;
+        let last_reconciled_at_micros = verified_against_source.then(|| now_micros().0);
         let latest_content_identity = restored
             .as_ref()
             .map(|generation| generation.snapshot().content_identity.clone());
@@ -876,19 +902,21 @@ impl CodeIndexWorktreeSchedulerV1 {
         let epoch = Arc::new(AtomicU64::new(0));
         // Restoring a sealed generation authorizes serve-prior-generation, not a
         // freshness claim. Cadence must verify against gix before tier-1/tier-2
-        // clocks may suppress reconciliation.
+        // clocks may suppress reconciliation, EXCEPT when the restore-time
+        // witness above already proved the generation current.
         let scheduler = Self {
             project_id,
             project_root,
+            store_root,
             identity,
             repository_id,
             worktree_id,
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
-            last_reconciled_at_micros: None,
-            last_stat_signature: None,
-            verified_against_source: false,
+            last_reconciled_at_micros,
+            last_stat_signature: restore_verified_stat,
+            verified_against_source,
             freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
@@ -1116,6 +1144,34 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.last_reconciled_at = Instant::now();
         self.last_reconciled_at_micros = Some(now_micros().0);
         self.verified_against_source = true;
+        self.persist_freshness_witness();
+    }
+
+    /// Record the restore-time freshness witness for the current active
+    /// generation. Called at the moment freshness is established (after a
+    /// reconcile verified the worktree against gix truth) so a later open of the
+    /// same worktree can prove the sealed generation still current without a full
+    /// re-read. Requires an active generation AND a captured tier-2 signature;
+    /// when either is absent the optimization simply defers to the next
+    /// reconcile, and a write failure is non-fatal.
+    fn persist_freshness_witness(&self) {
+        let Some(stat_signature) = self.last_stat_signature.clone() else {
+            return;
+        };
+        let Some(latest) = self.latest_complete() else {
+            return;
+        };
+        let witness = RestoreFreshnessWitnessV1 {
+            generation_id: latest
+                .generation
+                .manifest()
+                .generation_id
+                .as_str()
+                .to_owned(),
+            git_metadata_signature: self.git_metadata.stable_signature(),
+            stat_signature,
+        };
+        witness.persist(&self.store_root);
     }
 
     /// Admit only already-current immutable evidence. Expensive truth capture
@@ -1146,41 +1202,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// content hashing), so it can gate the far more expensive read+hash capture
     /// on the tier-2 query path when nothing has actually changed on disk.
     fn worktree_stat_signature(&self) -> Result<String, CodeIndexSchedulerErrorV1> {
-        let repository = gix::open(&self.project_root)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        let registry = StaticLanguageRegistry::new();
-        let mut buf = Vec::new();
-        for logical_path in classification.candidate_paths() {
-            let absolute = self.project_root.join(&logical_path);
-            let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if registry
-                .descriptor_for_extension(&extension.to_lowercase())
-                .is_none()
-            {
-                continue;
-            }
-            let Ok(metadata) = std::fs::metadata(&absolute) else {
-                continue;
-            };
-            if !metadata.is_file() {
-                continue;
-            }
-            let mtime_nanos = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0u128, |elapsed| elapsed.as_nanos());
-            buf.extend_from_slice(logical_path.as_bytes());
-            buf.push(0);
-            buf.extend_from_slice(&metadata.len().to_le_bytes());
-            buf.extend_from_slice(&mtime_nanos.to_le_bytes());
-            buf.push(0xff);
-        }
-        Ok(format!("sha256:{}", sha256_hex(&buf)))
+        worktree_stat_signature_for(&self.project_root)
     }
 
     /// Deliver debounced hook hints (exact touched paths) into the incremental
@@ -1503,6 +1525,121 @@ fn snapshot_content_identity(
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
+}
+
+/// A cheap stat-level (path, mtime, size) signature over the present language
+/// source candidates. Opens gix and runs stat-based status (no byte reads, no
+/// content hashing), so it can gate the far more expensive read+hash capture
+/// when nothing has actually changed on disk. Shared by the query-admission
+/// tier-2 prefilter and the restore-time freshness witness.
+fn worktree_stat_signature_for(project_root: &Path) -> Result<String, CodeIndexSchedulerErrorV1> {
+    let repository = gix::open(project_root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let registry = StaticLanguageRegistry::new();
+    let mut buf = Vec::new();
+    for logical_path in classification.candidate_paths() {
+        let absolute = project_root.join(&logical_path);
+        let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if registry
+            .descriptor_for_extension(&extension.to_lowercase())
+            .is_none()
+        {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&absolute) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let mtime_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0u128, |elapsed| elapsed.as_nanos());
+        buf.extend_from_slice(logical_path.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&metadata.len().to_le_bytes());
+        buf.extend_from_slice(&mtime_nanos.to_le_bytes());
+        buf.push(0xff);
+    }
+    Ok(format!("sha256:{}", sha256_hex(&buf)))
+}
+
+/// File name of the restore-time freshness witness inside the scoped store root.
+const FRESHNESS_WITNESS_FILE_NAME: &str = "freshness_witness.v1";
+
+/// A durable record of the tier-1 git-metadata + tier-2 stat signatures that a
+/// specific sealed generation was reconciled against.
+///
+/// On restore this lets the scheduler PROVE, without re-reading and re-hashing
+/// the whole worktree, that the on-disk source still equals the sealed
+/// generation: the witness is bound to `generation_id`, and both signatures are
+/// recomputed and compared. A match means no git-mediated change (tier-1) and
+/// no working-tree change under the standard (path, mtime, size) content proxy
+/// (tier-2) has occurred since seal — the same soundness bar the steady-state
+/// tier-2 query-admission suppression already relies on. Any mismatch, a
+/// generation-id mismatch, or an absent/corrupt witness falls through to a full
+/// reconcile, so the witness can only ever SKIP redundant work, never serve a
+/// stale index.
+struct RestoreFreshnessWitnessV1 {
+    generation_id: String,
+    git_metadata_signature: String,
+    stat_signature: String,
+}
+
+impl RestoreFreshnessWitnessV1 {
+    fn witness_path(store_root: &Path) -> PathBuf {
+        store_root.join(FRESHNESS_WITNESS_FILE_NAME)
+    }
+
+    /// Encode as three newline-delimited fields. Deliberately trivial and
+    /// versioned by file name so a format change is a new witness file (and the
+    /// old one simply fails to parse, forcing a safe full reconcile).
+    fn encode(&self) -> String {
+        format!(
+            "{}\n{}\n{}\n",
+            self.generation_id, self.git_metadata_signature, self.stat_signature
+        )
+    }
+
+    fn decode(contents: &str) -> Option<Self> {
+        let mut lines = contents.lines();
+        let generation_id = lines.next()?.to_owned();
+        let git_metadata_signature = lines.next()?.to_owned();
+        let stat_signature = lines.next()?.to_owned();
+        if generation_id.is_empty()
+            || git_metadata_signature.is_empty()
+            || stat_signature.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            generation_id,
+            git_metadata_signature,
+            stat_signature,
+        })
+    }
+
+    fn load(store_root: &Path) -> Option<Self> {
+        let contents = std::fs::read_to_string(Self::witness_path(store_root)).ok()?;
+        Self::decode(&contents)
+    }
+
+    /// Persist atomically via a temp file + rename so a concurrent restore never
+    /// observes a torn witness. A write failure is non-fatal: the next reconcile
+    /// simply rewrites it, and its absence only costs a full reconcile.
+    fn persist(&self, store_root: &Path) {
+        let path = Self::witness_path(store_root);
+        let temp = store_root.join(format!("{FRESHNESS_WITNESS_FILE_NAME}.tmp"));
+        if std::fs::write(&temp, self.encode()).is_ok() {
+            let _ = std::fs::rename(&temp, &path);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 //! content authority.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{CommitId, RefId, RepositoryId, TreeId, WorktreeId};
 
@@ -191,6 +191,31 @@ impl GitMetadataFingerprintV1 {
     /// Whether the sampled metadata differs from a previously captured value.
     pub(crate) fn differs_from(&self, other: &GitMetadataFingerprintV1) -> bool {
         self != other
+    }
+
+    /// A stable, order-independent textual signature of this fingerprint.
+    ///
+    /// Used to persist a restore-time freshness witness: two fingerprints share
+    /// a signature iff they are structurally equal (`PartialEq`), so comparing
+    /// the recomputed signature against a witness recorded at seal time is a
+    /// faithful stand-in for `differs_from`. `SystemTime` mtimes are rendered as
+    /// nanos-since-epoch so the encoding is deterministic across processes.
+    pub(crate) fn stable_signature(&self) -> String {
+        fn render_time(time: Option<SystemTime>) -> String {
+            time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or_else(|| "-".to_owned(), |elapsed| elapsed.as_nanos().to_string())
+        }
+        format!(
+            "head={}|index={}|packed_refs={}|refs_heads={}|head_contents={}",
+            render_time(self.head),
+            render_time(self.index),
+            render_time(self.packed_refs),
+            self.refs_heads.as_deref().unwrap_or("-"),
+            self.head_contents.as_deref().map_or_else(
+                || "-".to_owned(),
+                |value| super::sha256_hex(value.as_bytes())
+            ),
+        )
     }
 }
 
