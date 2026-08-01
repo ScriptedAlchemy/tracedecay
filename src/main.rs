@@ -146,11 +146,68 @@ impl Drop for Spinner {
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
 const MAX_BLOCKING_THREADS: usize = 32;
+const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
+const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
+const RAYON_NUM_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
 fn async_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
+}
+
+fn daemon_cpu_threads_from(
+    available: usize,
+    configured: Option<(&str, &str)>,
+) -> Result<usize, String> {
+    match configured {
+        Some((source, raw)) => match raw.parse::<usize>().ok().filter(|threads| *threads > 0) {
+            Some(threads) => Ok(threads),
+            None if source == RAYON_NUM_THREADS_ENV => {
+                Ok(available.clamp(1, DEFAULT_MAX_DAEMON_CPU_THREADS))
+            }
+            None => Err(format!("{source} must be a positive integer, got {raw:?}")),
+        },
+        None => Ok(available.clamp(1, DEFAULT_MAX_DAEMON_CPU_THREADS)),
+    }
+}
+
+fn is_daemon_run(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Run { .. }
+        })
+    )
+}
+
+fn install_daemon_cpu_pool(command: Option<&Commands>) -> tracedecay::errors::Result<()> {
+    if !is_daemon_run(command) {
+        return Ok(());
+    }
+    let available = std::thread::available_parallelism().map_or(1, usize::from);
+    let configured = std::env::var(DAEMON_CPU_THREADS_ENV)
+        .ok()
+        .map(|value| (DAEMON_CPU_THREADS_ENV, value))
+        .or_else(|| {
+            std::env::var(RAYON_NUM_THREADS_ENV)
+                .ok()
+                .map(|value| (RAYON_NUM_THREADS_ENV, value))
+        });
+    let threads = daemon_cpu_threads_from(
+        available,
+        configured
+            .as_ref()
+            .map(|(source, value)| (*source, value.as_str())),
+    )
+    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|index| format!("tracedecay-cpu-{index}"))
+        .build_global()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to start daemon CPU pool: {error}"),
+        })
 }
 
 fn is_extract_worker(command: Option<&Commands>) -> bool {
@@ -222,6 +279,12 @@ fn async_main() -> tracedecay::errors::Result<()> {
     if is_extract_worker(cli.command.as_ref()) {
         tracedecay::extraction_worker::run_worker();
     }
+    // Rayon otherwise creates one worker per logical CPU on first use. On
+    // large hosts that pool competes with Tokio, SQLite, and per-index pools,
+    // amplifying worktree warmup into CPU and memory contention. The daemon
+    // owns one bounded global pool; one-shot CLI commands retain Rayon's
+    // normal behavior. Operators can raise the default without a rebuild.
+    install_daemon_cpu_pool(cli.command.as_ref())?;
     let worker_threads = async_worker_threads();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
