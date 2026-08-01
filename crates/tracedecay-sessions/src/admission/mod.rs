@@ -33,7 +33,7 @@ use crate::observation::{
 };
 
 pub mod bounds;
-mod disposition;
+pub mod disposition;
 pub mod wire;
 
 pub use bounds::{DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES};
