@@ -227,7 +227,7 @@ async fn run_startup_session_post_ingest(
     cancellation: crate::application::observation::ObservationCancellation,
 ) -> bool {
     let git = crate::sessions::git_correlation::SystemGit;
-    let _ = crate::store::GlobalDbGitCorrelationStore::new(db.as_ref())
+    let _ = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(&db))
         .run_incremental_backfill(
             &git,
             crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
@@ -239,7 +239,7 @@ async fn run_startup_session_post_ingest(
     if let Some(analytics_db) = analytics_db {
         let sources = crate::analytics_bridge::hook_import_sources(Some(&project_root));
         let _ =
-            crate::analytics_bridge::import_hook_analytics(analytics_db.as_ref(), &sources).await;
+            crate::analytics_bridge::import_hook_analytics(analytics_db.as_ref(), sources).await;
         let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
         let now = crate::tracedecay::current_timestamp();
         let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
@@ -505,14 +505,19 @@ impl McpServer {
                     // that followed them. Best-effort and idempotent (own
                     // parse cursors + hint_outcome watermark), so it never
                     // blocks readiness and re-runs safely each startup.
-                    if !run_startup_session_post_ingest(
+                    // Boxed with an explicit `Send` bound: proving the
+                    // post-ingest future Send inside this spawned block trips
+                    // rustc's higher-ranked leak check; at this narrower scope
+                    // the same proof discharges first-order.
+                    let post_ingest: std::pin::Pin<
+                        Box<dyn std::future::Future<Output = bool> + Send>,
+                    > = Box::pin(run_startup_session_post_ingest(
                         db,
                         analytics_db,
                         project_root,
                         cancellation.clone(),
-                    )
-                    .await
-                    {
+                    ));
+                    if !post_ingest.await {
                         ingest_done_flag.store(true, Ordering::Release);
                         return;
                     }
