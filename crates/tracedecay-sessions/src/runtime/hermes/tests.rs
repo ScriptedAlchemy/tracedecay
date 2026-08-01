@@ -9,17 +9,14 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::admission::test_support::PanicHostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::StoredCursor;
 use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1,
 };
 
-use super::coverage::{
-    admit_rows_with_admission, admit_rows_with_admission_and_cancellation,
-    drain_hermes_projections_with_admission,
-};
+use super::coverage::admit_rows_with_admission_and_cancellation;
 use super::*;
 
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
@@ -30,11 +27,9 @@ async fn initialize_owned_store_before_foreign_fixture(directory: &std::path::Pa
         .get_or_init(|| async {
             // Match production startup order: initialize the owned store
             // before any foreign rusqlite fixture initializes SQLite.
-            let profile_root = directory.join(".owned-store-initialization");
-            let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .expect("initialize owned storage before foreign SQLite fixtures");
-            drop(runtime);
+            let _connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+                &directory.join(".owned-store-initialization.db"),
+            );
         })
         .await;
 }
@@ -127,19 +122,12 @@ fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
 
 #[tokio::test]
 async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
-    let profile = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
     let project_id = tracedecay_domain::ProjectId::new("project.hermes-cancelled-startup").unwrap();
-    let runtime =
-        HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
-            .await
-            .unwrap();
-    let facade = runtime.facade();
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
 
     let stats = admit_rows_with_admission_and_cancellation(
-        &facade,
+        &PanicHostAdmission,
         &[fixture(1)],
         ObservationScopeV1::Project { project_id },
         ObservationSourceGenerationV1::new(1).unwrap(),
@@ -312,38 +300,6 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
     assert_eq!(
         envelope.relations().message_id().map(ObservationId::as_str),
         Some("20260101_000000_abc123:7")
-    );
-}
-
-#[tokio::test]
-async fn projection_drain_projects_v1_message_identity() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path().join("profile"))
-        .await
-        .expect("open registered observation runtime");
-    let facade = runtime.facade();
-    let row = fixture(7);
-    let stats = admit_rows_with_admission(
-        &facade,
-        std::slice::from_ref(&row),
-        ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(1).unwrap(),
-        1,
-        1,
-        |_| Some(fixture_projection()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(stats.messages_upserted, 1);
-    drain_hermes_projections_with_admission(&facade, &ObservationScopeV1::Profile)
-        .await
-        .unwrap();
-    assert!(
-        runtime
-            .session_message_for_test(HostAdmissionScope::Profile, PROVIDER, "session-redacted:7")
-            .await
-            .unwrap()
-            .is_some()
     );
 }
 

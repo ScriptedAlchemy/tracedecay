@@ -320,3 +320,73 @@ pub trait HostAdmission: Send + Sync {
         offset: ParseOffset,
     ) -> AdmissionFuture<'a, ()>;
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Admission port for pre-cancellation tests that must fail if any host
+    /// storage call is attempted.
+    pub(crate) struct PanicHostAdmission;
+
+    impl HostAdmission for PanicHostAdmission {
+        fn capture_observation<'a>(
+            &'a self,
+            _request: CaptureObservationRequest,
+        ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
+            panic!("pre-cancelled ingest attempted observation admission")
+        }
+
+        fn advance_non_durable_source_cursor<'a>(
+            &'a self,
+            _advance: ObservationCursorAdvance,
+            _cancellation: ObservationCancellation,
+        ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
+            panic!("pre-cancelled ingest attempted cursor admission")
+        }
+
+        fn get_source_cursor<'a>(
+            &'a self,
+            _source: &'a ObservationSourceIdentityV1,
+            _scope: &'a ObservationScopeV1,
+        ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
+            panic!("pre-cancelled ingest attempted cursor read")
+        }
+
+        fn drain_projection_queue<'a>(
+            &'a self,
+            _provider: &'a str,
+            _scope: &'a ObservationScopeV1,
+            _cancellation: &'a ObservationCancellation,
+            _max: usize,
+        ) -> AdmissionFuture<'a, HostProjectionDrainOutcome> {
+            panic!("pre-cancelled ingest attempted projection drain")
+        }
+
+        fn has_session_message<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _provider: &'a str,
+            _message_id: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            panic!("pre-cancelled ingest attempted session-message read")
+        }
+
+        fn get_parse_offset<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _path: &'a str,
+        ) -> AdmissionFuture<'a, Option<ParseOffset>> {
+            panic!("pre-cancelled ingest attempted parse-offset read")
+        }
+
+        fn advance_parse_offset<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _path: &'a str,
+            _offset: ParseOffset,
+        ) -> AdmissionFuture<'a, ()> {
+            panic!("pre-cancelled ingest attempted parse-offset write")
+        }
+    }
+}
