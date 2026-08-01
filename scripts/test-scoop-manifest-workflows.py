@@ -48,9 +48,9 @@ def assert_hook_contract(
     assert state_path in prepare
     assert state_path in restore
     assert state_path in cleanup
-    assert "$cmd -in @('update', 'uninstall')" in prepare
-    assert "$cmd -eq 'update'" in restore
-    assert "$cmd -eq 'uninstall'" in cleanup
+    assert "Get-Variable -Name old_version" not in prepare
+    assert "$null -ne (Get-Variable -Name old_version" in restore
+    assert "$null -eq (Get-Variable -Name old_version" in cleanup
 
 
 def main() -> None:
