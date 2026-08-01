@@ -458,7 +458,7 @@ fn prepare_bound_hook(
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
 ) -> Option<PreparedBoundHook> {
-    let layout = crate::storage::resolve_layout_for_current_profile(project_root).ok()?;
+    let layout = super::store_layout::layout(project_root)?;
     let config_path = tracedecay_hooks::hook_configuration_path(&layout.data_root, host);
     let subscriber =
         HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(config_path));

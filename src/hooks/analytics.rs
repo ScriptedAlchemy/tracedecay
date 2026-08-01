@@ -647,12 +647,9 @@ pub(super) fn record_hook_analytics(
 /// `projects/proj_<path hash>/` for directories that never became projects, and
 /// those shards then outnumbered the real stores.
 fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
-    let enrolled_data_root = root.and_then(|root| {
-        crate::storage::resolve_enrolled_layout_for_current_profile(root)
-            .ok()
-            .flatten()
-            .map(|layout| layout.data_root)
-    });
+    let enrolled_data_root = root
+        .and_then(super::store_layout::enrolled_layout)
+        .map(|layout| layout.data_root);
     match enrolled_data_root {
         Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
         None => crate::storage::default_profile_root()
