@@ -26,6 +26,81 @@ use super::preview::{
 };
 use super::symbols::resolve_symbol_for_edit;
 
+/// Which of a node's leading doc-comment / attribute lines
+/// [`item_line_span`] should fold into the returned span, alongside its
+/// `start_line`..`end_line` body.
+pub(in crate::tracedecay) enum LeadingBlock {
+    /// Always start at `attrs_start_line`: a moved item always carries its
+    /// own docs with it (`move_symbol`).
+    Always,
+    /// Start at `attrs_start_line` only when the item actually has a leading
+    /// block *and* the caller wants it kept; otherwise start at
+    /// `start_line` (`replace_symbol`: only swap the docs in when
+    /// `new_source` brings its own).
+    WhenPresentAnd(bool),
+}
+
+/// A node's edit span in 0-indexed, inclusive line numbers, re-derived from
+/// its `attrs_start_line`/`start_line`/`end_line` per `leading` and clamped
+/// to how many lines the file (`line_count`) actually has.
+///
+/// `end_inclusive` is clamped so it never runs past EOF (a node's recorded
+/// `end_line` can be stale relative to the file on disk); `start` is left
+/// unclamped so callers can build their own out-of-bounds message — the
+/// wording differs per call site — when it doesn't fit.
+pub(in crate::tracedecay) struct ItemLineSpan {
+    pub(in crate::tracedecay) start: usize,
+    pub(in crate::tracedecay) end_inclusive: usize,
+}
+
+/// Re-derives the line span an edit touching `node`'s leading block through
+/// its body will need, given how many lines the file has. Used by
+/// `replace_symbol`, `insert_at_symbol`, and `move_symbol`'s span
+/// computation — three sites that used to each redo this
+/// attrs-start/end-clamp arithmetic independently.
+pub(in crate::tracedecay) fn item_line_span(
+    node: &Node,
+    line_count: usize,
+    leading: LeadingBlock,
+) -> ItemLineSpan {
+    let attrs_start = node.attrs_start_line as usize;
+    let item_start = node.start_line as usize;
+    let start = match leading {
+        // The `.min()` guards against inconsistent rows: `attrs_start_line`
+        // is documented to never exceed `start_line`, but a moved/replaced
+        // item always wants whichever of the two is earliest.
+        LeadingBlock::Always => attrs_start.min(item_start),
+        LeadingBlock::WhenPresentAnd(keep) if keep && attrs_start < item_start => attrs_start,
+        LeadingBlock::WhenPresentAnd(_) => item_start,
+    };
+    let end_inclusive = (node.end_line as usize).min(line_count.saturating_sub(1));
+    ItemLineSpan {
+        start,
+        end_inclusive,
+    }
+}
+
+/// Joins `lines` back into a single string with `\n` separators, re-adding
+/// the trailing newline the original source had (skipped when the result is
+/// empty, so deleting a file's only content never leaves a lone `\n`
+/// behind). The common tail of every anchored-edit / move-symbol splice:
+/// build the new line list, then hand it here instead of hand-rolling
+/// `join("\n")` plus a conditional trailing push at each call site.
+pub(in crate::tracedecay) fn splice_lines<S: AsRef<str>>(
+    lines: &[S],
+    source_had_trailing_newline: bool,
+) -> String {
+    let mut joined = lines
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<&str>>()
+        .join("\n");
+    if source_had_trailing_newline && !joined.is_empty() {
+        joined.push('\n');
+    }
+    joined
+}
+
 impl TraceDecay {
     /// Resolves a path to a relative path string.
     /// If the path is already relative, validates that it stays in the project.
@@ -166,34 +241,37 @@ impl TraceDecay {
         let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
         let (source, source_identity) = file.read_to_string(path)?;
 
-        let matches: Vec<_> = source.match_indices(old_str).collect();
-        match matches.len() {
-            0 => {
-                return Ok(EditResult {
-                    success: false,
-                    file_path: rel_path.clone(),
-                    matched_str: old_str.to_string(),
-                    new_str: new_str.to_string(),
-                    replaced_span: None,
-                    dry_run,
-                    diff: None,
-                    message: format!("old_str not found in {path}"),
-                });
-            }
-            1 => {}
-            n => {
-                return Ok(EditResult {
-                    success: false,
-                    file_path: rel_path.clone(),
-                    matched_str: old_str.to_string(),
-                    new_str: new_str.to_string(),
-                    replaced_span: None,
-                    dry_run,
-                    diff: None,
-                    message: format!("old_str matches {n} times, must match exactly once"),
-                });
-            }
+        let mut matches = source.match_indices(old_str);
+        let Some(matched) = matches.next() else {
+            return Ok(EditResult {
+                success: false,
+                file_path: rel_path.clone(),
+                matched_str: old_str.to_string(),
+                new_str: new_str.to_string(),
+                replaced_span: None,
+                dry_run,
+                diff: None,
+                message: format!("old_str not found in {path}"),
+            });
+        };
+        if matches.next().is_some() {
+            // Two matches already consumed from `matches`; the remainder it
+            // still holds is every match after those, so the total is that
+            // count plus the two already seen — no need for a second,
+            // redundant full-string `source.matches(old_str).count()` pass.
+            let n = 2 + matches.count();
+            return Ok(EditResult {
+                success: false,
+                file_path: rel_path.clone(),
+                matched_str: old_str.to_string(),
+                new_str: new_str.to_string(),
+                replaced_span: None,
+                dry_run,
+                diff: None,
+                message: format!("old_str matches {n} times, must match exactly once"),
+            });
         }
+        let (_, matched_text) = matched;
 
         let modified = source.replacen(old_str, new_str, 1);
 
@@ -213,7 +291,7 @@ impl TraceDecay {
             file_path: rel_path,
             matched_str: old_str.to_string(),
             new_str: new_str.to_string(),
-            replaced_span: None,
+            replaced_span: Some(matched_text.to_string()),
             dry_run,
             diff,
             message: edit_success_message(dry_run, "replacement successful"),
@@ -260,7 +338,11 @@ impl TraceDecay {
                 });
             };
             if hits.next().is_some() {
-                let count = source.matches(old).count();
+                // Two matches already consumed from `hits`; the remainder it
+                // still holds is every match after those, so the total is
+                // that count plus the two already seen — no need for a
+                // redundant full-string `source.matches(old).count()` pass.
+                let count = 2 + hits.count();
                 return Ok(MultiEditResult {
                     success: false,
                     file_path: rel_path.clone(),
@@ -417,10 +499,7 @@ impl TraceDecay {
         let mut new_lines: Vec<&str> = lines[..insert_idx].to_vec();
         new_lines.push(content);
         new_lines.extend_from_slice(&lines[insert_idx..]);
-        let mut modified = new_lines.join("\n");
-        if source.ends_with('\n') {
-            modified.push('\n');
-        }
+        let modified = splice_lines(&new_lines, source.ends_with('\n'));
 
         let diff = self
             .commit_or_preview_edit(
@@ -473,12 +552,15 @@ impl TraceDecay {
         // body never silently deletes its documentation.
         let has_leading_block = (target.attrs_start_line as usize) < target.start_line as usize;
         let replacement_brings_block = leading_doc_or_attr(new_source);
-        let start = if has_leading_block && replacement_brings_block {
-            target.attrs_start_line as usize
-        } else {
-            target.start_line as usize
-        };
-        let end_inclusive = (target.end_line as usize).min(lines.len().saturating_sub(1));
+        let span = item_line_span(
+            &target,
+            lines.len(),
+            LeadingBlock::WhenPresentAnd(replacement_brings_block),
+        );
+        let ItemLineSpan {
+            start,
+            end_inclusive,
+        } = span;
         if start >= lines.len() || start > end_inclusive {
             return Ok(EditResult {
                 success: false,
@@ -497,15 +579,11 @@ impl TraceDecay {
             });
         }
         let replaced_span = lines[start..=end_inclusive].join("\n");
-        let trailing_newline = source.ends_with('\n');
-        let mut rebuilt: Vec<String> = Vec::with_capacity(lines.len());
-        rebuilt.extend(lines[..start].iter().map(|s| (*s).to_string()));
-        rebuilt.push(new_source.trim_end_matches('\n').to_string());
-        rebuilt.extend(lines[end_inclusive + 1..].iter().map(|s| (*s).to_string()));
-        let mut modified = rebuilt.join("\n");
-        if trailing_newline {
-            modified.push('\n');
-        }
+        let mut rebuilt: Vec<&str> = Vec::with_capacity(lines.len());
+        rebuilt.extend_from_slice(&lines[..start]);
+        rebuilt.push(new_source.trim_end_matches('\n'));
+        rebuilt.extend_from_slice(&lines[end_inclusive + 1..]);
+        let modified = splice_lines(&rebuilt, source.ends_with('\n'));
         let diff = self
             .commit_or_preview_edit(
                 &rel_path,
@@ -523,7 +601,7 @@ impl TraceDecay {
             "replaced {}:{}-{}",
             target.file_path,
             start + 1,
-            target.end_line + 1
+            end_inclusive + 1
         );
         let mut message = edit_success_message(dry_run, &base);
         if has_leading_block && !replacement_brings_block {
@@ -576,8 +654,8 @@ impl TraceDecay {
             // Anchor above the item's leading doc-comment / attribute block so
             // "before" never splits docs from the item they document. For items
             // with no leading block, attrs_start_line == start_line and this is
-            // the item line itself. The min() guards against inconsistent rows.
-            target.attrs_start_line.min(target.start_line) as usize
+            // the item line itself.
+            item_line_span(&target, lines.len(), LeadingBlock::Always).start
         } else {
             (target.end_line as usize).saturating_add(1)
         };
@@ -593,15 +671,11 @@ impl TraceDecay {
                 message: format!("anchor line {anchor_line} past EOF ({})", lines.len()),
             });
         }
-        let trailing_newline = source.ends_with('\n');
-        let mut rebuilt: Vec<String> = Vec::with_capacity(lines.len() + 1);
-        rebuilt.extend(lines[..anchor_line].iter().map(|s| (*s).to_string()));
-        rebuilt.push(content.trim_end_matches('\n').to_string());
-        rebuilt.extend(lines[anchor_line..].iter().map(|s| (*s).to_string()));
-        let mut modified = rebuilt.join("\n");
-        if trailing_newline {
-            modified.push('\n');
-        }
+        let mut rebuilt: Vec<&str> = Vec::with_capacity(lines.len() + 1);
+        rebuilt.extend_from_slice(&lines[..anchor_line]);
+        rebuilt.push(content.trim_end_matches('\n'));
+        rebuilt.extend_from_slice(&lines[anchor_line..]);
+        let modified = splice_lines(&rebuilt, source.ends_with('\n'));
         let diff = self
             .commit_or_preview_edit(
                 &rel_path,

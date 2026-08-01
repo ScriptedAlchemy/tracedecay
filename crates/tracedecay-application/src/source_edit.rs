@@ -45,10 +45,11 @@ pub struct EditResult {
     pub file_path: String,
     pub matched_str: String,
     pub new_str: String,
-    /// For `replace_symbol`: the exact source span that was replaced, including
-    /// any leading doc-comment / attribute block that belongs to the item. Lets
-    /// callers see precisely what was swapped out (and recover its docs/attrs if
-    /// the replacement dropped them). `None` for plain string replacements.
+    /// The exact source text that was replaced. For `replace_symbol` this is
+    /// the item's full span, including any leading doc-comment / attribute
+    /// block, so callers can recover its docs/attrs if the replacement
+    /// dropped them; for `str_replace` it is the matched `old_str` text.
+    /// `None` only on a failed edit, where nothing was resolved to replace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_span: Option<String>,
     /// True when this was a dry run: validation, spans, and the resulting

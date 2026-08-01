@@ -20,8 +20,9 @@ use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_wi
 
 use super::TraceDecay;
 use super::edits::{
-    capture_planned_source_edit, edit_success_message, publish_planned_source_edit,
-    resolve_symbol_for_edit, validate_planned_source_edit,
+    LeadingBlock, LeadingKind, capture_planned_source_edit, classify_leading_line,
+    edit_success_message, item_line_span, publish_planned_source_edit, resolve_symbol_for_edit,
+    splice_lines, validate_planned_source_edit,
 };
 
 use fs_guards::{
@@ -34,9 +35,7 @@ use rust_paths::{
     crate_root_file, is_importable_item, module_stem, parent_module_candidates, rust_module_path,
     source_declares_external_module, visibility_word,
 };
-use use_parsing::{
-    UseLeaf, body_identifiers, parse_use_statements, portable_dependency_import, word_present,
-};
+use use_parsing::{UseLeaf, body_identifiers, parse_use_statements, portable_dependency_import};
 
 impl TraceDecay {
     /// Moves a resolved symbol from its current file to `dest_file`.
@@ -108,8 +107,9 @@ impl TraceDecay {
 
         // Mirror replace_symbol's span semantics but ALWAYS include the leading
         // doc-comment / attribute block: a moved item carries its own docs.
-        let mut start = target.attrs_start_line as usize;
-        let end_inclusive = (target.end_line as usize).min(src_lines.len().saturating_sub(1));
+        let span = item_line_span(&target, src_lines.len(), LeadingBlock::Always);
+        let mut start = span.start;
+        let end_inclusive = span.end_inclusive;
         if start >= src_lines.len() || start > end_inclusive {
             return Ok(fail(
                 format!(
@@ -126,7 +126,9 @@ impl TraceDecay {
         // enclosing module, not the following item. If `attrs_start_line` picked
         // up such a line, advance past it so the source keeps its module doc and
         // the destination doesn't receive a stray `//!` mid-file (a hard E0753).
-        while start < end_inclusive && src_lines[start].trim_start().starts_with("//!") {
+        while start < end_inclusive
+            && classify_leading_line(src_lines[start]) == LeadingKind::InnerDoc
+        {
             start += 1;
         }
         let moved_text = src_lines[start..=end_inclusive].join("\n");
@@ -157,12 +159,8 @@ impl TraceDecay {
         }
 
         // Build the source with the span removed (with blank-line cleanup).
-        let trailing_newline = source.ends_with('\n');
         let residual = remove_span_with_cleanup(&src_lines, start, end_inclusive);
-        let mut source_modified = residual.join("\n");
-        if trailing_newline && !source_modified.is_empty() {
-            source_modified.push('\n');
-        }
+        let source_modified = splice_lines(&residual, source.ends_with('\n'));
 
         // Dependency + import analysis: what the moved body needs at the
         // destination, and which of those we can auto-insert unambiguously.
@@ -435,6 +433,10 @@ impl TraceDecay {
         let idents = body_identifiers(&code_only);
         let source_code_only =
             masked_rust_source_with(source_modified, MaskOptions::UNUSED_IMPORTS);
+        // Hoisted out of the `use`-statement loop below: `source_code_only`
+        // never changes across iterations, so recomputing its identifier set
+        // on every matching `use` statement was pure waste.
+        let source_identifiers = body_identifiers(&source_code_only);
 
         // 1. Same-file item dependencies (structs, enums, helpers, consts, …).
         let src_nodes = self.get_nodes_by_file(source_rel).await.unwrap_or_default();
@@ -514,7 +516,7 @@ impl TraceDecay {
                 }
                 // Orphaned-import: source no longer needs it after the move.
                 let leaf = &stmt.leaves[0].binding;
-                if !word_present(&source_code_only, leaf) {
+                if !source_identifiers.contains(leaf) {
                     out.hints.push(MoveHint {
                         kind: "orphaned_import".to_string(),
                         file: source_rel.to_string(),
