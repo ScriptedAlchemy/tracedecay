@@ -276,8 +276,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "token-counting")]
     struct MissingUsageBackend;
 
+    #[cfg(feature = "token-counting")]
     impl AgentTaskBackend for MissingUsageBackend {
         fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
             Ok(AgentTaskResponse {
