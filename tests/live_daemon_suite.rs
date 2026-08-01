@@ -29,6 +29,15 @@
 //!
 //! Operator entry point: `scripts/live-daemon-check.sh`.
 //!
+//! This suite is deliberately **not** the CI performance harness. It is
+//! sequential, it asserts fixed latency ceilings rather than reporting
+//! percentiles, and it only ever observes a daemon someone else started.
+//! `scripts/perf-gate.sh` is the isolated counterpart: it indexes this repo
+//! into a throwaway profile, starts its own daemon, and drives concurrent
+//! readers at it. Reach for that one when the question is "did serving get
+//! slower", and for this one when the question is "is the operator's daemon
+//! healthy right now".
+//!
 //! Environment:
 //!
 //! | Variable | Meaning |

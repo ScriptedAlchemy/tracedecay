@@ -689,6 +689,61 @@ jobs:
           path: windows-merged-junit.xml
           retention-days: 7
 
+  # Catches serving-path performance regressions — the class profiled on
+  # 2026-08-01, where a search went from milliseconds to minutes because
+  # per-request work scaled with store size. The script indexes THIS repo into
+  # a throwaway profile, serves it from a private daemon, and drives six
+  # concurrent readers at it; the pass/fail budgets live in one block at the
+  # top of scripts/perf-gate.sh. They are order-of-magnitude tripwires, so a
+  # red here means a real regression, not a noisy runner.
+  perf-gate:
+    name: Serving-path perf gate
+    needs: dashboard-assets
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    # The gate needs an OPTIMIZED binary: a debug build makes the CPU-bound
+    # index and query paths slow enough to trip the budgets for reasons that
+    # have nothing to do with a regression. That means a release build of the
+    # root crate (~9 min on a 96-core box, longer here) plus a ~2 min index and
+    # a 60 s load window. rust-cache carries the dependency graph between runs;
+    # the root crate itself always recompiles.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-perf-gate-release-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Run serving-path perf gate
+        run: scripts/perf-gate.sh
+
+      # Retained unconditionally: the metrics from a FAILING run are the whole
+      # point of the artifact, and a timed-out job still leaves whatever the
+      # verdict phase managed to write.
+      - name: Upload perf gate metrics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perf-gate-metrics
+          path: |
+            target/perf-gate/perf-gate-metrics.json
+            target/perf-gate/perf-gate-summary.md
+          if-no-files-found: warn
+          retention-days: 14
+
   release-compatibility:
     name: Release compatibility
     needs: dashboard-assets
