@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use super::DashboardState;
-use super::util::{qmarks, query_rows};
+use super::util::query_rows;
+use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
@@ -343,7 +344,7 @@ async fn count_and_store(
         .chunk_by(|a, b| a.0 == b.0)
         .flat_map(|group| group.chunks(CHUNK))
     {
-        let placeholders = qmarks(chunk.len());
+        let placeholders = build_qmark_placeholders(chunk.len());
         let sql = format!(
             "SELECT provider, message_id, COALESCE(text, '') AS text
              FROM session_messages WHERE provider = ? AND message_id IN ({placeholders})"

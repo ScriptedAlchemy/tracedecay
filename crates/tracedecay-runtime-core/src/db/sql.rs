@@ -9,7 +9,7 @@ use crate::errors::{Result, TraceDecayError};
 /// Returns a SQL placeholder string of `n` anonymous `?` markers separated by
 /// `, `. Used to construct `IN ($qmarks)` clauses without allocating one
 /// `String` per id (`format!("?{i}")` previously did that).
-pub(super) fn build_qmark_placeholders(n: usize) -> String {
+pub fn build_qmark_placeholders(n: usize) -> String {
     debug_assert!(n > 0, "build_qmark_placeholders called with n == 0");
     // Each "?, " occupies 3 bytes; the last one drops the trailing ", ".
     let mut s = String::with_capacity(n * 3);
@@ -80,7 +80,7 @@ pub(super) fn push_int(buf: &mut String, val: i64) {
 /// anything larger outright, so a whole-table read has to arrive as a sequence
 /// of pages. This budget stays well under that admission limit while keeping
 /// the number of round trips low.
-pub(super) const FULL_SCAN_PAGE_ROWS: i64 = 2_000;
+pub const FULL_SCAN_PAGE_ROWS: i64 = 2_000;
 
 /// Reads an entire table through `rowid` keyset pages and returns every row.
 ///
@@ -90,7 +90,7 @@ pub(super) const FULL_SCAN_PAGE_ROWS: i64 = 2_000;
 /// `cursor_index` is the position of that trailing `rowid` column. The result
 /// is the complete scan: paging is a transport concern here, never a silent
 /// truncation.
-pub(super) async fn collect_rowid_pages<T, C>(
+pub async fn collect_rowid_pages<T, C>(
     conn: &C,
     page_sql: &str,
     cursor_index: i32,
@@ -118,7 +118,7 @@ where
 /// and the runtime refuses an oversized query outright rather than truncating
 /// it. Filtered whole-partition reads therefore have to page exactly like
 /// whole-table reads do.
-pub(super) async fn collect_rowid_pages_with<T, C>(
+pub async fn collect_rowid_pages_with<T, C>(
     conn: &C,
     page_sql: &str,
     leading_params: &[Value],
