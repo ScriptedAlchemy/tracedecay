@@ -414,7 +414,7 @@ pub(super) enum ContextScoutReadSurfaceV1 {
 }
 
 impl ContextScoutReadSurfaceV1 {
-    fn from_action(action: &str) -> Option<Self> {
+    pub(super) fn from_action(action: &str) -> Option<Self> {
         match action {
             "hook_v2_scout_recent" => Some(Self::Recent),
             "hook_v2_scout_explain" => Some(Self::Explain),
