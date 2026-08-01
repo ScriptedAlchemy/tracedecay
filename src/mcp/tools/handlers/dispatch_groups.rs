@@ -261,19 +261,49 @@ pub(super) async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    _options: ToolCallRegistryOptions<'_>,
+    options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    match tool_name {
-        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
-        "tracedecay_affected" => git::handle_affected(cg, args).await,
-        "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
-        "tracedecay_changelog" => git::handle_changelog(cg, args).await,
-        "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
-        "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-        "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
-        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
-        _ => Err(unknown_tool_error(tool_name)),
+    // The admission layer computes and carries a dispatch deadline for every
+    // git-walking tool (thirty seconds by default, see
+    // `dispatch_deadline_horizon_micros`). This dispatcher used to discard it
+    // (`_options`), so `pr_context`, `admin_branch_add`, and the other git
+    // handlers ran their gix tree walks, revwalks, diffs, and the branch-add
+    // index build without any horizon — a diverged or pathological ref hung the
+    // request indefinitely. Enforce the carried deadline here so every handler
+    // is bounded uniformly, returning the same typed semantic error the other
+    // git failures surface instead of a bare hang.
+    let carried_deadline = options.application_deadline.as_ref();
+    let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
+
+    let handler = async {
+        match tool_name {
+            "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
+            "tracedecay_affected" => git::handle_affected(cg, args).await,
+            "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
+            "tracedecay_changelog" => git::handle_changelog(cg, args).await,
+            "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
+            "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
+            "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
+            "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
+            "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
+            _ => Err(unknown_tool_error(tool_name)),
+        }
+    };
+
+    match (carried_deadline.is_some(), remaining) {
+        // A live remaining budget bounds the handler.
+        (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
+            Ok(result) => result,
+            Err(_elapsed) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+        },
+        // A deadline was carried but has already elapsed before dispatch even
+        // started: `deadline_remaining` returns `None` for a non-positive
+        // budget. Reject immediately with the typed error rather than running
+        // the handler unbounded.
+        (true, None) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
+        // No deadline was carried at all (standalone / non-admission callers):
+        // preserve the previous unbounded behaviour.
+        (false, None) => handler.await,
     }
 }
 
