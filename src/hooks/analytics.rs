@@ -486,9 +486,12 @@ fn disposition_from_daemon_error(error: &TraceDecayError) -> HookDispositionTele
     }
 }
 
-pub(crate) fn record_hook_invoked(
+/// Shared implementation for [`record_hook_invoked`] and
+/// [`record_other_hook_invoked`], which differ only in how the analytics
+/// `agent` key is derived (a typed [`HintAgent`] vs. the literal `"other"`).
+fn record_hook_invoked_named(
     root: Option<&Path>,
-    agent: HintAgent,
+    agent_key: &'static str,
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
@@ -502,13 +505,22 @@ pub(crate) fn record_hook_invoked(
         serde_json::json!({
             "schema_version": HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
             "coverage": HostHookTelemetryCoverage::HostMeasured,
-            "agent": agent.as_key(),
+            "agent": agent_key,
             "hook_name": bounded_identifier(hook_name),
             "prompt_category": prompt_category,
             "payload_bytes": payload_bytes,
         }),
     );
-    HookTimingSpan::new(root, agent, hook_name, prompt_category, payload_bytes)
+    HookTimingSpan::new_named(root, agent_key, hook_name, prompt_category, payload_bytes)
+}
+
+pub(crate) fn record_hook_invoked(
+    root: Option<&Path>,
+    agent: HintAgent,
+    hook_name: &str,
+    event_json: &str,
+) -> HookTimingSpan {
+    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json)
 }
 
 pub(crate) fn record_other_hook_invoked(
@@ -516,22 +528,7 @@ pub(crate) fn record_other_hook_invoked(
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
-    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
-    let payload_bytes = measure_host_event_payload_bytes(event_json);
-    let prompt_category = inferred_prompt_category(&parsed);
-    record_hook_analytics(
-        root,
-        "hook_invoked",
-        serde_json::json!({
-            "schema_version": HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
-            "coverage": HostHookTelemetryCoverage::HostMeasured,
-            "agent": "other",
-            "hook_name": bounded_identifier(hook_name),
-            "prompt_category": prompt_category,
-            "payload_bytes": payload_bytes,
-        }),
-    );
-    HookTimingSpan::new_named(root, "other", hook_name, prompt_category, payload_bytes)
+    record_hook_invoked_named(root, "other", hook_name, event_json)
 }
 
 pub(super) fn mint_hint_id() -> String {

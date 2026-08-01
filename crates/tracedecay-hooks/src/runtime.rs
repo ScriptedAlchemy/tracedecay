@@ -455,15 +455,6 @@ where
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookRuntimeStatusV1 {
-    pub configuration_revision: u64,
-    pub guidance: HookGuidanceStateV1,
-    pub pending_replay_records: u32,
-    pub catchup_required: bool,
-}
-
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HookRuntimeErrorV1 {
     #[error("hook runtime control is invalid or stale")]

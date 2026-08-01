@@ -482,6 +482,17 @@ fn seen_facts_path(root: &Path) -> Option<std::path::PathBuf> {
         .then(|| layout.data_root.join(SEEN_FACTS_FILENAME))
 }
 
+/// Records `fact_ids` as seen for `session_id` in an already-loaded `seen`
+/// state and persists it to `path`. No-op (and no write) when there is
+/// nothing new to record.
+fn commit_seen_facts(seen: &mut MemoryInjectSeen, path: &Path, session_id: &str, fact_ids: &[i64]) {
+    if fact_ids.is_empty() {
+        return;
+    }
+    seen.record(session_id, fact_ids);
+    let _ = seen.save(path);
+}
+
 fn record_injected_facts(root: &Path, session_id: Option<&str>, fact_ids: &[i64]) {
     let (Some(session_id), Some(path)) = (session_id, seen_facts_path(root)) else {
         return;
@@ -490,8 +501,7 @@ fn record_injected_facts(root: &Path, session_id: Option<&str>, fact_ids: &[i64]
         return;
     }
     let mut seen = MemoryInjectSeen::load_or_default(&path);
-    seen.record(session_id, fact_ids);
-    let _ = seen.save(&path);
+    commit_seen_facts(&mut seen, &path, session_id, fact_ids);
 }
 
 fn user_seen_facts_path() -> Option<std::path::PathBuf> {
@@ -508,8 +518,7 @@ fn record_injected_user_facts(session_id: Option<&str>, fact_ids: &[i64]) {
         return;
     }
     let mut seen = MemoryInjectSeen::load_or_default(&path);
-    seen.record(session_id, fact_ids);
-    let _ = seen.save(&path);
+    commit_seen_facts(&mut seen, &path, session_id, fact_ids);
 }
 
 // ---------------------------------------------------------------------------
@@ -594,16 +603,22 @@ pub async fn combined_prompt_memory_recall(
     if !memory_injection_enabled() || prompt.trim().chars().count() < MIN_PROMPT_CHARS {
         return None;
     }
-    let project_seen = match (session_id, seen_facts_path(root)) {
-        (Some(session_id), Some(path)) => {
-            MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
-        }
+    // Loaded once and reused below to record newly-injected facts, instead of
+    // reloading the same seen-facts file a second time after the recall.
+    let mut project_seen_state = match (session_id, seen_facts_path(root)) {
+        (Some(_), Some(path)) => Some((MemoryInjectSeen::load_or_default(&path), path)),
+        _ => None,
+    };
+    let mut user_seen_state = match (session_id, user_seen_facts_path()) {
+        (Some(_), Some(path)) => Some((MemoryInjectSeen::load_or_default(&path), path)),
+        _ => None,
+    };
+    let project_seen = match (session_id, &project_seen_state) {
+        (Some(session_id), Some((seen, _))) => seen.seen_for_session(session_id),
         _ => HashSet::new(),
     };
-    let user_seen = match (session_id, user_seen_facts_path()) {
-        (Some(session_id), Some(path)) => {
-            MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
-        }
+    let user_seen = match (session_id, &user_seen_state) {
+        (Some(session_id), Some((seen, _))) => seen.seen_for_session(session_id),
         _ => HashSet::new(),
     };
     let (project_results, user_results) = tokio::join!(
@@ -619,8 +634,14 @@ pub async fn combined_prompt_memory_recall(
         &facts,
         PROMPT_RECALL_CHAR_BUDGET,
     )?;
-    record_injected_user_facts(session_id, &user_ids);
-    record_injected_facts(root, session_id, &project_ids);
+    if let Some(session_id) = session_id {
+        if let Some((seen, path)) = user_seen_state.as_mut() {
+            commit_seen_facts(seen, path, session_id, &user_ids);
+        }
+        if let Some((seen, path)) = project_seen_state.as_mut() {
+            commit_seen_facts(seen, path, session_id, &project_ids);
+        }
+    }
     Some(text)
 }
 

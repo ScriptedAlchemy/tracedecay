@@ -172,7 +172,6 @@ Until each row lands, the definition is duplicated in both crates.
 
 | Moved here | Root shim to write |
 |---|---|
-| `analytics` (whole module) | `src/analytics.rs` becomes `pub use tracedecay_agent_hosts::analytics::*;` |
 | `agents::cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER` | `src/serve.rs` re-exports |
 
 ### Canonical compatibility shims
