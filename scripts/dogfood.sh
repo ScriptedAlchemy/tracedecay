@@ -195,11 +195,21 @@ verify_binary_identity() {
       return 1
       ;;
   esac
-  if [[ "$reported_identity" != "$expected_identity" ]]; then
+  # A dogfood build is an iteration build. The check that matters is the commit
+  # SHA: a mismatch there means a stale binary is about to be installed. The
+  # `.dirty` suffix must NOT fail the run — the build's own git probe can read a
+  # transiently-dirty tree (a concurrent git index.lock, a build-time file
+  # touch) even from a clean checkout, and an intentionally-dirty iteration
+  # build is explicitly fine to dogfood. Compare SHAs, tolerating `.dirty`.
+  if [[ "${reported_identity%.dirty}" != "${expected_identity%.dirty}" ]]; then
     printf '%s\n' \
       "dogfood candidate binary identity mismatch: expected $expected_identity, got $reported_version." \
       'Force a fresh dogfood rebuild, then rerun cargo dogfood.' >&2
     return 1
+  fi
+  if [[ "$reported_identity" != "$expected_identity" ]]; then
+    printf 'dogfood: installing a %s build at commit %s (checkout identity %s)\n' \
+      "$reported_version" "${expected_identity%.dirty}" "$expected_identity" >&2
   fi
 }
 
