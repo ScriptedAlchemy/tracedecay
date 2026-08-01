@@ -37,11 +37,11 @@ impl ProjectRuntime for TraceDecay {
         TraceDecay::profile_database(self)
     }
 
-    fn project_sessions<'a>(
-        &'a self,
+    fn project_sessions(
+        &self,
         project_id: ProjectId,
         roots: Vec<PathBuf>,
-    ) -> RuntimeFuture<'a, Arc<RegisteredGlobalDb>> {
+    ) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
         Box::pin(async move {
             TraceDecay::store_runtime_registry(self)
                 .project_sessions(project_id, roots)

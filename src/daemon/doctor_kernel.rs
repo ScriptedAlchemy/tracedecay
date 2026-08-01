@@ -1182,8 +1182,8 @@ pub async fn collect_code_generation_retention_findings(
 ) -> DoctorStorageFamilyReadV1 {
     use crate::retention::code_index_generations::{
         DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
-        plan_scope_root_retention,
+        GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
+        plan_code_generation_retention_with_verification, plan_scope_root_retention,
     };
     use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
@@ -1264,11 +1264,11 @@ pub async fn collect_code_generation_retention_findings(
         collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
         stranded_scope_count: scopes
             .as_ref()
-            .map_or(0, |scopes| scopes.stranded_scope_count()),
+            .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_count),
         stranded_scope_bytes: StorageByteSizeV1(
             scopes
                 .as_ref()
-                .map_or(0, |scopes| scopes.stranded_scope_bytes()),
+                .map_or(0, ScopeRootRetentionPlanV1::stranded_scope_bytes),
         ),
     };
     let Ok(finding) = code_generation_retention_finding(&record, completeness) else {

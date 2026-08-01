@@ -835,7 +835,7 @@ pub(super) async fn production_project_server(
                                     break false;
                                 }
                                 tokio::select! {
-                                    _ = code_index_cancellation.cancelled() => break false,
+                                    () = code_index_cancellation.cancelled() => break false,
                                     publication = code_index_publications.recv() => match publication {
                                         Ok(publication)
                                             if publication.project_root == code_index_project =>
