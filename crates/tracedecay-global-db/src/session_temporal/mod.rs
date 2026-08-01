@@ -17,8 +17,6 @@ mod retrieval;
 mod schema;
 mod sql;
 pub mod store;
-#[cfg(test)]
-mod tests;
 
 use std::collections::BTreeMap;
 

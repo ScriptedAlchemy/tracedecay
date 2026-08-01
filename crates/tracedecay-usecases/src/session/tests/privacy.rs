@@ -17,18 +17,18 @@ use super::harness::{
     EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PRIVACY_CANARY, PROJECT_ID, RegisteredTemporalHarness,
     SAFE_PRIVACY_PAYLOAD,
 };
-use crate::application::context::{
+use crate::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use crate::application::session::{
+use crate::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
     SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
-use crate::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_sessions::runtime::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };

@@ -12,18 +12,18 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PROJECT_ID, RegisteredTemporalHarness};
-use crate::application::context::{
+use crate::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use crate::application::session::{
+use crate::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
     SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
-use crate::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
