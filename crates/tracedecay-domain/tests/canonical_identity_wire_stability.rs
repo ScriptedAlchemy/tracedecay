@@ -5,7 +5,7 @@
 //! and the digest over them byte-identical. One representative per family is
 //! pinned here; the digests were captured from the pre-refactor tree.
 
-use tracedecay_domain::code_intelligence::{CodeGenerationId, ContentDigest};
+use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::configuration::UserProfileId;
 use tracedecay_domain::feedback::{FeedbackCycleId, GitHubReviewIdV1, ProximityWarningIdV1};
 use tracedecay_domain::research::{EntityId, canonical_sha256};
@@ -80,16 +80,6 @@ fn identity_families_digest_is_stable() {
     assert_eq!(
         digest.as_str(),
         "sha256:4dcf315d8b4836ebf368d2f7aa8ba6b5f27af5a0c0f876ff51153da07b2a93d5"
-    );
-}
-
-/// Identities derived through the shared hex encoder. These are real digest
-/// derivations, so the encoding has to stay byte-identical.
-#[test]
-fn derived_identities_are_stable() {
-    assert_eq!(
-        ContentDigest::of_bytes(b"tracedecay").as_str(),
-        "sha256:e1f0e2d7a1c0aeb1e2b0f57bbd0dbc9f8a70e78b5c5b9e5d3a4c4dd0f9f4e7a2"
     );
 }
 

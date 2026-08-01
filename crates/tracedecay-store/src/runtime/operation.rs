@@ -12,7 +12,7 @@ use crate::{
     TransactionalOutboxEntryV1,
 };
 
-use super::identity::validate_canonical_id;
+use super::identity::{canonical_id, validate_canonical_id};
 use super::{
     CodeShardScopeV1, CommitSequenceV1, StorageRuntimeContractErrorV1, StoreAuthorityEpochV1,
     StoreClientIdV1, StoreIdempotencyKeyV1, StoreIncarnationV1, StoreOperationIdV1, StoreShardIdV1,
@@ -443,12 +443,8 @@ pub struct CommandDigestV1(String);
 impl CommandDigestV1 {
     pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
         let value = value.into();
-        let valid = value.strip_prefix("sha256:").is_some_and(|hex| {
-            hex.len() == 64
-                && hex
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        });
+        let valid =
+            tracedecay_domain::canonical_text::is_tagged_lowercase_hex(&value, "sha256:", 64);
         if !valid {
             return Err(StorageRuntimeContractErrorV1::NonCanonical {
                 field: "command digest",
@@ -496,39 +492,8 @@ impl IdempotencyIdentityV1 {
     }
 }
 
-macro_rules! request_control_id {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub const MAX_BYTES: usize = 512;
-
-            pub fn new(value: impl Into<String>) -> Result<Self, StorageRuntimeContractErrorV1> {
-                let value = value.into();
-                validate_canonical_id(&value, $field, Self::MAX_BYTES)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-    };
-}
-
-request_control_id!(RuntimeDeadlineIdV1, "runtime deadline id");
-request_control_id!(RuntimeCancellationIdV1, "runtime cancellation id");
+canonical_id!(RuntimeDeadlineIdV1, "runtime deadline id");
+canonical_id!(RuntimeCancellationIdV1, "runtime cancellation id");
 
 /// Application-owned deadline identity propagated unchanged for correlation.
 ///
