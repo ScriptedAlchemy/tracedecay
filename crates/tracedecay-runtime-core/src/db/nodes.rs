@@ -2,17 +2,31 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
-use super::rows::{NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
+use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{
-    build_qmark_placeholders, collect_rowid_pages, collect_rows, opt_str, push_int,
-    push_opt_quoted, push_quoted,
+    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with, collect_rows, opt_str,
+    push_int, push_opt_quoted, push_quoted,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
-/// Columns `row_to_node` reads, and therefore the index of the trailing
-/// `rowid` cursor column in a paged node scan.
-const NODE_COLUMNS: i32 = 23;
+/// One `rowid` keyset page of the nodes declared by a single file.
+pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes WHERE file_path = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+);
+
+/// [`NODES_BY_FILE_PAGE_SQL`] narrowed to just the node ids.
+pub(super) const NODE_IDS_BY_FILE_PAGE_SQL: &str =
+    "SELECT id, rowid FROM nodes WHERE file_path = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3";
+
+/// One `rowid` keyset page of a single node kind.
+pub(super) const NODES_BY_KIND_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes WHERE kind = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+);
 
 impl Database {
     /// Inserts or replaces a single node.
@@ -405,24 +419,24 @@ impl Database {
     }
 
     /// Returns all nodes for a given file, ordered by start line.
+    ///
+    /// Read through `rowid` keyset pages. One file is not a bound: a generated
+    /// or vendored source file can declare more symbols than the `SQLite`
+    /// runtime will materialize for a single query, and the runtime refuses an
+    /// oversized query outright rather than truncating it. The pages arrive in
+    /// `rowid` order, so the `start_line` ordering is restored here.
     pub async fn get_nodes_by_file(&self, file_path: &str) -> Result<Vec<Node>> {
-        let mut rows = self
-            .engine_conn()
-            .query(
-                concat!(
-                    "SELECT ",
-                    node_select_columns!(),
-                    " FROM nodes WHERE file_path = ?1 ORDER BY start_line"
-                ),
-                params![file_path],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query nodes by file: {e}"),
-                operation: "get_nodes_by_file".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_node, "get_nodes_by_file").await
+        let mut nodes = collect_rowid_pages_with(
+            &self.engine_conn(),
+            NODES_BY_FILE_PAGE_SQL,
+            &[Value::Text(file_path.to_string())],
+            NODE_COLUMNS,
+            row_to_node,
+            "get_nodes_by_file",
+        )
+        .await?;
+        nodes.sort_by_key(|node| node.start_line);
+        Ok(nodes)
     }
 
     /// Returns every node whose `parent_id` matches `parent_id`. Replaces
@@ -523,24 +537,21 @@ impl Database {
     }
 
     /// Returns all nodes of a given kind.
+    ///
+    /// Read through `rowid` keyset pages. One node kind is a partition, not a
+    /// bound: a real repository holds far more functions than the `SQLite`
+    /// runtime will materialize for one query, and the runtime refuses an
+    /// oversized query outright rather than truncating it.
     pub async fn get_nodes_by_kind(&self, kind: NodeKind) -> Result<Vec<Node>> {
-        let mut rows = self
-            .engine_conn()
-            .query(
-                concat!(
-                    "SELECT ",
-                    node_select_columns!(),
-                    " FROM nodes WHERE kind = ?1"
-                ),
-                params![kind.as_str()],
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query nodes by kind: {e}"),
-                operation: "get_nodes_by_kind".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_node, "get_nodes_by_kind").await
+        collect_rowid_pages_with(
+            &self.engine_conn(),
+            NODES_BY_KIND_PAGE_SQL,
+            &[Value::Text(kind.as_str().to_string())],
+            NODE_COLUMNS,
+            row_to_node,
+            "get_nodes_by_kind",
+        )
+        .await
     }
 
     /// Returns every node in the database.
@@ -591,34 +602,18 @@ impl Database {
             !file_path.starts_with('/'),
             "delete_nodes_by_file expects relative path, got absolute"
         );
-        // Gather node IDs for the file first.
-        let node_ids: Vec<String> = {
-            let mut rows = transaction
-                .query_engine(
-                    "SELECT id FROM nodes WHERE file_path = ?1",
-                    params![file_path],
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query node ids: {e}"),
-                    operation: "delete_nodes_by_file".to_string(),
-                })?;
-
-            let mut ids = Vec::new();
-            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read node id: {e}"),
-                operation: "delete_nodes_by_file".to_string(),
-            })? {
-                ids.push(
-                    row.get::<String>(0)
-                        .map_err(|e| TraceDecayError::Database {
-                            message: format!("failed to read node id value: {e}"),
-                            operation: "delete_nodes_by_file".to_string(),
-                        })?,
-                );
-            }
-            ids
-        };
+        // Gather node IDs for the file first, through `rowid` keyset pages —
+        // one file's symbol count is not a bound the runtime honours. See
+        // [`Database::get_nodes_by_file`].
+        let node_ids: Vec<String> = collect_rowid_pages_with(
+            transaction,
+            NODE_IDS_BY_FILE_PAGE_SQL,
+            &[Value::Text(file_path.to_string())],
+            1,
+            |row| row.get::<String>(0),
+            "delete_nodes_by_file",
+        )
+        .await?;
 
         if node_ids.is_empty() {
             return Ok(());

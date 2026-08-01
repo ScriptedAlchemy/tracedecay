@@ -5,6 +5,7 @@ use crate::db::engine::params;
 
 use super::connection::Database;
 use super::engine::QueryExecutor;
+use super::sql::collect_rowid_pages;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -68,23 +69,22 @@ impl Database {
         // Files grouped by language. Done in Rust (not SQL) so the label set
         // stays in sync with the extractor registry without an ever-growing
         // CASE expression. See `display_language_for_path`.
+        //
+        // Read through `rowid` keyset pages: a real project holds more files
+        // than the `SQLite` runtime will materialize for one query, and the
+        // runtime refuses an oversized query outright rather than truncating
+        // it.
         let files_by_language = {
-            let mut rows = snapshot
-                .query("SELECT path FROM files", ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query files for language stats: {e}"),
-                    operation: "get_stats".to_string(),
-                })?;
+            let paths = collect_rowid_pages(
+                &snapshot,
+                super::files::FILE_PATH_PAGE_SQL,
+                1,
+                |row| row.get::<String>(0),
+                "get_stats",
+            )
+            .await?;
             let mut map: HashMap<String, u64> = HashMap::new();
-            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read file row: {e}"),
-                operation: "get_stats".to_string(),
-            })? {
-                let path: String = row.get(0).map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to read file path: {e}"),
-                    operation: "get_stats".to_string(),
-                })?;
+            for path in paths {
                 *map.entry(display_language_for_path(&path).to_string())
                     .or_insert(0) += 1;
             }
