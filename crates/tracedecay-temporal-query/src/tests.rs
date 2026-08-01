@@ -931,8 +931,12 @@ fn summary_lineage_is_limited_to_the_selected_ranked_page() {
     });
 }
 
+/// A derived-evidence group anchor is a span/burst container, not a retrievable
+/// payload: no hydration authority resolves one. Ranking it would spend a result
+/// slot and then report an unresolvable omission, so the group stays out of the
+/// ranked page while its member occurrences keep their ordinary coverage.
 #[test]
-fn derived_candidate_ranks_when_its_member_occurrence_has_a_distinct_anchor() {
+fn derived_group_candidate_never_ranks_as_a_standalone_row() {
     block_on(async {
         let derived_anchor = anchor("derived-span");
         let mut derived = candidate("derived-span", "derived-span", 20);
@@ -957,17 +961,24 @@ fn derived_candidate_ranks_when_its_member_occurrence_has_a_distinct_anchor() {
         .await
         .expect("derived span member");
 
-        assert_eq!(result.ranked.len(), 1);
-        assert_eq!(result.ranked[0].anchor_id, derived_anchor);
-        assert_eq!(result.ranked[0].stable_id, "derived-span");
-        assert_eq!(result.coverage.visible, 1);
-        assert_eq!(result.coverage.total(), Some(1));
         assert!(
             result
                 .ranked
                 .iter()
-                .all(|candidate| candidate.anchor_id != member.anchor_id)
+                .all(|candidate| candidate.anchor_id != derived_anchor),
+            "a derived-evidence group container must never be ranked"
         );
+        assert!(
+            result
+                .hydrated
+                .iter()
+                .all(|hydrated| hydrated.anchor_id() != &derived_anchor),
+            "a group container must never reach hydration, so it can never be omitted"
+        );
+        // The member the group pulled into the record read still counts as
+        // covered, exactly as before: only the container itself is withheld.
+        assert_eq!(result.coverage.visible, 1);
+        assert_eq!(result.coverage.total(), Some(1));
     });
 }
 

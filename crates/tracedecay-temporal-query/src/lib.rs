@@ -393,17 +393,18 @@ pub async fn execute_temporal_kernel(
             })
             .map(|item| item.occurrence.anchor_id.clone()),
     );
+    // A derived-evidence group anchor names a span/burst container, never a
+    // retrievable payload: no hydration authority resolves a group, so ranking
+    // one as a standalone row can only spend a result slot and a diversity
+    // slot, then report an unresolvable omission — evicting real messages from
+    // the page it was supposed to enrich. Groups keep their existing role of
+    // pulling every member occurrence into the record read (so a member that
+    // matches on its own is ranked); they never become results themselves.
     let visible_candidates = all_candidates
         .into_iter()
         .filter(|candidate| {
-            visible_anchors.contains(&candidate.anchor_id)
-                || (derived_candidate_anchors.contains(&candidate.anchor_id)
-                    && resolved.iter().any(|item| {
-                        item.occurrence
-                            .evidence
-                            .supporting_anchor_ids
-                            .contains(&candidate.anchor_id)
-                    }))
+            !derived_candidate_anchors.contains(&candidate.anchor_id)
+                && visible_anchors.contains(&candidate.anchor_id)
         })
         .collect::<Vec<_>>();
     let mut ranked = rank_candidates(&visible_candidates, request.diversity)?;

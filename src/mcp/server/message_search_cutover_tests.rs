@@ -28,7 +28,7 @@ use crate::mcp::transport::JsonRpcRequest;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-const MESSAGE_SEARCH_PROJECT_ID: &str = "project.message-search-cutover";
+pub(super) const MESSAGE_SEARCH_PROJECT_ID: &str = "project.message-search-cutover";
 
 fn git(root: &std::path::Path, args: &[&str]) {
     let status = std::process::Command::new(crate::git::git_program())
@@ -73,7 +73,7 @@ async fn indexed_project() -> (
     (cg, runtime, dir, pin)
 }
 
-async fn server_with_authorities() -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
+pub(super) async fn server_with_authorities() -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
     server_with_project_refresh_wake(None).await
 }
 
