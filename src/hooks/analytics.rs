@@ -247,26 +247,27 @@ impl Drop for HookTimingSpan {
         let disposition = state
             .disposition
             .unwrap_or_else(|| HookDispositionTelemetry::unknown("disposition_absent"));
-        let telemetry = HookCompletedTelemetry {
-            schema_version: HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
-            coverage: HostHookTelemetryCoverage::HostMeasured,
-            agent: self.agent.to_owned(),
-            hook_name: self.hook_name.clone(),
-            prompt_category: self.prompt_category.map(str::to_owned),
-            duration_us: Some(elapsed_us),
-            duration_ms: Some(elapsed_us / 1000),
-            hook_wall_time_us: Some(elapsed_us),
-            hook_wall_time_ms: Some(elapsed_us / 1000),
-            daemon_rtt_us: state.daemon_rtt_us,
-            daemon_call_count: Some(state.daemon_call_count),
-            payload_bytes: self.payload_bytes,
-            daemon_ipc_payload_bytes: state.daemon_ipc_payload_bytes,
-            timeout,
-            disposition,
-        };
-        if let Ok(fields) = serde_json::to_value(telemetry) {
-            record_hook_analytics(self.root.as_deref(), "hook_completed", fields);
-        }
+        record_hook_analytics(
+            self.root.as_deref(),
+            "hook_completed",
+            serde_json::json!({
+                "schema_version": HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
+                "coverage": HostHookTelemetryCoverage::HostMeasured,
+                "agent": self.agent,
+                "hook_name": self.hook_name.as_str(),
+                "prompt_category": self.prompt_category,
+                "duration_us": elapsed_us,
+                "duration_ms": elapsed_us / 1000,
+                "hook_wall_time_us": elapsed_us,
+                "hook_wall_time_ms": elapsed_us / 1000,
+                "daemon_rtt_us": state.daemon_rtt_us,
+                "daemon_call_count": state.daemon_call_count,
+                "payload_bytes": self.payload_bytes,
+                "daemon_ipc_payload_bytes": state.daemon_ipc_payload_bytes,
+                "timeout": timeout,
+                "disposition": disposition,
+            }),
+        );
     }
 }
 
