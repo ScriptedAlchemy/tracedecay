@@ -68,8 +68,8 @@ impl ActivityFamilyV1 {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 5] = [
+    /// Canonical family set for exhaustive projections and generated adapters.
+    pub const ALL: [Self; 5] = [
         Self::Hook,
         Self::SessionIngest,
         Self::CodeIndex,

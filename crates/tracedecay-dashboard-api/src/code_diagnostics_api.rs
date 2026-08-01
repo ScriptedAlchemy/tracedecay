@@ -209,7 +209,7 @@ mod tests {
                 settings,
             ))),
         );
-        let expected = authority.snapshot().await.expect("authority snapshot");
+        let expected = authority.overview().await.expect("authority snapshot");
         state.code_diagnostics_authority = Some(authority);
 
         let Json(actual) = overview(State(state)).await.expect("diagnostics overview");
