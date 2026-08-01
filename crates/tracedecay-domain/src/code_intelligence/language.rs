@@ -74,9 +74,10 @@ fn validate_sorted_unique_strings(
     values: &[String],
     field: &'static str,
 ) -> Result<(), DomainError> {
-    if values.iter().any(|value| {
-        value.is_empty() || value.trim() != value || value.chars().any(char::is_control)
-    }) || values.windows(2).any(|pair| pair[0] >= pair[1])
+    if !values
+        .iter()
+        .all(|value| crate::canonical_text::is_canonical_text(value))
+        || values.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(DomainError::NonCanonical { field });
     }

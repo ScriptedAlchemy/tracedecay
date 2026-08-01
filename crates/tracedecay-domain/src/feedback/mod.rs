@@ -85,15 +85,7 @@ feedback_id!(FeedbackDedupeKeyV1, "feedback dedupe key");
 feedback_id!(FeedbackSavedDedupeKeyV1, "saved feedback dedupe key");
 feedback_id!(FeedbackDedupeClaimId, "feedback dedupe claim id");
 
-fn validate_label(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        return Err(DomainError::Empty { field });
-    }
-    if value.trim() != value || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+pub(crate) use crate::canonical_text::validate_canonical_string as validate_label;
 
 /// Exact repository scope used for a feedback evaluation. A path, current
 /// working directory, repository display name, or mutable branch label is not

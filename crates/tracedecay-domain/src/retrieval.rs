@@ -24,6 +24,7 @@ use crate::code_intelligence::{
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId, digest_id};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
+use crate::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use crate::research::{DomainError, canonical_sha256};
 use crate::session::TemporalModeV1;
 
@@ -40,14 +41,11 @@ fn validate_retrieval_identity(
     value: &str,
     field: &'static str,
 ) -> Result<(), RetrievalContractError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(RetrievalContractError::InvalidIdentity { field });
+    if is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
+        Ok(())
+    } else {
+        Err(RetrievalContractError::InvalidIdentity { field })
     }
-    Ok(())
 }
 
 macro_rules! retrieval_string_id {

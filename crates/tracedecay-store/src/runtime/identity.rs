@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use tracedecay_domain::canonical_text::is_canonical_text;
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId,
     WorktreeId,
@@ -105,7 +106,7 @@ pub(super) fn validate_canonical_id(
             max,
         });
     }
-    if value.trim() != value || value.chars().any(char::is_control) {
+    if !is_canonical_text(value) {
         return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
     }
     Ok(())

@@ -29,16 +29,7 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
 
 /// Reject code identities that are empty, untrimmed, over 512 bytes, or carry
 /// control characters.
-fn validate_code_identity(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+use crate::canonical_text::validate_canonical_identity as validate_code_identity;
 
 macro_rules! code_id {
     ($($name:ident),+ $(,)?) => {$(
