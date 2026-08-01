@@ -70,6 +70,66 @@ const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_mins(5)
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
+/// How long a client rides out a project open that has not finished yet.
+///
+/// A cold project open (create/migrate DBs, config runtime, first index) takes
+/// ~2.5s release / ~3.3s debug even for a tiny repo, so a 2s grace abandoned
+/// legitimate opens just before they completed. Retry loops still exit
+/// immediately on a real failure.
+pub(crate) const PROJECT_OPEN_RETRY_GRACE: Duration = Duration::from_secs(15);
+pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Daemon error messages for a saturated project-open queue. Both clear on
+/// their own as in-flight opens finish, so they are retryable for the same
+/// reason [`PROJECT_WARMING_RETRY_HINT`] is.
+const PROJECT_OPEN_CAPACITY_MESSAGES: [&str; 2] = [
+    "daemon project open task capacity reached",
+    "daemon project server capacity reached",
+];
+/// Typed `error.data.kind` values for the same two capacity states.
+const PROJECT_OPEN_CAPACITY_ERROR_KINDS: [&str; 2] = [
+    "project_open_task_capacity_reached",
+    "project_server_capacity_reached",
+];
+/// Message fragments emitted when a daemon request misses its read deadline.
+const DAEMON_READ_DEADLINE_MESSAGES: [&str; 2] =
+    ["before deadline", "deadline already elapsed"];
+
+/// True when a daemon error message carries the project warming hint.
+pub(crate) fn error_message_is_project_warming(message: &str) -> bool {
+    message.contains(PROJECT_WARMING_RETRY_HINT)
+}
+
+/// True when a daemon error message describes a project open that has not
+/// finished yet: either the route's warming hint or a saturated open queue.
+pub(crate) fn error_message_is_project_open_retryable(message: &str) -> bool {
+    error_message_is_project_warming(message)
+        || PROJECT_OPEN_CAPACITY_MESSAGES
+            .iter()
+            .any(|capacity| message.contains(capacity))
+}
+
+/// Response-side form of [`error_message_is_project_open_retryable`] for
+/// clients that still hold the JSON-RPC `error` member, where the capacity
+/// states also carry a typed `data.kind`.
+pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value) -> bool {
+    error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(error_message_is_project_open_retryable)
+        || error
+            .pointer("/data/kind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| PROJECT_OPEN_CAPACITY_ERROR_KINDS.contains(&kind))
+}
+
+/// True when a daemon error message reports a missed read deadline.
+pub fn error_message_is_read_deadline(message: &str) -> bool {
+    DAEMON_READ_DEADLINE_MESSAGES
+        .iter()
+        .any(|deadline| message.contains(deadline))
+}
+
 mod authority;
 mod bootstrap;
 mod bootstrap_route;

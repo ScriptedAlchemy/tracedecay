@@ -83,12 +83,9 @@ impl UsageCategory {
 }
 
 pub fn normalize_tool_name(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let without_mcp = trimmed
-        .strip_prefix("mcp__tracedecay__")
-        .or_else(|| trimmed.strip_prefix("mcp_tracedecay_"))
-        .unwrap_or(trimmed);
-    without_mcp.to_ascii_lowercase().replace('-', "_")
+    crate::tool_name::strip_tool_prefix(raw.trim())
+        .to_ascii_lowercase()
+        .replace('-', "_")
 }
 
 pub fn is_skill_view_tool(raw: &str) -> bool {

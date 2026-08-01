@@ -1305,6 +1305,37 @@ fn config_holds_only_empty_root(settings: &serde_json::Value, root_key: &str) ->
     })
 }
 
+/// Bundle registration state for hosts that store the tracedecay MCP server
+/// under a `mcpServers.tracedecay` object with `disabled` and `args` fields.
+///
+/// A registration only counts as current when it is explicitly enabled and
+/// still launches `tracedecay serve`.
+pub fn mcp_servers_registration_state(
+    settings_path: &Path,
+) -> host_bundle_v2::HostBundleRegistrationStateV1 {
+    use host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+    let Ok(bytes) = std::fs::read(settings_path) else {
+        return State::Missing;
+    };
+    let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return State::Corrupt;
+    };
+    if settings
+        .pointer("/mcpServers/tracedecay/disabled")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+        && settings
+            .pointer("/mcpServers/tracedecay/args")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+    {
+        State::Current
+    } else {
+        State::Missing
+    }
+}
+
 /// Host-specific wording for [`doctor_check_mcp_registration`].
 pub struct McpDoctorLabels<'a> {
     /// Agent id used in the ``run `tracedecay install --agent <id>` `` hint.
