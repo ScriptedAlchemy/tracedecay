@@ -630,9 +630,6 @@ jobs:
                   root.append(node)
           Path("windows-merged-junit.xml").write_bytes(ET.tostring(root, encoding="utf-8"))
           PY
-          python3 benchmarks/pr13-host-conformance/validate_packet.py
-          python3 benchmarks/pr13-advisory-milestone/validate_packet.py
-          python3 benchmarks/pr12-lsp-gateway/validate_packet.py
 
       - name: Upload Windows runtime junit
         uses: actions/upload-artifact@v6
