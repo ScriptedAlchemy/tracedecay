@@ -24,7 +24,7 @@ pub(crate) struct Pr13HookOrchestrationRequestV1 {
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
     pub trigger: Pr13HookOrchestrationTriggerV1,
-    completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
+    pub(super) completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 }
 
 impl Pr13HookOrchestrationRequestV1 {
