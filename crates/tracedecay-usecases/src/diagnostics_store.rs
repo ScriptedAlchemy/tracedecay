@@ -35,7 +35,7 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 /// The DDL lives in `tracedecay-store` because the rusqlite-runtime
 /// `DiagnosticExecutor` writes the same tables and its fixtures must not be
 /// weaker than what this engine installs.
-pub(crate) const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
+pub const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
 
 // The stored column text is owned by `tracedecay_store::diagnostics::codec` so
 // this engine and the rusqlite-runtime `DiagnosticExecutor` cannot drift apart
@@ -63,7 +63,7 @@ impl<'a> DiagnosticsStore<'a> {
         }
     }
 
-    pub(crate) const fn new_runtime(
+    pub const fn new_runtime(
         conn: &'a tracedecay_runtime_core::db::engine::Connection,
     ) -> Self {
         Self::new(conn)
