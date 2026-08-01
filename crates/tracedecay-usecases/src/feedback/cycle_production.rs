@@ -488,7 +488,7 @@ fn feedback_scope_for_project(
     project_root: &Path,
     scope: &ResolvedScope,
 ) -> Result<FeedbackScopeV1, ApplicationContractError> {
-    let branch = crate::branch::current_branch(project_root).ok_or(
+    let branch = tracedecay_runtime_core::branch::current_branch(project_root).ok_or(
         ApplicationContractError::Inconsistent {
             field: "project-open feedback branch",
         },

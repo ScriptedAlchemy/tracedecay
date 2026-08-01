@@ -560,7 +560,7 @@ pub struct Pr12PrimitiveProjectRuntime {
 
 /// Replace the mount-time authority carried by an owned primitive result with
 /// the authority revalidated immediately before publication.
-pub(crate) fn reauthorize_primitive_evidence(
+pub fn reauthorize_primitive_evidence(
     result: &mut ApplicationResult<Value>,
     authority: AuthorityReceipt,
 ) -> bool {

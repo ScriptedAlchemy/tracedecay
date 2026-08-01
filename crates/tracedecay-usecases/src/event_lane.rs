@@ -207,12 +207,12 @@ fn activity_envelope(
     })
 }
 
-pub(crate) fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {
+pub fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {
     db.and_then(|db| authoritative_project_id(db, None))
         .is_some()
 }
 
-pub(crate) fn subscribe() -> Option<broadcast::Receiver<ActivityRecordV1>> {
+pub fn subscribe() -> Option<broadcast::Receiver<ActivityRecordV1>> {
     Some(live_bus().subscribe())
 }
 

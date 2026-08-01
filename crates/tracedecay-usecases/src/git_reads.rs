@@ -17,7 +17,10 @@ use tracedecay_domain::{
     ScopeSetRevision, ScopeUnavailableReasonV1,
 };
 
-use crate::git_intelligence::{GitBlameRequest, GitHistoryRequest, NativeGitIntelligence};
+use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest};
+// SEAM: the native `git` spawn adapter is still root-owned
+// (`src/git_intelligence.rs`). See `SEAMS.md`.
+use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
     GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
 };
@@ -252,7 +255,7 @@ pub struct GitReadAuthorityV1 {
 }
 
 impl GitReadAuthorityV1 {
-    pub(crate) fn new(project_root: impl Into<PathBuf>, scope: ResolvedScope) -> Self {
+    pub fn new(project_root: impl Into<PathBuf>, scope: ResolvedScope) -> Self {
         Self {
             project_root: project_root.into(),
             scope,
@@ -352,7 +355,7 @@ impl GitReadAuthorityV1 {
             .ok()
             .flatten()
             .and_then(|marker| {
-                crate::repository_provenance::RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
+                tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext::from_authoritative_project_marker(
                     &self.project_root,
                     &self.scope.project_id,
                     &marker,

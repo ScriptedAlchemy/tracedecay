@@ -168,7 +168,7 @@ pub(crate) fn register_pr13_advisory_hook_notice_queue(
     true
 }
 
-pub(crate) fn peek_pr13_advisory_hook_notice(
+pub fn peek_pr13_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
 ) -> Option<Pr13AdvisoryHookLookupNoticeV1> {
@@ -180,7 +180,7 @@ pub(crate) fn peek_pr13_advisory_hook_notice(
     queue.peek()
 }
 
-pub(crate) fn acknowledge_pr13_advisory_hook_notice(
+pub fn acknowledge_pr13_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
     notice: &Pr13AdvisoryHookLookupNoticeV1,

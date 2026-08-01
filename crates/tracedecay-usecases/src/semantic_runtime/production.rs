@@ -1379,7 +1379,7 @@ impl ProductionSemanticRuntimeV1 {
     }
 }
 
-pub(crate) struct PreparedSemanticEvaluationGenerationV1 {
+pub struct PreparedSemanticEvaluationGenerationV1 {
     source_generation: CodeGenerationId,
     projection: tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
     search_index_key: SemanticSearchIndexKeyV1,
@@ -2525,7 +2525,7 @@ pub fn project_semantic_production_runtime(
 /// Query adapters compare this identity with the exact sealed code generation
 /// selected at admission. A stale or merely indexing vector generation never
 /// becomes eligible for semantic composition.
-pub(crate) fn project_semantic_source_generation(project_root: &Path) -> Option<CodeGenerationId> {
+pub fn project_semantic_source_generation(project_root: &Path) -> Option<CodeGenerationId> {
     project_semantic_generation_pointer(project_root).map(|pointer| pointer.source_generation)
 }
 
@@ -2811,10 +2811,8 @@ mod tests {
         PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
         SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1, SemanticRuntimeWorkV1,
     };
-    use crate::{
-        db::{DatabaseAuthority, TestDatabaseRuntimeMode},
-        semantic_code::legacy_migration::ProductionLegacyVectorCanonicalRebuilderV1,
-    };
+    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_semantic::legacy_migration::ProductionLegacyVectorCanonicalRebuilderV1;
 
     use super::*;
 

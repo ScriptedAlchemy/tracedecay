@@ -77,7 +77,7 @@ pub(crate) fn dedupe_related_message_copies<T>(
     kept
 }
 
-pub(crate) fn is_inventory_text(text: &str) -> bool {
+pub fn is_inventory_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mentions_transcript_dir = lower.contains(".jsonl")
         || lower.contains("sessions/")

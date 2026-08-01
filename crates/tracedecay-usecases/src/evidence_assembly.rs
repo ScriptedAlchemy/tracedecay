@@ -19,7 +19,7 @@ use tracedecay_runtime_core::db::{Database, DatabaseAccessMode};
 /// authoritative profile identity carried by the daemon; it never infers
 /// either identity from a path, label, database, or request payload.
 #[derive(Clone)]
-pub(crate) struct RuntimeEvidenceAssemblyStore {
+pub struct RuntimeEvidenceAssemblyStore {
     profile_id: tracedecay_domain::UserProfileId,
     runtime: StoreRuntimeHandle,
     authority: tracedecay_runtime_core::db::DatabaseAuthority,
@@ -42,7 +42,7 @@ pub(crate) enum EvidenceAssemblyAnchorResolutionV1 {
 }
 
 impl RuntimeEvidenceAssemblyStore {
-    pub(crate) fn new(
+    pub fn new(
         profile_id: tracedecay_domain::UserProfileId,
         runtime: StoreRuntimeHandle,
         authority: tracedecay_runtime_core::db::DatabaseAuthority,

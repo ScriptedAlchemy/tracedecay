@@ -10,18 +10,13 @@ use std::sync::{
 };
 use tracedecay_application::RequestContext;
 
-use crate::{
-    application::context::{
-        CancellationToken, RequestInterruption, application_request_interruption,
+use crate::context::{CancellationToken, RequestInterruption, application_request_interruption};
+use tracedecay_code_index::{
+    production::{
+        CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexProductionConfigV1,
+        CodeIndexProductionOpenErrorV1, CodeIndexProductionOwnerV1,
     },
-    code_index::{
-        production::{
-            CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
-            CodeIndexProductionConfigV1, CodeIndexProductionOpenErrorV1,
-            CodeIndexProductionOwnerV1,
-        },
-        projection::CodeChunkProjectionSink,
-    },
+    projection::CodeChunkProjectionSink,
 };
 
 /// Production owner type exposed to daemon, CLI, MCP, and hook composition.

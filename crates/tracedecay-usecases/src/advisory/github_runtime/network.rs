@@ -372,7 +372,7 @@ pub fn unregister_profile_github_read_only_credential_authority_v1(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
+pub enum ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
     Mounted,
     Public,
     NotConfigured,

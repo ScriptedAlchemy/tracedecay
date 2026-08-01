@@ -185,7 +185,7 @@ pub(crate) struct ProductionSemanticConfigurationOperationV1 {
 }
 
 impl ProductionSemanticConfigurationOperationV1 {
-    pub(crate) fn new(
+    pub fn new(
         configuration: Arc<ProjectConfigurationRuntime>,
         accepted_profiles: Arc<RegisteredSemanticAcceptedProfileAuthorityV1>,
     ) -> Self {

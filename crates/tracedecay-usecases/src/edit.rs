@@ -19,7 +19,9 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use tracedecay_runtime_core::types::{AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult};
+use tracedecay_application::source_edit::{
+    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
+};
 
 const JOURNAL_VERSION: u8 = 1;
 const MAX_DURABLE_RECORD_BYTES: usize = 4 * 1024 * 1024;

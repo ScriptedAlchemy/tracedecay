@@ -55,7 +55,7 @@ pub(crate) fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<Ma
 
 type DashboardDiagnosticsResultV1<T> = std::result::Result<T, DashboardDiagnosticsErrorV1>;
 
-pub(crate) fn diagnostic_broker(
+pub fn diagnostic_broker(
     project_root: PathBuf,
     settings: CodeDiagnosticsSettings,
 ) -> DiagnosticBroker {
@@ -93,7 +93,7 @@ pub(crate) async fn open_diagnostic_broker(
 }
 
 #[derive(Clone)]
-pub(crate) struct DashboardDiagnosticsAuthorityV1 {
+pub struct DashboardDiagnosticsAuthorityV1 {
     inner: Arc<DashboardDiagnosticsAuthorityInnerV1>,
 }
 
@@ -106,7 +106,7 @@ struct DashboardDiagnosticsAuthorityInnerV1 {
 }
 
 impl DashboardDiagnosticsAuthorityV1 {
-    pub(crate) fn new(
+    pub fn new(
         project_root: PathBuf,
         settings_root: PathBuf,
         database: Arc<Database>,

@@ -8,7 +8,7 @@
 //! depend on them directly, so neither side has to reach through the other.
 
 pub mod contracts;
-pub(crate) mod render;
+pub mod render;
 pub use tracedecay_sessions::lcm::compression_policy;
 
 pub use contracts::{

@@ -20,7 +20,7 @@ use super::spool::DEFAULT_MAX_RECORD_BYTES;
 /// Host-event wire byte cap (hook stdin and other host-admission inputs).
 ///
 /// Equal to the durable host-admission spool max record size (1 MiB).
-pub(crate) const MAX_WIRE_MESSAGE_BYTES: usize = DEFAULT_MAX_RECORD_BYTES;
+pub const MAX_WIRE_MESSAGE_BYTES: usize = DEFAULT_MAX_RECORD_BYTES;
 
 /// Bounded MCP/daemon JSON-RPC frame cap (16 MiB).
 ///
@@ -28,13 +28,13 @@ pub(crate) const MAX_WIRE_MESSAGE_BYTES: usize = DEFAULT_MAX_RECORD_BYTES;
 /// composer-envelope ceilings (`MAX_JSONL_RECORD_BYTES` and
 /// `MAX_COMPOSER_ENVELOPE_BYTES`) while leaving durable host-event records at
 /// exactly 1 MiB.
-pub(crate) const MAX_MCP_JSONRPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_MCP_JSONRPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Max leading bytes retained on oversized MCP/daemon frames for `id` peek.
-pub(crate) const MCP_OVERSIZE_ID_INSPECT_BYTES: usize = 4096;
+pub const MCP_OVERSIZE_ID_INSPECT_BYTES: usize = 4096;
 
 /// Stable reason code for oversized wire input (non-durable, non-retryable).
-pub(crate) const WIRE_RECORD_TOO_LARGE: &str = "wire_record_too_large";
+pub const WIRE_RECORD_TOO_LARGE: &str = "wire_record_too_large";
 
 /// Typed read outcome for non-MCP bounded inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,11 +61,11 @@ impl fmt::Display for WireOversizedError {
 
 impl Error for WireOversizedError {}
 
-pub(crate) fn wire_oversized_io_error() -> io::Error {
+pub fn wire_oversized_io_error() -> io::Error {
     wire_oversized_io_error_with_prefix(Vec::new())
 }
 
-pub(crate) fn wire_oversized_io_error_with_prefix(mut inspect_prefix: Vec<u8>) -> io::Error {
+pub fn wire_oversized_io_error_with_prefix(mut inspect_prefix: Vec<u8>) -> io::Error {
     bound_inspect_prefix(&mut inspect_prefix);
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -74,7 +74,7 @@ pub(crate) fn wire_oversized_io_error_with_prefix(mut inspect_prefix: Vec<u8>) -
 }
 
 /// Returns true when `err` is the typed wire oversized disposition.
-pub(crate) fn is_wire_oversized_io_error(err: &io::Error) -> bool {
+pub fn is_wire_oversized_io_error(err: &io::Error) -> bool {
     err.get_ref()
         .and_then(|inner| inner.downcast_ref::<WireOversizedError>())
         .is_some()

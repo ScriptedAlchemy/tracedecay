@@ -1,4 +1,4 @@
-pub(crate) mod compatibility;
+pub mod compatibility;
 pub mod lcm;
 mod ports;
 mod refresh;
