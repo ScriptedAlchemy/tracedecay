@@ -68,6 +68,8 @@ macro_rules! canonical_id {
     };
 }
 
+pub(super) use canonical_id;
+
 // A retained database snapshot is not an evaluation, configuration, or Git
 // repository-state snapshot, so it intentionally does not reuse those domain IDs.
 canonical_id!(StoreSnapshotIdV1, "store snapshot id");

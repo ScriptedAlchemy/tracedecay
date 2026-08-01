@@ -59,6 +59,101 @@ pub(crate) fn validate_canonical_identity(
     }
 }
 
+/// Declare `#[serde(transparent)]` string-identity newtypes that share one
+/// surface: `new`, `as_str`, `validate`, validating `Deserialize`,
+/// `TryFrom<String>`, and `Display`.
+///
+/// Every identity family in this crate emitted exactly this code and differed
+/// only in three axes, so those are the parameters: whether the type carries a
+/// JSON schema, which error the family rejects with, and which validator it
+/// runs. The rejection `field` is the type name unless the family spells out a
+/// label with `=>`; both forms exist because both are already on the wire in
+/// error messages.
+///
+/// The expansion expects `Serialize`, `Deserialize`, `Deserializer`, `fmt`,
+/// and (for `schema`) `JsonSchema` in scope at the invocation site, matching
+/// the per-module macros this replaces.
+macro_rules! validated_string_newtype {
+    (@body $name:ident, $error:ty, $validate:path, $field:expr) => {
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, $error> {
+                let value = value.into();
+                $validate(&value, $field)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), $error> {
+                $validate(&self.0, $field)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = $error;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+
+    (schema, $error:ty, $validate:path; $($name:ident => $field:literal),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::canonical_text::validated_string_newtype!(@body $name, $error, $validate, $field);
+    )+};
+
+    (plain, $error:ty, $validate:path; $($name:ident => $field:literal),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::canonical_text::validated_string_newtype!(@body $name, $error, $validate, $field);
+    )+};
+
+    (schema, $error:ty, $validate:path; $($name:ident),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::canonical_text::validated_string_newtype!(@body $name, $error, $validate, stringify!($name));
+    )+};
+
+    (plain, $error:ty, $validate:path; $($name:ident),+ $(,)?) => {$(
+        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
+        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        $crate::canonical_text::validated_string_newtype!(@body $name, $error, $validate, stringify!($name));
+    )+};
+}
+
+pub(crate) use validated_string_newtype;
+
 #[cfg(test)]
 mod tests {
     use super::*;
