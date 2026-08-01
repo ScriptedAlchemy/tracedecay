@@ -66,12 +66,7 @@ pub(crate) fn register_profile_sessions_port() {
 
     impl profile_sessions::ProfileSessionsRuntime for DaemonProfileSessions {
         fn mount(&self) -> profile_sessions::MountFuture<'_> {
-            Box::pin(async {
-                self.registry
-                    .profile_sessions()
-                    .await
-                    .expect("registered profile sessions")
-            })
+            Box::pin(async { self.registry.profile_sessions().await })
         }
     }
 
@@ -79,13 +74,10 @@ pub(crate) fn register_profile_sessions_port() {
         Box::pin(async move {
             // The caller has already entered the daemon database scope; the
             // identity is therefore created inside it, not ahead of it.
-            let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-                .expect("profile identity for the profile-sessions port");
-            let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-                .await
-                .expect("session runtime registry for the profile-sessions port");
-            Box::new(DaemonProfileSessions { registry })
-                as Box<dyn profile_sessions::ProfileSessionsRuntime>
+            let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+            let registry = DaemonSessionRuntimeRegistryV1::open(identity).await?;
+            Ok(Box::new(DaemonProfileSessions { registry })
+                as Box<dyn profile_sessions::ProfileSessionsRuntime>)
         })
     }
 

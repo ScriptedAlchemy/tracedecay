@@ -31,6 +31,7 @@ use crate::RegisteredGlobalDb;
 /// [`ProfileSessionsRuntime::mount`] calls `profile_sessions()`.
 pub mod profile_sessions {
     use super::{Arc, Future, OnceLock, PathBuf, Pin, RegisteredGlobalDb};
+    use tracedecay_runtime_core::errors::Result;
 
     /// A live profile-sessions runtime owned by the composition root.
     ///
@@ -42,10 +43,12 @@ pub mod profile_sessions {
     }
 
     /// Result of [`ProfileSessionsRuntime::mount`].
-    pub type MountFuture<'a> = Pin<Box<dyn Future<Output = Arc<RegisteredGlobalDb>> + Send + 'a>>;
+    pub type MountFuture<'a> =
+        Pin<Box<dyn Future<Output = Result<Arc<RegisteredGlobalDb>>> + Send + 'a>>;
 
     /// Result of an [`Opener`] call.
-    pub type OpenFuture = Pin<Box<dyn Future<Output = Box<dyn ProfileSessionsRuntime>> + Send>>;
+    pub type OpenFuture =
+        Pin<Box<dyn Future<Output = Result<Box<dyn ProfileSessionsRuntime>>> + Send>>;
 
     /// Opener installed by the composition root, keyed by profile root.
     pub type Opener = fn(PathBuf) -> OpenFuture;
