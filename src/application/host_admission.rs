@@ -13,16 +13,13 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::StoreShardScopeV1;
 
-type StorageTestRuntime = tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-
 /// Registered host-admission fixture assembled by the composition root.
 ///
-/// The lower storage fixture exposes database-scoped test helpers. This
-/// wrapper retains the canonical daemon scope and session-runtime registry
-/// needed by graph, daemon, MCP, and hook integration tests.
+/// This retains the canonical daemon scope, registered databases, and
+/// session-runtime registry needed by graph, daemon, MCP, and hook integration
+/// tests.
 #[doc(hidden)]
 pub struct HostAdmissionTestRuntimeV1 {
-    storage: StorageTestRuntime,
     brain_id: BrainId,
     profile_id: UserProfileId,
     profile_root: PathBuf,
@@ -97,14 +94,7 @@ impl HostAdmissionTestRuntimeV1 {
             profile_registered.as_ref(),
             project_registered.as_deref(),
         )?;
-        let storage = StorageTestRuntime::from_registered_databases_for_test(
-            Arc::clone(&profile_database),
-            Arc::clone(&profile_registered),
-            project_registered.clone(),
-        );
-
         Ok(Self {
-            storage,
             brain_id: identity.brain_id().clone(),
             profile_id: identity.profile_id().clone(),
             profile_root,
@@ -119,12 +109,155 @@ impl HostAdmissionTestRuntimeV1 {
 
     #[doc(hidden)]
     pub fn canonical_project_key(project_path: &Path) -> String {
-        StorageTestRuntime::canonical_project_key(project_path)
+        RegisteredGlobalDb::canonical_project_key(project_path)
     }
 
     #[doc(hidden)]
     pub fn profile_root_for_test(&self) -> &Path {
         &self.profile_root
+    }
+
+    #[doc(hidden)]
+    pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
+        match scope {
+            HostAdmissionScope::Project => self.project_registered.as_deref(),
+            HostAdmissionScope::Profile => Some(self.profile_registered.as_ref()),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&Path> {
+        self.registered_database(scope)
+            .map(RegisteredGlobalDb::db_path)
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_session_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        session: &tracedecay_sessions::runtime::SessionRecord,
+    ) -> Result<bool> {
+        Ok(self
+            .session_database_for_test(scope)?
+            .upsert_session(session)
+            .await)
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_session_message_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
+    ) -> Result<bool> {
+        let database = self.session_database_for_test(scope)?;
+        let session = database
+            .get_session(&message.provider, &message.session_id)
+            .await
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "seed registered session message fixture".to_owned(),
+                message: format!(
+                    "session {}/{} is unavailable",
+                    message.provider, message.session_id
+                ),
+            })?;
+        Ok(database
+            .upsert_transcript_batch(
+                &session,
+                std::slice::from_ref(message),
+                &format!(
+                    "host-admission-test-message:{}:{}",
+                    message.provider, message.message_id
+                ),
+                crate::global_db::ParseOffset::default(),
+            )
+            .await)
+    }
+
+    #[doc(hidden)]
+    pub async fn session_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<Option<tracedecay_sessions::runtime::SessionRecord>> {
+        Ok(self
+            .session_database_for_test(scope)?
+            .get_session(provider, session_id)
+            .await)
+    }
+
+    #[doc(hidden)]
+    pub async fn transcript_store_counts_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+        transcript_path: &Path,
+    ) -> Result<(i64, i64, i64, i64, i64, i64, i64)> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                    (SELECT COUNT(*) FROM sessions
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM session_messages
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages_fts
+                     JOIN lcm_raw_messages raw
+                       ON raw.store_id = lcm_raw_messages_fts.rowid
+                     WHERE raw.provider = ?1 AND raw.session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages_fts),
+                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM parse_offsets
+                     WHERE file_path = ?3)",
+                tracedecay_runtime_core::db::engine::params![
+                    provider,
+                    session_id,
+                    transcript_path.to_string_lossy().as_ref()
+                ],
+            )
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "read registered transcript store counts".to_owned(),
+                message: "count query returned no row".to_owned(),
+            })?;
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    }
+
+    #[doc(hidden)]
+    pub async fn project_session_message_count_for_test(&self) -> Result<i64> {
+        self.session_database_for_test(HostAdmissionScope::Project)?
+            .session_message_count()
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                operation: "count registered project session messages".to_owned(),
+                message,
+            })
+    }
+
+    fn session_database_for_test(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
+        self.registered_database(scope)
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "bind registered host-admission test runtime".to_owned(),
+                message: "requested registered database scope is unavailable".to_owned(),
+            })
     }
 
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
@@ -310,14 +443,6 @@ impl HostAdmissionTestRuntimeV1 {
             });
         }
         Ok((store_layout, project_database))
-    }
-}
-
-impl std::ops::Deref for HostAdmissionTestRuntimeV1 {
-    type Target = tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
-
-    fn deref(&self) -> &Self::Target {
-        &self.storage
     }
 }
 
