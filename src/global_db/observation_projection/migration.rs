@@ -40,7 +40,7 @@ struct MigrationProgress {
 pub(crate) async fn prepare_projection_version_migration_with_engine(
     conn: &Connection,
 ) -> ProjectionStoreResult<()> {
-    if !migration_target_is_registered()? {
+    if !MIGRATION_TARGET_IS_REGISTERED {
         return Ok(());
     }
     if projection_rebuild_pending(conn).await? {
@@ -62,7 +62,7 @@ pub(crate) async fn advance_projection_version_migration_until_cancelled_with_en
     conn: &Connection,
     cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<bool> {
-    if !migration_target_is_registered()? {
+    if !MIGRATION_TARGET_IS_REGISTERED {
         return Ok(true);
     }
     if let Some(complete) = resume_projection_rebuild_with_engine(conn, cancelled).await? {
@@ -76,7 +76,7 @@ pub(crate) async fn advance_projection_version_migration_until_cancelled_with_en
 pub(crate) async fn projection_version_migration_complete_with_engine(
     conn: &Connection,
 ) -> ProjectionStoreResult<bool> {
-    if !migration_target_is_registered()? {
+    if !MIGRATION_TARGET_IS_REGISTERED {
         return Ok(true);
     }
     if projection_rebuild_pending(conn).await? {
@@ -87,18 +87,54 @@ pub(crate) async fn projection_version_migration_complete_with_engine(
         .map(|pending| !pending)
 }
 
-fn migration_target_is_registered() -> ProjectionStoreResult<bool> {
-    if SESSION_MESSAGE_PROJECTOR_VERSION == SESSION_MESSAGE_PROJECTOR_VERSION_V1 {
-        return Ok(false);
+/// Every projector version this module can converge a store to, paired with
+/// whether reaching it requires migrating a predecessor frontier.
+///
+/// Bumping `SESSION_MESSAGE_PROJECTOR_VERSION` without adding its entry here
+/// fails the build. It used to fail the daemon instead: the check ran on every
+/// store open and turned a missing migration into a runtime open error, which
+/// is the worst possible place to learn that a constant changed.
+const REGISTERED_MIGRATION_TARGETS: [(&str, bool); 2] = [
+    // The origin version. Nothing precedes it, so it needs no migration.
+    (SESSION_MESSAGE_PROJECTOR_VERSION_V1, false),
+    // Migrates incrementally from a V1, V2, or V3 predecessor frontier; see
+    // `read_predecessor_frontier`.
+    (SESSION_MESSAGE_PROJECTOR_VERSION_V4, true),
+];
+
+const fn const_str_eq(left: &str, right: &str) -> bool {
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {
+        return false;
     }
-    if SESSION_MESSAGE_PROJECTOR_VERSION != SESSION_MESSAGE_PROJECTOR_VERSION_V4 {
-        return Err(storage_message(
-            "prepare projection version migration",
-            "current projector version has no registered migration",
-        ));
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
     }
-    Ok(true)
+    true
 }
+
+const fn migration_required_for(version: &str) -> bool {
+    let mut index = 0;
+    while index < REGISTERED_MIGRATION_TARGETS.len() {
+        let (candidate, required) = REGISTERED_MIGRATION_TARGETS[index];
+        if const_str_eq(candidate, version) {
+            return required;
+        }
+        index += 1;
+    }
+    panic!(
+        "SESSION_MESSAGE_PROJECTOR_VERSION has no entry in REGISTERED_MIGRATION_TARGETS; \
+         add the new version and its migration before bumping the constant"
+    );
+}
+
+/// Resolved at compile time from the table above.
+const MIGRATION_TARGET_IS_REGISTERED: bool =
+    migration_required_for(SESSION_MESSAGE_PROJECTOR_VERSION);
 
 /// Converges a store whose predecessor projection lineage cannot support the
 /// incremental version migration (sequence gaps, or observations with zero or
