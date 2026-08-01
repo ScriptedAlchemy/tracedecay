@@ -66,6 +66,7 @@ trait TaskSchedulerApi {
     fn registered_xml(&mut self) -> Result<Option<String>>;
     fn register_xml(&mut self, xml: &str) -> Result<()>;
     fn set_enabled(&mut self, enabled: bool) -> Result<()>;
+    fn disable_for_rollback(&mut self) -> Result<()>;
     fn run(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
     fn delete(&mut self) -> Result<()>;
@@ -77,6 +78,7 @@ struct ControlObservation {
     diagnostic: String,
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 #[derive(Debug)]
 enum ShutdownRequestAttempt {
     Acknowledged,
@@ -393,28 +395,61 @@ pub(super) fn delete() -> Result<()> {
     with_platform_api(delete_with)
 }
 
+pub(super) fn rollback_new_registration() -> Result<()> {
+    with_platform_api(|api| rollback_registration_with(api, None, None))
+}
+
 fn register_task_xml_with(api: &mut dyn TaskSchedulerApi, xml: &str) -> Result<()> {
     let previous = api.snapshot()?;
-    if api.registered_xml()?.as_deref() == Some(xml) {
+    let previous_xml = api.registered_xml()?;
+    if previous_xml.as_deref() == Some(xml) {
         return Ok(());
     }
 
-    if let Err(registration_error) = api.register_xml(xml) {
-        let restore_result = match previous {
-            Some(snapshot) => restore_registered_snapshot_with(api, snapshot),
-            None => api.delete(),
-        };
+    let operation_result = api.register_xml(xml).and_then(|()| match previous {
+        Some(snapshot) => restore_registered_snapshot_with(api, snapshot),
+        None => Ok(()),
+    });
+    if let Err(operation_error) = operation_result {
+        let rollback_result = rollback_registration_with(api, previous, previous_xml.as_deref());
         return combine_task_operations(
             "register daemon task",
-            Err(registration_error),
-            restore_result,
+            Err(operation_error),
+            rollback_result,
         );
     }
-    let Some(previous) = previous else {
-        return Ok(());
-    };
+    Ok(())
+}
 
-    restore_registered_snapshot_with(api, previous)
+fn rollback_registration_with(
+    api: &mut dyn TaskSchedulerApi,
+    previous: Option<TaskSnapshot>,
+    previous_xml: Option<&str>,
+) -> Result<()> {
+    let disable_result = api.disable_for_rollback();
+    let definition_result = match (previous, previous_xml) {
+        (Some(snapshot), Some(xml)) => api
+            .register_xml(xml)
+            .and_then(|()| restore_snapshot_with(api, snapshot)),
+        (None, None) => api.delete(),
+        _ => Err(TraceDecayError::Config {
+            message: "daemon task registration rollback snapshot was inconsistent".to_string(),
+        }),
+    };
+    let rollback_result = combine_task_operations(
+        "disable and restore daemon task registration",
+        definition_result,
+        disable_result,
+    );
+    if previous.is_some_and(|snapshot| !snapshot.enabled) {
+        let final_disable_result = api.disable_for_rollback();
+        return combine_task_operations(
+            "restore disabled daemon task registration",
+            rollback_result,
+            final_disable_result,
+        );
+    }
+    rollback_result
 }
 
 fn restore_registered_snapshot_with(
@@ -683,9 +718,12 @@ fn wait_for_task_state_with(
     let mut last_state = DaemonServiceState::Missing;
     let mut last_control = "not observed".to_string();
     while control.elapsed() < deadline {
-        let remaining = deadline.saturating_sub(control.elapsed());
-        let probe_timeout = CONTROL_PROBE_TIMEOUT.min(remaining);
         last_state = state_from_snapshot(api.snapshot()?);
+        let remaining = deadline.saturating_sub(control.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let probe_timeout = CONTROL_PROBE_TIMEOUT.min(remaining);
         let observation = if require_ready {
             control.readiness(probe_timeout)
         } else {
@@ -792,6 +830,34 @@ fn state_from_snapshot(snapshot: Option<TaskSnapshot>) -> DaemonServiceState {
             enabled: false,
         }) => DaemonServiceState::StoppedDisabled,
     }
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn task_snapshot_from_scheduler_state(scheduler_state: i32, enabled: bool) -> Result<TaskSnapshot> {
+    let running = match (scheduler_state, enabled) {
+        (2 | 4, _) => true,
+        (1, false) | (3, true) => false,
+        (0, _) => {
+            return Err(TraceDecayError::Config {
+                message: "Windows Task Scheduler returned unknown daemon task state".to_string(),
+            });
+        }
+        (1, true) | (3, false) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler returned inconsistent daemon task state {scheduler_state} with enabled={enabled}"
+                ),
+            });
+        }
+        _ => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler returned unsupported daemon task state {scheduler_state}"
+                ),
+            });
+        }
+    };
+    Ok(TaskSnapshot { running, enabled })
 }
 
 fn combine_task_operations(
@@ -1034,22 +1100,20 @@ fn with_platform_control_api<T>(
 
 #[cfg(windows)]
 mod native {
-    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows::Win32::System::Com::{
         CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
         CoUninitialize,
     };
     use windows::Win32::System::TaskScheduler::{
         IRegisteredTask, ITaskFolder, ITaskService, TASK_CREATE_OR_UPDATE,
-        TASK_DONT_ADD_PRINCIPAL_ACE, TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_QUEUED,
-        TASK_STATE_RUNNING, TaskScheduler,
+        TASK_DONT_ADD_PRINCIPAL_ACE, TASK_LOGON_INTERACTIVE_TOKEN, TaskScheduler,
     };
     use windows::Win32::System::Variant::VARIANT;
     use windows::core::{BSTR, HRESULT};
 
     use super::*;
 
-    const SCHED_E_TASK_NOT_FOUND: HRESULT = HRESULT(0x8004_130f_u32 as i32);
     const OWNER_AND_DACL_SECURITY_INFORMATION: i32 = 0x0000_0001 | 0x0000_0004;
 
     pub(super) struct NativeTaskScheduler {
@@ -1150,10 +1214,7 @@ mod native {
                 .as_bool();
             let scheduler_state = unsafe { task.State() }
                 .map_err(|error| com_error("read daemon task state", error))?;
-            Ok(Some(TaskSnapshot {
-                running: matches!(scheduler_state, TASK_STATE_RUNNING | TASK_STATE_QUEUED),
-                enabled,
-            }))
+            task_snapshot_from_scheduler_state(scheduler_state.0, enabled).map(Some)
         }
 
         fn registered_xml(&mut self) -> Result<Option<String>> {
@@ -1197,6 +1258,14 @@ mod native {
                 .map_err(|error| com_error("change daemon task enablement", error))
         }
 
+        fn disable_for_rollback(&mut self) -> Result<()> {
+            let Some(task) = self.task_unchecked()? else {
+                return Ok(());
+            };
+            unsafe { task.SetEnabled(false.into()) }
+                .map_err(|error| com_error("disable daemon task during rollback", error))
+        }
+
         fn run(&mut self) -> Result<()> {
             let task = self.required_task("start")?;
             unsafe { task.Run(&VARIANT::default()) }
@@ -1222,8 +1291,12 @@ mod native {
     }
 
     fn is_task_not_found(error: &windows::core::Error) -> bool {
-        let code = error.code();
-        code == SCHED_E_TASK_NOT_FOUND || code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+        is_task_not_found_code(error.code())
+    }
+
+    pub(super) fn is_task_not_found_code(code: HRESULT) -> bool {
+        code == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0)
+            || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
     }
 
     fn com_error(operation: &str, error: windows::core::Error) -> TraceDecayError {
@@ -1259,6 +1332,7 @@ mod tests {
         fail_next_enablement: bool,
         fail_next_run: bool,
         fail_next_stop: bool,
+        fail_next_delete: bool,
         stop_leaves_running: bool,
         snapshots_until_exit: Option<usize>,
         snapshot_count: usize,
@@ -1281,6 +1355,7 @@ mod tests {
                 fail_next_enablement: false,
                 fail_next_run: false,
                 fail_next_stop: false,
+                fail_next_delete: false,
                 stop_leaves_running: false,
                 snapshots_until_exit: None,
                 snapshot_count: 0,
@@ -1316,7 +1391,7 @@ mod tests {
                 enabled: true,
             });
             self.xml = Some(xml.to_string());
-            if self.fail_registration_after_mutation {
+            if std::mem::take(&mut self.fail_registration_after_mutation) {
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler registration failed after mutation".to_string(),
                 });
@@ -1334,6 +1409,13 @@ mod tests {
             self.operations.push(Operation::Enable(enabled));
             task.enabled = enabled;
             Ok(())
+        }
+
+        fn disable_for_rollback(&mut self) -> Result<()> {
+            if self.task.is_none() {
+                return Ok(());
+            }
+            self.set_enabled(false)
         }
 
         fn run(&mut self) -> Result<()> {
@@ -1369,6 +1451,11 @@ mod tests {
 
         fn delete(&mut self) -> Result<()> {
             self.operations.push(Operation::Delete);
+            if std::mem::take(&mut self.fail_next_delete) {
+                return Err(TraceDecayError::Config {
+                    message: "fake scheduler delete failed".to_string(),
+                });
+            }
             self.task = None;
             self.xml = None;
             Ok(())
@@ -1656,6 +1743,48 @@ mod tests {
     }
 
     #[test]
+    fn native_scheduler_state_mapping_fails_closed() {
+        assert_eq!(
+            task_snapshot_from_scheduler_state(1, false).expect("disabled"),
+            TaskSnapshot {
+                running: false,
+                enabled: false,
+            }
+        );
+        assert_eq!(
+            task_snapshot_from_scheduler_state(2, false).expect("queued disabled"),
+            TaskSnapshot {
+                running: true,
+                enabled: false,
+            }
+        );
+        assert_eq!(
+            task_snapshot_from_scheduler_state(3, true).expect("ready"),
+            TaskSnapshot {
+                running: false,
+                enabled: true,
+            }
+        );
+        assert!(task_snapshot_from_scheduler_state(0, false).is_err());
+        assert!(task_snapshot_from_scheduler_state(1, true).is_err());
+        assert!(task_snapshot_from_scheduler_state(3, false).is_err());
+        assert!(task_snapshot_from_scheduler_state(5, true).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn account_information_error_is_not_task_not_found() {
+        use windows::core::HRESULT;
+
+        assert!(!native::is_task_not_found_code(HRESULT(
+            0x8004_130f_u32 as i32
+        )));
+        assert!(native::is_task_not_found_code(HRESULT::from_win32(
+            windows::Win32::Foundation::ERROR_FILE_NOT_FOUND.0
+        )));
+    }
+
+    #[test]
     fn registration_updates_definition_and_restores_running_disabled_state() {
         let mut api =
             FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task>old</Task>");
@@ -1698,13 +1827,11 @@ mod tests {
 
         register_task_xml_with(&mut api, "<Task>new</Task>").expect_err("restart must fail");
 
-        assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
-        assert_eq!(
-            api.operations,
-            vec![
-                Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Enable(false),
-            ]
+        assert_eq!(api.state(), DaemonServiceState::RunningDisabled);
+        assert_eq!(api.xml.as_deref(), Some("<Task>old</Task>"));
+        assert!(
+            api.operations
+                .contains(&Operation::Register("<Task>old</Task>".to_string()))
         );
     }
 
@@ -1719,12 +1846,10 @@ mod tests {
 
         assert!(error.to_string().contains("enablement change failed"));
         assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
-        assert_eq!(
-            api.operations,
-            vec![
-                Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Enable(false),
-            ]
+        assert_eq!(api.xml.as_deref(), Some("<Task>old</Task>"));
+        assert!(
+            api.operations
+                .contains(&Operation::Register("<Task>old</Task>".to_string()))
         );
     }
 
@@ -1743,13 +1868,42 @@ mod tests {
                 .contains("registration failed after mutation")
         );
         assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
+        assert_eq!(api.xml.as_deref(), Some("<Task>old</Task>"));
+        assert!(
+            api.operations
+                .contains(&Operation::Register("<Task>old</Task>".to_string()))
+        );
+    }
+
+    #[test]
+    fn failed_new_registration_cleanup_leaves_residual_task_disabled() {
+        let mut api =
+            FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task>new</Task>");
+        api.fail_next_delete = true;
+
+        let error = rollback_registration_with(&mut api, None, None)
+            .expect_err("delete failure must surface");
+
+        assert!(error.to_string().contains("fake scheduler delete failed"));
+        assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
         assert_eq!(
             api.operations,
-            vec![
-                Operation::Register("<Task>new</Task>".to_string()),
-                Operation::Enable(false),
-            ]
+            vec![Operation::Enable(false), Operation::Delete]
         );
+    }
+
+    #[test]
+    fn failed_no_start_transition_removes_new_registration() {
+        let mut api = FakeTaskScheduler::default();
+        register_task_xml_with(&mut api, "<Task>new</Task>").expect("register task");
+        api.fail_next_enablement = true;
+
+        apply_state_with(&mut api, DaemonServiceState::StoppedDisabled)
+            .expect_err("disable transition must fail");
+        rollback_registration_with(&mut api, None, None).expect("remove new task");
+
+        assert_eq!(api.state(), DaemonServiceState::Missing);
+        assert_eq!(api.operations.last(), Some(&Operation::Delete));
     }
 
     #[test]

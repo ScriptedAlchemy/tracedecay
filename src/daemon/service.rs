@@ -565,10 +565,24 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
 
 fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
-    let service_path = write_service_unit(spec)?;
-    runner.install(&service_path, start, &spec.socket_path)?;
-
-    Ok(service_path)
+    #[cfg(windows)]
+    let new_windows_task = windows_task::service_state()? == DaemonServiceState::Missing;
+    #[cfg(not(windows))]
+    let new_windows_task = false;
+    let operation_result = (|| {
+        let service_path = write_service_unit(spec)?;
+        runner.install(&service_path, start, &spec.socket_path)?;
+        Ok(service_path)
+    })();
+    if operation_result.is_err() && new_windows_task {
+        let rollback_result = windows_task::rollback_new_registration();
+        return combine_operation_and_restore(
+            "install new Windows daemon task",
+            operation_result,
+            rollback_result,
+        );
+    }
+    operation_result
 }
 
 pub fn refresh_service(spec: &DaemonServiceSpec) -> Result<PathBuf> {
