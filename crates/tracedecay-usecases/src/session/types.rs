@@ -72,7 +72,7 @@ impl SessionRequestBinding {
     ) -> Result<(), SessionAuthorizationError> {
         let scope = self
             .identity
-            .application_scope()
+            .session_request_scope()
             .map_err(|_| SessionAuthorizationError::UnresolvedApplicationScope)?;
         if &scope != context.scope() {
             return Err(SessionAuthorizationError::WrongScope);
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_binding_fails_closed_without_project_scope() {
+    fn profile_binding_fails_closed_against_a_project_context() {
         let context = context();
         let binding = SessionRequestBinding::new(
             ResolvedSessionIdentity::for_profile(
@@ -1119,9 +1119,12 @@ mod tests {
             context.binding.budgets,
         );
 
+        // A profile-owned binding resolves the profile session store's own
+        // scope, which is disjoint from every project scope, so pairing it with
+        // a project request context still fails closed.
         assert_eq!(
             binding.validate_context(&context),
-            Err(SessionAuthorizationError::UnresolvedApplicationScope)
+            Err(SessionAuthorizationError::WrongScope)
         );
     }
 

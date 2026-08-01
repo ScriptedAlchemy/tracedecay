@@ -465,7 +465,7 @@ impl DaemonSessionRetrievalService {
         let request_id = mint_global_request_id(GlobalRequestSurface::McpSessionRetrieval).ok()?;
         let request_id = RequestId::new(request_id.as_str()).ok()?;
         let actor = ActorId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?;
-        let scope = self.root.identity.application_scope().ok()?;
+        let scope = self.root.identity.session_request_scope().ok()?;
         let capability = message_search_digest(
             b"tracedecay.mcp.message-search.capability.v1\0",
             &self.root.identity,

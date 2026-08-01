@@ -349,7 +349,7 @@ fn command_from_request(
     let request_id = RequestId::new(request_id.as_str()).map_err(|error| error.to_string())?;
     let actor = ActorId::new("mcp.session-refresh").map_err(|error| error.to_string())?;
     let scope = identity
-        .application_scope()
+        .session_request_scope()
         .map_err(|error| error.to_string())?;
     let capability = CapabilityDigest::new(stable_digest(
         b"tracedecay.mcp.session-refresh.capability.v1\0",
