@@ -1,9 +1,8 @@
 //! Daemon client admission: shared client deadlines, capacity admission, and
 //! typed saturation rejections.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
@@ -14,6 +13,7 @@ use super::{
     parse_daemon_invocation_request, read_line_handling_wire_oversized, write_json_rpc_response,
 };
 use crate::mcp::ErrorCode;
+use crate::support::weak_registry::WeakRegistry;
 use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
@@ -110,7 +110,7 @@ struct DaemonClientFairnessKey {
 pub(crate) struct DaemonPerClientAdmission {
     /// Weak entries retain no client state after the last in-flight lease.
     /// Reconnects with the same validated process id reuse the live semaphore.
-    clients: Arc<Mutex<HashMap<DaemonClientFairnessKey, Weak<tokio::sync::Semaphore>>>>,
+    clients: Arc<WeakRegistry<DaemonClientFairnessKey, tokio::sync::Semaphore>>,
     capacity: usize,
 }
 
@@ -145,7 +145,7 @@ impl Default for DaemonPerClientAdmission {
 impl DaemonPerClientAdmission {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients: Arc::new(WeakRegistry::new()),
             capacity,
         }
     }
@@ -162,21 +162,10 @@ impl DaemonPerClientAdmission {
             global_db_path: handshake.client_identity.global_db_path.clone(),
             client_instance_id: handshake.client_instance_id.clone(),
         };
-        let semaphore = {
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            clients.retain(|_, semaphore| semaphore.strong_count() > 0);
-            clients
-                .get(&key)
-                .and_then(Weak::upgrade)
-                .unwrap_or_else(|| {
-                    let semaphore = Arc::new(tokio::sync::Semaphore::new(self.capacity));
-                    clients.insert(key, Arc::downgrade(&semaphore));
-                    semaphore
-                })
-        };
+        let capacity = self.capacity;
+        let (semaphore, _hit) = self
+            .clients
+            .get_or_insert_with(key, || Arc::new(tokio::sync::Semaphore::new(capacity)));
         Arc::clone(&semaphore)
             .try_acquire_owned()
             .map(|permit| DaemonPerClientPermit {
@@ -202,12 +191,8 @@ impl DaemonPerClientAdmission {
 
     #[cfg(test)]
     pub(crate) fn tracked_client_count(&self) -> usize {
-        let mut clients = self
-            .clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients.retain(|_, semaphore| semaphore.strong_count() > 0);
-        clients.len()
+        self.clients.retain_live();
+        self.clients.len()
     }
 }
 
