@@ -1,5 +1,7 @@
 //! Immutable hunk selection and compare-and-swap identity.
 
+use std::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::{DomainError, ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
@@ -201,54 +203,10 @@ pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.previ
 /// Domain separator for terminal PR11 index transaction receipts.
 pub const GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.receipt.v1";
 
-macro_rules! git_index_identifier {
-    ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                validate_path_label(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_path_label(&self.0, $field)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = DomainError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
-git_index_identifier!(
+crate::canonical_text::validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_path_label;
     GitIndexPreviewId => "git index preview id",
     GitIndexTransactionId => "git index transaction id",
     GitIndexReceiptId => "git index receipt id",

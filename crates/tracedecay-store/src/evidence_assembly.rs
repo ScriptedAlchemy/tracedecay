@@ -5,6 +5,7 @@ use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::{
     AnchorOwnerBindingV1, BlobId, CanonicalObservationIdV1, CanonicalSourceOccurrenceSetIdV1,
     CapabilityId, ComponentVersion, CoverageReportV1, EvidenceAssemblyPublicationReceiptIdV1,
@@ -1555,11 +1556,7 @@ fn ensure_unique<T: Ord>(values: &[T], field: &'static str) -> EvidenceAssemblyS
 }
 
 fn validate_label(value: &str, field: &'static str) -> EvidenceAssemblyStoreResult<()> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
+    if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
         return Err(invalid(field));
     }
     Ok(())
