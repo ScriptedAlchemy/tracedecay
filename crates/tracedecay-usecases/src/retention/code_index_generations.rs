@@ -67,7 +67,7 @@ struct SealedGenerationSealMetadataV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DurablePublicationPointerV1 {
+pub struct DurablePublicationPointerV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
     pub publication_digest: String,
@@ -201,7 +201,7 @@ pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
     ))
 }
 
-pub(crate) struct CodeGenerationStoreLockV1(File);
+pub struct CodeGenerationStoreLockV1(File);
 
 impl Drop for CodeGenerationStoreLockV1 {
     fn drop(&mut self) {
@@ -209,7 +209,7 @@ impl Drop for CodeGenerationStoreLockV1 {
     }
 }
 
-pub(crate) fn acquire_code_generation_store_lock(
+pub fn acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
     let lock_path = store_root.join(STORE_LOCK_FILE);
