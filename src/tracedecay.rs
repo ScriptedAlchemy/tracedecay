@@ -19,6 +19,7 @@ use tracedecay_code_extraction::LanguageRegistry;
 mod diagnostics;
 mod edits;
 pub(crate) mod facts;
+mod graph_runtime_port;
 mod indexing;
 mod lifecycle;
 mod locking;

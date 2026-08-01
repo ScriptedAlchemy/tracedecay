@@ -5,9 +5,8 @@ use crate::application::memory::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{
-    AddFactOutcome, AddFactRequest, ContradictionResult, FactRecord, FactSearchResult,
-    FeedbackRequest, FeedbackResult, MemoryCategory, MemoryStatus, SearchFactsRequest,
-    TrustHistoryEntry, UpdateFactRequest,
+    AddFactOutcome, AddFactRequest, FactRecord, FactSearchResult, FeedbackRequest, FeedbackResult,
+    MemoryCategory, MemoryStatus, SearchFactsRequest, TrustHistoryEntry, UpdateFactRequest,
 };
 use crate::store::memory::{DatabaseFactStore, ProjectFactStore, ProjectMemoryDbHandle};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -150,58 +149,6 @@ impl TraceDecay {
                 },
                 context,
             )
-            .await
-            .map_err(memory_application_error)
-    }
-
-    pub async fn related_facts(
-        &self,
-        entity: &str,
-        category: Option<MemoryCategory>,
-        min_trust: Option<f64>,
-        limit: usize,
-    ) -> Result<Vec<FactSearchResult>> {
-        let context = self.generated_memory_operation("related facts")?;
-        self.project_memory_application()
-            .await?
-            .related_facts_v1(
-                SearchFactsRequest {
-                    query: entity.to_owned(),
-                    category,
-                    limit: Some(limit),
-                    min_trust,
-                    include_why: true,
-                },
-                context,
-            )
-            .await
-            .map_err(memory_application_error)
-    }
-
-    pub async fn reason_facts(
-        &self,
-        entities: &[String],
-        category: Option<MemoryCategory>,
-        min_trust: Option<f64>,
-        limit: usize,
-    ) -> Result<Vec<FactSearchResult>> {
-        let context = self.generated_memory_operation("reason facts")?;
-        self.project_memory_application()
-            .await?
-            .reason_facts_v1(entities.to_vec(), category, min_trust, limit, context)
-            .await
-            .map_err(memory_application_error)
-    }
-
-    pub async fn contradict_facts(
-        &self,
-        category: Option<MemoryCategory>,
-        threshold: f64,
-        limit: usize,
-    ) -> Result<Vec<ContradictionResult>> {
-        self.project_memory_application()
-            .await?
-            .contradict_facts_v1(category, threshold, limit)
             .await
             .map_err(memory_application_error)
     }
