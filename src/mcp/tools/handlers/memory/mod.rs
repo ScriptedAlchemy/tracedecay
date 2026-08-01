@@ -148,17 +148,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-/// Upper bound on any single memory tool operation (add/search/feedback/…).
-///
-/// The add path performs a real per-fact holographic encode plus a serialized
-/// write transaction and an optional digest refresh, so a contended write lock
-/// or a starved host can stretch one operation far past any interactive budget.
-/// Unbounded, the tool handler awaits the store indefinitely and pins the MCP
-/// transport open; this deadline degrades that stall to a typed, retryable
-/// problem. It is deliberately generous relative to normal sub-second latency
-/// so healthy operations never trip it.
-const MEMORY_OPERATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Typed "operation exceeded deadline" problem for a bounded memory operation.
 ///
 /// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
@@ -166,7 +155,15 @@ const MEMORY_OPERATION_DEADLINE: std::time::Duration = std::time::Duration::from
 /// boundary surfaces a structured, retryable error rather than a transport
 /// hang. The deadline is a backstop, so retry is safe (writes are receipt
 /// idempotent).
-fn memory_deadline_error(operation: &str, deadline: std::time::Duration) -> TraceDecayError {
+///
+/// The bound itself is applied once, centrally, at the retained memory dispatch
+/// (`dispatch_groups::dispatch_memory_operation`) off the admission-carried
+/// client deadline — mirroring the git dispatcher — so every memory operation
+/// (add/search/feedback/status) is covered uniformly rather than per handler.
+pub(super) fn memory_deadline_error(
+    operation: &str,
+    deadline: std::time::Duration,
+) -> TraceDecayError {
     TraceDecayError::project_route(
         "memory_operation_deadline_exceeded",
         true,
@@ -175,29 +172,6 @@ fn memory_deadline_error(operation: &str, deadline: std::time::Duration) -> Trac
             deadline.as_secs()
         ),
     )
-}
-
-/// Bound `future` by [`MEMORY_OPERATION_DEADLINE`], mapping an elapsed deadline
-/// to [`memory_deadline_error`]. See [`with_memory_deadline_for`].
-pub(super) async fn with_memory_deadline<T>(
-    operation: &str,
-    future: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, operation, future).await
-}
-
-/// Bound `future` by `deadline`. On elapse the future is dropped (cancelling it
-/// at its next suspension point) and a typed deadline error is returned; the
-/// inner result is passed through unchanged otherwise.
-pub(super) async fn with_memory_deadline_for<T>(
-    deadline: std::time::Duration,
-    operation: &str,
-    future: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    match tokio::time::timeout(deadline, future).await {
-        Ok(result) => result,
-        Err(_elapsed) => Err(memory_deadline_error(operation, deadline)),
-    }
 }
 
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
@@ -426,38 +400,12 @@ mod tests {
         (tmp, cg, fact_id)
     }
 
-    #[tokio::test]
-    async fn memory_deadline_passes_through_a_fast_result() {
-        let ok: Result<u32> =
-            with_memory_deadline_for(std::time::Duration::from_secs(30), "fast probe", async {
-                Ok(7)
-            })
-            .await;
-        assert_eq!(ok.unwrap(), 7);
-
-        let err = with_memory_deadline_for(std::time::Duration::from_secs(30), "fast err", async {
-            Err::<u32, _>(config_error("inner failure"))
-        })
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(err, TraceDecayError::Config { message } if message == "inner failure"),
-            "the wrapper must pass an inner error through unchanged"
-        );
-    }
-
-    #[tokio::test]
-    async fn memory_deadline_elapse_yields_a_typed_retryable_problem() {
-        let err = with_memory_deadline_for(
-            std::time::Duration::from_millis(10),
-            "fact_store add",
-            async {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                Ok::<u32, TraceDecayError>(0)
-            },
-        )
-        .await
-        .unwrap_err();
+    /// The typed problem the central memory-dispatch deadline raises on elapse
+    /// (see `dispatch_groups::dispatch_memory_operation`) must stay a stable,
+    /// retryable project-route problem naming the operation and its budget.
+    #[test]
+    fn memory_deadline_error_is_a_typed_retryable_problem() {
+        let err = memory_deadline_error("fact_store add", std::time::Duration::from_secs(30));
         let (reason_code, retryable, detail) = err
             .project_route_context()
             .expect("an elapsed memory deadline must surface a typed project-route problem");
@@ -469,38 +417,33 @@ mod tests {
         );
     }
 
-    /// The add path (holographic encode + serialized write) must finish well
-    /// inside the operation deadline in a clean tempdir, so the bound is a
-    /// backstop for a stalled store rather than a limit healthy adds approach.
+    /// The add path (holographic encode + serialized write) completes in a clean
+    /// tempdir well inside any interactive budget, so the central dispatch bound
+    /// is a backstop for a stalled store rather than a limit healthy adds hit.
     #[tokio::test]
-    async fn add_fact_completes_within_the_operation_deadline() {
+    async fn add_fact_completes_promptly() {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         let memory = active_memory(&cg);
-        let outcome =
-            with_memory_deadline_for(MEMORY_OPERATION_DEADLINE, "fact_store add", async {
-                memory
-                    .add_fact_v1(
-                        AddFactRequest {
-                            content: "deadline-bounded add fixture".to_string(),
-                            category: MemoryCategory::General,
-                            source: None,
-                            tags: Vec::new(),
-                            entities: vec!["fixture-entity".to_string()],
-                            trust: None,
-                            metadata: json!({}),
-                        },
-                        MemoryOperationContext::generated(&owner, "deadline-bounded add", None)
-                            .unwrap(),
-                    )
-                    .await
-                    .map_err(memory_application_error)
-            })
+        let outcome = memory
+            .add_fact_v1(
+                AddFactRequest {
+                    content: "deadline-bounded add fixture".to_string(),
+                    category: MemoryCategory::General,
+                    source: None,
+                    tags: Vec::new(),
+                    entities: vec!["fixture-entity".to_string()],
+                    trust: None,
+                    metadata: json!({}),
+                },
+                MemoryOperationContext::generated(&owner, "deadline-bounded add", None).unwrap(),
+            )
             .await
-            .expect("a clean add must complete within the operation deadline");
+            .map_err(memory_application_error)
+            .expect("a clean add must complete promptly");
         assert!(
             outcome.fact.is_some(),
-            "the bounded add must persist a fact"
+            "the add must persist a fact"
         );
     }
 
