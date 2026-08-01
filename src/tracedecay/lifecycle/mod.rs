@@ -1,14 +1,12 @@
 //! Lifecycle: init/open/branch-tracking entry points plus the profile-store
 //! registration helpers they rely on.
 
-#[cfg(not(any(test, feature = "test-transport")))]
-use std::collections::HashMap;
 use std::path::Path;
 #[cfg(not(any(test, feature = "test-transport")))]
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
 #[cfg(not(any(test, feature = "test-transport")))]
-use std::sync::{LazyLock, Mutex, Weak};
+use std::sync::LazyLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
@@ -21,6 +19,8 @@ use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
+#[cfg(not(any(test, feature = "test-transport")))]
+use crate::support::weak_registry::WeakRegistry;
 use tracedecay_code_extraction::LanguageRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
@@ -44,8 +44,8 @@ pub(crate) use registry::git_remote_url;
 
 #[cfg(not(any(test, feature = "test-transport")))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
-    Mutex<HashMap<PathBuf, Weak<crate::db::OwnedMaintenanceDatabaseScope>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    WeakRegistry<PathBuf, crate::db::OwnedMaintenanceDatabaseScope>,
+> = LazyLock::new(WeakRegistry::new);
 
 impl TraceDecay {
     #[cfg(not(any(test, feature = "test-transport")))]
@@ -54,12 +54,9 @@ impl TraceDecay {
         operation: &'static str,
     ) -> Result<Arc<crate::db::OwnedMaintenanceDatabaseScope>> {
         let profile_root = open_options.resolved_profile_root()?;
-        let mut scopes = STANDALONE_MAINTENANCE_SCOPES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        scopes.retain(|_, scope| scope.strong_count() > 0);
+        STANDALONE_MAINTENANCE_SCOPES.retain_live();
         let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
-        if let Some(scope) = scopes.get(&profile_key).and_then(Weak::upgrade) {
+        if let Some(scope) = STANDALONE_MAINTENANCE_SCOPES.get_live(&profile_key) {
             return Ok(scope);
         }
         let lifecycle =
@@ -70,7 +67,7 @@ impl TraceDecay {
             operation,
         )?);
         let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
-        scopes.insert(profile_key, Arc::downgrade(&scope));
+        STANDALONE_MAINTENANCE_SCOPES.insert(profile_key, &scope);
         Ok(scope)
     }
 
