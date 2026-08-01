@@ -87,7 +87,7 @@ pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailur
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IngestPassBounds {
+pub(super) struct IngestPassBounds {
     /// Maximum work units discovered before discovery itself is truncated.
     pub discovered_units: usize,
     /// Maximum work units admitted into one pass after fair rotation.
@@ -127,7 +127,7 @@ impl IngestPassCoverage {
 
 /// Narrow additive pass result required by PR6 bounded multi-source scheduling.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IngestPassOutcome {
+pub(super) struct IngestPassOutcome {
     pub stats: TranscriptIngestStats,
     pub failures: Vec<TranscriptCatchUpFailure>,
     pub coverage: IngestPassCoverage,
@@ -162,7 +162,7 @@ impl IngestPassOutcome {
 
 /// Pure round-robin admission over a discovered unit count.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RoundRobinAdmission {
+pub(super) struct RoundRobinAdmission {
     pub admitted_indices: Vec<usize>,
     pub coverage: IngestPassCoverage,
 }
@@ -171,7 +171,7 @@ pub struct RoundRobinAdmission {
 ///
 /// A fully covered pass (`discovered <= max_units`) reports complete coverage;
 /// callers persist rotation only for bounded partial passes.
-pub fn plan_round_robin_admission(
+pub(super) fn plan_round_robin_admission(
     discovered: usize,
     frontier_offset: u64,
     max_units: usize,
@@ -208,7 +208,7 @@ pub fn plan_round_robin_admission(
     }
 }
 
-pub fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
+pub(super) fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -> Vec<u64> {
     let mut remaining = bounds.bytes_per_pass;
     let mut budgets = Vec::with_capacity(unit_count.min(bounds.units_per_pass));
     while budgets.len() < unit_count && remaining > 0 && bounds.bytes_per_unit > 0 {
@@ -223,7 +223,7 @@ pub fn allocate_pass_byte_budgets(unit_count: usize, bounds: IngestPassBounds) -
 ///
 /// Cancellation and full coverage never write. Partial / backpressured passes
 /// write only when at least one unit was attempted so rotation can continue.
-pub fn scheduling_write_required(
+pub(super) fn scheduling_write_required(
     coverage: IngestPassCoverage,
     attempted_units: usize,
     cancelled: bool,

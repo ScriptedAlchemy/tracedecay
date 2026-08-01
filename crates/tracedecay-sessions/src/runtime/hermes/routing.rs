@@ -11,7 +11,7 @@ use crate::runtime::shared::{ProjectRootMatcher, path_belongs_to_project};
 use super::ingest::HermesProfileSource;
 use super::rows::HermesRow;
 
-pub fn user_turn_locations(
+pub(super) fn user_turn_locations(
     rows: &[HermesRow],
     source: &HermesProfileSource,
 ) -> HashSet<i64> {
@@ -52,7 +52,7 @@ fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut Has
     locations.extend(rows.iter().map(|row| row.id));
 }
 
-pub fn turn_project_locations(
+pub(super) fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
     source: &HermesProfileSource,
@@ -95,11 +95,11 @@ pub fn turn_project_locations(
     locations
 }
 
-pub struct DestinationTurnLocations {
+pub(super) struct DestinationTurnLocations {
     pub by_row_id: HashMap<i64, &'static str>,
 }
 
-pub fn turn_project_locations_for_destinations(
+pub(super) fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
     source: &HermesProfileSource,

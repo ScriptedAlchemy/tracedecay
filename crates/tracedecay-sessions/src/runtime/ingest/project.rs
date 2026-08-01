@@ -289,7 +289,7 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
     source_outcome.into_transcript_outcome()
 }
 
-pub async fn finalize_project_ingest<A: SessionIngestAuthority>(
+pub(super) async fn finalize_project_ingest<A: SessionIngestAuthority>(
     db: &A,
     project_id: &ProjectId,
     project_root: &Path,

@@ -2,7 +2,7 @@
 //! observations (identity, checkpoints, and admission).
 
 use serde_json::Value;
-pub use tracedecay_capture::cursor_composer::{
+pub(super) use tracedecay_capture::cursor_composer::{
     composer_envelope_todo_checkpoint, cursor_composer_envelope_native_record_id,
     cursor_composer_envelope_source, cursor_composer_native_record_id,
 };
@@ -28,7 +28,7 @@ use super::PROVIDER;
 const COMPOSER_OBSERVATION_RETENTION: &str = "retention.provider-observation";
 
 #[allow(clippy::too_many_arguments)]
-pub fn build_cursor_composer_capture_request_for_project(
+pub(super) fn build_cursor_composer_capture_request_for_project(
     composer_id: &str,
     bubble_id: &str,
     bubble: &Value,
@@ -125,7 +125,7 @@ pub async fn capture_cursor_composer_observation(
         .map_err(|_| TranscriptIngestError::InvalidFrameState { provider: PROVIDER })
 }
 
-pub fn build_cursor_composer_envelope_capture_request_for_project(
+pub(super) fn build_cursor_composer_envelope_capture_request_for_project(
     composer_id: &str,
     envelope: &Value,
     project_path: Option<&str>,

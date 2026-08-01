@@ -684,7 +684,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore>(
 
 /// Reads per-session activity windows for the backfill from a project-sessions
 /// snapshot opened through [`GitCorrelationStore`].
-pub async fn session_activity_rows(
+pub(super) async fn session_activity_rows(
     conn: &(impl QueryExecutor + ?Sized),
     limit: usize,
 ) -> Result<Vec<SessionActivityRow>, String> {
@@ -723,7 +723,7 @@ pub async fn session_activity_rows(
 /// history forward in bounded batches. Sessions with no timestamp at all are
 /// excluded (their `COALESCE` key is `NULL`, so the `HAVING` filter drops them —
 /// they carry no derivable activity window anyway).
-pub async fn session_activity_rows_since(
+pub(super) async fn session_activity_rows_since(
     conn: &(impl QueryExecutor + ?Sized),
     since_exclusive: i64,
     limit: usize,
