@@ -25,7 +25,7 @@ use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
     admit_jsonl_observations,
 };
-use crate::runtime::shared::path_belongs_to_project;
+use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
@@ -192,16 +192,14 @@ impl CodexObservationAdmission<'_> {
         }
     }
 
-    pub(super) fn accepts(&self, cwd: Option<&Path>) -> bool {
+    /// Resolve this rollout's scope boundary once, so the per-record admission
+    /// test does not re-resolve the git identity of an unchanging root.
+    pub(super) fn scope_matcher(&self) -> TranscriptScopeMatcher {
         match self {
-            Self::Project { root, .. } => cwd.is_some_and(|cwd| path_belongs_to_project(cwd, root)),
+            Self::Project { root, .. } => TranscriptScopeMatcher::project(root),
             Self::Profile {
                 registered_roots, ..
-            } => cwd.is_none_or(|cwd| {
-                !registered_roots
-                    .iter()
-                    .any(|root| path_belongs_to_project(cwd, root))
-            }),
+            } => TranscriptScopeMatcher::profile(registered_roots),
         }
     }
 
@@ -246,6 +244,7 @@ async fn try_admit_codex_jsonl_observations(
         SessionId::new(meta.session_id.clone())?,
     )?;
     let scope = admission_scope.scope();
+    let scope_matcher = admission_scope.scope_matcher();
     let request = JsonlObservationAdmissionRequest::new(
         PROVIDER,
         path,
@@ -275,7 +274,7 @@ async fn try_admit_codex_jsonl_observations(
                 ObservationOrderingDomainV1::FileBytes,
                 |native| {
                     context_state.observe_context_record(&native, path, &meta);
-                    if !admission_scope.accepts(context_state.cwd.as_deref()) {
+                    if !scope_matcher.accepts(context_state.cwd.as_deref()) {
                         non_durable_reason = Some(ObservationCoverageReason::OutOfScope);
                         return Err(ObservationRecordParseErrorV1::NormalizationFailed);
                     }

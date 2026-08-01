@@ -174,17 +174,17 @@ mod goal_event_tests {
             project_id,
         };
         assert_eq!(project.scope(), linked.scope());
-        assert!(project.accepts(Some(&project_src)));
-        assert!(!project.accepts(Some(&other)));
+        assert!(project.scope_matcher().accepts(Some(&project_src)));
+        assert!(!project.scope_matcher().accepts(Some(&other)));
 
         let registered = vec![project_root];
         let profile = CodexObservationAdmission::Profile {
             session_id: Some("session-1"),
             registered_roots: &registered,
         };
-        assert!(!profile.accepts(Some(&project_src)));
-        assert!(profile.accepts(Some(&other)));
-        assert!(profile.accepts(None));
+        assert!(!profile.scope_matcher().accepts(Some(&project_src)));
+        assert!(profile.scope_matcher().accepts(Some(&other)));
+        assert!(profile.scope_matcher().accepts(None));
         assert!(profile.accepts_session("session-1"));
         assert!(!profile.accepts_session("session-2"));
     }
