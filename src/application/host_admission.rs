@@ -576,6 +576,105 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_database.upsert_store_instance(upsert).await
     }
 
+    #[doc(hidden)]
+    pub async fn append_profile_analytics_event_for_test(
+        &self,
+        event: &crate::global_db::AnalyticsEventInsert,
+    ) -> Result<i64> {
+        self.profile_database
+            .append_analytics_event(event)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                operation: "append registered analytics event".to_owned(),
+                message,
+            })
+    }
+
+    #[doc(hidden)]
+    pub async fn query_profile_analytics_events_for_test(
+        &self,
+        query: &crate::global_db::AnalyticsEventQuery,
+    ) -> Result<Vec<crate::global_db::AnalyticsEventRecord>> {
+        self.profile_database
+            .query_analytics_events(query)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                operation: "query registered profile analytics events".to_owned(),
+                message,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn correlate_hint_outcomes_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        project_id: &str,
+        now: i64,
+    ) -> crate::hooks::hint_outcomes::HintOutcomeStats {
+        let Ok(session_database) = self.session_database_for_test(scope) else {
+            return crate::hooks::hint_outcomes::HintOutcomeStats::default();
+        };
+        crate::hooks::hint_outcomes::correlate_hint_outcomes(
+            self.profile_database.as_ref(),
+            session_database,
+            project_id,
+            now,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn ensure_runtime_configuration_for_test(
+        &self,
+        project_root: &Path,
+        layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+        crate::config::ensure_runtime_configuration_for_registered_database(
+            project_root,
+            layout,
+            self.project_configuration_database_for_test()?,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn resolve_runtime_configuration_for_test(
+        &self,
+        project_root: &Path,
+        layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+        crate::config::resolve_runtime_configuration_for_registered_database(
+            project_root,
+            layout,
+            self.project_configuration_database_for_test()?,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn load_runtime_configuration_read_only_for_test(
+        &self,
+        project_root: &Path,
+        layout: &tracedecay_runtime_core::storage::StoreLayout,
+    ) -> Result<crate::config::PinnedRuntimeConfiguration> {
+        crate::config::load_runtime_configuration_for_registered_database_read_only(
+            project_root,
+            layout,
+            self.project_configuration_database_for_test()?,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    fn project_configuration_database_for_test(&self) -> Result<Arc<RegisteredGlobalDb>> {
+        self.project_registered
+            .clone()
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "bind configuration test project sessions".to_owned(),
+                message: "registered ProjectSessions mount is unavailable".to_owned(),
+            })
+    }
+
     fn project_database_for_test(&self) -> Result<&RegisteredGlobalDb> {
         self.project_registered
             .as_deref()
