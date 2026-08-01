@@ -17,7 +17,9 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{
+    Connection, Executor, QueryExecutor, TransactionBehavior, params,
+};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::persist::persist_observation_retrieval_anchor;
@@ -30,8 +32,7 @@ use super::schema::{
 /// writer that appends observations the backfill has already passed -- the
 /// consolidator merges a source tail above the target frontier -- can clear it
 /// and re-arm convergence.
-pub const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str =
-    "observation-repository-provenance-v1";
+pub const OBSERVATION_PROVENANCE_SCHEMA_MIGRATION: &str = "observation-repository-provenance-v1";
 
 /// Observations covered per committed backfill page. Each page runs in its
 /// own transaction so an interrupted open — the project warmup deadline
@@ -173,7 +174,9 @@ async fn backfill_page_transaction(
     Ok(BackfillPageOutcome::Advanced)
 }
 
-async fn anchor_backfill_page(conn: &Connection) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
+async fn anchor_backfill_page(
+    conn: &Connection,
+) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await

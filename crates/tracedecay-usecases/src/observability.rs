@@ -64,21 +64,15 @@ fn canonical_costs_value(model: &CostsReadModelV1) -> Result<serde_json::Value, 
     serde_json::to_value(model)
 }
 
-pub fn costs_cli_value(
-    model: &CostsReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
+pub fn costs_cli_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 
-pub fn costs_mcp_value(
-    model: &CostsReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
+pub fn costs_mcp_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 
-pub fn costs_http_value(
-    model: &CostsReadModelV1,
-) -> Result<serde_json::Value, serde_json::Error> {
+pub fn costs_http_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
     canonical_costs_value(model)
 }
 

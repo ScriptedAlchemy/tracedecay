@@ -8,9 +8,7 @@ use thiserror::Error;
 use tracedecay_domain::{DomainError, FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecordV2};
 use tracedecay_store::FactStore;
 
-use crate::anchor_resolution::{
-    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
-};
+use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
 
 use super::MemoryApplication;
 use super::error::MemoryApplicationError;

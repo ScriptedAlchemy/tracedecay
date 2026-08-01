@@ -8,9 +8,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
+use crate::tracedecay::TraceDecay;
 use tracedecay_code_index::ast_grep_search::{AstGrepSearchMatch, search_tree};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::types::Node;
 
 const MAX_API_MIGRATION_AST_MATCHES: usize = 16_384;

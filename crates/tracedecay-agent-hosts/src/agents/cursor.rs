@@ -1162,7 +1162,9 @@ fn report_cursor_session_ingest<'a>(
             dc.info(&format!("  - {path}"));
         }
     }
-    if health.max_transcript_pending_bytes > crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() {
+    if health.max_transcript_pending_bytes
+        > crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes()
+    {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
@@ -2093,7 +2095,8 @@ mod tests {
             tracked_transcripts: 2,
             pending_transcripts: 1,
             pending_bytes: crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
-            max_transcript_pending_bytes: crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
+            max_transcript_pending_bytes:
+                crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
         };
 
         report_cursor_session_ingest(
@@ -2137,10 +2140,7 @@ mod tests {
     fn cursor_branch_add_outcomes_are_strictly_decoded() {
         for (name, expected) in [
             ("not_indexed", BranchAddOutcome::NotIndexed),
-            (
-                "already_tracked",
-                BranchAddOutcome::AlreadyTracked,
-            ),
+            ("already_tracked", BranchAddOutcome::AlreadyTracked),
             ("added", BranchAddOutcome::Added),
             ("deferred", BranchAddOutcome::Deferred),
         ] {

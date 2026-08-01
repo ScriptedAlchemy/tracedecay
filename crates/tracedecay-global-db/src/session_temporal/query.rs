@@ -2,12 +2,12 @@ use std::error::Error;
 use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, SessionId, SessionProjectionGenerationV1,
     UtcMicros,
 };
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
 use tracedecay_store::{SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult};
 
 pub(super) const BEGIN_OPERATION: &str = "begin session temporal generation";

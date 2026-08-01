@@ -113,9 +113,7 @@ pub(crate) fn apply_canonical_summary_source_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::lcm::contracts::{
-        LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind,
-    };
+    use crate::session::lcm::contracts::{LcmExpandedSummarySource, LcmRawMessage, LcmStorageKind};
 
     fn source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {

@@ -61,11 +61,11 @@ use crate::advisory::{
     SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
 };
 use crate::configuration::ConfigurationCurrentStateV1;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
+use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::tracedecay::TraceDecay;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
 
 const POLICY_REVISION_V1: u64 = 1;
@@ -84,8 +84,9 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
-    pub test_attribution:
-        Arc<dyn tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort + Send + Sync>,
+    pub test_attribution: Arc<
+        dyn tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort + Send + Sync,
+    >,
     pub mounted_providers: Vec<MountedLspProvider>,
 }
 

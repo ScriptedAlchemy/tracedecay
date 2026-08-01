@@ -6,9 +6,9 @@
 //! authority tables, and a repair that fails partway leaves the triggers
 //! standing rather than a live user store with its integrity guards stripped.
 
-use tracedecay_runtime_core::db::engine::QueryExecutor;
 use crate::tests::harness::RegisteredGlobalDbHarness;
 use crate::{connection_table_exists, repair_session_temporal_store};
+use tracedecay_runtime_core::db::engine::QueryExecutor;
 
 const SUSPENDED_TRIGGER: &str = "session_refresh_operations_delete_guard_v1";
 

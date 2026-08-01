@@ -28,14 +28,14 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{DomainError, ManifestDigest};
 
-use crate::configuration::resolver::{
-    ConfigurationLayerV1, ConfigurationResolutionError, ConfigurationResolutionInputSourceV1,
-    ConfigurationResolutionInputV1, ConfigurationResolutionV1, resolve_configuration_inputs,
-};
 use crate::configuration::migration::{
     ConfigurationMigrationQuarantineReasonV1, LegacyConfigurationEntryV1,
     LegacyConfigurationSourceKindV1, ReadonlyLegacyConfigurationInputV1,
     ReadonlyLegacyConfigurationInputsV1,
+};
+use crate::configuration::resolver::{
+    ConfigurationLayerV1, ConfigurationResolutionError, ConfigurationResolutionInputSourceV1,
+    ConfigurationResolutionInputV1, ConfigurationResolutionV1, resolve_configuration_inputs,
 };
 
 use super::{ConfigurationRegistry, ConfigurationRegistryError};
@@ -716,7 +716,9 @@ fn decode_usize(value: &Value) -> Option<ConfigurationValueV1> {
 
 fn decode_pr_autotrack_poll_secs(value: &Value) -> Option<ConfigurationValueV1> {
     value.as_u64().map(|value| {
-        ConfigurationValueV1::Unsigned(value.max(crate::configuration::registry::MIN_AUTO_TRACK_PR_POLL_SECS))
+        ConfigurationValueV1::Unsigned(
+            value.max(crate::configuration::registry::MIN_AUTO_TRACK_PR_POLL_SECS),
+        )
     })
 }
 

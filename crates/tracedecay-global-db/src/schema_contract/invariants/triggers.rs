@@ -1799,8 +1799,8 @@ pub async fn suspend_session_invariants_for_schema_upgrade(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_runtime_core::db::engine::params;
     use crate::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::db::engine::params;
 
     /// Registry rows the identity triggers key off. `upsert_code_project`
     /// refuses temporary roots, so the fixture writes the authority rows

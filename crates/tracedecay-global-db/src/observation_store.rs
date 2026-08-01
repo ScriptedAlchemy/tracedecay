@@ -228,7 +228,8 @@ impl RegisteredGlobalDb {
         {
             project_ids.insert(project_id);
         }
-        if let Some(git_common_dir) = tracedecay_runtime_core::worktree::git_common_dir(project_root)
+        if let Some(git_common_dir) =
+            tracedecay_runtime_core::worktree::git_common_dir(project_root)
             && let Some(project_id) = self
                 .project_id_by_native_path_alias(&git_common_dir, LegacyPathAliasKind::GitCommonDir)
                 .await
@@ -310,9 +311,9 @@ impl RegisteredGlobalDb {
                     path,
                 }
             }
-            tracedecay_runtime_core::storage::ProfileShardValidationError::NonCanonical { reason } => {
-                noncanonical(reason)
-            }
+            tracedecay_runtime_core::storage::ProfileShardValidationError::NonCanonical {
+                reason,
+            } => noncanonical(reason),
         })?;
 
         Ok(ProjectObservationStoreResolution {

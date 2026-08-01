@@ -167,7 +167,10 @@ impl RegisteredGlobalDb {
         self.read_connection.read_snapshot().await
     }
 
-    pub async fn snapshot_to(&self, destination: &Path) -> tracedecay_runtime_core::errors::Result<()> {
+    pub async fn snapshot_to(
+        &self,
+        destination: &Path,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         if destination == self.authority.canonical_database_path() {
             return Err(registered_error(
                 "snapshot registered global database",
@@ -195,12 +198,14 @@ impl RegisteredGlobalDb {
                 "snapshot destination must be outside the canonical database directory",
             ));
         }
-        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).map_err(|error| {
-            registered_error(
-                "prepare private registered database snapshot directory",
-                error,
-            )
-        })?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).map_err(
+            |error| {
+                registered_error(
+                    "prepare private registered database snapshot directory",
+                    error,
+                )
+            },
+        )?;
         self.runtime
             .snapshot_to(destination.to_path_buf(), self.authority.clone())
             .await
@@ -210,7 +215,9 @@ impl RegisteredGlobalDb {
             })
     }
 
-    async fn validate_authority_schema_contract(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    async fn validate_authority_schema_contract(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
             registered_error("begin registered authority schema validation", error)
         })?;
@@ -296,7 +303,8 @@ impl RegisteredGlobalDb {
 
     pub fn work_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage> {
+    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
+    {
         let handle = self
             .runtime
             .authorized_migration_sql_handle(self.authority.clone())
@@ -354,7 +362,9 @@ impl RegisteredGlobalDb {
     /// idempotently through the same handle `work_storage` validates.
     pub fn workflow_storage(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    > {
         let storage = self.work_storage()?;
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_work_storage(&storage)
             .map_err(|error| {
@@ -379,7 +389,9 @@ impl RegisteredGlobalDb {
 
     pub fn storage_telemetry_handle(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+    > {
         self.runtime.telemetry_read_handle().map_err(|error| {
             registered_error(
                 "attach registered storage telemetry reader",
@@ -426,7 +438,9 @@ impl RegisteredGlobalDb {
         config: &tracedecay_sessions::runtime::lcm::retention::LcmRetentionConfig,
         mode: tracedecay_sessions::runtime::lcm::retention::RetentionMode,
         now: i64,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_sessions::runtime::lcm::retention::LcmRetentionReport> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_sessions::runtime::lcm::retention::LcmRetentionReport,
+    > {
         let storage_root = self.db_path().parent().ok_or_else(|| {
             registered_error(
                 "run registered session retention",
@@ -445,7 +459,9 @@ impl RegisteredGlobalDb {
             &move |intent| {
                 authority
                     .require_active_write_scope(intent)
-                    .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))
+                    .map_err(|error| {
+                        tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string())
+                    })
             },
         )
         .await
@@ -458,7 +474,9 @@ impl RegisteredGlobalDb {
         config: &super::observation::retention::ObservationRetentionConfig,
         mode: super::observation::retention::RetentionMode,
         now: i64,
-    ) -> tracedecay_runtime_core::errors::Result<super::observation::retention::ObservationRetentionReport> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        super::observation::retention::ObservationRetentionReport,
+    > {
         let authority = self.authority.clone();
         super::observation::retention::run_observation_retention_authorized(
             &self.write_connection,
@@ -498,7 +516,11 @@ pub struct RegisteredGlobalDbWriterConnection<'a> {
 }
 
 impl RegisteredGlobalDbWriterConnection<'_> {
-    pub async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    pub async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -506,7 +528,11 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.connection.execute(sql, params).await
     }
 
-    pub async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    pub async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -514,7 +540,10 @@ impl RegisteredGlobalDbWriterConnection<'_> {
         self.connection.query(sql, params).await
     }
 
-    pub async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
+    pub async fn execute_batch(
+        &self,
+        sql: &str,
+    ) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.require_active("execute registered global database batch")?;
         self.connection.execute_batch(sql).await
     }
@@ -522,7 +551,9 @@ impl RegisteredGlobalDbWriterConnection<'_> {
     fn require_active(&self, intent: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.authority
             .require_active_write_scope(intent)
-            .map_err(|error| tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string()))
+            .map_err(|error| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+            })
     }
 }
 
@@ -539,7 +570,11 @@ pub struct RegisteredGlobalDbWriteTransaction<'a> {
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -548,7 +583,11 @@ impl QueryExecutor for RegisteredGlobalDbWriteTransaction<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -563,21 +602,15 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
 impl tracedecay_sessions::runtime::store_port::SessionWriteTxn
     for RegisteredGlobalDbWriteTransaction<'_>
 {
-    fn commit(
-        self,
-    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
+    fn commit(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
         async move {
             RegisteredGlobalDbWriteTransaction::commit(self)
                 .await
-                .map_err(|error| {
-                    registered_error("commit registered session transaction", error)
-                })
+                .map_err(|error| registered_error("commit registered session transaction", error))
         }
     }
 
-    fn rollback(
-        self,
-    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
+    fn rollback(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
         async move {
             RegisteredGlobalDbWriteTransaction::rollback(self)
                 .await
@@ -608,17 +641,14 @@ impl tracedecay_sessions::runtime::store_port::SessionStoreAuthority for Registe
         async move {
             RegisteredGlobalDb::read_snapshot(self)
                 .await
-                .map_err(|error| {
-                    registered_error("open registered session read snapshot", error)
-                })
+                .map_err(|error| registered_error("open registered session read snapshot", error))
         }
     }
 
     fn begin_write_transaction(
         &self,
-    ) -> impl Future<
-        Output = tracedecay_runtime_core::errors::Result<Self::WriteTxn<'_>>,
-    > + Send {
+    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<Self::WriteTxn<'_>>> + Send
+    {
         RegisteredGlobalDb::begin_write_transaction(self)
     }
 }
@@ -663,7 +693,9 @@ impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
     }
 }
 
-impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor for RegisteredGlobalDbWriteTransaction<'_> {
+impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
+    for RegisteredGlobalDbWriteTransaction<'_>
+{
     async fn attach_database(
         &self,
         path: &Path,
@@ -675,7 +707,11 @@ impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor for Registe
 }
 
 impl RegisteredGlobalDbWriteTransaction<'_> {
-    pub async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    pub async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -683,7 +719,11 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.execute(sql, params).await
     }
 
-    pub async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    pub async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -691,7 +731,10 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
-    pub async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
+    pub async fn execute_batch(
+        &self,
+        sql: &str,
+    ) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.require_active("execute registered global database transaction batch")?;
         self.transaction.execute_batch(sql).await
     }
@@ -703,12 +746,16 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
         {
             let rollback = self.transaction.rollback().await;
             return match rollback {
-                Ok(()) => Err(tracedecay_runtime_core::db::engine::Error::invalid_operation(
-                    error.to_string(),
-                )),
-                Err(rollback_error) => Err(tracedecay_runtime_core::db::engine::Error::invalid_operation(format!(
-                    "{error}; rollback after authority loss failed: {rollback_error}"
-                ))),
+                Ok(()) => Err(
+                    tracedecay_runtime_core::db::engine::Error::invalid_operation(
+                        error.to_string(),
+                    ),
+                ),
+                Err(rollback_error) => Err(
+                    tracedecay_runtime_core::db::engine::Error::invalid_operation(format!(
+                        "{error}; rollback after authority loss failed: {rollback_error}"
+                    )),
+                ),
             };
         }
         self.transaction.commit().await
@@ -721,7 +768,9 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
     fn require_active(&self, intent: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.authority
             .require_active_write_scope(intent)
-            .map_err(|error| tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string()))
+            .map_err(|error| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+            })
     }
 }
 
@@ -832,12 +881,22 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-fn sqlite_identity_error_message(error: tracedecay_runtime_core::db::SqliteFileIdentityError) -> &'static str {
+fn sqlite_identity_error_message(
+    error: tracedecay_runtime_core::db::SqliteFileIdentityError,
+) -> &'static str {
     match error {
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Open => "could not open SQLite file identity",
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Inspect => "could not inspect SQLite file identity",
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Identify => "could not identify SQLite file",
-        tracedecay_runtime_core::db::SqliteFileIdentityError::Unavailable => "SQLite file identity is unavailable",
+        tracedecay_runtime_core::db::SqliteFileIdentityError::Open => {
+            "could not open SQLite file identity"
+        }
+        tracedecay_runtime_core::db::SqliteFileIdentityError::Inspect => {
+            "could not inspect SQLite file identity"
+        }
+        tracedecay_runtime_core::db::SqliteFileIdentityError::Identify => {
+            "could not identify SQLite file"
+        }
+        tracedecay_runtime_core::db::SqliteFileIdentityError::Unavailable => {
+            "SQLite file identity is unavailable"
+        }
     }
 }
 
@@ -997,9 +1056,12 @@ mod tests {
         let profile = TempDir::new().unwrap();
         let database_path = profile.path().join("projects/project/sessions.db");
         fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-        let scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(profile.path(), 1, "registered-issued-writer")
-                .unwrap();
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            profile.path(),
+            1,
+            "registered-issued-writer",
+        )
+        .unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(&database_path);
         let authority =
             DatabaseAuthority::for_runtime(&database_path, "registered issued writer").unwrap();
@@ -1021,7 +1083,9 @@ mod tests {
         let mut rows = connection
             .query(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                tracedecay_runtime_core::db::engine::params!["stale_registered_writer_must_not_persist"],
+                tracedecay_runtime_core::db::engine::params![
+                    "stale_registered_writer_must_not_persist"
+                ],
             )
             .await
             .unwrap();
@@ -1033,19 +1097,23 @@ mod tests {
         let profile = TempDir::new().unwrap();
         let database_path = profile.path().join("projects/project/queued.db");
         fs::create_dir_all(database_path.parent().unwrap()).unwrap();
-        let scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(profile.path(), 1, "queued-registered-writer")
-                .unwrap();
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            profile.path(),
+            1,
+            "queued-registered-writer",
+        )
+        .unwrap();
         let authority =
             DatabaseAuthority::for_runtime(&database_path, "queued registered writer").unwrap();
         let gate = Arc::new(AuthorityGate::default());
-        let connection = tracedecay_runtime_core::db::engine::TestConnection::open_with_write_authority(
-            &database_path,
-            Arc::new(GatedAuthority {
-                authority: authority.clone(),
-                gate: Arc::clone(&gate),
-            }),
-        );
+        let connection =
+            tracedecay_runtime_core::db::engine::TestConnection::open_with_write_authority(
+                &database_path,
+                Arc::new(GatedAuthority {
+                    authority: authority.clone(),
+                    gate: Arc::clone(&gate),
+                }),
+            );
         connection
             .execute_batch("CREATE TABLE queued_write (value INTEGER NOT NULL)")
             .await

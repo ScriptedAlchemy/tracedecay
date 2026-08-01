@@ -13,14 +13,14 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::lcm_service::{self, SearchPayloadArgs};
 use super::*;
-use crate::application::configuration::ProductionUserSettingsDaemonClient;
 use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::application::configuration::ProductionUserSettingsDaemonClient;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::DaemonDatabaseScope;
-use tracedecay_runtime_core::db::engine::params;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::lcm::{LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft};
 use crate::runtime::{SessionMessageRecord, SessionRecord};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use tracedecay_runtime_core::db::engine::params;
 
 const PROVIDER: &str = "cursor";
 const SESSION_ID: &str = "sess-lcm-fixes";
@@ -60,9 +60,12 @@ impl DashboardFixture {
 
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("profile identity");
-        let scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, "lcm-dashboard-fixes")
-                .expect("daemon database scope");
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            nonce,
+            "lcm-dashboard-fixes",
+        )
+        .expect("daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("session runtime registry");

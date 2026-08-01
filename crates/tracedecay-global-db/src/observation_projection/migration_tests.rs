@@ -25,9 +25,9 @@ use tracedecay_store::{
 };
 
 use super::prepare_projection_version_migration_with_engine;
+use crate::RegisteredGlobalDb;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::{TestConnection, params};
-use crate::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,

@@ -399,7 +399,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         &self,
         request: FeedbackRequest,
         context: MemoryOperationContext,
-    ) -> Result<tracedecay_runtime_core::memory::types::FeedbackResult, MemoryApplicationError> {
+    ) -> Result<tracedecay_runtime_core::memory::types::FeedbackResult, MemoryApplicationError>
+    {
         let source_input = request
             .source
             .clone()

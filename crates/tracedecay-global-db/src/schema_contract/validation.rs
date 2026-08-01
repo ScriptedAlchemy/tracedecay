@@ -60,7 +60,10 @@ fn normalize_default(value: Option<&str>) -> Option<String> {
     })
 }
 
-async fn validate_table(conn: &impl QueryExecutor, contract: &Table) -> tracedecay_runtime_core::errors::Result<()> {
+async fn validate_table(
+    conn: &impl QueryExecutor,
+    contract: &Table,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let actual = read_columns(conn, contract.name).await?;
     if actual.len() != contract.columns.len() {
         return Err(global_db_operation_message(

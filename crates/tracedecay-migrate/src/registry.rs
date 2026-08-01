@@ -8,9 +8,9 @@ use crate::root_seam::global_db::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
     StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use crate::root_seam::storage_adapters::try_classify_project_storage_with_registry;
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
-use crate::root_seam::storage_adapters::try_classify_project_storage_with_registry;
 use tracedecay_runtime_core::storage::{
     ProjectStorageLocation, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,

@@ -1209,46 +1209,42 @@ async fn maybe_run_global_retention(
         return;
     };
     let now_secs = crate::tracedecay::current_timestamp();
-    let succeeded = match crate::retention::prune_global_retention(
-        database,
-        &config.retention,
-        now_secs,
-    )
-    .await
-    {
-        Ok(reports) => {
-            for report in reports {
-                if report.applied && report.rows > 0 {
-                    log_daemon_event(
-                        "retention_prune",
-                        &[
-                            ("scope", "global".to_string()),
-                            ("table", report.table.to_string()),
-                            ("rows", report.rows.to_string()),
-                            (
-                                "window_days",
-                                report
-                                    .window_days
-                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
-                            ),
-                        ],
-                    );
+    let succeeded =
+        match crate::retention::prune_global_retention(database, &config.retention, now_secs).await
+        {
+            Ok(reports) => {
+                for report in reports {
+                    if report.applied && report.rows > 0 {
+                        log_daemon_event(
+                            "retention_prune",
+                            &[
+                                ("scope", "global".to_string()),
+                                ("table", report.table.to_string()),
+                                ("rows", report.rows.to_string()),
+                                (
+                                    "window_days",
+                                    report
+                                        .window_days
+                                        .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
+                                ),
+                            ],
+                        );
+                    }
                 }
+                true
             }
-            true
-        }
-        Err(_) => {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("scope", "global".to_string()),
-                    ("outcome", "error".to_string()),
-                    ("failure", "retention_pass_failed".to_string()),
-                ],
-            );
-            false
-        }
-    };
+            Err(_) => {
+                log_daemon_event(
+                    "retention_prune",
+                    &[
+                        ("scope", "global".to_string()),
+                        ("outcome", "error".to_string()),
+                        ("failure", "retention_pass_failed".to_string()),
+                    ],
+                );
+                false
+            }
+        };
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 

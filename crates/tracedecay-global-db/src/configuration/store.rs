@@ -31,14 +31,6 @@ use tracedecay_store::configuration::{
 };
 use zeroize::Zeroizing;
 
-use super::migration::{
-    CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME, ConfigurationMigrationError,
-    ConfigurationMigrationQuarantineEntryV1, ConfigurationMigrationReceiptV1,
-    ConfigurationMigrationStore, LegacyConfigurationSourceKindV1,
-};
-use super::schema::ConfigurationSchemaError;
-#[cfg(test)]
-use super::schema::ensure_configuration_schema;
 use super::contracts::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationControlStore,
@@ -47,12 +39,20 @@ use super::contracts::{
     CredentialWritePort, DirectConfigurationMutation, ScopeRevalidationEvidenceV1,
     WriteOnlyCredentialMutation,
 };
+use super::migration::{
+    CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME, ConfigurationMigrationError,
+    ConfigurationMigrationQuarantineEntryV1, ConfigurationMigrationReceiptV1,
+    ConfigurationMigrationStore, LegacyConfigurationSourceKindV1,
+};
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
+use super::schema::ConfigurationSchemaError;
+#[cfg(test)]
+use super::schema::ensure_configuration_schema;
+use crate::RegisteredGlobalDb;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use crate::RegisteredGlobalDb;
 
 mod audit;
 mod read;
@@ -2616,7 +2616,9 @@ pub struct GlobalDbConfigurationControlStore<'db> {
 fn repair_pre_digest_semantic_configuration(
     encoded: &str,
 ) -> Result<Option<String>, ConfigurationError> {
-    if let Ok(current) = serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(encoded) {
+    if let Ok(current) =
+        serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(encoded)
+    {
         current.validate().map_err(|_| {
             ConfigurationError::validation_message(
                 "semantic runtime configuration is invalid under the current schema",
@@ -2652,11 +2654,12 @@ fn repair_pre_digest_semantic_configuration(
     object.insert("active_profile".to_owned(), serde_json::Value::Null);
     object.insert("rollback_profile".to_owned(), serde_json::Value::Null);
     let repaired =
-        serde_json::from_value::<crate::configuration::semantic::SemanticConfig>(document).map_err(|_| {
-            ConfigurationError::validation_message(
-                "semantic runtime configuration cannot be repaired under the current schema",
-            )
-        })?;
+        serde_json::from_value::<crate::configuration::semantic::SemanticConfig>(document)
+            .map_err(|_| {
+                ConfigurationError::validation_message(
+                    "semantic runtime configuration cannot be repaired under the current schema",
+                )
+            })?;
     repaired.validate().map_err(|_| {
         ConfigurationError::validation_message(
             "semantic runtime configuration cannot be repaired under the current schema",
@@ -2737,8 +2740,9 @@ fn complete_snapshot_for_current_registry(
             );
         }
     }
-    let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
-        .map_err(ConfigurationError::validation)?;
+    let semantic_key =
+        SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
+            .map_err(ConfigurationError::validation)?;
     if let Some(ConfigurationValueV1::Text(encoded)) = effective_values.get_mut(&semantic_key)
         && let Some(repaired) = repair_pre_digest_semantic_configuration(encoded)?
     {
@@ -4247,7 +4251,9 @@ mod tests {
     fn forward_repair_disables_pre_digest_semantics_without_changing_install_intent() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key =
+            SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
+                .unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let legacy = serde_json::json!({
             "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
@@ -4273,7 +4279,8 @@ mod tests {
             panic!("semantic setting must remain typed text");
         };
         assert!(
-            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(legacy_text).is_err(),
+            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(legacy_text)
+                .is_err(),
             "fixture must reproduce the pre-accepted-profile-digest snapshot"
         );
 
@@ -4285,7 +4292,8 @@ mod tests {
             panic!("semantic setting must remain typed text");
         };
         let semantic =
-            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(repaired_text).unwrap();
+            serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(repaired_text)
+                .unwrap();
         semantic.validate().unwrap();
         assert_eq!(
             semantic.selected_model.as_deref(),
@@ -4304,7 +4312,9 @@ mod tests {
     fn forward_repair_rejects_unrecognized_semantic_configuration() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key =
+            SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
+                .unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let mut effective_values = current.effective_values;
         effective_values.insert(

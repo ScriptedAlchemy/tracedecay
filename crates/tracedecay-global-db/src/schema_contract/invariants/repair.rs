@@ -5,8 +5,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db_operation_error;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::rows::{authority_violation, decode_authority_json, encode_authority_json};
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
@@ -24,7 +24,9 @@ struct CommittedCursorCandidate {
 /// `observation_projection::rebuild::read_observation_frontier` for why a
 /// caller doing further reads or writes on the same connection depends on
 /// that.
-async fn read_observation_frontier(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<i64> {
+async fn read_observation_frontier(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await

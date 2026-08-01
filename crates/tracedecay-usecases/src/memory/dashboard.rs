@@ -17,7 +17,9 @@ use tracedecay_store::{
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
-use tracedecay_runtime_core::memory::types::{MemoryGroomingOperation, MemoryGroomingReport, MemoryRepairStats};
+use tracedecay_runtime_core::memory::types::{
+    MemoryGroomingOperation, MemoryGroomingReport, MemoryRepairStats,
+};
 
 use super::MemoryApplication;
 use super::compatibility::{compatibility_relation, legacy_usize};

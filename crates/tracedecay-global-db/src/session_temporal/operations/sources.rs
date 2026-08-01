@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use tracedecay_runtime_core::db::engine::{Executor, params};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     AnchorDurabilityClass, AnchorSourceGenerationV2, DurableObservationV1, EntityId, EntityKind,
@@ -8,6 +7,7 @@ use tracedecay_domain::{
     ProjectionGenerationId, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, UtcMicros,
 };
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::types::{

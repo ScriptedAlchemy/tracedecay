@@ -38,10 +38,11 @@ pub fn daemon_owned_project_source_binding(
     project_id: &ProjectId,
     project_root: &Path,
 ) -> Result<ScopeSourceBinding, DomainError> {
-    let locator = crate::primitives::locator_digest_for_project(project_root)
-        .map_err(|_| DomainError::NonCanonical {
+    let locator = crate::primitives::locator_digest_for_project(project_root).map_err(|_| {
+        DomainError::NonCanonical {
             field: "daemon project source binding locator digest",
-        })?;
+        }
+    })?;
     ScopeSourceBinding::new(
         SourceBindingId::new(DAEMON_PROJECT_SOURCE_BINDING_ID.to_owned())?,
         DAEMON_PROJECT_SOURCE_KIND,

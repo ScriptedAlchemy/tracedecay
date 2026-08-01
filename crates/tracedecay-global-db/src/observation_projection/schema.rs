@@ -1088,8 +1088,8 @@ async fn has_output_ordinal(conn: &impl QueryExecutor) -> Result<bool, Error> {
 mod tests {
     use tempfile::TempDir;
 
-    use tracedecay_runtime_core::db::engine::TestConnection;
     use crate::ensure_registered_schema;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     async fn open_registered_schema(
         path: &std::path::Path,
@@ -1260,7 +1260,9 @@ mod tests {
         .unwrap();
 
         let transaction = conn
-            .transaction_with_behavior(tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate)
+            .transaction_with_behavior(
+                tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate,
+            )
             .await
             .unwrap();
         super::ensure_observation_projection_schema(&transaction)

@@ -178,7 +178,8 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     });
 
     let payload_ref = created_rx.await.expect("payload creation signal");
-    let payload_path = tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_path =
+        tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
     let snapshot = db.read_snapshot().await.unwrap();
@@ -255,10 +256,12 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
         current_frontier_store_id: None,
         last_finalized_session_id: None,
         last_finalized_frontier_store_id: None,
-        maintenance_debt: vec![tracedecay_sessions::runtime::lcm::LcmMaintenanceDebt::RawBacklog {
-            from_store_id: 1,
-            to_store_id: 2,
-        }],
+        maintenance_debt: vec![
+            tracedecay_sessions::runtime::lcm::LcmMaintenanceDebt::RawBacklog {
+                from_store_id: 1,
+                to_store_id: 2,
+            },
+        ],
     };
     let (written_tx, written_rx) = tokio::sync::oneshot::channel();
     let task_db = Arc::clone(&db);
@@ -302,9 +305,12 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     drop(snapshot);
 
     let transaction = db.begin_write_transaction().await.unwrap();
-    let state = tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update.clone())
-        .await
-        .unwrap();
+    let state = tracedecay_sessions::runtime::lcm::compression::update_lifecycle(
+        &transaction,
+        update.clone(),
+    )
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(state.provider, update.provider);
     assert_eq!(state.conversation_id, update.conversation_id);

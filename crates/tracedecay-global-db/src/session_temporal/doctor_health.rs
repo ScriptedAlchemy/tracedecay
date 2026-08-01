@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor};
 use crate::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor};
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -742,9 +742,7 @@ struct HealthCheck {
 /// `uncheckpointed_wal` instead of opening `mode=ro` (which creates `-shm`)
 /// or copying the family. Empty / non-SQLite placeholders return
 /// `session_store_uninitialized`.
-pub async fn session_temporal_doctor_health_at(
-    db_path: &Path,
-) -> SessionTemporalHealthReport {
+pub async fn session_temporal_doctor_health_at(db_path: &Path) -> SessionTemporalHealthReport {
     if !db_path.is_file() {
         return unavailable_report(SessionTemporalHealthStatus::Unavailable);
     }
@@ -1328,7 +1326,10 @@ fn count(conn: &RusqliteConnection, sql: &str) -> Result<u64, rusqlite::Error> {
         .min(MAX_FINDING_COUNT))
 }
 
-async fn snapshot_count(conn: &impl QueryExecutor, sql: &str) -> tracedecay_runtime_core::db::engine::Result<u64> {
+async fn snapshot_count(
+    conn: &impl QueryExecutor,
+    sql: &str,
+) -> tracedecay_runtime_core::db::engine::Result<u64> {
     let mut rows = conn.query(sql, ()).await?;
     let value = rows
         .next()
@@ -1437,7 +1438,10 @@ fn is_exact_fts_blob_corruption(message: &str, expected_table: &str) -> bool {
     blob.parse::<u64>().is_ok() && table.strip_suffix('"') == Some(expected_table)
 }
 
-async fn connection_count(conn: &impl Executor, table: &str) -> tracedecay_runtime_core::db::engine::Result<i64> {
+async fn connection_count(
+    conn: &impl Executor,
+    table: &str,
+) -> tracedecay_runtime_core::db::engine::Result<i64> {
     let sql = match table {
         "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
         "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",

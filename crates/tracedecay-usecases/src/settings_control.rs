@@ -20,8 +20,8 @@ use tracedecay_application::{
     prepare_user_settings_preview, validate_project_settings_patch, validate_user_settings_values,
 };
 
-use crate::configuration::DirectConfigurationMutation;
 use crate::config::PinnedRuntimeConfiguration;
+use crate::configuration::DirectConfigurationMutation;
 use crate::user_config::{ConfigSaveError, UserConfig};
 
 pub use tracedecay_application::{

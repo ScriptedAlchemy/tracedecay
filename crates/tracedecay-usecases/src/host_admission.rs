@@ -711,10 +711,8 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         &'a self,
         source: &'a ObservationSourceIdentityV1,
         scope: &'a ObservationScopeV1,
-    ) -> tracedecay_sessions::admission::AdmissionFuture<
-        'a,
-        Option<ObservationSourceCursorV1>,
-    > {
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ObservationSourceCursorV1>>
+    {
         Box::pin(async move {
             HostAdmissionFacade::get_source_cursor(self, source, scope)
                 .await
@@ -733,16 +731,10 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         tracedecay_sessions::admission::HostProjectionDrainOutcome,
     > {
         Box::pin(async move {
-            HostAdmissionFacade::drain_projection_queue(
-                self,
-                provider,
-                scope,
-                cancellation,
-                max,
-            )
-            .await
-            .map(canonical_projection_drain_outcome)
-            .map_err(canonical_admission_outcome)
+            HostAdmissionFacade::drain_projection_queue(self, provider, scope, cancellation, max)
+                .await
+                .map(canonical_projection_drain_outcome)
+                .map_err(canonical_admission_outcome)
         })
     }
 

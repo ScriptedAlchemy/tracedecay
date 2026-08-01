@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, Rows, Value, params,
+};
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
@@ -386,7 +388,11 @@ impl<'db> ProjectRegistryDatabase<'db> {
 }
 
 impl QueryExecutor for ProjectRegistryReadSnapshot {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -395,7 +401,11 @@ impl QueryExecutor for ProjectRegistryReadSnapshot {
 }
 
 impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -404,7 +414,11 @@ impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
 }
 
 impl Executor for ProjectRegistryWriteTransaction<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -424,7 +438,10 @@ impl ProjectRegistryWriteTransaction<'_> {
             .map_err(|error| global_db_operation_error(operation, error))
     }
 
-    async fn rollback(self, operation: &'static str) -> tracedecay_runtime_core::errors::Result<()> {
+    async fn rollback(
+        self,
+        operation: &'static str,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         self.0
             .rollback()
             .await
@@ -1594,7 +1611,9 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns legacy project paths with native path bytes preserved.
-    pub async fn try_list_project_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_paths(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT path FROM projects ORDER BY path",
@@ -1604,7 +1623,9 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns modern registry aliases with native path bytes preserved.
-    pub async fn try_list_project_alias_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_alias_paths(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT alias_path FROM project_aliases ORDER BY alias_path",
@@ -1632,7 +1653,9 @@ impl RegisteredGlobalDb {
     /// operation. Nothing in planning or applying a reap deletes a file.
     ///
     /// [`apply_registry_reap`]: Self::apply_registry_reap
-    pub async fn plan_registry_reap(&self) -> tracedecay_runtime_core::errors::Result<RegistryReapPlan> {
+    pub async fn plan_registry_reap(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<RegistryReapPlan> {
         const OPERATION: &str = "plan registry reap";
         let profile_root = self
             .db_path()
@@ -1743,7 +1766,10 @@ impl RegisteredGlobalDb {
                 missing_path: canonical_root,
                 project_id: Some(project_id.clone()),
             };
-            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, &project_id);
+            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+                &profile_root,
+                &project_id,
+            );
             if store_root.exists() {
                 plan.retained.push(RetainedRegistryEntry {
                     entry,

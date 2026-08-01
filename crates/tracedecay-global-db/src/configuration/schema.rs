@@ -397,10 +397,14 @@ pub async fn ensure_configuration_schema(
 mod tests {
     use super::*;
 
-    async fn connection() -> (tempfile::TempDir, tracedecay_runtime_core::db::engine::TestConnection) {
+    async fn connection() -> (
+        tempfile::TempDir,
+        tracedecay_runtime_core::db::engine::TestConnection,
+    ) {
         let directory = tempfile::tempdir().unwrap();
-        let connection =
-            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("configuration.db"));
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("configuration.db"),
+        );
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await

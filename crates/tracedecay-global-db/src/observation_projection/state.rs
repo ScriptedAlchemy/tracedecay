@@ -6,8 +6,8 @@ use tracedecay_store::{
     SessionRecord,
 };
 
-use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_sessions::compatibility::projected_content_hash;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -814,9 +814,7 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
 /// Distinct paths are resolved before any write, then each verified alias is
 /// updated idempotently. Updating `project_key` only when it matched the old
 /// path preserves provider-native keys while keeping path-shaped keys aligned.
-pub async fn converge_session_project_paths(
-    conn: &impl Executor,
-) -> ProjectionStoreResult<()> {
+pub async fn converge_session_project_paths(conn: &impl Executor) -> ProjectionStoreResult<()> {
     let mut rows = conn
         .query("SELECT DISTINCT project_path FROM sessions", ())
         .await

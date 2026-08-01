@@ -1,7 +1,7 @@
 mod cursor_keys;
 mod direct;
-pub mod execution;
 mod doctor_health;
+pub mod execution;
 mod expand;
 mod hydration;
 pub mod operations;
@@ -21,21 +21,21 @@ mod tests;
 
 use std::collections::BTreeMap;
 
-use tracedecay_runtime_core::db::engine::params;
 use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
+use tracedecay_runtime_core::db::engine::params;
 
-use tracedecay_sessions::lcm::contracts::{
-    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
-    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
-};
 use self::execution::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
 use crate::RegisteredGlobalDb;
+use tracedecay_sessions::lcm::contracts::{
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
+};
 use tracedecay_store::SessionMessageRecord;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
@@ -370,7 +370,10 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         &self,
         request: &AuthorizedTemporalExecutionRequest,
     ) -> Result<
-        (tracedecay_runtime_core::db::engine::ReadSnapshot, TemporalExecutionSnapshot),
+        (
+            tracedecay_runtime_core::db::engine::ReadSnapshot,
+            TemporalExecutionSnapshot,
+        ),
         SessionTemporalExecutionError,
     > {
         let control = request.snapshot_request().execution_control();

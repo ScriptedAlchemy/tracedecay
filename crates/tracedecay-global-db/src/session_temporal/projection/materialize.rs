@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1, MessageId,
     MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalAnchorRecord, SessionId,
     TemporalAssertionKindV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, UtcMicros,
 };
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::{
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionStoreError, SessionStoreResult,
@@ -561,11 +561,7 @@ pub async fn canonical_parent_message_resolver(
 }
 
 impl ParentMessageResolver {
-    pub(in crate::session_temporal) fn register(
-        &mut self,
-        message_id: &str,
-        occurrence_id: &str,
-    ) {
+    pub(in crate::session_temporal) fn register(&mut self, message_id: &str, occurrence_id: &str) {
         self.occurrences
             .entry(message_id.to_owned())
             .or_default()

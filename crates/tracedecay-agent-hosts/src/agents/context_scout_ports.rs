@@ -33,9 +33,9 @@ use super::context_scout_v2::{
     ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
     select_context_scout_delivery_window,
 };
-use crate::ports::configuration::ConfigurationCurrentStateV1;
 use crate::db::Database;
 use crate::db::engine::params;
+use crate::ports::configuration::ConfigurationCurrentStateV1;
 
 const ADDRESS_LEDGER_KEY_V1: &str = "agents.context-scout.addresses.v1";
 const ADDRESS_LEDGER_SCHEMA_VERSION_V1: u16 = 1;

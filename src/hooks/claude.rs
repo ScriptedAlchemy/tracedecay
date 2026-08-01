@@ -239,8 +239,7 @@ async fn claude_subagent_start_context(event_json: &str) -> Option<String> {
 }
 
 fn claude_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
-    event_cwd_from_parsed(parsed)
-        .map(|cwd| DaemonHookEvent::session_start(HookAgent::Claude, cwd))
+    event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Claude, cwd))
 }
 
 /// Builds the Claude `SessionStart` context for code workspaces.

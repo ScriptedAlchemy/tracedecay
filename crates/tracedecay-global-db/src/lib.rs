@@ -19,9 +19,7 @@ mod git_index_transactions;
 pub mod host_ports;
 pub mod observation;
 mod observation_projection;
-pub use observation_projection::{
-    project_observation_with_engine, rebuild_projection_with_engine,
-};
+pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 mod observation_store;
 mod project_registry;
 mod registered;
@@ -110,7 +108,9 @@ pub struct AnalyticsEventRecord {
     pub metadata_json: Option<String>,
 }
 
-impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource for AnalyticsEventRecord {
+impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource
+    for AnalyticsEventRecord
+{
     fn as_analytics_session_timestamp(
         &self,
     ) -> Option<tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestamp> {
@@ -890,7 +890,9 @@ pub fn global_accounting_enabled() -> bool {
     global_accounting_mode().enabled()
 }
 
-fn row_to_analytics_event(row: &tracedecay_runtime_core::db::engine::Row) -> Option<AnalyticsEventRecord> {
+fn row_to_analytics_event(
+    row: &tracedecay_runtime_core::db::engine::Row,
+) -> Option<AnalyticsEventRecord> {
     Some(AnalyticsEventRecord {
         id: row.get(0).ok()?,
         provider: row.get(1).ok()?,
