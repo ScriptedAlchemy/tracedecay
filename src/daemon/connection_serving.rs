@@ -121,7 +121,13 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
             result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
             incoming = transport.read_line() => {
                 let Some(line) = incoming? else {
-                    return Ok(None);
+                    // EOF closes only the client's request half. It may still
+                    // be reading the response, as one-shot CLI clients do.
+                    // Finish the already bounded owner lookup and let the
+                    // subsequent write prove whether the peer fully left.
+                    return open
+                        .await
+                        .map(|owner| Some((owner, pending_lines)));
                 };
                 if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
                     return Err(TraceDecayError::Config {
