@@ -6,10 +6,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::application::host_admission::HostAdmissionTelemetryDisposition as HookDispositionTelemetry;
-#[cfg(test)]
 use crate::application::host_admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
+    HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };
 use crate::errors::TraceDecayError;
 use tracedecay_hooks::HookTransportDispositionV1;
@@ -27,34 +26,23 @@ enum HostHookTelemetryCoverage {
     HostMeasured,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct HookTimeoutTelemetry {
     budget_ms: Option<u64>,
     timed_out: Option<bool>,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct HookCompletedTelemetry {
-    schema_version: u32,
-    coverage: HostHookTelemetryCoverage,
     agent: String,
-    hook_name: String,
-    prompt_category: Option<String>,
-    duration_us: Option<u64>,
-    duration_ms: Option<u64>,
     hook_wall_time_us: Option<u64>,
-    hook_wall_time_ms: Option<u64>,
     daemon_rtt_us: Option<u64>,
-    daemon_call_count: Option<u64>,
     payload_bytes: Option<u64>,
     daemon_ipc_payload_bytes: Option<u64>,
     timeout: HookTimeoutTelemetry,
     disposition: HookDispositionTelemetry,
 }
 
-#[cfg(test)]
 impl HookCompletedTelemetry {
     fn from_row(row: &Value) -> Option<(Self, bool)> {
         if row.get("event").and_then(Value::as_str) != Some("hook_completed") {
@@ -66,30 +54,12 @@ impl HookCompletedTelemetry {
 
         let timeout = row.get("timeout").and_then(Value::as_object);
         let telemetry = Self {
-            schema_version: row
-                .get("schema_version")
-                .and_then(Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-                .unwrap_or_default(),
-            coverage: HostHookTelemetryCoverage::HostMeasured,
             agent: row
                 .get("agent")
                 .and_then(Value::as_str)
                 .map_or_else(|| "unknown".to_owned(), bounded_identifier),
-            hook_name: row
-                .get("hook_name")
-                .and_then(Value::as_str)
-                .map_or_else(|| "unknown".to_owned(), bounded_identifier),
-            prompt_category: row
-                .get("prompt_category")
-                .and_then(Value::as_str)
-                .map(bounded_identifier),
-            duration_us: optional_u64_field(row, "duration_us"),
-            duration_ms: optional_u64_field(row, "duration_ms"),
             hook_wall_time_us: optional_u64_field(row, "hook_wall_time_us"),
-            hook_wall_time_ms: optional_u64_field(row, "hook_wall_time_ms"),
             daemon_rtt_us: optional_u64_field(row, "daemon_rtt_us"),
-            daemon_call_count: optional_u64_field(row, "daemon_call_count"),
             payload_bytes: optional_u64_field(row, "payload_bytes"),
             daemon_ipc_payload_bytes: optional_u64_field(row, "daemon_ipc_payload_bytes"),
             timeout: HookTimeoutTelemetry {
@@ -110,7 +80,6 @@ impl HookCompletedTelemetry {
     }
 }
 
-#[cfg(test)]
 fn optional_u64_field(value: &Value, field: &str) -> Option<u64> {
     value.get(field).and_then(Value::as_u64)
 }
@@ -686,12 +655,10 @@ fn now_unix_millis() -> u64 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
 mod readiness;
 
 #[cfg(test)]
 pub(crate) use readiness::empty_hook_completed_readiness_distributions;
-#[cfg(test)]
 pub(crate) use readiness::{
     HookCompletedReadinessDistributions, aggregate_hook_completed_readiness,
 };
