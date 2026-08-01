@@ -944,6 +944,121 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
 
     cg.close();
 }
+
+/// The retained memory dispatch bounds every memory operation by the
+/// admission-carried client deadline, exactly as the git dispatcher does: an
+/// already-elapsed budget rejects each operation with the typed, retryable
+/// deadline problem before the store is ever touched.
+#[tokio::test]
+async fn memory_dispatch_rejects_an_already_elapsed_deadline() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("memory-deadline-elapsed");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-memory-deadline-elapsed",
+    )
+    .await
+    .unwrap();
+
+    for operation in [
+        RetainedSurfaceOperation::FactStore,
+        RetainedSurfaceOperation::FactFeedback,
+        RetainedSurfaceOperation::MemoryStatus,
+    ] {
+        let options = ToolCallRegistryOptions {
+            application_deadline: Some(
+                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
+            ),
+            ..ToolCallRegistryOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let error = dispatch_memory_operation(
+            operation,
+            &cg,
+            json!({ "action": "add", "content": "elapsed-deadline fixture" }),
+            &options,
+        )
+        .await
+        .expect_err("an elapsed deadline must reject the memory operation");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{operation:?} elapsed-deadline path must return fast, took {:?}",
+            started.elapsed(),
+        );
+        let (reason_code, retryable, _detail) = error
+            .project_route_context()
+            .expect("the elapsed deadline must surface a typed project-route problem");
+        assert_eq!(
+            reason_code, "memory_operation_deadline_exceeded",
+            "{operation:?} must report the memory deadline problem",
+        );
+        assert!(retryable, "a deadline backstop is safe to retry");
+    }
+
+    cg.close();
+}
+
+/// A standalone caller carries no admission deadline, so the same memory
+/// dispatch runs the operation unbounded to completion — the central bound is a
+/// backstop, never a limit healthy operations hit.
+#[tokio::test]
+async fn memory_dispatch_without_a_deadline_runs_to_completion() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("memory-no-deadline");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-memory-no-deadline",
+    )
+    .await
+    .unwrap();
+
+    let options = ToolCallRegistryOptions::default();
+    let result = dispatch_memory_operation(
+        RetainedSurfaceOperation::FactStore,
+        &cg,
+        json!({ "action": "add", "content": "unbounded memory add fixture" }),
+        &options,
+    )
+    .await
+    .expect("a deadline-free memory add runs to completion");
+    assert_ne!(
+        result.semantic_error(),
+        Some(true),
+        "the unbounded add must succeed, not surface a semantic error",
+    );
+    assert!(
+        result.failure_message().is_none(),
+        "the unbounded add must not report a failure: {:?}",
+        result.failure_message(),
+    );
+
+    // The persisted fact is visible to a follow-up status that also runs
+    // unbounded through the same central dispatch.
+    let status = dispatch_memory_operation(
+        RetainedSurfaceOperation::MemoryStatus,
+        &cg,
+        json!({ "format": "json" }),
+        &options,
+    )
+    .await
+    .expect("memory_status runs unbounded when no deadline is carried");
+    let rendered = serde_json::to_string(&status.value).unwrap();
+    assert!(
+        rendered.contains("fact_count"),
+        "status must report the fact_count field: {rendered}",
+    );
+
+    cg.close();
+}
+
 /// Blank ids and zero depths are caller input, not internal invariants: they
 /// arrive straight from tool arguments (`tracedecay tool impact --args
 /// '{"node_id":""}'`). Every node-id graph tool must therefore answer with a
