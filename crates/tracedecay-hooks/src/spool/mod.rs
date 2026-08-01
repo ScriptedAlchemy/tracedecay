@@ -89,6 +89,13 @@ impl HookSpoolV1 {
     /// Open/recover a bounded spool and acquire the sole writer lease. The OS
     /// releases the prior process lock when its file descriptor closes. Expiry
     /// independently prevents a live-but-stale owner from mutating the spool.
+    ///
+    /// The lease is single-shot and non-renewable: open, do bounded work with
+    /// the `now` the lease was acquired at, drop. A handle held past
+    /// `config.writer_lease_micros` of caller-observed time stops accepting
+    /// mutations with [`HookSpoolError::WriterLeaseLost`]; the only recovery is
+    /// to drop it and reopen, which is lossless because every record and
+    /// acknowledgement is durable before its call returns.
     pub fn open(
         root: impl Into<PathBuf>,
         config: HookSpoolConfigV1,
