@@ -8,6 +8,21 @@ use tracedecay_hooks::{
     HookGuidanceDispositionV1,
 };
 
+/// Test shim over [`super::native_material`], which now takes the identity
+/// fields `prepare_bound_hook` already decoded. These cases start from the raw
+/// host payload, so they decode it here exactly as production does once.
+fn native_material(
+    event_json: &str,
+    family: tracedecay_hooks::HookEventFamily,
+    observed_at: UtcMicros,
+) -> Option<NativeEnvelopeMaterialV1> {
+    super::native_material(
+        &serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default(),
+        family,
+        observed_at,
+    )
+}
+
 fn scope(worktree: &str) -> ResolvedScope {
     ResolvedScope::new(
         ProjectId::new("project.hook-v2-test").unwrap(),

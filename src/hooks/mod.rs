@@ -71,7 +71,8 @@ pub(crate) use analytics::HookCompletedReadinessDistributions;
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
     mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
-    record_hook_invoked, record_other_hook_invoked, record_workspace_status_analytics,
+    record_hook_invoked, record_hook_invoked_parsed, record_other_hook_invoked,
+    record_workspace_status_analytics,
 };
 
 pub(crate) fn aggregate_hook_completed_readiness(

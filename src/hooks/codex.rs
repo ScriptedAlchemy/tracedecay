@@ -26,7 +26,7 @@ use super::{
     event_project_root, event_project_root_from_json, event_project_root_with_identity,
     event_project_root_with_identity_from_json, event_session_id, format_tool_hint,
     is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
-    record_hint_analytics, record_hook_analytics, record_hook_invoked,
+    record_hint_analytics, record_hook_analytics, record_hook_invoked, record_hook_invoked_parsed,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
 
@@ -51,9 +51,14 @@ may be missing.";
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = event_project_root_with_identity_from_json(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
+    let root = event_project_root_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Codex,
+        "SessionStart",
+        &event,
+        &parsed,
+    );
     if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
         super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
     }
@@ -212,13 +217,21 @@ fn merge_codex_subagent_output(output: Option<String>, digest: Option<String>) -
 /// Fail-open: no surviving hint leaves prior behavior unchanged.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_with_identity_from_json(&event).await;
-    let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostToolUse", &event);
-    if let Some(context) = codex_post_tool_use_hint(&event) {
+    // One parse for the whole hook, like the Claude post-tool surface: root,
+    // analytics, the hint decision, and the daemon notification all read it.
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    let _hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Codex,
+        "PostToolUse",
+        &event,
+        &parsed,
+    );
+    if let Some(context) = codex_post_tool_use_hint(&parsed) {
         println!("{}", codex_additional_context_json("PostToolUse", &context));
     }
-    notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &event).await;
+    notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &parsed).await;
     0
 }
 
@@ -227,11 +240,10 @@ pub async fn hook_codex_post_tool_use() -> i32 {
 /// with [`decide_codex_post_tool_use_hint`], then dedupes per (session,
 /// category) via [`deduped_project_hint`] exactly like the Claude post-tool-use
 /// surface (which mints its own candidate id and records only the terminal row).
-fn codex_post_tool_use_hint(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let hint = decide_codex_post_tool_use_hint(&parsed)?;
-    let root = event_project_root(&parsed);
-    let session_id = event_session_id(&parsed);
+fn codex_post_tool_use_hint(parsed: &Value) -> Option<String> {
+    let hint = decide_codex_post_tool_use_hint(parsed)?;
+    let root = event_project_root(parsed);
+    let session_id = event_session_id(parsed);
     let hint = deduped_project_hint(root.as_deref(), HintAgent::Codex, session_id, hint)?;
     Some(format_tool_hint(&hint))
 }
@@ -314,7 +326,8 @@ pub async fn hook_codex_stop() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
-    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
+    let hook_telemetry =
+        record_hook_invoked_parsed(root.as_deref(), HintAgent::Codex, "Stop", &event, &parsed);
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::v2::dispatch(
             tracedecay_hooks::HookHostV1::Codex,
