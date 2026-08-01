@@ -677,7 +677,7 @@ impl TraceDecay {
         .await?
         {
             OpenHealthOutcome::Ready { db, migrated } => (db, migrated),
-            OpenHealthOutcome::Recovered(result) => return result,
+            OpenHealthOutcome::Recovered(result) => return *result,
         };
 
         install_usecase_runtime_configuration_authority()?;
