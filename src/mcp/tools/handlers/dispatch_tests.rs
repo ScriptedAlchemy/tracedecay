@@ -947,3 +947,184 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
 
     cg.close();
 }
+/// LIVE DEFECT REGRESSION.
+///
+/// `tracedecay tool impact --args '{"node_id":""}'` used to reach
+/// `GraphTraverser::get_impact_radius`, trip a `debug_assert!`, and panic the
+/// daemon's client task. The client only saw "daemon closed the connection",
+/// with nothing naming the offending argument. Blank ids and zero depths are
+/// caller input, not internal invariants, so every node-id graph tool must
+/// answer with a typed argument error.
+#[tokio::test]
+async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("blank-node-id");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn blank_probe_callee() {}\npub fn blank_probe() { blank_probe_callee(); }\n",
+    )
+    .unwrap();
+    let (cg, _runtime) =
+        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
+            .await
+            .unwrap();
+    cg.index_all().await.unwrap();
+
+    for tool_name in [
+        "tracedecay_impact",
+        "tracedecay_callers",
+        "tracedecay_callees",
+        "tracedecay_node",
+    ] {
+        for blank in ["", "   "] {
+            let error = dispatch_graph_tools(
+                tool_name,
+                &cg,
+                json!({"node_id": blank}),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err(&format!("{tool_name} must reject a blank node_id"));
+            assert!(
+                matches!(&error, TraceDecayError::Config { message }
+                    if message.contains("node_id must not be empty")),
+                "{tool_name} returned the wrong error for a blank node_id: {error}",
+            );
+        }
+    }
+
+    // Depth arguments are clamped with `min(max)`, which leaves an explicit
+    // zero intact; that reached the same assertions from the other side.
+    let node_id = cg
+        .get_nodes_by_name("blank_probe")
+        .await
+        .unwrap()
+        .first()
+        .expect("indexed probe symbol")
+        .id
+        .clone();
+    for tool_name in [
+        "tracedecay_impact",
+        "tracedecay_callers",
+        "tracedecay_callees",
+    ] {
+        let error = dispatch_graph_tools(
+            tool_name,
+            &cg,
+            json!({"node_id": node_id, "max_depth": 0}),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err(&format!("{tool_name} must reject max_depth 0"));
+        assert!(
+            matches!(&error, TraceDecayError::Config { message }
+                if message.contains("at least 1")),
+            "{tool_name} returned the wrong error for max_depth 0: {error}",
+        );
+    }
+}
+
+/// The daemon serves each client from a task in a `JoinSet`, so a panicking
+/// request unwinds only that task while the graph handle and the server-side
+/// registries it touched stay shared with every later request. A follow-up
+/// query on a valid node id hung once after the original panic, so this pins
+/// down that neither the previously panicking argument nor a real unwind on a
+/// task holding the same graph leaves later calls broken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_tools_still_answer_after_a_panicking_worker_task() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("panic-recovery");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn recovery_callee() {}\npub fn recovery_probe() { recovery_callee(); }\n",
+    )
+    .unwrap();
+    let (cg, _runtime) =
+        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.panic-recovery")
+            .await
+            .unwrap();
+    cg.index_all().await.unwrap();
+    let cg = Arc::new(cg);
+    let node_id = cg
+        .get_nodes_by_name("recovery_callee")
+        .await
+        .unwrap()
+        .first()
+        .expect("indexed probe symbol")
+        .id
+        .clone();
+
+    // 1. The argument that used to panic now fails as an ordinary error.
+    assert!(
+        dispatch_graph_tools(
+            "tracedecay_impact",
+            &cg,
+            json!({"node_id": ""}),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .is_err()
+    );
+
+    // 2. A genuine unwind on a task that shares the graph handle, mirroring a
+    //    panicking daemon client task.
+    let panicking = {
+        let cg = Arc::clone(&cg);
+        let node_id = node_id.clone();
+        tokio::spawn(async move {
+            let _ = dispatch_graph_tools(
+                "tracedecay_impact",
+                &cg,
+                json!({"node_id": node_id}),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            panic!("simulated daemon client task panic");
+        })
+    };
+    assert!(
+        panicking.await.is_err_and(|error| error.is_panic()),
+        "the worker task should have panicked"
+    );
+
+    // 3. The next valid request must still complete.
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        dispatch_graph_tools(
+            "tracedecay_impact",
+            &cg,
+            json!({"node_id": node_id, "max_depth": 2}),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("impact must not hang after a worker panic")
+    .expect("impact must succeed after a worker panic");
+    assert!(recovered.value["content"][0]["text"].is_string());
+}

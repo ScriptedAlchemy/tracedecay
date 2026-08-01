@@ -105,16 +105,55 @@ pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value
     generic_tool_result(project_root, args, value, Vec::new())
 }
 
+/// Rejects tool arguments that are not a JSON object.
+///
+/// Handlers that read named parameters used to `debug_assert!` this. The
+/// argument value comes straight off the wire (an MCP client, the `tracedecay
+/// tool --args` CLI, or an internal dispatch probe), so a scalar or array is
+/// caller error, not a broken invariant — asserting it panicked the daemon's
+/// client task and the caller saw only a dropped connection.
+pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
+    if args.is_object() {
+        return Ok(());
+    }
+    Err(TraceDecayError::Config {
+        message: format!("invalid arguments: {tool_name} expects a JSON object"),
+    })
+}
+
+/// Rejects a zero result limit with a typed error.
+pub(crate) fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
+    if limit == 0 {
+        return Err(TraceDecayError::Config {
+            message: format!("invalid parameter: {tool_name} requires limit to be at least 1"),
+        });
+    }
+    Ok(())
+}
+
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
 /// confusing error when that happens.
+///
+/// A present-but-blank value is rejected here rather than forwarded. An empty
+/// `node_id` used to reach the graph traversal layer and trip a
+/// `debug_assert!`, panicking the daemon's client task so the caller saw only
+/// "daemon closed the connection"; every handler that takes a node id shares
+/// this one guard so the failure is a typed argument error instead.
 pub(super) fn require_node_id(args: &Value) -> Result<&str> {
-    args.get("node_id")
+    let node_id = args
+        .get("node_id")
         .or_else(|| args.get("id"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: node_id".to_string(),
-        })
+        })?;
+    if node_id.trim().is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: node_id must not be empty".to_string(),
+        });
+    }
+    Ok(node_id)
 }
 
 /// Returns the user-provided `path` argument, falling back to the scope
@@ -543,6 +582,27 @@ mod tests {
     fn test_require_node_id_missing() {
         let args = json!({"query": "something"});
         assert!(require_node_id(&args).is_err());
+    }
+
+    /// A blank node id used to travel all the way into graph traversal and
+    /// trip a `debug_assert!`, panicking the daemon's client task; the caller
+    /// only saw "daemon closed the connection". Every node-id handler shares
+    /// this guard, so the rejection must name the offending parameter.
+    #[test]
+    fn require_node_id_rejects_blank_values() {
+        for args in [
+            json!({"node_id": ""}),
+            json!({"node_id": "   "}),
+            json!({"node_id": "\t\n"}),
+            json!({"id": ""}),
+        ] {
+            let error = require_node_id(&args).expect_err(&format!("blank node id: {args}"));
+            let message = error.to_string();
+            assert!(
+                message.contains("node_id must not be empty"),
+                "unexpected message for {args}: {message}"
+            );
+        }
     }
 
     #[test]

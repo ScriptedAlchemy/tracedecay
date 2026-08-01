@@ -56,7 +56,8 @@ use crate::types::NodeKind;
 use super::super::ToolResult;
 use super::super::render;
 use super::support::{
-    effective_path, filter_by_scope, generic_tool_result, rendered_tool_result, unique_file_paths,
+    effective_path, filter_by_scope, generic_tool_result, rendered_tool_result,
+    require_object_args, require_positive_limit, unique_file_paths,
 };
 
 /// True when `path` names a Rust source file (case-insensitive `.rs`). Gates

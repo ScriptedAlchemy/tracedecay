@@ -66,15 +66,14 @@ impl McpServer {
         if file_paths.is_empty() {
             return 0;
         }
-        debug_assert!(
-            file_paths.iter().all(|p| !p.is_empty()),
-            "estimate_raw_file_tokens received empty file path"
-        );
-        let Ok(map) = self.file_token_map.lock() else {
-            return 0;
-        };
+        // Paths arrive from indexed node rows on every tool response. A blank
+        // one is bad index data, not a broken invariant, and it already fails
+        // the map lookup below — asserting here only converted it into a
+        // worker panic on the shared response path.
+        let map = crate::mcp::server::requests::recover_lock(&self.file_token_map);
         file_paths
             .iter()
+            .filter(|path| !path.is_empty())
             .filter_map(|path| map.get(path.as_str()))
             .sum()
     }
@@ -170,19 +169,14 @@ impl McpServer {
         let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {
             return;
         };
-        if let Ok(mut guard) = self.file_token_map.lock() {
-            *guard = fresh;
-        }
+        *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
     }
 
     /// Internal: snapshot of the current `file_token_map`. Exposed for
     /// integration tests only; not part of the stable public API.
     #[doc(hidden)]
     pub fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
-        self.file_token_map
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        crate::mcp::server::requests::recover_lock(&self.file_token_map).clone()
     }
 
     /// Flushes pending tokens to the worldwide counter if at least 30 seconds

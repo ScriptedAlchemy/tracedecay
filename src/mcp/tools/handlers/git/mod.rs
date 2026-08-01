@@ -26,7 +26,7 @@ use std::pin::Pin;
 use serde_json::{Value, json};
 
 use super::super::ToolResult;
-use super::support::{generic_tool_result, unique_file_paths};
+use super::support::{generic_tool_result, require_object_args, unique_file_paths};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
