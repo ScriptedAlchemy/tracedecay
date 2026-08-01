@@ -638,8 +638,14 @@ async fn test_search_skips_ignored_dependency_hint_when_results_fill_limit() {
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["name"].as_str(), Some("Foo"));
+    assert_eq!(
+        payload["results"][0]["node_id"], payload["results"][0]["id"],
+        "typed lexical fallback must retain the graph identity used by follow-up tools"
+    );
     assert!(payload.get("ignored_dependency_hint").is_none());
     assert_eq!(payload["status"].as_str(), Some("lexical_fallback"));
+    assert!(payload["query_fallback_digest"].is_null());
+    assert_eq!(payload["semantic"]["status"].as_str(), Some("unavailable"));
 }
 
 #[tokio::test]

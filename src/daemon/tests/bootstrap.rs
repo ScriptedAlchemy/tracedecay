@@ -1551,7 +1551,8 @@ async fn production_composition_harness_wires_query_search_authority() {
     std::fs::create_dir_all(project.join("src")).expect("source dir");
     std::fs::write(
         project.join("src/lib.rs"),
-        "pub fn production_composition_probe() -> bool { true }\n",
+        "pub fn production_composition_probe() -> bool { true }\n\
+         pub fn production_composition_caller() -> bool { production_composition_probe() }\n",
     )
     .expect("source file");
     commit_production_composition_project(&project);
@@ -1559,27 +1560,59 @@ async fn production_composition_harness_wires_query_search_authority() {
     let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
         .await
         .expect("production composition");
-    let response = harness
-        .call_tool(
-            &project,
-            "tracedecay_search",
-            json!({
-                "query": "production_composition_probe",
-                "limit": 10,
-                "format": "json"
-            }),
-        )
-        .await
-        .expect("production search");
-    let payload: serde_json::Value =
-        serde_json::from_str(production_composition_tool_text(&response)).expect("search json");
-    assert!(
-        payload["results"].as_array().is_some_and(|matches| {
-            matches.iter().any(|candidate| {
+    let payload = tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
+        loop {
+            let response = harness
+                .call_tool(
+                    &project,
+                    "tracedecay_search",
+                    json!({
+                        "query": "production_composition_probe",
+                        "limit": 10,
+                        "format": "json"
+                    }),
+                )
+                .await
+                .expect("production search");
+            let payload: serde_json::Value =
+                serde_json::from_str(production_composition_tool_text(&response))
+                    .expect("search json");
+            if payload["code_generation"].as_str().is_some() {
+                break payload;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("production query authority did not become ready");
+    let candidate = payload["results"]
+        .as_array()
+        .and_then(|matches| {
+            matches.iter().find(|candidate| {
                 candidate["display"]["name"] == json!("production_composition_probe")
             })
-        }),
-        "production query search authority did not return the indexed symbol: {payload}"
+        })
+        .unwrap_or_else(|| {
+            panic!("production query search authority did not return the indexed symbol: {payload}")
+        });
+    let node_id = candidate["node_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("search result must address graph follow-up tools: {candidate}"));
+    let impact = harness
+        .call_tool(
+            &project,
+            "tracedecay_impact",
+            json!({"node_id": node_id, "format": "json"}),
+        )
+        .await
+        .expect("production impact");
+    let impact_payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&impact)).expect("impact json");
+    assert!(
+        impact_payload["node_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "impact must consume the graph identity returned by production search: {impact_payload}"
     );
     harness.shutdown().await;
 }
