@@ -4531,14 +4531,70 @@ fn component_set_receipt_from_prepared(
     request: &HostComponentSetExecutionRequestV1,
     confirmed_preview: Option<&HostComponentSetLifecyclePreviewV1>,
 ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
+    // Provenance is preserved only for a *companion*: a component an incremental
+    // Update left untouched while it did real work on a sibling. Two gates bound
+    // this:
+    //
+    // * The operation is an Update. Install first-deploys every component,
+    //   Repair re-asserts ownership of the entire cataloged set, and Uninstall
+    //   removes it — each legitimately stamps its operation onto every receipt,
+    //   changed or not. Only Update is incremental.
+    // * The set performed at least one effective artifact write. A transaction
+    //   that writes nothing anywhere is a pure no-op re-run of the identical
+    //   set; it still records its operation on every receipt rather than
+    //   silently reusing the prior one.
+    let preserves_untouched_companions = request.lifecycle.operation
+        == HostBundleLifecycleOpV1::Update
+        && prepared.iter().any(|component| {
+            component
+                .plan
+                .mutations
+                .iter()
+                .any(|mutation| mutation.action != HostArtifactActionV1::Noop)
+        });
     let component_receipts = prepared
         .iter()
         .map(|component| {
-            if component.plan.mutations.is_empty()
+            // An unchanged companion — one whose plan writes nothing (every
+            // artifact action is a Noop) and whose manifest is byte-identical to
+            // its durable receipt — keeps its original operation provenance. A
+            // component with manifest artifacts always plans one Noop mutation
+            // per artifact, so the emptiness of the mutation list can never stand
+            // in for "no work"; the action of each mutation must be inspected.
+            if preserves_untouched_companions
+                && component
+                    .plan
+                    .mutations
+                    .iter()
+                    .all(|mutation| mutation.action == HostArtifactActionV1::Noop)
                 && let Some(previous_receipt) = &component.previous_receipt
                 && previous_receipt.manifest_digest == component.manifest.canonical_digest()?
             {
                 return Ok(previous_receipt.clone());
+            }
+            let mut rollback_history = component
+                .previous_receipt
+                .as_ref()
+                .map(|receipt| receipt.rollback_history.clone())
+                .unwrap_or_default();
+            // A Repair that overwrites a receipt-owned path whose bytes drifted
+            // from the catalog backs up genuinely foreign content: a user edit,
+            // never tracedecay's own prior output (Repair replaces a path only
+            // when its observed digest differs from the cataloged digest, which
+            // for the unchanged Repair manifest is also the previously owned
+            // digest). Reference this operation from the receipt so the commit
+            // boundary retains that backup and an operator can still recover the
+            // overwritten bytes. Ordinary Update backups replace tracedecay's own
+            // previously owned output and stay retired on commit.
+            if request.lifecycle.operation == HostBundleLifecycleOpV1::Repair
+                && component
+                    .plan
+                    .mutations
+                    .iter()
+                    .any(|mutation| mutation.action == HostArtifactActionV1::BackupThenReplace)
+                && !rollback_history.contains(&request.operation_id)
+            {
+                rollback_history.push(request.operation_id);
             }
             Ok(HostBundleInstallReceiptV1 {
                 schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
@@ -4562,11 +4618,7 @@ fn component_set_receipt_from_prepared(
                         .collect()
                 },
                 rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
-                rollback_history: component
-                    .previous_receipt
-                    .as_ref()
-                    .map(|receipt| receipt.rollback_history.clone())
-                    .unwrap_or_default(),
+                rollback_history,
             })
         })
         .collect::<Result<Vec<_>, HostBundleError>>()?;
@@ -5940,10 +5992,18 @@ mod tests {
         assert_eq!(companion.operation_id, [81; 16]);
         assert_eq!(companion.operation, HostBundleLifecycleOpV1::Install);
 
+        // A companion whose manifest changed but whose artifact bytes did not
+        // still earns a fresh receipt. The change must keep the set's shared
+        // configuration authority (`configuration_snapshot_id`,
+        // `integration_manifest_digest`, `catalog_digest`) uniform across
+        // components — `validate_component_set_journal` rejects a set whose
+        // components disagree on it — so bump a per-component manifest field
+        // (`effective_behavior_digest`) that shifts only the agent's canonical
+        // digest and leaves the core component entirely unchanged.
         let mut metadata_only_change = core_only_change.clone();
         metadata_only_change.components[1]
             .manifest
-            .configuration_snapshot_id = "first-party.v2".to_string();
+            .effective_behavior_digest = Sha256::digest(b"first-party.behavior.v2").into();
         let metadata_request =
             component_set_request(HostKindV1::OpenCode, HostBundleLifecycleOpV1::Update, 83);
         let receipt = HostComponentSetTransactionV1::new(&mut writer)
