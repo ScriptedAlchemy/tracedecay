@@ -89,13 +89,16 @@ pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource>
 
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
 /// cursor per source file so re-runs only ingest the appended tail.
+// Takes the source list by value: a borrowed slice iterator held across the
+// per-source awaits trips rustc's higher-ranked Send leak check when this
+// future runs inside the spawned startup catch-up task.
 pub(crate) async fn import_hook_analytics(
     gdb: &RegisteredGlobalDb,
-    sources: &[HookImportSource],
+    sources: Vec<HookImportSource>,
 ) -> HookImportOutcome {
     let mut outcome = HookImportOutcome::default();
     for source in sources {
-        outcome.sources.push(import_source(gdb, source).await);
+        outcome.sources.push(import_source(gdb, &source).await);
     }
     outcome
 }
@@ -341,7 +344,7 @@ pub(crate) async fn analytics_sync_with_db(
     project_root: Option<&Path>,
 ) -> Value {
     let sources = hook_import_sources(project_root);
-    import_hook_analytics(gdb, &sources).await.as_json()
+    import_hook_analytics(gdb, sources).await.as_json()
 }
 
 pub(crate) async fn analytics_diagnostics_with_db(
