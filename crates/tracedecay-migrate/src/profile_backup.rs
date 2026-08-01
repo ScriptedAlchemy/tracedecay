@@ -113,7 +113,7 @@ pub fn create_complete_profile_backup(
     backup_parent: &Path,
     backup_id: &str,
     created_at: i64,
-    lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+    lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> Result<PathBuf, String> {
     if backup_id.is_empty() || created_at <= 0 {
         return Err("backup identity and timestamp must be non-empty".to_owned());
@@ -450,14 +450,15 @@ fn rebind_restored_store_manifests(
         if !metadata.is_dir() {
             continue;
         }
-        let manifest_path = store_root.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path =
+            store_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let manifest_metadata = match fs::symlink_metadata(&manifest_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(format!(
                     "restored store '{}' is missing required {}",
                     store_root.display(),
-                    crate::root_seam::storage::STORE_MANIFEST_FILENAME
+                    tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME
                 ));
             }
             Err(error) => {
@@ -473,7 +474,7 @@ fn rebind_restored_store_manifests(
                 manifest_path.display()
             ));
         }
-        let manifest = crate::root_seam::storage::read_store_manifest(&manifest_path)
+        let manifest = tracedecay_runtime_core::storage::read_store_manifest(&manifest_path)
             .map_err(|error| error.to_string())?;
         let project_id = store
             .file_name()
@@ -485,9 +486,9 @@ fn rebind_restored_store_manifests(
             published_profile_root,
             &manifest_path,
         )?;
-        crate::root_seam::storage::write_store_manifest_to_path(&manifest_path, &manifest)
+        tracedecay_runtime_core::storage::write_store_manifest_to_path(&manifest_path, &manifest)
             .map_err(|error| error.to_string())?;
-        if crate::root_seam::storage::read_store_manifest(&manifest_path)
+        if tracedecay_runtime_core::storage::read_store_manifest(&manifest_path)
             .map_err(|error| error.to_string())?
             != manifest
         {
@@ -501,15 +502,15 @@ fn rebind_restored_store_manifests(
 }
 
 fn rebound_store_manifest(
-    mut manifest: crate::root_seam::storage::StoreManifest,
+    mut manifest: tracedecay_runtime_core::storage::StoreManifest,
     project_id: &str,
     published_profile_root: &Path,
     manifest_path: &Path,
-) -> Result<crate::root_seam::storage::StoreManifest, String> {
-    if manifest.schema_version != crate::root_seam::storage::STORE_MANIFEST_SCHEMA_VERSION
+) -> Result<tracedecay_runtime_core::storage::StoreManifest, String> {
+    if manifest.schema_version != tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION
         || manifest.project_id.as_deref() != Some(project_id)
-        || manifest.store_kind != crate::root_seam::storage::StoreKind::CodeProject
-        || manifest.storage_mode != crate::root_seam::storage::StorageMode::ProfileSharded
+        || manifest.store_kind != tracedecay_runtime_core::storage::StoreKind::CodeProject
+        || manifest.storage_mode != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
     {
         return Err(format!(
             "restored store manifest '{}' does not match its enrollment",
@@ -554,7 +555,7 @@ fn verify_restored_rehearsal(
             continue;
         };
         let source_path = checked_join(&backup.root, &entry.logical_path)?;
-        let source_manifest = crate::root_seam::storage::read_store_manifest(&source_path)
+        let source_manifest = tracedecay_runtime_core::storage::read_store_manifest(&source_path)
             .map_err(|error| error.to_string())?;
         let expected = rebound_store_manifest(
             source_manifest,
@@ -563,7 +564,7 @@ fn verify_restored_rehearsal(
             &source_path,
         )?;
         let restored_path = checked_join(restored_profile_root, &entry.logical_path)?;
-        let restored = crate::root_seam::storage::read_store_manifest(&restored_path)
+        let restored = tracedecay_runtime_core::storage::read_store_manifest(&restored_path)
             .map_err(|error| error.to_string())?;
         if restored != expected {
             return Err(format!(
@@ -586,7 +587,7 @@ fn restored_store_manifest_project_id(logical_path: &str) -> Option<&str> {
         (
             Some("projects"),
             Some(project_id),
-            Some(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
+            Some(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
             None,
         ) if !project_id.is_empty() => Some(project_id),
         _ => None,
@@ -954,7 +955,7 @@ mod tests {
         let restore = temp.path().join("restored");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile,
             "backup test",
         )
@@ -1006,19 +1007,19 @@ mod tests {
         ] {
             fs::write(source_store.join(name), contents).unwrap();
         }
-        let source_manifest = crate::root_seam::storage::StoreManifest {
-            schema_version: crate::root_seam::storage::STORE_MANIFEST_SCHEMA_VERSION,
+        let source_manifest = tracedecay_runtime_core::storage::StoreManifest {
+            schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
             project_id: Some(project_id.to_owned()),
-            store_kind: crate::root_seam::storage::StoreKind::CodeProject,
-            storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+            store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             project_root: project.clone(),
             data_root: source_store.clone(),
             graph_db_relpath: "tracedecay.db".into(),
             sessions_db_relpath: "sessions.db".into(),
             branch_meta_relpath: "branch-meta.json".into(),
         };
-        crate::root_seam::storage::write_store_manifest_to_path(
-            &source_store.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
+        tracedecay_runtime_core::storage::write_store_manifest_to_path(
+            &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
             &source_manifest,
         )
         .unwrap();
@@ -1026,7 +1027,7 @@ mod tests {
         let expected_memory = fs::read(profile.join("user-memory.db")).unwrap();
         let expected_lcm = fs::read(profile.join("user-sessions.db")).unwrap();
         let expected_config = fs::read(profile.join("config.toml")).unwrap();
-        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile,
             "backup test",
         )
@@ -1038,8 +1039,8 @@ mod tests {
         rehearse_complete_profile_backup(&backup, &restore).unwrap();
 
         let restored_store = restore.join("projects").join(project_id);
-        let restored_manifest = crate::root_seam::storage::read_store_manifest(
-            &restored_store.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
+        let restored_manifest = tracedecay_runtime_core::storage::read_store_manifest(
+            &restored_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
         )
         .unwrap();
         assert_eq!(restored_manifest.project_id.as_deref(), Some(project_id));
@@ -1049,8 +1050,8 @@ mod tests {
             restored_store.canonicalize().unwrap()
         );
         assert_eq!(
-            crate::root_seam::storage::read_store_manifest(
-                &source_store.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME)
+            tracedecay_runtime_core::storage::read_store_manifest(
+                &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME)
             )
             .unwrap(),
             source_manifest,
@@ -1081,7 +1082,7 @@ mod tests {
         let backups = temp.path().join("backups");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile,
             "backup test",
         )
@@ -1102,7 +1103,7 @@ mod tests {
         let profile = temp.path().join("profile");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile,
             "backup test",
         )
@@ -1140,13 +1141,13 @@ mod tests {
         ] {
             fs::write(source_store.join(name), contents).unwrap();
         }
-        crate::root_seam::storage::write_store_manifest_to_path(
-            &source_store.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
-            &crate::root_seam::storage::StoreManifest {
-                schema_version: crate::root_seam::storage::STORE_MANIFEST_SCHEMA_VERSION,
+        tracedecay_runtime_core::storage::write_store_manifest_to_path(
+            &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+            &tracedecay_runtime_core::storage::StoreManifest {
+                schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
                 project_id: Some(project_id.to_owned()),
-                store_kind: crate::root_seam::storage::StoreKind::CodeProject,
-                storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+                store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
+                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
                 project_root: project,
                 data_root: source_store.clone(),
                 graph_db_relpath: "tracedecay.db".into(),
@@ -1155,7 +1156,7 @@ mod tests {
             },
         )
         .unwrap();
-        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile,
             "backup test",
         )
@@ -1208,7 +1209,7 @@ mod tests {
         let (backup, restore) = sharded_released_backup(&temp);
         let manifest_entry = format!(
             "projects/project.release/{}",
-            crate::root_seam::storage::STORE_MANIFEST_FILENAME
+            tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME
         );
         fs::remove_file(backup.join(&manifest_entry)).unwrap();
         let manifest_path = backup.join("backup-manifest.json");

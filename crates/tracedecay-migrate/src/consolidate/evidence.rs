@@ -3,14 +3,14 @@ use super::*;
 pub(super) struct InputReadEvidence {
     pub(super) source_graph: GraphStoreEvidence,
     pub(super) target_graph: GraphStoreEvidence,
-    pub(super) sessions: crate::root_seam::sqlite_read_snapshot::SnapshotSet,
+    pub(super) sessions: tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet,
     pub(super) session_fingerprints: BTreeMap<PathBuf, String>,
 }
 
 pub(super) struct GraphStoreEvidence {
     pub(super) identities: sqlite::GraphLogicalIdentities,
     pub(super) fingerprints: BTreeMap<PathBuf, String>,
-    generations: BTreeMap<PathBuf, crate::root_seam::sqlite_read_snapshot::SourceGeneration>,
+    generations: BTreeMap<PathBuf, tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration>,
     #[cfg(test)]
     peak_scratch_bytes: u64,
 }
@@ -56,7 +56,7 @@ impl InputReadEvidence {
                 .session_fingerprints
                 .get(path)
                 .ok_or_else(|| config_error("session database set changed after inspection"))?;
-            let current = crate::root_seam::sqlite_read_snapshot::family_fingerprint(path)
+            let current = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
                 .map_err(io_error)?;
             if &current != expected {
                 return Err(config_error(format!(
@@ -105,7 +105,7 @@ impl GraphStoreEvidence {
                 .fingerprints
                 .get(path)
                 .ok_or_else(|| config_error("graph database set changed after inspection"))?;
-            let current = crate::root_seam::sqlite_read_snapshot::family_fingerprint(path)
+            let current = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
                 .map_err(io_error)?;
             if &current != expected {
                 return Err(config_error(format!(
@@ -140,7 +140,7 @@ pub(super) async fn capture_input_evidence(
 ) -> Result<InputReadEvidence> {
     let source_graph = capture_graph_evidence(source_graphs, scratch_root).await?;
     let target_graph = capture_graph_evidence(target_graphs, scratch_root).await?;
-    let sessions = crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture_in(
+    let sessions = tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet::capture_in(
         session_paths,
         scratch_root,
     )
@@ -149,8 +149,8 @@ pub(super) async fn capture_input_evidence(
     let mut session_fingerprints = BTreeMap::new();
     for path in session_paths {
         sessions.get(path).map_err(io_error)?;
-        let fingerprint =
-            crate::root_seam::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+        let fingerprint = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
+            .map_err(io_error)?;
         session_fingerprints.insert(path.clone(), fingerprint);
     }
     sessions.validate_sources_unchanged().map_err(io_error)?;
@@ -172,7 +172,7 @@ async fn capture_graph_evidence(
     #[cfg(test)]
     let mut peak_scratch_bytes = 0_u64;
     for path in paths {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root)
             .await
             .map_err(io_error)?;
         #[cfg(test)]
@@ -181,8 +181,8 @@ async fn capture_graph_evidence(
         }
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
         sqlite::extend_graph_identities(snapshot.connection(), &mut identities).await?;
-        let fingerprint =
-            crate::root_seam::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+        let fingerprint = tracedecay_runtime_core::sqlite_read_snapshot::family_fingerprint(path)
+            .map_err(io_error)?;
         snapshot.validate_source().map_err(io_error)?;
         generations.insert(path.clone(), snapshot.source_generation());
         fingerprints.insert(path.clone(), fingerprint);

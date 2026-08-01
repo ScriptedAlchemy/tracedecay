@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::inventory::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
-use crate::root_seam::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::root_seam::global_db::{self, RegisteredGlobalDb};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor, params};
 
 pub(super) async fn inspect_global_db(
     path: &Path,
@@ -14,7 +14,7 @@ pub(super) async fn inspect_global_db(
     let mut unavailable_reason = None;
 
     if exists {
-        let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
             path,
             "inspect global database offline",
         );
@@ -29,7 +29,7 @@ pub(super) async fn inspect_global_db(
         if authority.is_ok() {
             drop(authority);
             let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-            match crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root).await {
+            match tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await {
                 Ok(db) => {
                     return inventory_from_connection(
                         path,
@@ -151,7 +151,7 @@ fn should_verify_integrity(integrity: InventoryIntegrityMode) -> bool {
 }
 
 pub(super) async fn sqlite_quick_check(path: &Path) -> SqliteIntegrityOutcome {
-    let authority = match crate::root_seam::db::DatabaseAuthority::for_runtime(
+    let authority = match tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
         path,
         "quick-check SQLite database offline",
     ) {
@@ -164,7 +164,8 @@ pub(super) async fn sqlite_quick_check(path: &Path) -> SqliteIntegrityOutcome {
     };
     drop(authority);
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = match crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root).await {
+    let db = match tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await
+    {
         Ok(db) => db,
         Err(error) => {
             return SqliteIntegrityOutcome::Unavailable {

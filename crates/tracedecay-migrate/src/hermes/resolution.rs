@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table_columns};
-use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 pub struct ResolvedTargetProject {
     pub root: PathBuf,
@@ -57,10 +57,10 @@ fn real_project_root(
     if canonical == canonical_user_home || is_hermes_home {
         return None;
     }
-    if let Some(git_root) = crate::root_seam::worktree::git_worktree_root(&canonical) {
+    if let Some(git_root) = tracedecay_runtime_core::worktree::git_worktree_root(&canonical) {
         return Some(git_root);
     }
-    crate::root_seam::config::has_project_database(&canonical).then_some(canonical)
+    tracedecay_runtime_core::config::has_project_database(&canonical).then_some(canonical)
 }
 
 fn target_key(target: &ResolvedTargetProject) -> String {

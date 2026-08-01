@@ -10,9 +10,11 @@ use super::copy::{
 };
 use super::fingerprint::hash_sqlite_value;
 use super::pipeline::verify_source;
-use crate::root_seam::db::Database;
-use crate::root_seam::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
-use crate::root_seam::memory::store::MemoryStore;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::engine::{
+    Executor, QueryExecutor, Value, params, params_from_iter,
+};
+use tracedecay_runtime_core::memory::store::MemoryStore;
 
 pub fn source_integer(columns: &[String], values: &[Value], name: &str) -> Option<i64> {
     let value = values.get(columns.iter().position(|column| column == name)?)?;
@@ -748,7 +750,7 @@ where
 #[cfg(test)]
 pub(super) async fn merge_memory_snapshot_for_test<S>(
     source: &S,
-    target: &crate::root_seam::db::engine::Connection,
+    target: &tracedecay_runtime_core::db::engine::Connection,
 ) -> Result<u64, String>
 where
     S: QueryExecutor + ?Sized,
@@ -758,7 +760,9 @@ where
     }
     verify_source(source).await?;
     let transaction = target
-        .transaction_with_behavior(crate::root_seam::db::engine::TransactionBehavior::Immediate)
+        .transaction_with_behavior(
+            tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate,
+        )
         .await
         .map_err(|error| format!("could not begin target memory migration: {error}"))?;
     let rows_copied = copy_memory_tables(source, &transaction).await?;

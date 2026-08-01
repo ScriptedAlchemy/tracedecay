@@ -12,9 +12,9 @@ use super::resolution::{ResolvedTargetProject, resolve_target_project, same_path
 use super::session_merge::{MergeSnapshotRequest, merge_snapshot};
 use crate::hermes::{LegacyHermesMigration, LegacyHermesMigrationIssue};
 use crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
-use crate::root_seam::sqlite_read_snapshot::{SnapshotConnection, SnapshotDatabase};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::sqlite_read_snapshot::{SnapshotConnection, SnapshotDatabase};
 
 pub async fn verify_source<Q>(source: &Q) -> Result<(), String>
 where
@@ -161,10 +161,10 @@ struct ResolvedTargetLayout {
 }
 
 fn project_layout(
-    layout: crate::root_seam::storage::StoreLayout,
-) -> crate::root_seam::errors::Result<ResolvedTargetLayout> {
+    layout: tracedecay_runtime_core::storage::StoreLayout,
+) -> tracedecay_runtime_core::errors::Result<ResolvedTargetLayout> {
     let project_id = layout.identity.project_id.clone().ok_or_else(|| {
-        crate::root_seam::errors::TraceDecayError::Config {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "target project shard has no durable project id".to_string(),
         }
     })?;
@@ -178,7 +178,7 @@ fn project_layout(
 async fn resolve_target_layout(
     target_project: &ResolvedTargetProject,
     tracedecay_profile_root: &Path,
-) -> crate::root_seam::errors::Result<ResolvedTargetLayout> {
+) -> tracedecay_runtime_core::errors::Result<ResolvedTargetLayout> {
     if target_project.user_scope {
         return Ok(ResolvedTargetLayout {
             sessions_db_path: crate::root_seam::sessions::user_sessions_db_path(
@@ -189,12 +189,12 @@ async fn resolve_target_layout(
         });
     }
     if let Some(project_id) = target_project.registry_project_id.as_deref() {
-        if let Some(layout) = crate::root_seam::storage::resolve_persisted_layout(
+        if let Some(layout) = tracedecay_runtime_core::storage::resolve_persisted_layout(
             &target_project.root,
             tracedecay_profile_root,
         )? {
             if layout.identity.project_id.as_deref() != Some(project_id) {
-                return Err(crate::root_seam::errors::TraceDecayError::Config {
+                return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
                     message: format!(
                         "registered project identity collision for '{}': registry has '{project_id}', repository has '{}'",
                         target_project.root.display(),
@@ -204,25 +204,28 @@ async fn resolve_target_layout(
             }
             return project_layout(layout);
         }
-        return project_layout(crate::root_seam::storage::profile_sharded_layout(
+        return project_layout(tracedecay_runtime_core::storage::profile_sharded_layout(
             &target_project.root,
             tracedecay_profile_root,
-            &crate::root_seam::storage::EnrollmentMarker {
+            &tracedecay_runtime_core::storage::EnrollmentMarker {
                 project_id: project_id.to_string(),
-                storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             },
         )?);
     }
 
-    let production_profile = crate::root_seam::storage::default_profile_root()
+    let production_profile = tracedecay_runtime_core::storage::default_profile_root()
         .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
     let layout = if production_profile {
-        crate::root_seam::tracedecay::TraceDecay::resolve_store_layout_for_identity(
+        tracedecay_runtime_core::tracedecay::TraceDecay::resolve_store_layout_for_identity(
             &target_project.root,
         )
         .await
     } else {
-        crate::root_seam::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
+        tracedecay_runtime_core::storage::resolve_layout(
+            &target_project.root,
+            tracedecay_profile_root,
+        )
     }?;
     project_layout(layout)
 }
@@ -402,7 +405,7 @@ async fn migrate_candidate_snapshot(
         .filter(|_| !target_project.user_scope)
     {
         Some(path) => Some(
-            crate::root_seam::sqlite_read_snapshot::open_in(path, tracedecay_profile_root)
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, tracedecay_profile_root)
                 .await
                 .map_err(|error| {
                     CandidateError::Failed(format!(
@@ -592,7 +595,7 @@ pub async fn migrate_candidate(
 ) -> Result<CandidateOutcome, CandidateError> {
     let source_db = match candidate.source_sessions_db.as_deref() {
         Some(path) => Some(
-            crate::root_seam::sqlite_read_snapshot::open_in(path, tracedecay_profile_root)
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, tracedecay_profile_root)
                 .await
                 .map_err(|error| {
                     CandidateError::Failed(format!(
@@ -628,7 +631,7 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(sql).unwrap();
         drop(connection);
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(&path)
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(&path)
             .await
             .unwrap();
         (temp, snapshot)

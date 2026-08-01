@@ -1,25 +1,33 @@
-//! The runtime kernel seam this package still depends on.
+//! The upward seam this package still depends on.
 //!
 //! The migration subsystem was moved out of the root `tracedecay` crate before
-//! the runtime kernel it sits on (`db`, `storage`, `errors`,
-//! `sqlite_read_snapshot`, `lifecycle_lease`, `global_db`, `sessions`,
-//! `config`, `daemon`, `branch`, `branch_meta`, `memory`, `worktree`, `git`,
-//! `application`, `agents`, `open_store_holders`, `tracedecay`) finished its
-//! own extraction into `tracedecay-runtime-core`. Every moved reference to one
-//! of those root modules was rewritten to `crate::root_seam::<module>` so the
-//! whole coupling surface is one greppable name.
+//! the subsystems it sits on finished their own extraction. Every moved
+//! reference to one of those root modules was rewritten to
+//! `crate::root_seam::<module>` so the whole coupling surface is one greppable
+//! name.
 //!
-//! At integration the lead repoints this module at the kernel crate — the
-//! intended shape is a set of re-exports such as:
+//! **The kernel half is closed.** `storage`, `db`, `sqlite_read_snapshot`,
+//! `errors`, `lifecycle_lease`, `config`, `branch`, `branch_meta`, `memory`,
+//! `open_store_holders`, `worktree`, `git`, and `tracedecay::current_timestamp`
+//! now resolve directly against `tracedecay_runtime_core`, so they no longer
+//! come through here.
 //!
-//! ```ignore
-//! pub use tracedecay_runtime_core::{
-//!     agents, application, branch, branch_meta, config, daemon, db, errors, git, global_db,
-//!     lifecycle_lease, memory, open_store_holders, sessions, sqlite_read_snapshot, storage,
-//!     tracedecay, worktree,
-//! };
-//! ```
+//! Five modules remain — `global_db`, `sessions`, `daemon`, `agents`, and
+//! `application` — and **none of them can be closed from inside this crate**:
 //!
-//! Until that lands the seam is deliberately empty, so `cargo check` reports
-//! exactly which kernel items the migration subsystem needs. `SEAMS.md` in this
-//! crate catalogs them by file and line.
+//! - `global_db` — `tracedecay-global-db` already depends on this crate, so
+//!   taking the reverse dependency is a Cargo cycle.
+//! - `sessions` / `agents` — `tracedecay-sessions` and
+//!   `tracedecay-agent-hosts` have not repointed at the kernel yet, so they do
+//!   not compile and cannot be depended on.
+//! - `daemon` — `daemon/store_runtime` has no owning crate at all, and the
+//!   items needed here are types held in this crate's public API, which a
+//!   registered port cannot supply.
+//! - `application::host_admission` — still lives in the root crate, not in
+//!   `tracedecay-application`.
+//!
+//! The seam is therefore left deliberately empty for exactly these five, so
+//! `cargo check` keeps naming the blockers instead of hiding them behind ports
+//! that nothing can implement. `SEAMS.md` next to this crate's manifest
+//! catalogs all 94 remaining references by module, item, and file:line, and
+//! records the recommended mechanism and owner for each.
