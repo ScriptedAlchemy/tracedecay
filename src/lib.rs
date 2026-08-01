@@ -95,6 +95,8 @@ pub use tracedecay_usecases::git_query;
 pub mod global_db;
 pub mod graph;
 pub mod hooks;
+#[cfg(test)]
+mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
 pub mod memory;
