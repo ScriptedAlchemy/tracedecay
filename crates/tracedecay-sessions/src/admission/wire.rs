@@ -159,7 +159,7 @@ pub fn read_bounded_to_string(
 /// Read one newline-delimited frame, retaining at most `max_bytes` of content
 /// (excluding the terminating newline). On overflow, discards until newline or
 /// EOF and returns [`WireReadOutcome::Oversized`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn read_bounded_line<R>(
     reader: &mut R,
     max_bytes: usize,
@@ -250,7 +250,7 @@ fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
 }
 
 /// Map a bounded line read into the historical `Option<String>` transport shape.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn line_outcome_to_io(outcome: WireReadOutcome<Option<String>>) -> io::Result<Option<String>> {
     match outcome {
         WireReadOutcome::Ready(line) => Ok(line),
