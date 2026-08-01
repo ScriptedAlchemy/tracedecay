@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use regex::Regex;
 
@@ -10,6 +10,10 @@ const BINARYISH_SAMPLE_CHARS: usize = 8192;
 const QUARANTINED_ASSISTANT_MIN_CHARS: usize = 65_536;
 const QUARANTINED_ASSISTANT_MIN_TOKENS: usize = 1_000;
 const QUARANTINE_HIGH_REPETITION: &str = "high_repetition";
+const SESSION_PATTERN_CACHE_MAX: usize = 64;
+
+static SESSION_PATTERN_CACHE: LazyLock<Mutex<HashMap<Vec<String>, Arc<CompiledPatternSet>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Default)]
 pub struct CompiledPatternSet {
@@ -110,8 +114,30 @@ pub fn ignore_message_reason_with_compiled(
 }
 
 pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
-    let compiled = compile_session_patterns(patterns);
+    let compiled = cached_session_patterns(patterns);
     matches_any_compiled_pattern(&compiled, value)
+}
+
+/// Session pattern lists come from configuration and repeat on every LCM
+/// call, so compiled sets are memoized by pattern-list contents instead of
+/// being recompiled per match.
+fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPatternSet> {
+    let key = patterns
+        .iter()
+        .map(|pattern| pattern.as_ref().to_string())
+        .collect::<Vec<_>>();
+    let mut cache = SESSION_PATTERN_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(compiled) = cache.get(&key) {
+        return Arc::clone(compiled);
+    }
+    let compiled = Arc::new(compile_session_patterns(patterns));
+    if cache.len() >= SESSION_PATTERN_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&compiled));
+    compiled
 }
 
 pub fn matches_any_compiled_pattern(patterns: &CompiledPatternSet, value: &str) -> bool {

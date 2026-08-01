@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -5,7 +6,7 @@ use serde_json::{Map, Value, json};
 use crate::compatibility::projected_content_hash;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::message_storage_text;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlValue, params};
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
@@ -23,6 +24,7 @@ use super::{
     payload, raw, replay_transactions, security, util,
 };
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
+const SQLITE_IN_BATCH_SIZE: usize = 500;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
 const PRESERVED_TODO_CONTEXT_PREFIX: &str =
     "[Your active task list was preserved across context compression]";
@@ -33,6 +35,17 @@ const CONTEXT_RECOVERY_HINT_SUFFIX: &str = "If the replay after compression is m
 struct IngestedActiveMessages {
     replay_messages: Vec<Value>,
     changed_replay: bool,
+}
+
+/// Per-message state resolved before the ingest loop so the loop does not
+/// issue one round trip per message.
+struct PreparedActiveMessage {
+    role: String,
+    original_content: Value,
+    storage_text: String,
+    /// `None` for messages replayed as-is (already summarized, or ignored by
+    /// the configured message patterns).
+    message_id: Option<String>,
 }
 
 struct ExistingActiveMessageState {
@@ -1775,56 +1788,45 @@ async fn ingest_active_messages(
     let mut changed_replay = false;
     let mut next_available_ordinal = next_ordinal(conn, provider, session_id).await?;
     let compiled_ignore_patterns = security::compile_message_patterns(ignore_message_patterns);
+    let prepared = prepare_active_messages(
+        conn,
+        provider,
+        session_id,
+        messages,
+        &compiled_ignore_patterns,
+    )
+    .await?;
+    let prefetched_message_ids = prepared
+        .iter()
+        .filter_map(|prepared| prepared.message_id.clone())
+        .collect::<Vec<_>>();
+    let prefetched_states =
+        existing_active_message_states(conn, provider, &prefetched_message_ids).await?;
+    // Message ids written by an earlier iteration are re-read from the
+    // database so a repeated id still sees the row this loop just wrote.
+    let mut rewritten_message_ids = HashSet::new();
 
-    for (idx, message) in messages.iter().enumerate() {
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("user")
-            .to_string();
-        let original_content = message_content_value(message);
-        let storage_text = message_storage_text(&original_content);
-        let search_text = message_content(message);
-        if message
-            .get("lcm_summary_node_id")
-            .and_then(Value::as_str)
-            .is_some_and(|node_id| !node_id.is_empty())
-        {
+    for (message, prepared) in messages.iter().zip(prepared) {
+        let PreparedActiveMessage {
+            role,
+            original_content,
+            storage_text,
+            message_id,
+        } = prepared;
+        let Some(message_id) = message_id else {
             let mut replay = message.clone();
             replay["role"] = Value::String(role);
             replay_messages.push(replay);
             continue;
-        }
-        if security::ignore_message_reason_with_compiled(&search_text, &compiled_ignore_patterns)
-            .is_some()
-        {
-            let mut replay = message.clone();
-            replay["role"] = Value::String(role);
-            replay_messages.push(replay);
-            continue;
-        }
-        let explicit_message_id = message
-            .get("id")
-            .or_else(|| message.get("message_id"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let stored_message_id = match (explicit_message_id.as_ref(), message.get("store_id")) {
-            (None, Some(store_id)) => match store_id.as_i64() {
-                Some(store_id) => {
-                    message_id_for_store_id(conn, provider, session_id, store_id).await?
-                }
-                None => None,
-            },
-            _ => None,
         };
-        let message_id = explicit_message_id
-            .or(stored_message_id)
-            .unwrap_or_else(|| {
-                deterministic_message_id(provider, session_id, idx, &role, &storage_text)
-            });
-        let existing_state = existing_active_message_state(conn, provider, &message_id).await?;
-        let ordinal = if let Some(existing) = existing_state.as_ref() {
+        let rewritten_state;
+        let existing_state = if rewritten_message_ids.contains(&message_id) {
+            rewritten_state = existing_active_message_state(conn, provider, &message_id).await?;
+            rewritten_state.as_ref()
+        } else {
+            prefetched_states.get(&message_id)
+        };
+        let ordinal = if let Some(existing) = existing_state {
             existing.ordinal
         } else {
             next_available_ordinal += 1;
@@ -1836,7 +1838,7 @@ async fn ingest_active_messages(
         replay["content"] = original_content.clone();
         let initial_metadata_json = active_message_metadata(message, &replay);
         let expected_content_hash = projected_content_hash(&storage_text);
-        if let Some(existing) = existing_state.as_ref() {
+        if let Some(existing) = existing_state {
             let matches_stored_row = existing.ordinal == ordinal
                 && existing.content_hash == expected_content_hash
                 && existing.metadata_json.as_deref() == Some(initial_metadata_json.as_str())
@@ -1878,6 +1880,7 @@ async fn ingest_active_messages(
             payload_rollback,
         )
         .await?;
+        rewritten_message_ids.insert(message_id.clone());
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
             .await
             .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
@@ -1916,24 +1919,135 @@ async fn ingest_active_messages(
     })
 }
 
-async fn message_id_for_store_id(
+/// Resolves role, content, and message id for every ingest candidate up front
+/// so the ingest loop performs in-memory lookups instead of one query per
+/// message.
+async fn prepare_active_messages(
     conn: &impl QueryExecutor,
     provider: &str,
     session_id: &str,
-    store_id: i64,
-) -> Result<Option<String>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT message_id
+    messages: &[Value],
+    compiled_ignore_patterns: &security::CompiledPatternSet,
+) -> Result<Vec<PreparedActiveMessage>, LcmError> {
+    struct DraftActiveMessage {
+        role: String,
+        original_content: Value,
+        storage_text: String,
+        replay_as_is: bool,
+        explicit_message_id: Option<String>,
+        store_id: Option<i64>,
+    }
+
+    let mut drafts = Vec::with_capacity(messages.len());
+    let mut lookup_store_ids = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user")
+            .to_string();
+        let original_content = message_content_value(message);
+        let storage_text = message_storage_text(&original_content);
+        let search_text = message_content(message);
+        let replay_as_is = message
+            .get("lcm_summary_node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|node_id| !node_id.is_empty())
+            || security::ignore_message_reason_with_compiled(
+                &search_text,
+                compiled_ignore_patterns,
+            )
+            .is_some();
+        let explicit_message_id = (!replay_as_is)
+            .then(|| {
+                message
+                    .get("id")
+                    .or_else(|| message.get("message_id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+            .flatten();
+        let store_id = (!replay_as_is && explicit_message_id.is_none())
+            .then(|| message.get("store_id").and_then(Value::as_i64))
+            .flatten();
+        if let Some(store_id) = store_id {
+            lookup_store_ids.push(store_id);
+        }
+        drafts.push(DraftActiveMessage {
+            role,
+            original_content,
+            storage_text,
+            replay_as_is,
+            explicit_message_id,
+            store_id,
+        });
+    }
+
+    let stored_message_ids =
+        message_ids_for_store_ids(conn, provider, session_id, &lookup_store_ids).await?;
+    let mut prepared = Vec::with_capacity(drafts.len());
+    for (idx, draft) in drafts.into_iter().enumerate() {
+        let message_id = (!draft.replay_as_is).then(|| {
+            draft
+                .explicit_message_id
+                .or_else(|| {
+                    draft
+                        .store_id
+                        .and_then(|store_id| stored_message_ids.get(&store_id).cloned())
+                })
+                .unwrap_or_else(|| {
+                    deterministic_message_id(
+                        provider,
+                        session_id,
+                        idx,
+                        &draft.role,
+                        &draft.storage_text,
+                    )
+                })
+        });
+        prepared.push(PreparedActiveMessage {
+            role: draft.role,
+            original_content: draft.original_content,
+            storage_text: draft.storage_text,
+            message_id,
+        });
+    }
+    Ok(prepared)
+}
+
+async fn message_ids_for_store_ids(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    session_id: &str,
+    store_ids: &[i64],
+) -> Result<HashMap<i64, String>, LcmError> {
+    let mut message_ids = HashMap::new();
+    for chunk in store_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = sql_placeholders(chunk.len());
+        let sql = format!(
+            "SELECT store_id, message_id
              FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
-            params![provider, session_id, store_id],
-        )
-        .await?;
-    Ok(match rows.next().await? {
-        Some(row) => Some(row.get(0)?),
-        None => None,
-    })
+             WHERE provider = ? AND session_id = ? AND store_id IN ({placeholders})"
+        );
+        let mut values = vec![
+            SqlValue::Text(provider.to_string()),
+            SqlValue::Text(session_id.to_string()),
+        ];
+        values.extend(chunk.iter().copied().map(SqlValue::Integer));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            message_ids.insert(row.get(0)?, row.get(1)?);
+        }
+    }
+    Ok(message_ids)
+}
+
+fn sql_placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
 fn message_content_value(message: &Value) -> Value {
@@ -2069,6 +2183,43 @@ async fn existing_active_message_state(
             })
         })
         .transpose()
+}
+
+/// Batch form of [`existing_active_message_state`] for the ingest prefetch.
+async fn existing_active_message_states(
+    conn: &impl QueryExecutor,
+    provider: &str,
+    message_ids: &[String],
+) -> Result<HashMap<String, ExistingActiveMessageState>, LcmError> {
+    let mut states = HashMap::new();
+    for chunk in message_ids.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = sql_placeholders(chunk.len());
+        let sql = format!(
+            "SELECT message_id, session_id, role, timestamp, ordinal, content_hash, metadata_json
+             FROM lcm_raw_messages
+             WHERE provider = ? AND message_id IN ({placeholders})"
+        );
+        let mut values = vec![SqlValue::Text(provider.to_string())];
+        values.extend(chunk.iter().cloned().map(SqlValue::Text));
+        let mut rows = conn.query(&sql, values).await?;
+        while let Some(row) = rows.next().await? {
+            states.insert(
+                row.get(0)?,
+                ExistingActiveMessageState {
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    timestamp: row.get(3)?,
+                    ordinal: row.get(4)?,
+                    content_hash: row.get(5)?,
+                    metadata_json: row.get(6)?,
+                },
+            );
+        }
+    }
+    Ok(states)
 }
 
 async fn next_ordinal(

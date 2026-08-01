@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -7,7 +7,7 @@ use serde_json::Value;
 
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value as SqlValue, params};
 
 use super::{
     LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS, LcmError, LcmGcConfig, maintenance, payload,
@@ -31,6 +31,7 @@ const LIVE_PREFIX_REWRITES: [(&str, &str); 3] = [
 ];
 const GC_PREFIXES: [&str; 2] = [GC_PAYLOAD_PREFIX, GC_TOOL_OUTPUT_PREFIX];
 const MAX_SAMPLES: usize = 20;
+const SQLITE_IN_BATCH_SIZE: usize = 500;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmGcPhaseReport {
@@ -668,8 +669,13 @@ async fn preview_unreferenced_metadata(
     remaining: &mut usize,
     report: &mut LcmGcReport,
 ) -> Result<(), LcmError> {
-    for payload_ref in metadata_refs.difference(referenced) {
-        let Some((state, first_seen_at)) = gc_mark(conn, payload_ref).await? else {
+    let candidates = metadata_refs
+        .difference(referenced)
+        .cloned()
+        .collect::<Vec<_>>();
+    let marks = gc_marks(conn, &candidates).await?;
+    for payload_ref in &candidates {
+        let Some((state, first_seen_at)) = marks.get(payload_ref.as_str()) else {
             report.deferred.count += 1;
             report
                 .deferred
@@ -677,7 +683,9 @@ async fn preview_unreferenced_metadata(
                 .get_or_insert_with(|| "within_grace".to_string());
             continue;
         };
-        if state != "unreferenced" || now.saturating_sub(first_seen_at) < cfg.grace_seconds as i64 {
+        if state.as_str() != "unreferenced"
+            || now.saturating_sub(*first_seen_at) < cfg.grace_seconds as i64
+        {
             report.deferred.count += 1;
             report
                 .deferred
@@ -710,6 +718,7 @@ async fn preview_missing_metadata(
     report: &mut LcmGcReport,
 ) -> Result<(), LcmError> {
     let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let mut candidates = Vec::new();
     for payload_ref in metadata_refs.intersection(referenced) {
         match payload_file_present(dir.as_deref(), payload_ref) {
             Ok(true) => continue,
@@ -723,10 +732,16 @@ async fn preview_missing_metadata(
         if !cfg.reap_missing_enabled || cfg.reap_missing_after == 0 {
             continue;
         }
-        let Some((state, first_seen_at)) = gc_mark(conn, payload_ref).await? else {
+        candidates.push(payload_ref.clone());
+    }
+    let marks = gc_marks(conn, &candidates).await?;
+    for payload_ref in &candidates {
+        let Some((state, first_seen_at)) = marks.get(payload_ref.as_str()) else {
             continue;
         };
-        if state != "missing" || now.saturating_sub(first_seen_at) < cfg.reap_missing_after as i64 {
+        if state.as_str() != "missing"
+            || now.saturating_sub(*first_seen_at) < cfg.reap_missing_after as i64
+        {
             continue;
         }
         if *remaining == 0 {
@@ -1093,6 +1108,42 @@ async fn gc_mark(
     } else {
         Ok(None)
     }
+}
+
+/// Batch form of [`gc_mark`] for read-only preview passes that would otherwise
+/// issue one query per candidate payload ref.
+async fn gc_marks(
+    conn: &(impl QueryExecutor + ?Sized),
+    payload_refs: &[String],
+) -> Result<HashMap<String, (String, i64)>, LcmError> {
+    let mut marks = HashMap::new();
+    for chunk in payload_refs.chunks(SQLITE_IN_BATCH_SIZE) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT payload_ref, state, first_seen_at
+             FROM lcm_gc_marks
+             WHERE payload_ref IN ({placeholders})"
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(SqlValue::Text)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            marks.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+        }
+    }
+    Ok(marks)
 }
 
 async fn upsert_gc_mark(
