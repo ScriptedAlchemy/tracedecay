@@ -470,7 +470,12 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         &handshake,
         "tracedecay_runtime",
         daemon_doctor_runtime_args(),
-        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        // Diagnostic probe, not a liveness gate. A multi-gigabyte store
+        // cold-opening while agents saturate the daemon can take well over 10s
+        // for its first integrity read; a warm steady-state read returns in well
+        // under a second. Give it headroom so a contended read reports real
+        // status instead of failing the post-update with a spurious timeout.
+        tokio::time::Instant::now() + std::time::Duration::from_secs(90),
     )
     .await?;
     daemon_runtime_status(&result)
@@ -492,8 +497,11 @@ async fn daemon_project_status_with_deadline(
     // failure. The ordinary Doctor helper intentionally falls back to a cold
     // snapshot on daemon errors, which is useful for diagnostics but would
     // conceal a cached non-retryable warm-up failure here.
+    // Cold-open admission under heavy load can exceed a tight 10s bound; keep it
+    // generous (still capped by the outer startup deadline) so warm-up isn't
+    // misreported as a terminal admission failure.
     let admission_deadline =
-        (tokio::time::Instant::now() + std::time::Duration::from_secs(10)).min(startup_deadline);
+        (tokio::time::Instant::now() + std::time::Duration::from_secs(90)).min(startup_deadline);
     let admission = crate::daemon::call_default_tool_within(
         &handshake,
         "tracedecay_status",
