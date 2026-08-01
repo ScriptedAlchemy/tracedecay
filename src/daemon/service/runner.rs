@@ -264,10 +264,9 @@ impl ServiceRunner {
             Self::Launchd => launchd_service_target()
                 .ok()
                 .map(|target| format!("launchctl print {target}")),
-            Self::WindowsTask => Some(format!(
-                "Get-ScheduledTask -TaskName '{}'",
-                windows_task::task_name()
-            )),
+            Self::WindowsTask => windows_task::task_name()
+                .ok()
+                .map(|name| format!("Get-ScheduledTask -TaskName '{name}'")),
         }
     }
 }

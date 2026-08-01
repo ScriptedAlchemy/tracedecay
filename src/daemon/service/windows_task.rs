@@ -4,8 +4,56 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{DaemonServiceSpec, DaemonServiceState};
 
-const TASK_NAME: &str = "TraceDecay Daemon";
-const TASK_PATH: &str = r"\TraceDecay Daemon";
+const TASK_NAME_PREFIX: &str = "TraceDecay Daemon";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TaskIdentity {
+    user_sid: String,
+    task_name: String,
+    task_path: String,
+    sddl: String,
+}
+
+impl TaskIdentity {
+    fn current() -> Result<Self> {
+        #[cfg(windows)]
+        {
+            let user_sid = tracedecay_runtime_core::windows_security::current_user_sid_string()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("could not determine current Windows user SID: {error}"),
+                })?;
+            Self::for_user_sid(&user_sid)
+        }
+        #[cfg(not(windows))]
+        {
+            Err(TraceDecayError::Config {
+                message: "Windows Task Scheduler identity is unavailable on this platform"
+                    .to_string(),
+            })
+        }
+    }
+
+    fn for_user_sid(user_sid: &str) -> Result<Self> {
+        let mut components = user_sid.split('-');
+        let valid = components.next() == Some("S")
+            && components.clone().count() >= 2
+            && components.all(|component| {
+                !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if !valid {
+            return Err(TraceDecayError::Config {
+                message: format!("current Windows user SID '{user_sid}' is not canonical"),
+            });
+        }
+        let task_name = format!("{TASK_NAME_PREFIX} ({user_sid})");
+        Ok(Self {
+            user_sid: user_sid.to_string(),
+            task_path: format!(r"\{task_name}"),
+            task_name,
+            sddl: format!("O:{user_sid}D:P(A;;GA;;;SY)(A;;GA;;;{user_sid})"),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TaskSnapshot {
@@ -23,15 +71,19 @@ trait TaskSchedulerApi {
     fn delete(&mut self) -> Result<()>;
 }
 
-pub(super) fn task_name() -> &'static str {
-    TASK_NAME
+pub(super) fn task_name() -> Result<String> {
+    Ok(TaskIdentity::current()?.task_name)
 }
 
-pub(super) fn task_path() -> PathBuf {
-    PathBuf::from(TASK_PATH)
+pub(super) fn task_path() -> Result<PathBuf> {
+    Ok(PathBuf::from(TaskIdentity::current()?.task_path))
 }
 
 pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
+    render_task_xml_for(spec, &TaskIdentity::current()?)
+}
+
+fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Result<String> {
     let profile_root = match &spec.data_dir_override {
         Some(profile_root) => profile_root.clone(),
         None => super::tracedecay_data_dir()?,
@@ -42,11 +94,15 @@ pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
     } else {
         std::env::current_dir()?.join(profile_root)
     };
-    let executable = xml_escape(&spec.tracedecay_bin.to_string_lossy());
+    let executable = xml_escape(windows_path_text(
+        &spec.tracedecay_bin,
+        "daemon executable",
+    )?);
     let arguments = xml_escape(&format!(
         "daemon run --profile-root {}",
-        quote_windows_argument(&profile_root.to_string_lossy())
+        quote_windows_argument(windows_path_text(&profile_root, "daemon profile root")?)
     ));
+    let user_sid = xml_escape(&identity.user_sid);
 
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -57,10 +113,12 @@ pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>{user_sid}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
+      <UserId>{user_sid}</UserId>
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
@@ -86,6 +144,15 @@ pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
 </Task>
 "#
     ))
+}
+
+fn windows_path_text<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
+    path.to_str().ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "Windows Task Scheduler {description} path '{}' is not valid Unicode",
+            path.display()
+        ),
+    })
 }
 
 pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
@@ -399,6 +466,59 @@ fn xml_element_text<'a>(xml: &'a str, element: &str) -> Option<&'a str> {
     Some(&after_start[..value_end])
 }
 
+fn xml_section_text<'a>(xml: &'a str, section: &str) -> Option<&'a str> {
+    let opening_prefix = format!("<{section}");
+    let opening_start = xml.find(&opening_prefix)?;
+    let value_start = xml[opening_start..].find('>')? + opening_start + 1;
+    let closing = format!("</{section}>");
+    let value_end = xml[value_start..].find(&closing)? + value_start;
+    Some(&xml[value_start..value_end])
+}
+
+fn task_definition_is_owned(xml: &str, sddl: &str, identity: &TaskIdentity) -> bool {
+    if xml.matches("<LogonTrigger").count() != 1 || xml.matches("<Principal ").count() != 1 {
+        return false;
+    }
+    let trigger_user = xml_section_text(xml, "LogonTrigger")
+        .and_then(|section| xml_element_text(section, "UserId"))
+        .map(xml_unescape);
+    let principal_user = xml_section_text(xml, r#"Principal id="Author""#)
+        .and_then(|section| xml_element_text(section, "UserId"))
+        .map(xml_unescape);
+    trigger_user.as_deref() == Some(identity.user_sid.as_str())
+        && principal_user.as_deref() == Some(identity.user_sid.as_str())
+        && task_sddl_is_private(sddl, &identity.user_sid)
+}
+
+fn task_sddl_is_private(sddl: &str, user_sid: &str) -> bool {
+    let Some(dacl_start) = sddl.find("D:P") else {
+        return false;
+    };
+    let owner_and_group = &sddl[..dacl_start];
+    if owner_and_group != format!("O:{user_sid}")
+        && !owner_and_group.starts_with(&format!("O:{user_sid}G:"))
+    {
+        return false;
+    }
+    let mut aces = &sddl[dacl_start + 3..];
+    let user_ace = format!("(A;;GA;;;{user_sid})");
+    let mut saw_user = false;
+    let mut saw_system = false;
+    while !aces.is_empty() {
+        let Some(end) = aces.find(')') else {
+            return false;
+        };
+        let (ace, remaining) = aces.split_at(end + 1);
+        match ace {
+            "(A;;GA;;;SY)" | "(A;;GA;;;S-1-5-18)" if !saw_system => saw_system = true,
+            value if value == user_ace.as_str() && !saw_user => saw_user = true,
+            _ => return false,
+        }
+        aces = remaining;
+    }
+    saw_user && saw_system
+}
+
 fn quote_windows_argument(argument: &str) -> String {
     let mut quoted = String::from("\"");
     let mut backslashes = 0;
@@ -509,9 +629,11 @@ mod native {
     use super::*;
 
     const SCHED_E_TASK_NOT_FOUND: HRESULT = HRESULT(0x8004_130f_u32 as i32);
+    const OWNER_AND_DACL_SECURITY_INFORMATION: i32 = 0x0000_0001 | 0x0000_0004;
 
     pub(super) struct NativeTaskScheduler {
         root: ITaskFolder,
+        identity: TaskIdentity,
         _apartment: ComApartment,
     }
 
@@ -534,6 +656,7 @@ mod native {
 
     impl NativeTaskScheduler {
         pub(super) fn connect() -> Result<Self> {
+            let identity = TaskIdentity::current()?;
             let apartment = ComApartment::initialize()?;
             let service: ITaskService =
                 unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
@@ -545,16 +668,50 @@ mod native {
                 .map_err(|error| com_error("open Task Scheduler root folder", error))?;
             Ok(Self {
                 root,
+                identity,
                 _apartment: apartment,
             })
         }
 
-        fn task(&self) -> Result<Option<IRegisteredTask>> {
-            match unsafe { self.root.GetTask(&BSTR::from(TASK_PATH)) } {
+        fn task_unchecked(&self) -> Result<Option<IRegisteredTask>> {
+            match unsafe {
+                self.root
+                    .GetTask(&BSTR::from(self.identity.task_path.as_str()))
+            } {
                 Ok(task) => Ok(Some(task)),
                 Err(error) if is_task_not_found(&error) => Ok(None),
                 Err(error) => Err(com_error("get TraceDecay daemon task", error)),
             }
+        }
+
+        fn task(&self) -> Result<Option<IRegisteredTask>> {
+            let Some(task) = self.task_unchecked()? else {
+                return Ok(None);
+            };
+            self.verify_ownership(&task)?;
+            Ok(Some(task))
+        }
+
+        fn verify_ownership(&self, task: &IRegisteredTask) -> Result<()> {
+            let xml = unsafe { task.Xml() }
+                .map_err(|error| com_error("read daemon task XML for ownership", error))?;
+            let xml = String::try_from(xml).map_err(|error| TraceDecayError::Config {
+                message: format!("daemon task XML is not valid UTF-16: {error}"),
+            })?;
+            let sddl = unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
+                .map_err(|error| com_error("read daemon task security descriptor", error))?;
+            let sddl = String::try_from(sddl).map_err(|error| TraceDecayError::Config {
+                message: format!("daemon task security descriptor is not valid UTF-16: {error}"),
+            })?;
+            if task_definition_is_owned(&xml, &sddl, &self.identity) {
+                return Ok(());
+            }
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to manage scheduled task '{}': its user identity or protected ACL is not owned by current SID {}",
+                    self.identity.task_path, self.identity.user_sid
+                ),
+            })
         }
 
         fn required_task(&self, operation: &str) -> Result<IRegisteredTask> {
@@ -592,20 +749,25 @@ mod native {
         }
 
         fn register_xml(&mut self, xml: &str) -> Result<()> {
-            let empty = VARIANT::default();
-            unsafe {
+            if self.task_unchecked()?.is_some() {
+                let _ = self.task()?;
+            }
+            let user = VARIANT::from(self.identity.user_sid.as_str());
+            let password = VARIANT::default();
+            let sddl = VARIANT::from(self.identity.sddl.as_str());
+            let task = unsafe {
                 self.root.RegisterTask(
-                    &BSTR::from(TASK_PATH),
+                    &BSTR::from(self.identity.task_path.as_str()),
                     &BSTR::from(xml),
                     TASK_CREATE_OR_UPDATE.0,
-                    &empty,
-                    &empty,
+                    &user,
+                    &password,
                     TASK_LOGON_INTERACTIVE_TOKEN,
-                    &empty,
+                    &sddl,
                 )
             }
-            .map(drop)
-            .map_err(|error| com_error("register TraceDecay daemon task", error))
+            .map_err(|error| com_error("register TraceDecay daemon task", error))?;
+            self.verify_ownership(&task)
         }
 
         fn set_enabled(&mut self, enabled: bool) -> Result<()> {
@@ -627,7 +789,10 @@ mod native {
         }
 
         fn delete(&mut self) -> Result<()> {
-            match unsafe { self.root.DeleteTask(&BSTR::from(TASK_NAME), 0) } {
+            match unsafe {
+                self.root
+                    .DeleteTask(&BSTR::from(self.identity.task_name.as_str()), 0)
+            } {
                 Ok(()) => Ok(()),
                 Err(error) if is_task_not_found(&error) => Ok(()),
                 Err(error) => Err(com_error("delete TraceDecay daemon task", error)),
@@ -652,6 +817,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+
+    const TEST_SID: &str = "S-1-5-21-111-222-333-1001";
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Operation {
@@ -752,11 +919,109 @@ mod tests {
     }
 
     #[test]
+    fn task_identity_scopes_name_path_and_acl_to_user_sid() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+
+        assert_eq!(
+            identity.task_name,
+            "TraceDecay Daemon (S-1-5-21-111-222-333-1001)"
+        );
+        assert_eq!(
+            identity.task_path,
+            r"\TraceDecay Daemon (S-1-5-21-111-222-333-1001)"
+        );
+        assert_eq!(
+            identity.sddl,
+            "O:S-1-5-21-111-222-333-1001D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-21-111-222-333-1001)"
+        );
+        assert!(TaskIdentity::for_user_sid("S-1-5-21-(foreign)").is_err());
+    }
+
+    #[test]
+    fn ownership_requires_matching_trigger_principal_and_private_acl() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let xml = render_task_xml_for(
+            &spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data"),
+            &identity,
+        )
+        .expect("task XML");
+
+        assert!(task_definition_is_owned(&xml, &identity.sddl, &identity));
+        assert!(!task_definition_is_owned(
+            &xml.replace(TEST_SID, "S-1-5-21-111-222-333-1002"),
+            &identity.sddl,
+            &identity
+        ));
+        assert!(!task_definition_is_owned(
+            &xml,
+            &format!("{}(A;;GA;;;BA)", identity.sddl),
+            &identity
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn task_xml_rejects_non_unicode_paths_instead_of_corrupting_them() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let executable = std::ffi::OsString::from_vec(vec![b'C', b':', b'\\', 0xff]);
+        let error = render_task_xml_for(
+            &spec(PathBuf::from(executable), r"C:\TraceDecay\data"),
+            &identity,
+        )
+        .expect_err("invalid Unicode must fail");
+
+        assert!(error.to_string().contains("is not valid Unicode"));
+    }
+
+    #[test]
+    fn task_xml_round_trips_unc_and_extended_profile_roots() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        for profile_root in [
+            PathBuf::from(r"\\server\share\TraceDecay Data\"),
+            PathBuf::from(r"\\?\C:\Users\Zack\TraceDecay Data\"),
+        ] {
+            let xml = render_task_xml_for(
+                &spec(r"\\?\C:\TraceDecay\tracedecay.exe", &profile_root),
+                &identity,
+            )
+            .expect("render task XML");
+
+            assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_profile_root_is_made_absolute() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let xml = render_task_xml_for(
+            &spec(r"C:\TraceDecay\tracedecay.exe", "relative-profile"),
+            &identity,
+        )
+        .expect("render task XML");
+
+        assert_eq!(
+            profile_root_from_task_xml(&xml),
+            Some(
+                std::env::current_dir()
+                    .expect("current directory")
+                    .join("relative-profile")
+            )
+        );
+    }
+
+    #[test]
     fn task_xml_escapes_action_paths_and_declares_daemon_settings() {
-        let xml = render_task_xml(&spec(
-            r#"C:\Program Files\Trace<&"'Decay\tracedecay.exe"#,
-            r#"C:\Users\Zack & <Trace>"'Decay"#,
-        ))
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let xml = render_task_xml_for(
+            &spec(
+                r#"C:\Program Files\Trace<&"'Decay\tracedecay.exe"#,
+                r#"C:\Users\Zack & <Trace>"'Decay"#,
+            ),
+            &identity,
+        )
         .expect("render task XML");
 
         assert!(xml.contains(
@@ -766,9 +1031,12 @@ mod tests {
             r#"<Arguments>daemon run --profile-root &quot;C:\Users\Zack &amp; &lt;Trace&gt;\&quot;&apos;Decay&quot;</Arguments>"#
         ));
         assert!(xml.contains("<LogonTrigger>"));
+        assert_eq!(
+            xml.matches(&format!("<UserId>{TEST_SID}</UserId>")).count(),
+            2
+        );
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
-        assert!(!xml.contains("<UserId>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(xml.contains("<Interval>PT1M</Interval>"));
@@ -779,10 +1047,14 @@ mod tests {
     #[test]
     fn task_xml_profile_root_round_trips_escaped_text() {
         let profile_root = PathBuf::from("C:\\Users\\Z & <Trace>\"'Decay\\");
-        let xml = render_task_xml(&spec(
-            r"C:\Users\Z\scoop\apps\tracedecay\current\tracedecay.exe",
-            &profile_root,
-        ))
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let xml = render_task_xml_for(
+            &spec(
+                r"C:\Users\Z\scoop\apps\tracedecay\current\tracedecay.exe",
+                &profile_root,
+            ),
+            &identity,
+        )
         .expect("render task XML");
 
         assert_eq!(profile_root_from_task_xml(&xml), Some(profile_root));
@@ -952,5 +1224,19 @@ mod tests {
         std::fs::write(&current, b"current").expect("current executable");
 
         assert_eq!(preferred_service_executable(&shim), current);
+    }
+
+    #[test]
+    fn scoop_component_matching_is_case_insensitive() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let app = temp.path().join("APPS/TraceDecay");
+        let versioned = app.join("4.2.0/tracedecay.EXE");
+        let current = app.join("current/tracedecay.exe");
+        std::fs::create_dir_all(versioned.parent().expect("version parent")).expect("version dir");
+        std::fs::create_dir_all(current.parent().expect("current parent")).expect("current dir");
+        std::fs::write(&versioned, b"versioned").expect("versioned executable");
+        std::fs::write(&current, b"current").expect("current executable");
+
+        assert_eq!(preferred_service_executable(&versioned), current);
     }
 }
