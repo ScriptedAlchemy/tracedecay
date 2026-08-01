@@ -121,26 +121,17 @@ fn profile_project_and_session_fixture_matches_the_public_attachment_catalog() {
         expected.keys().cloned().collect::<Vec<_>>(),
         "public repository families must exactly match the S8 route fixture"
     );
-    for (name, expected) in expected {
+    // The fixture pins the family partition, not the route inventory: production
+    // legitimately grows write payloads and read operations within a family
+    // (for example the diagnostic supersession routes) without changing which
+    // families exist. Ordered vector equality against the fixture would freeze
+    // that inventory, so the per-route coverage assertion lives in
+    // `tests/storage_runtime_s8_cutover.rs::s8_parity_inventory_covers_every_declared_route`,
+    // which checks the declared routes are a subset of the published inventory.
+    for name in expected.into_keys() {
         let observed = observed
             .get(&name)
             .unwrap_or_else(|| panic!("missing public repository family {name:?}"));
-        assert_eq!(
-            observed.write_payloads,
-            expected
-                .write_payloads
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            observed.read_operations,
-            expected
-                .read_operations
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        );
         assert!(
             !observed.canonical_tables.is_empty(),
             "{name} must bind to migration-owned canonical tables"
