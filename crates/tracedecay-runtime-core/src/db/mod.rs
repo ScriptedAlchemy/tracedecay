@@ -30,7 +30,7 @@ pub use access::OwnedMaintenanceDatabaseScope;
 pub use access::enter_maintenance_database_scope;
 #[cfg(not(test))]
 pub use access::enter_owned_maintenance_database_scope;
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use access::is_isolated_test_path;
 #[cfg(windows)]
 pub use access::windows_hard_link_count;

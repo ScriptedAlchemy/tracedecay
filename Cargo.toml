@@ -378,7 +378,9 @@ tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0", 
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0", features = ["test-transport"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
