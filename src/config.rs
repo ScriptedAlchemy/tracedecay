@@ -892,18 +892,23 @@ fn usecase_opened_runtime_configuration(
     )
 }
 
-pub(crate) fn materialize_root_runtime_configuration(
+pub(crate) fn root_runtime_configuration(
     configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
-) -> Result<TraceDecayConfig> {
-    Ok(PinnedRuntimeConfiguration::new(
+) -> Result<PinnedRuntimeConfiguration> {
+    PinnedRuntimeConfiguration::new(
         RuntimeConfigurationTarget {
             project_id: configuration.target.project_id.clone(),
             project_root: configuration.target.project_root.clone(),
         },
         configuration.revision_id.clone(),
         configuration.snapshot.clone(),
-    )?
-    .config)
+    )
+}
+
+pub(crate) fn materialize_root_runtime_configuration(
+    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+) -> Result<TraceDecayConfig> {
+    Ok(root_runtime_configuration(configuration)?.config)
 }
 
 struct RootRuntimeConfigurationAuthority;
@@ -1002,6 +1007,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
     INSTALLATION
         .as_ref()
         .map_err(|message| config_error(message.clone()))
+        .copied()
 }
 
 /// Loads and publishes the durable current configuration for a resolved store

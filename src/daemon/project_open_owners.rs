@@ -848,7 +848,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     graph: Arc<crate::tracedecay::TraceDecay>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
-    configuration: crate::config::PinnedRuntimeConfiguration,
+    configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     mounted_providers: Vec<MountedLspProvider>,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
@@ -1478,7 +1478,7 @@ async fn register_production_feedback_cycle(
     project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
     graph: Arc<crate::tracedecay::TraceDecay>,
     scope: ResolvedScope,
-    configuration: crate::config::PinnedRuntimeConfiguration,
+    configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     mounted_providers: Vec<MountedLspProvider>,
 ) -> Result<
@@ -2516,7 +2516,7 @@ fn resolve_production_github_identity(
 pub(super) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
     project_root: &Path,
-    configuration: &crate::config::PinnedRuntimeConfiguration,
+    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
     observed_at: UtcMicros,
 ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
     let locator = locator_digest_for_project(project_root)?;

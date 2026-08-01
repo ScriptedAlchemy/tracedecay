@@ -475,7 +475,9 @@ async fn apply_configuration_or_semantic_transition(
             .await?
     };
     let current = registered.runtime.client().current().await?;
-    crate::config::install_pinned_runtime_configuration(current.clone())
+    let root_current = crate::config::root_runtime_configuration(&current)
+        .map_err(|_| ConfigurationError::Unavailable)?;
+    crate::config::install_pinned_runtime_configuration(root_current)
         .map_err(|_| ConfigurationError::Unavailable)?;
     registered
         .runtime
