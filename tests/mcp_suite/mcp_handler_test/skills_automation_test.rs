@@ -1,9 +1,12 @@
+#[cfg(feature = "test-transport")]
 use crate::fixture;
 use crate::support::*;
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(feature = "test-transport")]
 use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     approve_managed_skill, create_managed_skill_draft,
@@ -12,9 +15,11 @@ use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 
 #[tokio::test]
@@ -133,6 +138,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
     close_test_graph(cg).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
@@ -361,6 +367,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     drop(env_lock);
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) fn managed_skill_test_draft(id: &str, title: &str) -> ManagedSkillDraft {
     ManagedSkillDraft {
         id: id.to_string(),

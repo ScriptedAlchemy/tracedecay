@@ -687,7 +687,7 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(Arc::new(HostAdmissionBroker::new(runtime)))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn into_mcp_server_context_for_test(
         self,
         cg: TraceDecay,
@@ -696,7 +696,7 @@ impl HostAdmissionTestRuntimeV1 {
         Arc::new(self).mcp_server_context_for_test(cg, scope_prefix)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn mcp_server_context_for_test(
         self: Arc<Self>,
         cg: TraceDecay,

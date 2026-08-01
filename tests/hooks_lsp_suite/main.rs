@@ -13,6 +13,7 @@
 mod common;
 
 mod extract_worker_test;
+#[cfg(feature = "test-transport")]
 mod hook_branch_routing_test;
 mod hook_lifecycle_lease_test;
 mod hook_replay_test;

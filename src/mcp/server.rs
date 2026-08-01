@@ -306,7 +306,7 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
@@ -502,7 +502,7 @@ impl McpServer {
         self.project_session_retrieval_service.is_some()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
     pub fn host_admission_test_runtime_for_test(
         &self,
@@ -510,7 +510,7 @@ impl McpServer {
         self._host_admission_test_runtime.as_deref()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
@@ -528,7 +528,7 @@ impl McpServer {
     /// test runtime is scoped to a single project, so a cross-project fixture
     /// has to open each additional graph through its own scoped runtime and
     /// hand the result in here.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
     pub async fn new_with_retained_test_graphs_for_test(
         cg: TraceDecay,
@@ -576,7 +576,7 @@ impl McpServer {
     /// hook notification fail closed as `project_registry_route_unavailable`
     /// before it ever reaches the spool, which is a fixture gap rather than
     /// the daemon's behaviour.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
@@ -705,7 +705,7 @@ impl McpServer {
             project_routes,
             application_invocation_executor,
             project_server_live,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
         #[cfg(test)]
@@ -911,7 +911,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: project_routes,

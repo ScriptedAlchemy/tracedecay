@@ -465,7 +465,7 @@ fn run_application_tool(
         .expect("run application tool")
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 async fn preview_commit_via_mcp(
     fixture: &RuntimeFixture,
     scope: &ResolvedScope,

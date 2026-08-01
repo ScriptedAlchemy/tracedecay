@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+#[cfg(feature = "test-transport")]
 use tracedecay::application::memory::{
     MemoryApplication, MemoryOperationContext, automation_fact_proposal_add_command,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::automation::fact_proposals::{
     FactProposalRecord, FactProposalState, FactProposalStore, fact_proposals_path,
     import_legacy_fact_proposals,
@@ -15,6 +17,7 @@ use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+#[cfg(feature = "test-transport")]
 use tracedecay::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
     MemoryGroomingOperation, UpdateFactRequest,
@@ -27,6 +30,7 @@ use tracedecay::migrate::manifest::{
     MigrationPlanOptions, apply_migration_manifest, build_plan_manifest, finalize_migration_apply,
     verify_migration_manifest,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::migrate::memory_cutover::MemoryCutoverOptions;
 use tracedecay::migrate::registry::{
     RegistryReconstructionReport, RegistryReconstructionStatus,
@@ -38,8 +42,11 @@ use tracedecay::storage::{
     StoreKind, StoreManifest, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay::store::memory::DatabaseFactStore;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_domain::ProjectId;
+#[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,
@@ -47,12 +54,13 @@ use tracedecay_domain::{
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, NativeAliasKindV2,
     NativeAliasV2, PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1,
+    PrivacyDomainId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1,
     RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
     VectorWatermark,
 };
+#[cfg(feature = "test-transport")]
 use tracedecay_store::{
     AnchorDispositionReasonClassV1, AnchorDispositionStateV1,
     CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactIdV1, CompatibilityFactTargetV1,
@@ -63,11 +71,14 @@ use tracedecay_store::{
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
 
+#[cfg(feature = "test-transport")]
 const ARCHIVE_DIGEST_A: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+#[cfg(feature = "test-transport")]
 const ARCHIVE_DIGEST_B: &str =
     "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+#[cfg(feature = "test-transport")]
 fn archive_id<T>(value: &str) -> T
 where
     T: TryFrom<String, Error = DomainError>,
@@ -75,6 +86,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 async fn seed_public_archive_fact(
     branch: &Path,
     owner: FactOwnerV1,
@@ -406,6 +418,7 @@ async fn seed_public_archive_fact(
     )
 }
 
+#[cfg(feature = "test-transport")]
 async fn seed_production_evidence_assembly(
     branch: &Path,
     owner: &FactOwnerV1,
@@ -598,6 +611,7 @@ async fn seed_production_evidence_assembly(
     }
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
     let _lock = HOME_ENV_LOCK.lock().await;
@@ -766,6 +780,7 @@ async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation() {
     let _lock = HOME_ENV_LOCK.lock().await;
@@ -1077,6 +1092,7 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_memory_cutover_rejects_incompatible_v2_identity_without_receipt() {
     let _lock = HOME_ENV_LOCK.lock().await;

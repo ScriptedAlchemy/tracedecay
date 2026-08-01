@@ -237,6 +237,33 @@ name = "git_index_snapshot_root_canonicalization"
 path = "tests/git_index_snapshot_root_canonicalization.rs"
 required-features = ["test-transport"]
 
+# Integration harnesses that intentionally exercise in-process daemon/test
+# transport seams stay out of the default production feature graph.
+[[test]]
+name = "dashboard_api_test"
+path = "tests/dashboard_api_test/main.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "daemon_fault_harness_test"
+path = "tests/daemon_fault_harness_test.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "host_lifecycle_cli_acceptance"
+path = "tests/host_lifecycle_cli_acceptance.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "migration_reindex_status_test"
+path = "tests/migration_reindex_status_test.rs"
+required-features = ["test-transport"]
+
+[[test]]
+name = "serve_proxy_lifecycle_test"
+path = "tests/serve_proxy_lifecycle_test.rs"
+required-features = ["test-transport"]
+
 [dependencies]
 axum = "0.8"
 tower = "0.5"
@@ -380,7 +407,7 @@ tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0", features = ["test-transport"] }
+tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0", features = ["test-helpers"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }

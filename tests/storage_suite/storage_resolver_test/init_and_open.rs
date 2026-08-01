@@ -115,6 +115,7 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
     assert_eq!(opened.serving_branch(), Some("main"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn tracked_branch_project_memory_resolves_the_shared_project_store() {
     let _guard = HOME_ENV_LOCK.lock().await;

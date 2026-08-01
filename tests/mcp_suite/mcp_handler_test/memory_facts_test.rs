@@ -76,6 +76,7 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
     close_test_graph(cg).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     let (cg, _env, _dir) = setup_empty_project().await;

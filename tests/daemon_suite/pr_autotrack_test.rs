@@ -513,6 +513,7 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
     assert_eq!(matching_facts[0].fact_id, restored_on_busy.fact_id);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn target_durability_failure_blocks_cleanup_and_retry_is_idempotent() {
     let fixture = PrProject::indexed_with_origin().await;
@@ -567,6 +568,7 @@ async fn target_durability_failure_blocks_cleanup_and_retry_is_idempotent() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn receipt_durability_failure_blocks_cleanup_until_durable_retry() {
     let fixture = PrProject::indexed_with_origin().await;

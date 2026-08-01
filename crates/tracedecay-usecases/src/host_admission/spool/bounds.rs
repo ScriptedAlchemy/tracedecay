@@ -57,7 +57,7 @@ impl SpoolBounds {
         self
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub const fn with_quarantine_limits(
         mut self,
         max_quarantine_bytes: usize,
