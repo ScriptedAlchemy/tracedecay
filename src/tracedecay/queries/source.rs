@@ -133,7 +133,12 @@ fn normalize_lookup_path(project_root: &std::path::Path, raw: &str) -> String {
         // symlinks, `..` segments, and trailing slashes uniformly. If
         // either fails (file doesn't exist on disk, project root
         // moved), fall back to a raw prefix strip.
-        if let (Ok(abs), Ok(root)) = (path.canonicalize(), project_root.canonicalize())
+        //
+        // `project_root` is immutable for the lifetime of a `TraceDecay`
+        // instance, so its canonical form is cached instead of re-stat'ing
+        // the filesystem on every call (this runs once per diagnostic span
+        // looked up).
+        if let (Ok(abs), Some(root)) = (path.canonicalize(), canonical_project_root(project_root))
             && let Ok(rel) = abs.strip_prefix(&root)
         {
             return rel.to_string_lossy().replace('\\', "/");
@@ -144,6 +149,32 @@ fn normalize_lookup_path(project_root: &std::path::Path, raw: &str) -> String {
         }
     }
     forward
+}
+
+/// Returns the canonicalised form of `project_root`, computing it at most
+/// once per distinct root value seen by this process.
+///
+/// A single-entry cache (rather than a per-instance field) keeps the fix
+/// local to this module: `TraceDecay` almost always runs with one project
+/// root per process, so the cache hits on every call after the first: a
+/// differing root simply recomputes and replaces the cached entry, which
+/// stays correct even if a process ever juggles more than one root.
+fn canonical_project_root(project_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((cached_root, cached_canon)) = guard.as_ref()
+        && cached_root == project_root
+    {
+        return Some(cached_canon.clone());
+    }
+    let canon = project_root.canonicalize().ok()?;
+    *guard = Some((project_root.to_path_buf(), canon.clone()));
+    Some(canon)
 }
 
 #[cfg(test)]
