@@ -170,7 +170,11 @@ pub(super) fn stored_row_matches(
         )
         .optional()?;
     Ok(stored.map(|stored| {
-        stored == values.iter().map(|(_, value)| value.expected()).collect::<Vec<_>>()
+        stored
+            == values
+                .iter()
+                .map(|(_, value)| value.expected())
+                .collect::<Vec<_>>()
     }))
 }
 
