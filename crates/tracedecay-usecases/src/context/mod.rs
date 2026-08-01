@@ -200,7 +200,46 @@ impl ResolvedSessionIdentity {
         )
         .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
     }
+
+    /// Resolves the exact application scope a *session request* is admitted
+    /// under. Session requests address either a project-owned session store or
+    /// the profile-owned session store, so this resolution is total where
+    /// [`Self::application_scope`] is deliberately project-only.
+    ///
+    /// Project-owned identities resolve exactly as [`Self::application_scope`].
+    /// Profile-owned identities resolve to the profile session store's own
+    /// coordinates, built solely from the profile, store, and root identifiers
+    /// this identity already carries under the reserved
+    /// [`PROFILE_SESSION_SCOPE_PREFIX`] namespace. Nothing is read from a path,
+    /// the CWD, or a sibling root, and the reserved prefix keeps a profile
+    /// scope from ever comparing equal to a real project scope.
+    pub fn session_request_scope(
+        &self,
+    ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
+        let SessionOwner::Profile { profile_id } = &self.owner else {
+            return self.application_scope();
+        };
+        let contract = |error: tracedecay_domain::DomainError| {
+            ApplicationScopeError::Contract(error.to_string())
+        };
+        tracedecay_application::ResolvedScope::new(
+            ProjectId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{profile_id}"))
+                .map_err(contract)?,
+            RepositoryId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{}", self.store_id))
+                .map_err(contract)?,
+            WorktreeId::new(format!("{PROFILE_SESSION_SCOPE_PREFIX}.{}", self.root_id))
+                .map_err(contract)?,
+            None,
+        )
+        .map_err(|error| ApplicationScopeError::Contract(error.to_string()))
+    }
 }
+
+/// Reserved identifier namespace for the profile-owned session store's
+/// application scope. Real project scopes are named by their registered
+/// project, repository, and worktree identity, so this prefix keeps the
+/// profile session scope disjoint from every project scope.
+pub const PROFILE_SESSION_SCOPE_PREFIX: &str = "tracedecay.profile-session";
 
 macro_rules! digest {
     ($($name:ident),+ $(,)?) => {
@@ -779,6 +818,65 @@ mod tests {
         assert_eq!(
             identity.application_scope().unwrap_err(),
             ApplicationScopeError::ProfileIdentityWithoutProject
+        );
+    }
+
+    #[test]
+    fn session_request_scope_names_the_profile_session_store() {
+        let identity = ResolvedSessionIdentity::for_profile(
+            ProfileId::new("profile.primary").unwrap(),
+            SessionStoreId::new("store.profile.primary").unwrap(),
+            SessionRootId::new("root.profile.primary").unwrap(),
+        );
+
+        // Session requests may address the profile-owned session store, so the
+        // session scope is total where the project-only scope fails closed. The
+        // scope is built from the identity's own identifiers under the reserved
+        // prefix: no path, CWD, or sibling root is consulted.
+        let scope = identity.session_request_scope().unwrap();
+        assert_eq!(
+            scope.project_id.as_str(),
+            "tracedecay.profile-session.profile.primary"
+        );
+        assert_eq!(
+            scope.repository_id.as_str(),
+            "tracedecay.profile-session.store.profile.primary"
+        );
+        assert_eq!(
+            scope.worktree_id.as_str(),
+            "tracedecay.profile-session.root.profile.primary"
+        );
+        assert!(scope.reference.is_none());
+        scope.validate().unwrap();
+        assert_eq!(
+            identity.session_request_scope().unwrap(),
+            scope,
+            "the profile session scope must be stable for the same identity"
+        );
+    }
+
+    #[test]
+    fn session_request_scope_matches_project_application_scope() {
+        let identity = project_identity();
+
+        assert_eq!(
+            identity.session_request_scope().unwrap(),
+            identity.application_scope().unwrap(),
+            "project-owned session requests keep the exact project scope"
+        );
+    }
+
+    #[test]
+    fn profile_session_scope_never_equals_a_project_scope() {
+        let profile = ResolvedSessionIdentity::for_profile(
+            ProfileId::new("profile.primary").unwrap(),
+            SessionStoreId::new("store.profile.primary").unwrap(),
+            SessionRootId::new("root.profile.primary").unwrap(),
+        );
+
+        assert_ne!(
+            profile.session_request_scope().unwrap(),
+            project_identity().session_request_scope().unwrap()
         );
     }
 
