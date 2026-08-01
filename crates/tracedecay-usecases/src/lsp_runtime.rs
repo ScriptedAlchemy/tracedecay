@@ -871,6 +871,18 @@ struct CachedTestRunScope {
     projection: LspFeedbackProjectionScope,
 }
 
+#[derive(Clone)]
+struct LspTestRunExpansionContext {
+    operation_id: String,
+    operation_generation: u64,
+    operation_completed: u64,
+    operation_total: Option<u64>,
+    operation_termination: Option<OperationTermination>,
+    available_results: usize,
+    result_offset: usize,
+    page_size: u32,
+}
+
 impl OperationEventTestRunProjection {
     pub(crate) fn new(
         reader: CanonicalManagedTestRunReader,
@@ -891,15 +903,18 @@ impl OperationEventTestRunProjection {
         document_uri: Option<&str>,
         scope: &LspFeedbackProjectionScope,
         stable_id: String,
-        operation_id: String,
-        operation_generation: u64,
-        operation_completed: u64,
-        operation_total: Option<u64>,
-        operation_termination: Option<OperationTermination>,
-        available_results: usize,
-        result_offset: usize,
-        page_size: u32,
+        context: LspTestRunExpansionContext,
     ) -> Result<String, LspRuntimeFailure> {
+        let LspTestRunExpansionContext {
+            operation_id,
+            operation_generation,
+            operation_completed,
+            operation_total,
+            operation_termination,
+            available_results,
+            result_offset,
+            page_size,
+        } = context;
         let issued_at = now_micros();
         let record = StoredLspTestRunExpansionV1 {
             schema_version: LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION,
@@ -1015,13 +1030,16 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                             current_scope_key(&current),
                             test_run_source_revision(&snapshot),
                         );
-                    let operation_id = snapshot.operation_id.to_string();
-                    let operation_generation = snapshot.generation;
-                    let operation_completed = snapshot.completed;
-                    let operation_total = snapshot.total;
-                    let operation_termination = snapshot.termination;
-                    let available_results = snapshot.available_results;
-                    let first_offset = snapshot.result_offset;
+                    let expansion_context = LspTestRunExpansionContext {
+                        operation_id: snapshot.operation_id.to_string(),
+                        operation_generation: snapshot.generation,
+                        operation_completed: snapshot.completed,
+                        operation_total: snapshot.total,
+                        operation_termination: snapshot.termination,
+                        available_results: snapshot.available_results,
+                        result_offset: snapshot.result_offset,
+                        page_size: 1,
+                    };
                     let has_bounded_results = snapshot.next_cursor.is_some();
                     let mut outcome = test_run_projection(
                         root.clone(),
@@ -1036,14 +1054,12 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                                 document_uri.as_deref(),
                                 &scope,
                                 item.stable_id.clone(),
-                                operation_id.clone(),
-                                operation_generation,
-                                operation_completed,
-                                operation_total,
-                                operation_termination,
-                                available_results,
-                                first_offset.saturating_add(index),
-                                1,
+                                LspTestRunExpansionContext {
+                                    result_offset: expansion_context
+                                        .result_offset
+                                        .saturating_add(index),
+                                    ..expansion_context.clone()
+                                },
                             ) {
                                 Ok(handle) => Some(handle),
                                 Err(error) => {
@@ -1058,15 +1074,14 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                                 &root,
                                 document_uri.as_deref(),
                                 &scope,
-                                format!("{operation_id}.__remaining__"),
-                                operation_id,
-                                operation_generation,
-                                operation_completed,
-                                operation_total,
-                                operation_termination,
-                                available_results,
-                                first_offset.saturating_add(envelope.items.len()),
-                                MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                                format!("{}.__remaining__", expansion_context.operation_id),
+                                LspTestRunExpansionContext {
+                                    result_offset: expansion_context
+                                        .result_offset
+                                        .saturating_add(envelope.items.len()),
+                                    page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                                    ..expansion_context
+                                },
                             ) {
                                 Ok(handle) => Some(handle),
                                 Err(error) => {
@@ -1328,14 +1343,16 @@ impl OperationEventTestRunProjection {
                     record.document_uri.as_deref(),
                     &scope,
                     record.stable_id.clone(),
-                    record.operation_id.clone(),
-                    record.operation_generation,
-                    record.operation_completed,
-                    record.operation_total,
-                    record.operation_termination,
-                    record.available_results,
-                    end,
-                    MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                    LspTestRunExpansionContext {
+                        operation_id: record.operation_id.clone(),
+                        operation_generation: record.operation_generation,
+                        operation_completed: record.operation_completed,
+                        operation_total: record.operation_total,
+                        operation_termination: record.operation_termination,
+                        available_results: record.available_results,
+                        result_offset: end,
+                        page_size: MAX_CONTEXT_PROJECTION_ITEMS as u32,
+                    },
                 ) {
                     Ok(handle) => Some(handle),
                     Err(_) => return ContextExpansionOutcome::Denied,

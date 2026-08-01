@@ -433,20 +433,20 @@ pub async fn resolve_production_feedback_cycle_parts(
     let operation = required_surface_operation("feedback_diagnostics")?;
     let graph_operation = required_surface_operation("feedback_impact")?;
     let tests_operation = required_surface_operation("affected_tests")?;
-    let lsp_input = production_lsp_input(
-        feedback_scope.clone(),
-        input.scope.clone(),
-        input.requester.clone(),
-        input.authorization,
-        proximity_threshold_pin,
-        policy_digest.clone(),
-        provider_candidates
+    let lsp_input = production_lsp_input(ProductionLspInputContext {
+        feedback_scope: feedback_scope.clone(),
+        scope: input.scope.clone(),
+        requester: input.requester.clone(),
+        authorization: input.authorization,
+        threshold_pin: proximity_threshold_pin,
+        policy_digest: policy_digest.clone(),
+        providers: provider_candidates
             .iter()
             .map(|(identity, _)| identity.clone())
             .collect(),
-        input.project_root,
-        input.document_identity,
-    )?;
+        project_root: input.project_root,
+        document_identity: input.document_identity,
+    })?;
     Ok(ProductionFeedbackCyclePartsV1 {
         feedback_scope,
         policy_digest,
@@ -699,7 +699,7 @@ fn unavailable_lsp_candidate(
     )
 }
 
-fn production_lsp_input(
+struct ProductionLspInputContext {
     feedback_scope: FeedbackScopeV1,
     scope: ResolvedScope,
     requester: ActorId,
@@ -709,7 +709,22 @@ fn production_lsp_input(
     providers: Vec<DiagnosticProviderIdentity>,
     project_root: PathBuf,
     document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
+}
+
+fn production_lsp_input(
+    input: ProductionLspInputContext,
 ) -> Result<Pr12FeedbackCycleLspInput, ApplicationContractError> {
+    let ProductionLspInputContext {
+        feedback_scope,
+        scope,
+        requester,
+        authorization,
+        threshold_pin,
+        policy_digest,
+        providers,
+        project_root,
+        document_identity,
+    } = input;
     let root_uri = url::Url::from_directory_path(
         project_root
             .canonicalize()
@@ -1237,17 +1252,17 @@ mod tests {
             ConfigurationRevisionId::new("configuration.test.current").expect("revision");
         let (authorization, _) =
             authorization(&scope, &configuration_revision, &configuration, 1_000_000);
-        let input = production_lsp_input(
-            feedback_scope(&scope),
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
             scope,
-            ActorId::new("actor.cycle-production").expect("actor"),
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin(&configuration_revision, &configuration),
-            policy,
-            vec![provider],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document)),
-        )
+            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_digest: policy,
+            providers: vec![provider],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document)),
+        })
         .expect("input");
 
         let invocation = input(FeedbackCycleRequest {
@@ -1287,17 +1302,17 @@ mod tests {
             document_uri: "file:///workspace/src/lib.rs".to_owned(),
         };
         let (current, calls) = authorization(&scope, &configuration_revision, &configuration, 1);
-        let input = production_lsp_input(
-            feedback_scope(&scope),
-            scope.clone(),
-            ActorId::new("actor.cycle-production").expect("actor"),
-            current,
-            threshold_pin(&configuration_revision, &configuration),
-            policy.clone(),
-            vec![provider.clone()],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document.clone())),
-        )
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
+            scope: scope.clone(),
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
+            authorization: current,
+            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_digest: policy.clone(),
+            providers: vec![provider.clone()],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document.clone())),
+        })
         .expect("input");
 
         assert!(input(request()).await.is_ok());
@@ -1306,17 +1321,17 @@ mod tests {
 
         let (expired, expired_calls) =
             authorization(&scope, &configuration_revision, &configuration, 0);
-        let input = production_lsp_input(
-            feedback_scope(&scope),
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
             scope,
-            ActorId::new("actor.cycle-production").expect("actor"),
-            expired,
-            threshold_pin(&configuration_revision, &configuration),
-            policy,
-            vec![provider],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document)),
-        )
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
+            authorization: expired,
+            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_digest: policy,
+            providers: vec![provider],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document)),
+        })
         .expect("input");
 
         assert!(input(request()).await.is_err());
@@ -1348,17 +1363,17 @@ mod tests {
             &drifted_configuration,
             1_000_000,
         );
-        let input = production_lsp_input(
-            feedback_scope(&scope),
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
             scope,
-            ActorId::new("actor.cycle-production").expect("actor"),
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin(&configuration_revision, &authorized_configuration),
-            policy,
-            vec![provider],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document)),
-        )
+            threshold_pin: threshold_pin(&configuration_revision, &authorized_configuration),
+            policy_digest: policy,
+            providers: vec![provider],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document)),
+        })
         .expect("input");
 
         assert!(
@@ -1447,17 +1462,17 @@ mod tests {
             ConfigurationRevisionId::new("configuration.test.current").expect("revision");
         let (authorization, _) =
             authorization(&scope, &configuration_revision, &configuration, 1_000_000);
-        let input = production_lsp_input(
-            feedback_scope(&scope),
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
             scope,
-            ActorId::new("actor.cycle-production").expect("actor"),
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin(&configuration_revision, &configuration),
-            policy,
-            vec![provider],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document.clone())),
-        )
+            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_digest: policy,
+            providers: vec![provider],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document.clone())),
+        })
         .expect("input");
         let invocation = input(FeedbackCycleRequest {
             root_uri: "file:///workspace/".to_owned(),
@@ -1495,17 +1510,17 @@ mod tests {
             ConfigurationRevisionId::new("configuration.test.current").expect("revision");
         let (authorization, _) =
             authorization(&scope, &configuration_revision, &configuration, 1_000_000);
-        let input = production_lsp_input(
-            feedback_scope(&scope),
+        let input = production_lsp_input(ProductionLspInputContext {
+            feedback_scope: feedback_scope(&scope),
             scope,
-            ActorId::new("actor.cycle-production").expect("actor"),
+            requester: ActorId::new("actor.cycle-production").expect("actor"),
             authorization,
-            threshold_pin(&configuration_revision, &configuration),
-            policy,
-            vec![provider],
-            PathBuf::from("/workspace"),
-            Arc::new(Identity(document.clone())),
-        )
+            threshold_pin: threshold_pin(&configuration_revision, &configuration),
+            policy_digest: policy,
+            providers: vec![provider],
+            project_root: PathBuf::from("/workspace"),
+            document_identity: Arc::new(Identity(document.clone())),
+        })
         .expect("input");
         let mut invocation = input(FeedbackCycleRequest {
             root_uri: "file:///workspace/".to_owned(),

@@ -358,20 +358,65 @@ fn horizon(since_seconds: i64, observed_at_micros: i64) -> ObservabilityHorizonV
     }
 }
 
-fn measurement(
-    descriptor_revision: &str,
-    metric: &str,
-    value: Option<f64>,
-    unit: &str,
-    denominator: &str,
-    coverage: MetricCoverageV1,
+struct MeasurementDescriptor<'a> {
+    revision: &'a str,
+    metric: &'a str,
+    unit: &'a str,
+    denominator: &'a str,
+}
+
+impl<'a> MeasurementDescriptor<'a> {
+    const fn new(revision: &'a str, metric: &'a str, unit: &'a str, denominator: &'a str) -> Self {
+        Self {
+            revision,
+            metric,
+            unit,
+            denominator,
+        }
+    }
+}
+
+struct MeasurementProvenance<'a> {
     source: MetricSourceV1,
-    source_revision: &str,
-    projector_revision: &str,
-    watermark: &str,
-    horizon: &ObservabilityHorizonV1,
-    unavailable_reason: Option<&str>,
-) -> MetricValueV1 {
+    source_revision: &'a str,
+    projector_revision: &'a str,
+    watermark: &'a str,
+}
+
+impl<'a> MeasurementProvenance<'a> {
+    const fn new(
+        source: MetricSourceV1,
+        source_revision: &'a str,
+        projector_revision: &'a str,
+        watermark: &'a str,
+    ) -> Self {
+        Self {
+            source,
+            source_revision,
+            projector_revision,
+            watermark,
+        }
+    }
+}
+
+struct MeasurementSpec<'a> {
+    descriptor: MeasurementDescriptor<'a>,
+    provenance: MeasurementProvenance<'a>,
+    horizon: &'a ObservabilityHorizonV1,
+    coverage: MetricCoverageV1,
+    value: Option<f64>,
+    unavailable_reason: Option<&'a str>,
+}
+
+fn measurement(spec: MeasurementSpec<'_>) -> MetricValueV1 {
+    let MeasurementSpec {
+        descriptor,
+        provenance,
+        horizon,
+        coverage,
+        value,
+        unavailable_reason,
+    } = spec;
     let uncertainty = match value {
         Some(value) => MetricUncertaintyV1 {
             lower: Some(value),
@@ -385,23 +430,23 @@ fn measurement(
         },
     };
     MetricValueV1 {
-        descriptor_revision: descriptor_revision.to_string(),
-        metric: metric.to_string(),
+        descriptor_revision: descriptor.revision.to_string(),
+        metric: descriptor.metric.to_string(),
         value,
-        unit: unit.to_string(),
-        denominator: denominator.to_string(),
+        unit: descriptor.unit.to_string(),
+        denominator: descriptor.denominator.to_string(),
         denominator_value: coverage.eligible,
         coverage,
         evidence_class: MetricEvidenceClassV1::Measurement,
         provenance: MetricProvenanceV1 {
-            source,
-            source_revision: source_revision.to_string(),
-            projector_revision: projector_revision.to_string(),
-            watermark: watermark.to_string(),
+            source: provenance.source,
+            source_revision: provenance.source_revision.to_string(),
+            projector_revision: provenance.projector_revision.to_string(),
+            watermark: provenance.watermark.to_string(),
         },
         cohort: MetricCohortV1 {
-            descriptor_revision: format!("{denominator}.v1"),
-            eligible_population: denominator.to_string(),
+            descriptor_revision: format!("{}.v1", descriptor.denominator),
+            eligible_population: descriptor.denominator.to_string(),
         },
         temporal: MetricTemporalV1 {
             horizon: horizon.clone(),
@@ -425,20 +470,24 @@ pub fn observatory_unavailable_read_model(
     let metric_coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
     let metrics = {
         let metric = |name: &str| {
-            measurement(
-                ANALYTICS_DESCRIPTOR,
-                name,
-                None,
-                "events",
-                "eligible_observability_events",
-                metric_coverage.clone(),
-                MetricSourceV1::ObservabilityEnvelope,
-                "observability-envelope.v1",
-                "observatory-projector.v1",
-                &watermark,
-                &read_horizon,
-                Some(reason),
-            )
+            measurement(MeasurementSpec {
+                descriptor: MeasurementDescriptor::new(
+                    ANALYTICS_DESCRIPTOR,
+                    name,
+                    "events",
+                    "eligible_observability_events",
+                ),
+                provenance: MeasurementProvenance::new(
+                    MetricSourceV1::ObservabilityEnvelope,
+                    "observability-envelope.v1",
+                    "observatory-projector.v1",
+                    &watermark,
+                ),
+                horizon: &read_horizon,
+                coverage: metric_coverage.clone(),
+                value: None,
+                unavailable_reason: Some(reason),
+            })
         };
         vec![
             metric("observability_events"),
@@ -566,20 +615,24 @@ pub async fn observatory_read_model(
     let reason = (!complete).then_some("incomplete_observability_coverage");
     let metrics = {
         let metric = |name: &str, value: u64, unit: &str| {
-            measurement(
-                ANALYTICS_DESCRIPTOR,
-                name,
-                complete.then_some(value as f64),
-                unit,
-                "eligible_observability_events",
-                metric_coverage.clone(),
-                MetricSourceV1::ObservabilityEnvelope,
-                "observability-envelope.v1",
-                "observatory-projector.v1",
-                &watermark,
-                &read_horizon,
-                reason,
-            )
+            measurement(MeasurementSpec {
+                descriptor: MeasurementDescriptor::new(
+                    ANALYTICS_DESCRIPTOR,
+                    name,
+                    unit,
+                    "eligible_observability_events",
+                ),
+                provenance: MeasurementProvenance::new(
+                    MetricSourceV1::ObservabilityEnvelope,
+                    "observability-envelope.v1",
+                    "observatory-projector.v1",
+                    &watermark,
+                ),
+                horizon: &read_horizon,
+                coverage: metric_coverage.clone(),
+                value: complete.then_some(value as f64),
+                unavailable_reason: reason,
+            })
         };
         vec![
             metric("observability_events", observed, "events"),
@@ -608,20 +661,25 @@ pub fn attach_feedback_system_quality(
     let Some(feedback) = feedback else {
         let coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
         for (kind, unit, denominator) in feedback_metric_descriptors() {
-            read_model.metrics.push(measurement(
-                FEEDBACK_DESCRIPTOR,
-                kind,
-                None,
-                unit,
-                denominator,
-                coverage.clone(),
-                MetricSourceV1::FeedbackObservations,
-                "feedback-observations.v1",
-                "feedback-system-quality-projector.v1",
-                "feedback:unavailable",
-                &read_model.horizon,
-                unavailable_reason.or(Some("feedback_observations_unavailable")),
-            ));
+            read_model.metrics.push(measurement(MeasurementSpec {
+                descriptor: MeasurementDescriptor::new(
+                    FEEDBACK_DESCRIPTOR,
+                    kind,
+                    unit,
+                    denominator,
+                ),
+                provenance: MeasurementProvenance::new(
+                    MetricSourceV1::FeedbackObservations,
+                    "feedback-observations.v1",
+                    "feedback-system-quality-projector.v1",
+                    "feedback:unavailable",
+                ),
+                horizon: &read_model.horizon,
+                coverage: coverage.clone(),
+                value: None,
+                unavailable_reason: unavailable_reason
+                    .or(Some("feedback_observations_unavailable")),
+            }));
         }
         read_model.current = false;
         return;
@@ -651,20 +709,24 @@ pub fn attach_feedback_system_quality(
             .unavailable_reason
             .map(feedback_unavailable_reason)
             .or((!complete).then_some("incomplete_feedback_coverage"));
-        read_model.metrics.push(measurement(
-            FEEDBACK_DESCRIPTOR,
-            feedback_metric_name(metric.metric),
-            complete.then_some(metric.value).flatten(),
-            feedback_metric_unit(metric.unit),
-            feedback_denominator_name(metric.denominator_population),
+        read_model.metrics.push(measurement(MeasurementSpec {
+            descriptor: MeasurementDescriptor::new(
+                FEEDBACK_DESCRIPTOR,
+                feedback_metric_name(metric.metric),
+                feedback_metric_unit(metric.unit),
+                feedback_denominator_name(metric.denominator_population),
+            ),
+            provenance: MeasurementProvenance::new(
+                MetricSourceV1::FeedbackObservations,
+                "feedback-observations.v1",
+                "feedback-system-quality-projector.v1",
+                &watermark,
+            ),
+            horizon: &read_model.horizon,
             coverage,
-            MetricSourceV1::FeedbackObservations,
-            "feedback-observations.v1",
-            "feedback-system-quality-projector.v1",
-            &watermark,
-            &read_model.horizon,
-            unavailable,
-        ));
+            value: complete.then_some(metric.value).flatten(),
+            unavailable_reason: unavailable,
+        }));
     }
     read_model.current &= feedback.coverage == Plan26CoverageV1::Known;
     read_model.watermark = format!("{};{watermark}", read_model.watermark);
@@ -784,20 +846,19 @@ pub fn costs_unavailable_read_model(
                       denominator: &str,
                       source: MetricSourceV1,
                       source_revision: &str| {
-            measurement(
-                COST_DESCRIPTOR,
-                name,
-                None,
-                unit,
-                denominator,
-                coverage.clone(),
-                source,
-                source_revision,
-                "costs-projector.v1",
-                "costs:unavailable",
-                &read_horizon,
-                Some(reason),
-            )
+            measurement(MeasurementSpec {
+                descriptor: MeasurementDescriptor::new(COST_DESCRIPTOR, name, unit, denominator),
+                provenance: MeasurementProvenance::new(
+                    source,
+                    source_revision,
+                    "costs-projector.v1",
+                    "costs:unavailable",
+                ),
+                horizon: &read_horizon,
+                coverage: coverage.clone(),
+                value: None,
+                unavailable_reason: Some(reason),
+            })
         };
         (
             vec![
@@ -889,42 +950,58 @@ pub async fn costs_read_model(
         .then_some("pricing_revision_unavailable")
         .or(accounting_reason);
     let usage = vec![
-        measurement(
+        measurement(MeasurementSpec {
+            descriptor: MeasurementDescriptor::new(
+                COST_DESCRIPTOR,
+                "provider_tokens",
+                "tokens",
+                "ingested_provider_turns",
+            ),
+            provenance: MeasurementProvenance::new(
+                MetricSourceV1::AccountingTurn,
+                "accounting-turn.v1",
+                "costs-projector.v1",
+                &accounting_watermark,
+            ),
+            horizon: &read_horizon,
+            coverage: accounting_coverage.clone(),
+            value: tokens,
+            unavailable_reason: accounting_reason,
+        }),
+        measurement(MeasurementSpec {
+            descriptor: MeasurementDescriptor::new(
+                COST_DESCRIPTOR,
+                "saved_tokens",
+                "tokens",
+                "eligible_savings_calls",
+            ),
+            provenance: MeasurementProvenance::new(
+                MetricSourceV1::SavingsLedger,
+                "savings-ledger.v1",
+                "costs-projector.v1",
+                &savings_watermark,
+            ),
+            horizon: &read_horizon,
+            coverage: savings_coverage,
+            value: saved_tokens,
+            unavailable_reason: savings_reason,
+        }),
+    ];
+    let estimated_cost = vec![measurement(MeasurementSpec {
+        descriptor: MeasurementDescriptor::new(
             COST_DESCRIPTOR,
-            "provider_tokens",
-            tokens,
-            "tokens",
-            "ingested_provider_turns",
-            accounting_coverage.clone(),
+            "provider_cost",
+            "usd",
+            "priced_provider_turns",
+        ),
+        provenance: MeasurementProvenance::new(
             MetricSourceV1::AccountingTurn,
             "accounting-turn.v1",
             "costs-projector.v1",
             &accounting_watermark,
-            &read_horizon,
-            accounting_reason,
         ),
-        measurement(
-            COST_DESCRIPTOR,
-            "saved_tokens",
-            saved_tokens,
-            "tokens",
-            "eligible_savings_calls",
-            savings_coverage,
-            MetricSourceV1::SavingsLedger,
-            "savings-ledger.v1",
-            "costs-projector.v1",
-            &savings_watermark,
-            &read_horizon,
-            savings_reason,
-        ),
-    ];
-    let estimated_cost = vec![measurement(
-        COST_DESCRIPTOR,
-        "provider_cost",
-        None,
-        "usd",
-        "priced_provider_turns",
-        if accounting.is_some() {
+        horizon: &read_horizon,
+        coverage: if accounting.is_some() {
             coverage(
                 None,
                 accounting.map_or(0, |value| value.0),
@@ -934,13 +1011,9 @@ pub async fn costs_read_model(
         } else {
             accounting_coverage
         },
-        MetricSourceV1::AccountingTurn,
-        "accounting-turn.v1",
-        "costs-projector.v1",
-        &accounting_watermark,
-        &read_horizon,
-        pricing_reason,
-    )];
+        value: None,
+        unavailable_reason: pricing_reason,
+    })];
     let known = usage
         .iter()
         .chain(&estimated_cost)
