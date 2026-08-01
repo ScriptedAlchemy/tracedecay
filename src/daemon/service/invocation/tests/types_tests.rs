@@ -404,10 +404,10 @@ async fn feedback_admission_conflicts_construct_zero_losing_producers() {
     let (publication_ready, publication_is_ready) = tokio::sync::oneshot::channel();
     let (continue_publication, publication_may_continue) = tokio::sync::oneshot::channel();
     let (commit_starting, commit_is_starting) = tokio::sync::oneshot::channel();
-    let gate = Arc::new(DaemonFeedbackPublicationTestGate {
-        publication_ready: StdMutex::new(Some(publication_ready)),
-        continue_publication: Mutex::new(Some(publication_may_continue)),
-    });
+    let gate = Arc::new(DaemonFeedbackPublicationTestGate::new(
+        publication_ready,
+        publication_may_continue,
+    ));
     service
         .project_runtimes
         .arm_commit_starting(commit_starting);
