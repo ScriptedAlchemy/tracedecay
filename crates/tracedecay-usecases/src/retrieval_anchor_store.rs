@@ -193,27 +193,23 @@ impl RuntimeRetrievalAnchorStore {
 }
 
 impl RetrievalAnchorDispositionStore for RuntimeRetrievalAnchorStore {
-    fn append_disposition(
+    async fn append_disposition(
         &self,
         record: RetrievalAnchorDispositionRecordV1,
-    ) -> impl std::future::Future<
-        Output = RetrievalAnchorStoreResult<AnchorDispositionAppendOutcomeV1>,
-    > + Send {
-        async move {
-            record.validate()?;
-            self.validate_owner(record.owner())?;
-            let identity =
-                canonical_sha256(&(record.owner(), record.anchor_id(), record.disposition_id()))
-                    .map_err(invalid)?;
-            let admission_bytes = serialized_len(&record)?;
-            self.submit(
-                RepositoryWritePayloadV1::RetrievalAnchorDisposition(Box::new(record.clone())),
-                canonical_sha256(&record).map_err(invalid)?,
-                identity,
-                admission_bytes,
-            )
-            .await
-        }
+    ) -> RetrievalAnchorStoreResult<AnchorDispositionAppendOutcomeV1> {
+        record.validate()?;
+        self.validate_owner(record.owner())?;
+        let identity =
+            canonical_sha256(&(record.owner(), record.anchor_id(), record.disposition_id()))
+                .map_err(invalid)?;
+        let admission_bytes = serialized_len(&record)?;
+        self.submit(
+            RepositoryWritePayloadV1::RetrievalAnchorDisposition(Box::new(record.clone())),
+            canonical_sha256(&record).map_err(invalid)?,
+            identity,
+            admission_bytes,
+        )
+        .await
     }
 
     fn publish_derivative(

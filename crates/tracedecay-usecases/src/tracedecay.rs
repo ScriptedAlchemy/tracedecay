@@ -28,6 +28,8 @@ use tracedecay_runtime_core::types::{Edge, GraphStats, Node, NodeKind, SearchRes
 
 pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type GraphValueFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type GraphCallChain = Vec<(Node, Option<Edge>)>;
+pub type ComplexityRankedNode = (Node, u32, u64, u64, u64);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackedBranchDiagnostic {
@@ -118,7 +120,7 @@ pub trait GraphRuntimePort: Send + Sync {
         from_id: &'a str,
         to_id: &'a str,
         max_depth: usize,
-    ) -> GraphFuture<'a, Option<Vec<(Node, Option<Edge>)>>>;
+    ) -> GraphFuture<'a, Option<GraphCallChain>>;
     fn get_impact_radius<'a>(
         &'a self,
         node_id: &'a str,
@@ -149,7 +151,7 @@ pub trait GraphRuntimePort: Send + Sync {
         node_kind: Option<&'a NodeKind>,
         path_prefix: Option<&'a str>,
         limit: usize,
-    ) -> GraphFuture<'a, Vec<(Node, u32, u64, u64, u64)>>;
+    ) -> GraphFuture<'a, Vec<ComplexityRankedNode>>;
     fn run_diagnostics<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<EditDiagnosticRecord>>;
     fn redundancy<'a>(
         &'a self,

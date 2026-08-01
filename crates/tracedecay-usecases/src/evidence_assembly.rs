@@ -375,58 +375,51 @@ fn authorize_runtime_anchor_resolution_at(
 }
 
 impl tracedecay_store::EvidenceAssemblyStore for RuntimeEvidenceAssemblyStore {
-    fn publish_or_replay(
+    async fn publish_or_replay(
         &self,
         write: tracedecay_store::EvidenceAssemblyWriteV1,
-    ) -> impl std::future::Future<
-        Output = tracedecay_store::EvidenceAssemblyStoreResult<
-            tracedecay_store::EvidenceAssemblyPublicationOutcomeV1,
-        >,
-    > + Send {
-        async move {
-            write.validate()?;
-            self.validate_owner(&write.owner)?;
-            let expected = write.receipt.clone();
-            let read =
-                tracedecay_store::EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
-                    owner: write.owner.clone(),
-                    idempotency_key: write.idempotency_key.clone(),
-                };
-            let request = evidence_runtime_submit_request(self.runtime.binding(), write)?;
-            let probe = Arc::new(EvidenceRuntimeProbe::from_control(request.control()));
-            let replayed = match self
-                .runtime
-                .dispatch_submit_authorized(request, probe, self.authority.clone())
-                .await
-                .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?
+    ) -> tracedecay_store::EvidenceAssemblyStoreResult<
+        tracedecay_store::EvidenceAssemblyPublicationOutcomeV1,
+    > {
+        write.validate()?;
+        self.validate_owner(&write.owner)?;
+        let expected = write.receipt.clone();
+        let read = tracedecay_store::EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
+            owner: write.owner.clone(),
+            idempotency_key: write.idempotency_key.clone(),
+        };
+        let request = evidence_runtime_submit_request(self.runtime.binding(), write)?;
+        let probe = Arc::new(EvidenceRuntimeProbe::from_control(request.control()));
+        let replayed = match self
+            .runtime
+            .dispatch_submit_authorized(request, probe, self.authority.clone())
+            .await
+            .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?
+        {
+            tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+            | tracedecay_store::RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => false,
+            tracedecay_store::RuntimeSubmitOutcomeV1::ExactReplay { .. } => true,
+            tracedecay_store::RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
+            }
+            _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+        };
+        let receipt = match self.read(read)? {
+            tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(receipt))
+                if receipt == expected =>
             {
-                tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
-                | tracedecay_store::RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. } => {
-                    false
-                }
-                tracedecay_store::RuntimeSubmitOutcomeV1::ExactReplay { .. } => true,
-                tracedecay_store::RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
-                    return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
-                }
-                _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
-            };
-            let receipt = match self.read(read)? {
-                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(receipt))
-                    if receipt == expected =>
-                {
-                    receipt
-                }
-                tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(_)) => {
-                    return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
-                }
-                _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
-            };
-            Ok(if replayed {
-                tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Replayed(receipt)
-            } else {
-                tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Published(receipt)
-            })
-        }
+                receipt
+            }
+            tracedecay_store::EvidenceAssemblyReadResultV1::Publication(Some(_)) => {
+                return Err(tracedecay_store::EvidenceAssemblyStoreError::ReplayConflict);
+            }
+            _ => return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable),
+        };
+        Ok(if replayed {
+            tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Replayed(receipt)
+        } else {
+            tracedecay_store::EvidenceAssemblyPublicationOutcomeV1::Published(receipt)
+        })
     }
 
     fn drilldown_contribution(
