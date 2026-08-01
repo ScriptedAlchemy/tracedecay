@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
@@ -374,10 +375,8 @@ pub async fn hook_cursor_session_start() -> i32 {
     0
 }
 
-fn cursor_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
-    cursor_event_cwd(parsed).map(|cwd| {
-        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Cursor, cwd)
-    })
+fn cursor_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
+    cursor_event_cwd(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Cursor, cwd))
 }
 
 /// Builds the lean Cursor `sessionStart` context for a resolved project root.
@@ -758,7 +757,7 @@ async fn notify_cursor_after_file_edit(
     }
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels)
+        DaemonHookEvent::cursor_after_file_edit(rels)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -782,7 +781,7 @@ async fn notify_cursor_after_shell_event(
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(cwd)
+        DaemonHookEvent::cursor_after_shell_execution(cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -802,7 +801,7 @@ async fn notify_cursor_workspace_open(
     }
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone())
+        DaemonHookEvent::cursor_workspace_open(root.clone())
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -1065,7 +1064,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(event.agent, crate::daemon::HookAgent::Cursor.as_wire());
+        assert_eq!(event.agent, HookAgent::Cursor.as_wire());
         assert_eq!(event.event, "sessionStart");
         assert_eq!(
             event.cwd.as_deref(),
