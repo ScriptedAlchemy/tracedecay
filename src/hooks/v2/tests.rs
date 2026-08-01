@@ -707,7 +707,8 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
 
 #[test]
 fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
-    let fixture = include_str!("../../../tests/fixtures/packaged_host_events/hermes/saved-edit.json");
+    let fixture =
+        include_str!("../../../tests/fixtures/packaged_host_events/hermes/saved-edit.json");
     let material = native_material(
         fixture,
         tracedecay_hooks::HookEventFamily::ToolLifecycle,
