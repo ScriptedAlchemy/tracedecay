@@ -643,8 +643,8 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
                 file.write_all(format!("{line}\n").as_bytes())?;
                 file.sync_all()?;
             }
+            #[cfg(unix)]
             if let Some(parent) = path.parent() {
-                #[cfg(unix)]
                 std::fs::File::open(parent)?.sync_all()?;
             }
             Ok(())
