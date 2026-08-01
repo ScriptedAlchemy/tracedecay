@@ -141,7 +141,7 @@ async fn admit_canonical_effect(
     ordinal: u64,
     text: &str,
 ) {
-    let store = db.observation_store();
+    let store = crate::store::GlobalDbObservationStore::with_runtime(db.runtime(), db.authority());
     store
         .persist_observation(anchored_write(canonical_observation(
             session_id, ordinal, text,
