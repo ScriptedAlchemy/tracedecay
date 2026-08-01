@@ -7,6 +7,7 @@ members = [
     "crates/tracedecay-capture",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
+    "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",
     "crates/tracedecay-host-integration",
@@ -134,7 +135,7 @@ production = [
 # Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
 # vocab decoding is lazy (first count pays it, idle servers never do).
 # Disable for a leaner binary — cost estimation falls back to chars/4.
-token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting"]
+token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
@@ -183,9 +184,13 @@ lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
 test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
+<<<<<<< HEAD
     "tracedecay-runtime-core/test-transport",
     "tracedecay-migrate/test-transport",
     "tracedecay-agent-hosts/test-transport",
+=======
+    "tracedecay-dashboard-api/test-transport",
+>>>>>>> worktree-agent-aecb5073a6fd9c7b1
 ]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
@@ -240,6 +245,7 @@ tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.
 tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api", version = "0.1.0" }
 tracedecay-domain = { path = "crates/tracedecay-domain", version = "0.1.0" }
 tracedecay-host-integration = { path = "crates/tracedecay-host-integration", version = "0.1.0" }
 tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }

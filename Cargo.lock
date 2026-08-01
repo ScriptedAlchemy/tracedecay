@@ -5546,6 +5546,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-hooks",
@@ -5700,6 +5701,30 @@ dependencies = [
  "tracedecay-domain",
  "tree-sitter",
  "tree-sitter-language",
+]
+
+[[package]]
+name = "tracedecay-dashboard-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dirs",
+ "open",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tracedecay-api",
+ "tracedecay-application",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracedecay-tool-catalog",
+ "tracing",
 ]
 
 [[package]]
