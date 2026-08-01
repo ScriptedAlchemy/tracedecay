@@ -99,7 +99,6 @@ use retrieval::{
 use session_reflector::{auto_apply_session_fact_proposals, validate_session_fact_proposals};
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
-#[cfg(unix)]
 pub use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
@@ -234,11 +233,13 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
 ) -> Result<SkillWriterAutomationRun> {
     let sessions_db = project_automation_sessions(cg).await?;
     run_skill_writer_for_store(
-        cg.store_layout().dashboard_root.clone(),
-        sessions_db,
+        SkillWriterStoreRuntime {
+            dashboard_root: cg.store_layout().dashboard_root.clone(),
+            sessions_db,
+            analytics_project_root: Some(cg.project_root()),
+            analytics_db: Some(cg.profile_database().as_ref()),
+        },
         retrieval,
-        Some(cg.project_root()),
-        Some(cg.profile_database().as_ref()),
         config,
         backend,
         options,
@@ -257,11 +258,13 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     options.profile_root = Some(profile_root.to_path_buf());
     let sessions_db = session_registry.profile_sessions().await?;
     run_skill_writer_for_store(
-        user_automation_root(profile_root),
-        sessions_db,
+        SkillWriterStoreRuntime {
+            dashboard_root: user_automation_root(profile_root),
+            sessions_db,
+            analytics_project_root: None,
+            analytics_db: None,
+        },
         retrieval,
-        None,
-        None,
         config,
         backend,
         options,
@@ -269,16 +272,26 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     .await
 }
 
-async fn run_skill_writer_for_store(
+struct SkillWriterStoreRuntime<'a> {
     dashboard_root: PathBuf,
     sessions_db: Arc<RegisteredGlobalDb>,
+    analytics_project_root: Option<&'a Path>,
+    analytics_db: Option<&'a RegisteredGlobalDb>,
+}
+
+async fn run_skill_writer_for_store(
+    runtime: SkillWriterStoreRuntime<'_>,
     retrieval: &dyn AutomationSessionRetrieval,
-    analytics_project_root: Option<&std::path::Path>,
-    analytics_db: Option<&RegisteredGlobalDb>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
+    let SkillWriterStoreRuntime {
+        dashboard_root,
+        sessions_db,
+        analytics_project_root,
+        analytics_db,
+    } = runtime;
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
         sessions_db,
@@ -591,6 +604,11 @@ pub struct CombinedReviewAutomationRun {
     pub skill_writer: SkillWriterAutomationRun,
 }
 
+struct CombinedReviewEvidence<'a> {
+    reflector: &'a SessionReflectorEvidenceBundle,
+    skill: &'a SkillWriterEvidenceBundle,
+}
+
 /// Outcome of attempting the combined dispatch. `NotCombined` means the
 /// caller should fall back to the normal sequential per-task runs; nothing
 /// was recorded and no locks are held.
@@ -703,6 +721,10 @@ async fn run_combined_review_for_retrieval(
                 reason: "skill_writer_evidence_unavailable",
             });
         }
+    };
+    let evidence_bundles = CombinedReviewEvidence {
+        reflector: &reflector_bundle,
+        skill: &skill_bundle,
     };
 
     let _reflector_lock = match acquire_combined_task_lock(
@@ -834,8 +856,7 @@ async fn run_combined_review_for_retrieval(
                 &reflector_finalizer,
                 &skill_finalizer,
                 &response,
-                &reflector_bundle,
-                &skill_bundle,
+                &evidence_bundles,
                 None,
                 &err,
                 &retry_report,
@@ -857,8 +878,7 @@ async fn run_combined_review_for_retrieval(
             &reflector_finalizer,
             &skill_finalizer,
             &response,
-            &reflector_bundle,
-            &skill_bundle,
+            &evidence_bundles,
             Some(&output),
             &err,
             &retry_report,
@@ -877,8 +897,7 @@ async fn run_combined_review_for_retrieval(
             &reflector_finalizer,
             &skill_finalizer,
             &response,
-            &reflector_bundle,
-            &skill_bundle,
+            &evidence_bundles,
             Some(&output),
             &err,
             &retry_report,
@@ -911,8 +930,7 @@ async fn run_combined_review_for_retrieval(
                 &reflector_finalizer,
                 &skill_finalizer,
                 &response,
-                &reflector_bundle,
-                &skill_bundle,
+                &evidence_bundles,
                 Some(&output),
                 &err,
                 &retry_report,
@@ -946,8 +964,7 @@ async fn run_combined_review_for_retrieval(
                 &reflector_finalizer,
                 &skill_finalizer,
                 &response,
-                &reflector_bundle,
-                &skill_bundle,
+                &evidence_bundles,
                 Some(&output),
                 &err,
                 &retry_report,
@@ -1016,8 +1033,7 @@ async fn append_combined_failed_records(
     reflector_finalizer: &AgentRunFinalizer<'_>,
     skill_finalizer: &AgentRunFinalizer<'_>,
     response: &AgentTaskResponse,
-    reflector_bundle: &SessionReflectorEvidenceBundle,
-    skill_bundle: &SkillWriterEvidenceBundle,
+    evidence: &CombinedReviewEvidence<'_>,
     proposed_ops: Option<&Value>,
     err: &TraceDecayError,
     retry_report: &AgentTaskRetryReport,
@@ -1025,7 +1041,7 @@ async fn append_combined_failed_records(
     let reflector_record = reflector_finalizer
         .append_failed_record(
             response.model.clone(),
-            reflector_bundle.evidence_hash.clone(),
+            evidence.reflector.evidence_hash.clone(),
             proposed_ops.cloned(),
             err.to_string(),
             retry_report,
@@ -1034,7 +1050,7 @@ async fn append_combined_failed_records(
     let skill_record = skill_finalizer
         .append_failed_record(
             response.model.clone(),
-            skill_bundle.evidence_hash.clone(),
+            evidence.skill.evidence_hash.clone(),
             proposed_ops.cloned(),
             err.to_string(),
             retry_report,
