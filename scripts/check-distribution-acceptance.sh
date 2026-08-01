@@ -79,7 +79,6 @@ assert_required_assets() {
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
-    "tests/session_suite/lcm_schema/mod.rs"
     "benchmarks/pr5-observation/workload-v1.json"
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
     "benchmarks/search-quality/query-fallback-report-v1.json"
