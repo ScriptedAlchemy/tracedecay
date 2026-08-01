@@ -56,7 +56,7 @@ pub enum DatabaseAuthorityRole {
 }
 
 #[cfg_attr(
-    not(feature = "test-transport"),
+    not(any(feature = "test-helpers", feature = "test-transport")),
     doc = r#"
 Production builds do not expose the integration-fixture authority escape hatch.
 
@@ -378,7 +378,7 @@ impl DatabaseAuthority {
 
     /// Test escape hatch for integration fixtures. Production paths are
     /// rejected even when a caller can reach this hidden API.
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     #[doc(hidden)]
     pub fn acquire_test(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
@@ -582,7 +582,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
     access_error(operation, path, &error.to_string())
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {

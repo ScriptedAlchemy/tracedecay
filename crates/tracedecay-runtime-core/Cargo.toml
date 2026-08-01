@@ -12,9 +12,10 @@ default = []
 # in-process transport doubles used by storage-runtime tests.
 test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
-# surfaces (currently `db::engine::TestConnection`) to dependent crates' test
-# builds. Never gates production code. Distinct from `test-transport`, which
-# gates in-process transport doubles and forwards a dependency feature.
+# surfaces (engine fixtures and explicit database fixture runtimes) to
+# dependent crates' test builds. Never gates production code or forwards a
+# dependency feature. Distinct from `test-transport`, which gates in-process
+# transport doubles and forwards a dependency feature.
 test-helpers = []
 
 [dependencies]

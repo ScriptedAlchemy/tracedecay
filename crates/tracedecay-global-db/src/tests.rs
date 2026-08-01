@@ -1,11 +1,15 @@
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
 pub mod harness;
 
+#[cfg(test)]
 use harness::RegisteredGlobalDbHarness;
 
+#[cfg(test)]
 async fn table_exists(db: &RegisteredGlobalDb, table: &str) -> bool {
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -18,6 +22,7 @@ async fn table_exists(db: &RegisteredGlobalDb, table: &str) -> bool {
     rows.next().await.unwrap().is_some()
 }
 
+#[cfg(test)]
 async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot

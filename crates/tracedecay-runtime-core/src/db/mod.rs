@@ -41,7 +41,7 @@ pub use access::{
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::Database;
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::TestDatabaseRuntimeMode;
 pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,

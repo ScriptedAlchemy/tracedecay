@@ -224,6 +224,7 @@ impl RegisteredGlobalDb {
     /// `live_root`. The database move is one transaction; the manifest is
     /// written before commit and restored if commit fails, so retries can
     /// safely resume either side of an interrupted filesystem/database pair.
+    #[allow(clippy::too_many_arguments)]
     pub async fn relink_orphan_store_instance(
         &self,
         source_project_id: &str,
