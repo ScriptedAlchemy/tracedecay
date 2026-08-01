@@ -604,6 +604,103 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
+    #[doc(hidden)]
+    pub fn mcp_session_authorities(&self) -> crate::mcp::tools::SessionAuthorities<'_> {
+        crate::mcp::tools::SessionAuthorities::new(
+            self.project_registered.as_ref(),
+            Some(&self.profile_registered),
+        )
+        .with_registered_databases(
+            self.project_registered.as_ref(),
+            Some(&self.profile_registered),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unregistered_mcp_session_authorities_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> crate::mcp::tools::SessionAuthorities<'_> {
+        match scope {
+            HostAdmissionScope::Project => {
+                crate::mcp::tools::SessionAuthorities::new(self.project_registered.as_ref(), None)
+            }
+            HostAdmissionScope::Profile => {
+                crate::mcp::tools::SessionAuthorities::new(None, Some(&self.profile_registered))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_admission_broker_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<SharedHostAdmissionBroker> {
+        let database = self.session_database_for_test(scope)?;
+        let (runtime, _) =
+            HostAdmissionRuntime::open_for_database(database.db_path()).map_err(|outcome| {
+                TraceDecayError::Database {
+                    operation: "open registered host-admission test broker".to_owned(),
+                    message: outcome
+                        .reason_code
+                        .unwrap_or("spool_runtime_unavailable")
+                        .to_owned(),
+                }
+            })?;
+        Ok(Arc::new(HostAdmissionBroker::new(runtime)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_mcp_server_context_for_test(
+        self,
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+    ) -> Result<crate::mcp::server::McpServerConstructionContext> {
+        Arc::new(self).mcp_server_context_for_test(cg, scope_prefix)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_server_context_for_test(
+        self: Arc<Self>,
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+    ) -> Result<crate::mcp::server::McpServerConstructionContext> {
+        let profile_root = self.profile_root.clone();
+        let transcript_source_home =
+            profile_root
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!(
+                        "test profile '{}' has no isolated transcript-source home",
+                        profile_root.display()
+                    ),
+                })?;
+        let project_sessions =
+            self.project_registered
+                .clone()
+                .ok_or_else(|| TraceDecayError::Database {
+                    operation: "bind MCP test project sessions".to_owned(),
+                    message: "registered ProjectSessions mount is unavailable".to_owned(),
+                })?;
+        let profile_database = Arc::clone(&self.profile_database);
+        let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let mut context =
+            crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
+                .with_direct_databases(
+                    Some(Arc::clone(&profile_database)),
+                    Some(profile_database),
+                    Some(project_sessions),
+                    Some(profile_sessions),
+                );
+        context.profile_root = Some(profile_root);
+        context.profile_identity = Some(profile_identity);
+        context.transcript_source_home = Some(transcript_source_home);
+        context.host_admission_test_runtime = Some(self);
+        Ok(context)
+    }
+
     #[cfg(test)]
     pub(crate) async fn correlate_hint_outcomes_for_test(
         &self,
