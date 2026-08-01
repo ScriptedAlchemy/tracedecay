@@ -124,7 +124,7 @@ impl CodexStructuredState {
                 let Some(payload) = record.get("payload") else {
                     return;
                 };
-                if let Some(policy) = string_field(payload, "approval_policy") {
+                if let Some(policy) = super::meta::string_field(payload, "approval_policy") {
                     self.summary.approval_policy = Some(policy);
                 }
                 if let Some(sandbox) = payload
@@ -133,7 +133,7 @@ impl CodexStructuredState {
                 {
                     self.summary.sandbox_policy = Some(sandbox.to_string());
                 }
-                if let Some(effort) = string_field(payload, "effort").or_else(|| {
+                if let Some(effort) = super::meta::string_field(payload, "effort").or_else(|| {
                     payload
                         .pointer("/collaboration_mode/settings/reasoning_effort")
                         .and_then(Value::as_str)
@@ -141,7 +141,7 @@ impl CodexStructuredState {
                 }) {
                     self.summary.effort = Some(effort);
                 }
-                if let Some(model) = string_field(payload, "model") {
+                if let Some(model) = super::meta::string_field(payload, "model") {
                     self.summary.models.insert(model);
                 }
             }
@@ -382,14 +382,6 @@ impl CodexStructuredState {
             .map(|exec| exec_command_row(exec, meta, path, None))
             .collect()
     }
-}
-
-fn string_field(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
 }
 
 fn timestamp_of(record: &Value) -> Option<i64> {

@@ -430,12 +430,6 @@ fn paginate_summary_sources(
     (page, pagination)
 }
 
-/// Mirrors `compression::estimate_tokens`: deterministic whitespace-word
-/// token estimate used for the `lcm_status` store size diagnostic.
-fn estimate_tokens(text: &str) -> i64 {
-    text.split_whitespace().count().max(1) as i64
-}
-
 struct ExpandQueryAssembler {
     context_blocks: Vec<LcmExpandQueryContextBlock>,
     context_pagination: Vec<LcmExpandQueryPagination>,
