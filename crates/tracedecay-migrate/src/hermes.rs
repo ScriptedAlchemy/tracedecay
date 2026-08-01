@@ -72,7 +72,7 @@ pub struct LegacyHermesMigrationReport {
 /// the normal `TraceDecay` user profile. No environment or working-directory
 /// override can redirect discovery.
 pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigrationReport {
-    let Ok(profile_root) = crate::root_seam::storage::default_profile_root() else {
+    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return LegacyHermesMigrationReport {
             failed: vec![LegacyHermesMigrationIssue {
                 source_db: user_home.join(".hermes/.tracedecay/sessions.db"),
@@ -121,9 +121,9 @@ pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigra
 /// avoids trying to acquire a second exclusive lock from the same process.
 pub async fn migrate_legacy_hermes_stores_under_lease(
     user_home: &Path,
-    lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+    lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> LegacyHermesMigrationReport {
-    let Ok(profile_root) = crate::root_seam::storage::default_profile_root() else {
+    let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return LegacyHermesMigrationReport {
             failed: vec![LegacyHermesMigrationIssue {
                 source_db: user_home.join(".hermes/.tracedecay/sessions.db"),
@@ -179,7 +179,7 @@ async fn migrate_legacy_hermes_stores_inner(
     hermes_homes: &[PathBuf],
     fail_after_table: Option<&str>,
 ) -> LegacyHermesMigrationReport {
-    let lifecycle = match crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = match tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         tracedecay_profile_root,
         "legacy Hermes store migration",
     ) {
@@ -202,10 +202,10 @@ async fn migrate_legacy_hermes_stores_with_lease(
     user_home: &Path,
     tracedecay_profile_root: &Path,
     hermes_homes: &[PathBuf],
-    lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+    lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
     fail_after_table: Option<&str>,
 ) -> LegacyHermesMigrationReport {
-    let _database_scope = match crate::root_seam::db::enter_maintenance_database_scope(
+    let _database_scope = match tracedecay_runtime_core::db::enter_maintenance_database_scope(
         lifecycle,
         tracedecay_profile_root,
         "legacy Hermes store migration",
@@ -401,9 +401,9 @@ mod tests {
     use crate::root_seam::application::host_admission::{
         HostAdmissionScope, HostAdmissionTestRuntimeV1,
     };
-    use crate::root_seam::db::engine::{Executor, QueryExecutor, TestConnection, params};
-    use crate::root_seam::memory::store::MemoryStore;
-    use crate::root_seam::memory::types::{
+    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+    use tracedecay_runtime_core::memory::store::MemoryStore;
+    use tracedecay_runtime_core::memory::types::{
         AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
     };
     use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
@@ -450,13 +450,13 @@ mod tests {
     impl HermesMigrationTestRuntime {
         async fn create(path: &Path) -> Self {
             if let Some(parent) = path.parent() {
-                crate::root_seam::storage::PrivateStoreIo::create_dir_all(parent).unwrap();
+                tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(parent).unwrap();
             }
             let connection = TestConnection::open_with_write_authority(
                 path,
                 Arc::new(ForeignFixtureWriteAuthority),
             );
-            crate::root_seam::db::migrations::migrate_connection(&connection)
+            tracedecay_runtime_core::db::migrations::migrate_connection(&connection)
                 .await
                 .unwrap();
             crate::root_seam::global_db::ensure_registered_schema(&connection)
@@ -652,14 +652,14 @@ mod tests {
         }
 
         async fn assert_memory_merge_waits_for_writer(source_path: &Path, target_path: &Path) {
-            let source = crate::root_seam::sqlite_read_snapshot::open(source_path)
+            let source = tracedecay_runtime_core::sqlite_read_snapshot::open(source_path)
                 .await
                 .unwrap();
             let target = Self::create(target_path).await;
             let writer = target
                 .connection
                 .transaction_with_behavior(
-                    crate::root_seam::db::engine::TransactionBehavior::Immediate,
+                    tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate,
                 )
                 .await
                 .unwrap();
@@ -775,7 +775,7 @@ mod tests {
     }
 
     async fn immutable_source_count(path: &Path, table: HermesFixtureTable) -> i64 {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path)
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(path)
             .await
             .unwrap();
         let count = query_count(snapshot.connection(), table).await;
@@ -784,7 +784,7 @@ mod tests {
     }
 
     async fn immutable_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path)
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(path)
             .await
             .unwrap();
         let mut rows = snapshot
@@ -826,7 +826,7 @@ mod tests {
         profile_root: &Path,
         project_root: &Path,
     ) -> HostAdmissionTestRuntimeV1 {
-        let layout = crate::root_seam::storage::resolve_layout(project_root, profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(project_root, profile_root).unwrap();
         HostAdmissionTestRuntimeV1::project(
             profile_root,
             project_root,
@@ -914,16 +914,16 @@ mod tests {
         fs::write(project.join(".tracedecay/tracedecay.db"), []).unwrap();
         write_project_enrollment(
             project,
-            &crate::root_seam::storage::default_profile_project_id(project),
+            &tracedecay_runtime_core::storage::default_profile_project_id(project),
         );
     }
 
     fn write_project_enrollment(project: &Path, project_id: &str) {
-        crate::root_seam::storage::write_enrollment_marker(
+        tracedecay_runtime_core::storage::write_enrollment_marker(
             project,
-            &crate::root_seam::storage::EnrollmentMarker {
+            &tracedecay_runtime_core::storage::EnrollmentMarker {
                 project_id: project_id.to_string(),
-                storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             },
         )
         .unwrap();
@@ -935,7 +935,7 @@ mod tests {
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("profile");
         let hermes_homes = [user_home.join(".hermes")];
-        let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             "post-update test",
         )
@@ -968,7 +968,7 @@ mod tests {
             }
         }
 
-        let _profile = crate::root_seam::config::PinnedUserDataDir::new();
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let user_home = tempfile::tempdir().unwrap();
         let _xdg_config = RestoreXdgConfig(std::env::var_os("XDG_CONFIG_HOME"));
         unsafe {
@@ -979,8 +979,8 @@ mod tests {
 
         assert!(report.failed.is_empty(), "{report:?}");
         assert!(report.unresolved.is_empty(), "{report:?}");
-        let profile_root = crate::root_seam::storage::default_profile_root().unwrap();
-        let reacquired = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+        let reacquired = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
             &profile_root,
             "post-migration test",
         );
@@ -1068,7 +1068,7 @@ mod tests {
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
         assert!(first.migrated[0].rows_copied >= 3);
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = registered_project_target(&profile_root, &project).await;
         let counts = target
             .transcript_store_counts_for_test(
@@ -1137,7 +1137,7 @@ mod tests {
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
         let initial_rows_copied = first.migrated[0].rows_copied;
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = registered_project_target(&profile_root, &project).await;
         assert_eq!(
             target
@@ -1233,7 +1233,7 @@ mod tests {
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let facts = immutable_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].0, "facts survive without sessions");
@@ -1433,8 +1433,8 @@ mod tests {
             .await;
         drop(source_runtime);
 
-        crate::root_seam::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let target_runtime = HermesMigrationTestRuntime::create(&layout.graph_db_path).await;
         let target_fact_id = target_runtime
             .add_memory_fact_request(AddFactRequest {
@@ -1586,7 +1586,7 @@ mod tests {
             2
         );
         assert!(
-            !crate::root_seam::storage::resolve_layout(&first, &profile_root)
+            !tracedecay_runtime_core::storage::resolve_layout(&first, &profile_root)
                 .unwrap()
                 .sessions_db_path
                 .exists()
@@ -1663,7 +1663,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let path_hash_layout = crate::root_seam::storage::default_profile_sharded_layout(
+        let path_hash_layout = tracedecay_runtime_core::storage::default_profile_sharded_layout(
             &current_project,
             &profile_root,
         )
@@ -1778,21 +1778,21 @@ mod tests {
         let project = temp.path().join("project");
         mark_real_project(&project);
         let legacy_shard = profile_root.join("projects/legacy-hermes-identity");
-        let source = legacy_shard.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
+        let source = legacy_shard.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
         fs::create_dir_all(&legacy_shard).unwrap();
-        let manifest = crate::root_seam::storage::StoreManifest {
-            schema_version: crate::root_seam::storage::STORE_MANIFEST_SCHEMA_VERSION,
+        let manifest = tracedecay_runtime_core::storage::StoreManifest {
+            schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
             project_id: Some("legacy-hermes-identity".into()),
-            store_kind: crate::root_seam::storage::StoreKind::CodeProject,
-            storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+            store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             project_root: hermes.clone(),
             data_root: legacy_shard.clone(),
             graph_db_relpath: PathBuf::from("tracedecay.db"),
-            sessions_db_relpath: PathBuf::from(crate::root_seam::storage::SESSIONS_DB_FILENAME),
-            branch_meta_relpath: PathBuf::from(crate::root_seam::storage::BRANCH_META_FILENAME),
+            sessions_db_relpath: PathBuf::from(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME),
+            branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         };
         fs::write(
-            legacy_shard.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
+            legacy_shard.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
@@ -1812,7 +1812,7 @@ mod tests {
             1
         );
         let target_layout =
-            crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+            tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         assert_ne!(target_layout.sessions_db_path, source);
         let target = registered_project_target(&profile_root, &project).await;
         assert!(
@@ -1840,21 +1840,21 @@ mod tests {
         let profile_root = temp.path().join("tracedecay-profile");
         let hermes = user_home.join(".hermes");
         let legacy_shard = profile_root.join("projects/legacy-hermes-projectless");
-        let source = legacy_shard.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
+        let source = legacy_shard.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
         fs::create_dir_all(&legacy_shard).unwrap();
-        let manifest = crate::root_seam::storage::StoreManifest {
-            schema_version: crate::root_seam::storage::STORE_MANIFEST_SCHEMA_VERSION,
+        let manifest = tracedecay_runtime_core::storage::StoreManifest {
+            schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
             project_id: Some("legacy-hermes-projectless".into()),
-            store_kind: crate::root_seam::storage::StoreKind::CodeProject,
-            storage_mode: crate::root_seam::storage::StorageMode::ProfileSharded,
+            store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
             project_root: hermes.clone(),
             data_root: legacy_shard.clone(),
             graph_db_relpath: PathBuf::from("tracedecay.db"),
-            sessions_db_relpath: PathBuf::from(crate::root_seam::storage::SESSIONS_DB_FILENAME),
-            branch_meta_relpath: PathBuf::from(crate::root_seam::storage::BRANCH_META_FILENAME),
+            sessions_db_relpath: PathBuf::from(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME),
+            branch_meta_relpath: PathBuf::from(tracedecay_runtime_core::storage::BRANCH_META_FILENAME),
         };
         fs::write(
-            legacy_shard.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME),
+            legacy_shard.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
@@ -1950,7 +1950,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(session.project_path, "user");
-        assert!(!crate::root_seam::memory::user::user_memory_db_path(&profile_root).exists());
+        assert!(!tracedecay_runtime_core::memory::user::user_memory_db_path(&profile_root).exists());
         assert_eq!(
             immutable_source_count(&source, HermesFixtureTable::Sessions).await,
             1
@@ -2095,7 +2095,7 @@ mod tests {
 
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.migrated.is_empty());
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         assert!(!layout.sessions_db_path.exists());
     }
 
@@ -2119,7 +2119,7 @@ mod tests {
         assert!(report.unresolved[0].reason.contains("ambiguous"));
         assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
         let project_layout =
-            crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+            tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         assert!(!project_layout.sessions_db_path.exists());
     }
 
@@ -2143,7 +2143,7 @@ mod tests {
         assert_eq!(report.failed.len(), 1, "{report:?}");
         assert!(report.failed[0].reason.contains("newer"));
         assert!(
-            !crate::root_seam::storage::resolve_layout(&project, &profile_root)
+            !tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root)
                 .unwrap()
                 .sessions_db_path
                 .exists()
@@ -2170,7 +2170,7 @@ mod tests {
             .insert_external_payload(payload_ref, payload)
             .await;
         drop(source_runtime);
-        let layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let layout = tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = registered_project_target(&profile_root, &project).await;
         assert!(
             target

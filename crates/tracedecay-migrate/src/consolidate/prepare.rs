@@ -7,7 +7,7 @@ use tracedecay_application::DirectorySyncPolicy;
 
 use super::files::{remove_runtime_files, sqlite_sidecar};
 use super::*;
-use crate::root_seam::branch_meta::BranchEntry;
+use tracedecay_runtime_core::branch_meta::BranchEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrepareStop {
@@ -196,7 +196,7 @@ fn staging_root(resolved: &ResolvedPlan) -> Result<PathBuf> {
 }
 
 fn source_branch_stem(branch_name: &str) -> String {
-    let base = crate::root_seam::branch::sanitize_branch_name(branch_name)
+    let base = tracedecay_runtime_core::branch::sanitize_branch_name(branch_name)
         .chars()
         .take(180)
         .collect::<String>();

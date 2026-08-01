@@ -16,10 +16,10 @@ use crate::root_seam::daemon::store_runtime::registry::{
     StoreRuntimeRegistryConfig, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-use crate::root_seam::db::{
+use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope,
 };
-use crate::root_seam::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,7 +213,7 @@ impl ConsolidationRuntimeOwnerV1 {
     pub(super) async fn new(
         profile_root: &Path,
         root: &Path,
-        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+        lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -578,7 +578,7 @@ pub(super) struct FrozenInputRuntimeSetV1 {
 impl FrozenInputRuntimeSetV1 {
     pub(super) async fn acquire(
         profile_root: &Path,
-        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+        lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -942,7 +942,7 @@ fn validate_relative_locator(locator: &Path) -> Result<()> {
 }
 
 fn current_file_identity(path: &Path) -> Result<u64> {
-    crate::root_seam::db::sqlite_generation_identity(path).map_err(|_| {
+    tracedecay_runtime_core::db::sqlite_generation_identity(path).map_err(|_| {
         runtime_error(format!(
             "could not verify consolidation artifact file identity '{}'",
             path.display()

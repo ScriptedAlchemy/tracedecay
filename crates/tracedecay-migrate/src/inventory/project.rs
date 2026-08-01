@@ -10,9 +10,9 @@ use crate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath,
     SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
-use crate::root_seam::config::{self, TRACEDECAY_DIR, db_filename};
-use crate::root_seam::errors::Result;
-use crate::root_seam::storage::{
+use tracedecay_runtime_core::config::{self, TRACEDECAY_DIR, db_filename};
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_runtime_core::storage::{
     BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME,
 };
 
@@ -126,9 +126,9 @@ pub(super) async fn inspect_data_dir_candidate(
     if role == StoreRole::CodeProjectStore
         && dir_name == TRACEDECAY_DIR
         && !db_path.is_file()
-        && crate::root_seam::storage::read_enrollment_marker(project_root).is_ok_and(|marker| {
+        && tracedecay_runtime_core::storage::read_enrollment_marker(project_root).is_ok_and(|marker| {
             marker.is_some_and(|marker| {
-                marker.storage_mode == crate::root_seam::storage::StorageMode::ProfileSharded
+                marker.storage_mode == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
             })
         })
     {
@@ -289,10 +289,10 @@ async fn inspect_project_store(
 
     let sync_lock = data_dir.join("sync.lock");
     if sync_lock.is_file() {
-        match crate::root_seam::storage::try_acquire_sidecar_lock(&sync_lock) {
+        match tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&sync_lock) {
             Ok(Some(lock)) => drop(lock),
             Ok(None) => statuses.push(StoreStatus::Locked),
-            Err(error) if crate::root_seam::db::is_lock_contended(&error) => {
+            Err(error) if tracedecay_runtime_core::db::is_lock_contended(&error) => {
                 statuses.push(StoreStatus::Locked);
             }
             Err(_) => statuses.push(StoreStatus::NeedsManualReview),
@@ -357,9 +357,9 @@ pub(super) fn push_integrity_issue(
 }
 
 fn current_branch_database(project_root: &Path, data_dir: &Path) -> Option<PathBuf> {
-    let branch = crate::root_seam::branch::current_branch(project_root)?;
-    let metadata = crate::root_seam::branch_meta::load_branch_meta(data_dir)?;
-    crate::root_seam::branch::resolve_branch_db_path(data_dir, &branch, &metadata)
+    let branch = tracedecay_runtime_core::branch::current_branch(project_root)?;
+    let metadata = tracedecay_runtime_core::branch_meta::load_branch_meta(data_dir)?;
+    tracedecay_runtime_core::branch::resolve_branch_db_path(data_dir, &branch, &metadata)
 }
 
 pub(super) fn missing_registered_store(project_root: &Path) -> StoreInventory {
@@ -403,14 +403,14 @@ pub(super) fn canonical_path_set(paths: &[PathBuf]) -> HashSet<PathBuf> {
 }
 
 pub(super) fn canonicalize_lossy(path: &Path) -> PathBuf {
-    crate::root_seam::lifecycle_lease::canonical_or_original(path)
+    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(path)
 }
 
 /// Authoritative prune during migration inventory scans (unlike the
 /// scan.rs hint, nothing here is config-overridable — these directories are
 /// always skipped while hunting for legacy data stores). Delegates the
 /// generated/vendored segment check to the shared
-/// [`crate::root_seam::config::is_generated_dir_segment`] list, plus one site-local
+/// [`tracedecay_runtime_core::config::is_generated_dir_segment`] list, plus one site-local
 /// addition: `.git`, which migration scans always want to skip but which
 /// isn't part of the shared "generated/vendored" concept (the other three
 /// call sites — scan hint, config default excludes, redundancy scanner —

@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use crate::root_seam::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::Executor;
 
 use super::{
     SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
     external_source, mapped_parent_metadata, mapped_turn_message_id, observation, projection,
     query_i64, table_exists,
 };
-use crate::root_seam::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 struct TableVerification {
     label: &'static str,
@@ -17,15 +17,15 @@ struct TableVerification {
 }
 
 pub(in crate::consolidate) async fn verify_session_union_sql(
-    input_snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
+    input_snapshots: &tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet,
     source: &Path,
     target: &Path,
-    destination_snapshots: &crate::root_seam::sqlite_read_snapshot::SnapshotSet,
+    destination_snapshots: &tracedecay_runtime_core::sqlite_read_snapshot::SnapshotSet,
     destination_root: &Path,
     offsets: &SessionMergeOffsets,
     source_project_id: &str,
 ) -> Result<()> {
-    let destination = destination_root.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
+    let destination = destination_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
     let conn = destination_snapshots.get(&destination).map_err(|error| {
         db_error(
             "verify_consolidation",

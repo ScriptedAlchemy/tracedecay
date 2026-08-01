@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use crate::root_seam::db::engine::params;
+use tracedecay_runtime_core::db::engine::params;
 use crate::root_seam::global_db::tests::harness::RegisteredGlobalDbHarness;
 use crate::root_seam::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
 

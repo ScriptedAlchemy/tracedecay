@@ -18,7 +18,7 @@ impl Drop for StoreLocks {
 }
 
 pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<()> {
-    if crate::root_seam::config::user_data_dir()
+    if tracedecay_runtime_core::config::user_data_dir()
         .is_some_and(|root| same_path(&root, &options.profile_root))
         && crate::root_seam::daemon::daemon_reachable()
     {
@@ -32,7 +32,7 @@ pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<(
 #[cfg(not(test))]
 pub(super) fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> Result<()> {
     evaluate_holder_scan(
-        crate::root_seam::open_store_holders::scan(database_paths).map_err(io_error)?,
+        tracedecay_runtime_core::open_store_holders::scan(database_paths).map_err(io_error)?,
     )
 }
 
@@ -42,20 +42,20 @@ pub(super) fn ensure_no_open_store_holders(_database_paths: &[PathBuf]) -> Resul
     // may be unreadable. Keep production discovery fail-closed and exercise
     // its result handling deterministically below.
     evaluate_holder_scan(
-        crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(Vec::new()),
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Supported(Vec::new()),
     )
 }
 
 fn evaluate_holder_scan(
-    scan: crate::root_seam::open_store_holders::OpenStoreHolderScan,
+    scan: tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan,
 ) -> Result<()> {
     match scan {
-        crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(holders)
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Supported(holders)
             if holders.is_empty() =>
         {
             Ok(())
         }
-        crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
             let mut details = String::new();
             for holder in holders {
                 let version = holder.version.as_deref().unwrap_or("version unknown");
@@ -83,7 +83,7 @@ fn evaluate_holder_scan(
                 "profile shard consolidation requires every input store handle to be closed; restart the listed agent hosts and retry (TraceDecay never terminates them automatically):{details}"
             )))
         }
-        crate::root_seam::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
             Err(config_error(format!(
                 "profile shard consolidation cannot prove every input store handle is closed: {reason}; run consolidation on a host with open-store process discovery"
             )))
@@ -198,7 +198,7 @@ fn additional_copy_bytes(source: &Path, target: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{evaluate_holder_scan, truncate_command};
-    use crate::root_seam::open_store_holders::OpenStoreHolderScan;
+    use tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan;
 
     #[test]
     fn holder_command_is_bounded_on_character_boundaries() {
