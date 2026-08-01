@@ -60,15 +60,16 @@ pub use ports::{
 pub use production::current_query_factory;
 pub(crate) use production::project_semantic_generation_pointer;
 pub use production::{
-    PreparedSemanticEvaluationGenerationV1, ProductionSemanticRuntimeV1,
-    SavedCodeGenerationScheduleHookV1, SemanticCompatibleCurrentGenerationSnapshotV1,
-    SemanticVectorPublicationLeaseV1, production_saved_generation_schedule_hook,
-    project_semantic_application_status, project_semantic_production_runtime,
-    project_semantic_source_generation, register_project_semantic_runtime,
-    unregister_project_semantic_runtime,
+    ApplicationSemanticSearchParametersV1, AuthorizedProjectSemanticSearchParametersV1,
+    ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,
 };
 pub use production::{
-    ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,
+    PreparedSemanticEvaluationGenerationV1, ProductionSemanticRuntimeV1,
+    SavedCodeGenerationScheduleHookV1, SavedGenerationScheduleHookParametersV1,
+    SemanticCompatibleCurrentGenerationSnapshotV1, SemanticVectorPublicationLeaseV1,
+    production_saved_generation_schedule_hook, project_semantic_application_status,
+    project_semantic_production_runtime, project_semantic_source_generation,
+    register_project_semantic_runtime, unregister_project_semantic_runtime,
 };
 pub use redundancy::{
     SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,

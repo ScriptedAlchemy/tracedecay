@@ -1307,16 +1307,16 @@ impl ProductionSemanticRuntimeV1 {
             code_generation,
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
-        compose_application_semantic_search(
-            &self.handle,
+        compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
+            handle: &self.handle,
             request,
-            &complete,
+            generation: &complete,
             calibration,
-            &vectors,
+            vectors: &vectors,
             control,
             mode,
             fallback,
-        )
+        })
     }
 
     pub async fn rollback(
@@ -2209,6 +2209,18 @@ where
     CalibratedSemanticQueryService::new(lane).execute(readiness, decision, fallback)
 }
 
+/// Complete input set for one application semantic-search composition.
+pub struct ApplicationSemanticSearchParametersV1<'a, V, C> {
+    pub handle: &'a DaemonSemanticRuntimeHandleV1,
+    pub request: &'a SemanticRetrievalRequestV1<'a>,
+    pub generation: &'a CompleteSemanticGenerationV1,
+    pub calibration: Option<&'a SemanticCalibrationProfileV1>,
+    pub vectors: &'a V,
+    pub control: &'a C,
+    pub mode: SemanticQueryModeV1,
+    pub fallback: Arc<QueryFallbackSubpayload>,
+}
+
 /// Application search composition: admit `SemanticCodeRetriever` only through
 /// [`DaemonSemanticRuntimeHandleV1::query_factory`].
 ///
@@ -2216,19 +2228,22 @@ where
 /// return the frozen query fallback without waiting on `FastEmbed` download or
 /// projection. Exact/lexical/graph owners stay independently callable.
 pub fn compose_application_semantic_search<'a, V, C>(
-    handle: &DaemonSemanticRuntimeHandleV1,
-    request: &'a SemanticRetrievalRequestV1<'a>,
-    generation: &'a CompleteSemanticGenerationV1,
-    calibration: Option<&'a SemanticCalibrationProfileV1>,
-    vectors: &'a V,
-    control: &'a C,
-    mode: SemanticQueryModeV1,
-    fallback: Arc<QueryFallbackSubpayload>,
+    parameters: ApplicationSemanticSearchParametersV1<'a, V, C>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     V: SemanticVectorReadPort,
     C: SemanticExecutionControl + Sync,
 {
+    let ApplicationSemanticSearchParametersV1 {
+        handle,
+        request,
+        generation,
+        calibration,
+        vectors,
+        control,
+        mode,
+        fallback,
+    } = parameters;
     let readiness = semantic_lane_readiness_for_request(handle, request, generation, calibration);
     match readiness {
         SemanticLaneReadinessV1::Ready {
@@ -2311,20 +2326,34 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProductionProjectSemanticSearchBridgeV1;
 
+/// Authenticated project-scoped inputs for production semantic search.
+pub struct AuthorizedProjectSemanticSearchParametersV1<'a, C> {
+    pub project_root: &'a Path,
+    pub code_generation: &'a CodeIndexPublishedGenerationV1,
+    pub request: &'a SemanticRetrievalRequestV1<'a>,
+    pub calibration: Option<&'a SemanticCalibrationProfileV1>,
+    pub control: &'a C,
+    pub mode: SemanticQueryModeV1,
+    pub authorized_query: &'a AuthorizedQueryFallbackV1,
+}
+
 impl ProductionProjectSemanticSearchBridgeV1 {
     pub fn execute<'a, C>(
         &'a self,
-        project_root: &'a Path,
-        code_generation: &'a CodeIndexPublishedGenerationV1,
-        request: &'a SemanticRetrievalRequestV1<'a>,
-        calibration: Option<&'a SemanticCalibrationProfileV1>,
-        control: &'a C,
-        mode: SemanticQueryModeV1,
-        authorized_query: &'a AuthorizedQueryFallbackV1,
+        parameters: AuthorizedProjectSemanticSearchParametersV1<'a, C>,
     ) -> SemanticRuntimeFuture<'a, Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>>
     where
         C: SemanticExecutionControl + Sync + 'a,
     {
+        let AuthorizedProjectSemanticSearchParametersV1 {
+            project_root,
+            code_generation,
+            request,
+            calibration,
+            control,
+            mode,
+            authorized_query,
+        } = parameters;
         if request.query_digest != authorized_query.query_digest {
             return Box::pin(async { Err(SemanticQueryServiceError::InvalidFallback) });
         }
@@ -2569,21 +2598,36 @@ pub fn project_semantic_application_status(
 pub type SavedCodeGenerationScheduleHookV1 =
     Arc<dyn Fn(&CodeIndexPublishedGenerationV1) -> bool + Send + Sync>;
 
+/// Owned authorities and identities captured by a saved-generation hook.
+pub struct SavedGenerationScheduleHookParametersV1 {
+    pub project_root: PathBuf,
+    pub code_index_store_root: PathBuf,
+    pub worktree_id: WorktreeId,
+    pub handle: DaemonSemanticRuntimeHandleV1,
+    pub database: Arc<Database>,
+    pub lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
+    pub resources: SemanticResourceCeilings,
+    pub fair_scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
+}
+
 /// Production hook: enqueue semantic projection for each saved generation.
 ///
 /// Artifact admission remains owned by the model lifecycle. Until a complete
 /// compatible artifact is available the background task fails closed without
 /// joining into exact/lexical/graph search.
 pub fn production_saved_generation_schedule_hook(
-    project_root: PathBuf,
-    code_index_store_root: PathBuf,
-    worktree_id: WorktreeId,
-    handle: DaemonSemanticRuntimeHandleV1,
-    database: Arc<Database>,
-    lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
-    resources: SemanticResourceCeilings,
-    fair_scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
+    parameters: SavedGenerationScheduleHookParametersV1,
 ) -> SavedCodeGenerationScheduleHookV1 {
+    let SavedGenerationScheduleHookParametersV1 {
+        project_root,
+        code_index_store_root,
+        worktree_id,
+        handle,
+        database,
+        lifecycle,
+        resources,
+        fair_scheduler,
+    } = parameters;
     let runtime = Arc::new(ProductionSemanticRuntimeV1::new_with_code_index_store_root(
         handle,
         database,
@@ -3461,16 +3505,16 @@ mod tests {
             checks: AtomicUsize::new(0),
         };
 
-        let outcome = compose_application_semantic_search(
-            &handle,
-            &request,
-            &complete,
-            Some(&calibration),
-            &PanicVectors,
-            &control,
-            SemanticQueryModeV1::FallbackAllowed,
-            composition_fallback(),
-        )
+        let outcome = compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
+            handle: &handle,
+            request: &request,
+            generation: &complete,
+            calibration: Some(&calibration),
+            vectors: &PanicVectors,
+            control: &control,
+            mode: SemanticQueryModeV1::FallbackAllowed,
+            fallback: composition_fallback(),
+        })
         .expect("cancelled semantic composition");
 
         assert!(matches!(
@@ -3627,16 +3671,16 @@ mod tests {
         )
         .expect("complete generation");
 
-        let outcome = compose_application_semantic_search(
-            &handle,
-            &request,
-            &complete,
-            None,
-            &PanicVectors,
-            &IdleControl,
-            SemanticQueryModeV1::FallbackAllowed,
-            composition_fallback(),
-        )
+        let outcome = compose_application_semantic_search(ApplicationSemanticSearchParametersV1 {
+            handle: &handle,
+            request: &request,
+            generation: &complete,
+            calibration: None,
+            vectors: &PanicVectors,
+            control: &IdleControl,
+            mode: SemanticQueryModeV1::FallbackAllowed,
+            fallback: composition_fallback(),
+        })
         .expect("compose while indexing");
         assert!(matches!(
             outcome,

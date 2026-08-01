@@ -189,14 +189,16 @@ impl DaemonInvocationState {
             .map(
                 |((((handle, database), lifecycle), resources), worktree_id)| {
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
-                        project_root.to_path_buf(),
-                        scoped_code_index_store_root.clone(),
-                        worktree_id,
-                        handle.clone(),
-                        database,
-                        lifecycle,
-                        resources,
-                        self.semantic_projection_scheduler.clone(),
+                        crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
+                            project_root: project_root.to_path_buf(),
+                            code_index_store_root: scoped_code_index_store_root.clone(),
+                            worktree_id,
+                            handle: handle.clone(),
+                            database,
+                            lifecycle,
+                            resources,
+                            fair_scheduler: self.semantic_projection_scheduler.clone(),
+                        },
                     )
                 },
             );

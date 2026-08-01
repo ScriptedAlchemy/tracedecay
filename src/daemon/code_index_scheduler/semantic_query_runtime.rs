@@ -21,9 +21,9 @@ use super::query_runtime::{
     ExecutedQuerySearchV1, QuerySearchExecutionErrorV1, QuerySearchExecutionRequestV1,
 };
 use crate::application::semantic_runtime::{
-    CommittedRetrievalProfileStateV1, ProductionProjectSemanticSearchBridgeV1,
-    ProductionSemanticRetrievalConfigurationStoreV1, SemanticConfigurationPinV1,
-    SemanticCurrentLinkedActivationV1,
+    AuthorizedProjectSemanticSearchParametersV1, CommittedRetrievalProfileStateV1,
+    ProductionProjectSemanticSearchBridgeV1, ProductionSemanticRetrievalConfigurationStoreV1,
+    SemanticConfigurationPinV1, SemanticCurrentLinkedActivationV1,
 };
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::{RerankCompatibilityPinsV1, SemanticCompatibilityPinsV1};
@@ -424,15 +424,15 @@ impl CodeIndexSchedulerRegistryV1 {
             );
         }
         let outcome = ProductionProjectSemanticSearchBridgeV1
-            .execute(
+            .execute(AuthorizedProjectSemanticSearchParametersV1 {
                 project_root,
                 code_generation,
-                &request,
-                Some(&pins.calibration),
+                request: &request,
+                calibration: Some(&pins.calibration),
                 control,
                 mode,
                 authorized_query,
-            )
+            })
             .await?;
         let mut rerank_executor = authority
             .rerank
