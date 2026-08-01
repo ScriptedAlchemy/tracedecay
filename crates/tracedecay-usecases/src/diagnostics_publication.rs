@@ -523,22 +523,27 @@ pub fn github_review_contribution_v1(
 /// candidates do not carry a `(file, content_digest, span)` triple directly;
 /// the caller resolves those from its own generation evidence and passes them
 /// here so no identity is invented inside the publication layer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticContributionAnchorV1 {
+    pub anchor: RetrievalAnchorId,
+    pub file_occurrence_id: FileOccurrenceId,
+    pub content_digest: ContentDigest,
+    pub span: SourceSpan,
+    pub symbol_occurrence_id: Option<SymbolOccurrenceId>,
+}
+
 pub fn advisory_contribution_v1(
-    anchor: RetrievalAnchorId,
-    file_occurrence_id: FileOccurrenceId,
-    content_digest: ContentDigest,
-    span: SourceSpan,
-    symbol_occurrence_id: Option<SymbolOccurrenceId>,
+    anchor: DiagnosticContributionAnchorV1,
     code: &str,
     severity: DiagnosticSeverityV1,
     notice: &str,
 ) -> DiagnosticContributionV1 {
     DiagnosticContributionV1 {
-        anchor,
-        file_occurrence_id,
-        content_digest,
-        span,
-        symbol_occurrence_id,
+        anchor: anchor.anchor,
+        file_occurrence_id: anchor.file_occurrence_id,
+        content_digest: anchor.content_digest,
+        span: anchor.span,
+        symbol_occurrence_id: anchor.symbol_occurrence_id,
         code: code.to_owned(),
         severity,
         message: bounded_notice(notice),
