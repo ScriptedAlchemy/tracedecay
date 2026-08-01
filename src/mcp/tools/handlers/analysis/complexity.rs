@@ -59,12 +59,11 @@ pub(crate) async fn handle_complexity(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -121,12 +120,11 @@ pub(crate) async fn handle_doc_coverage(
         "files": file_items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -168,12 +166,11 @@ pub(crate) async fn handle_god_class(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 

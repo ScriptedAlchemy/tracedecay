@@ -48,7 +48,9 @@ use crate::types::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
-use super::support::{effective_path, rendered_tool_result, unique_file_paths};
+use super::support::{
+    effective_path, generic_tool_result, rendered_tool_result, unique_file_paths,
+};
 
 /// Coarse human label for a modularity score in [0,1].
 fn modularity_label(score: f64) -> &'static str {

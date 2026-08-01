@@ -55,7 +55,9 @@ use crate::types::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render;
-use super::support::{effective_path, filter_by_scope, rendered_tool_result, unique_file_paths};
+use super::support::{
+    effective_path, filter_by_scope, generic_tool_result, rendered_tool_result, unique_file_paths,
+};
 
 /// True when `path` names a Rust source file (case-insensitive `.rs`). Gates
 /// tree-sitter masking, which parses with the Rust grammar and would

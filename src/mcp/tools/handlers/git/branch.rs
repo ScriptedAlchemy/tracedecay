@@ -52,9 +52,7 @@ pub(crate) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
         );
     }
 
-    rendered_tool_result(Some(cg.project_root()), args, &result, vec![], || {
-        render::generic_md(&result)
-    })
+    generic_tool_result(Some(cg.project_root()), args, &result, vec![])
 }
 
 /// Handles `tracedecay_branch_search` tool calls.
@@ -105,12 +103,11 @@ pub(crate) async fn handle_branch_search(cg: &TraceDecay, args: Value) -> Result
         .collect();
 
     let items = json!(items);
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &items,
         vec![],
-        || render::generic_md(&items),
     ))
 }
 
@@ -155,12 +152,11 @@ pub(crate) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
             "removed": [],
             "changed": [],
         });
-        return Ok(rendered_tool_result(
+        return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
             &result,
             vec![],
-            || render::generic_md(&result),
         ));
     }
 
@@ -305,12 +301,11 @@ pub(crate) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
     });
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &result,
         touched_files,
-        || render::generic_md(&result),
     ))
 }
 

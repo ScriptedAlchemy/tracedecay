@@ -87,9 +87,22 @@ pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
     rendered_tool_result(project_root, args, value, Vec::new(), md)
 }
 
-/// [`tool_json_with_md`] for handlers that don't need a custom markdown renderer.
+/// [`rendered_tool_result`] for handlers that don't need a custom markdown
+/// renderer — the default body is [`render::generic_md`] over the same value.
+pub(super) fn generic_tool_result(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+) -> ToolResult {
+    rendered_tool_result(project_root, args, value, touched_files, || {
+        render::generic_md(value)
+    })
+}
+
+/// [`generic_tool_result`] for handlers that touch no files.
 pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    tool_json_with_md(project_root, args, value, || render::generic_md(value))
+    generic_tool_result(project_root, args, value, Vec::new())
 }
 
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
@@ -438,7 +451,75 @@ fn ambiguous_project_selector_error(
 mod tests {
     use serde_json::json;
 
-    use super::{is_explicit_project_path_selector, require_node_id, string_array_values};
+    use crate::mcp::tools::render;
+
+    use super::{
+        CONTEXT_MEMORY_ANALYTICS_KEY, generic_tool_result, is_explicit_project_path_selector,
+        rendered_tool_result, require_node_id, string_array_values,
+    };
+
+    /// `generic_tool_result` must stay a pure spelling of the closure form it
+    /// replaced at every call site — same bytes on both output formats, and the
+    /// same internal-analytics lifting.
+    #[test]
+    fn generic_tool_result_matches_the_explicit_generic_md_closure() {
+        let mut value = json!({
+            "count": 2,
+            "items": [{"name": "alpha", "file": "src/a.rs"}, {"name": "beta", "file": "src/b.rs"}],
+        });
+        // Exercise the internal-analytics lifting branch too.
+        value[CONTEXT_MEMORY_ANALYTICS_KEY] = json!({"matches": 1});
+        let touched = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+
+        for args in [
+            json!({}),
+            json!({"format": "markdown"}),
+            json!({"format": "json"}),
+        ] {
+            let expected = rendered_tool_result(None, &args, &value, touched.clone(), || {
+                render::generic_md(&value)
+            });
+            let actual = generic_tool_result(None, &args, &value, touched.clone());
+
+            assert_eq!(actual.value, expected.value, "payload differs for {args}");
+            assert_eq!(
+                actual.touched_files, expected.touched_files,
+                "touched files differ for {args}"
+            );
+            assert_eq!(
+                actual.internal_analytics(),
+                expected.internal_analytics(),
+                "internal analytics differ for {args}"
+            );
+        }
+    }
+
+    /// Handlers that used to build their own text envelope — `render::finalize`
+    /// then a hand-written `{"content":[{"type":"text",...}]}` — now go through
+    /// `rendered_tool_result`. That is the same envelope for any payload without
+    /// the internal-analytics key, which is every payload those handlers build.
+    #[test]
+    fn rendered_tool_result_matches_a_hand_built_text_envelope() {
+        let value = json!({"passed": 0, "failed": 1, "results": [], "note": "nothing ran"});
+        let touched = vec!["src/a.rs".to_string()];
+
+        for args in [
+            json!({}),
+            json!({"format": "markdown"}),
+            json!({"format": "json"}),
+        ] {
+            let text = render::finalize(None, &args, &value, || render::generic_md(&value));
+            let expected = super::text_tool_result(&text, touched.clone());
+            let actual = generic_tool_result(None, &args, &value, touched.clone());
+
+            assert_eq!(actual.value, expected.value, "payload differs for {args}");
+            assert_eq!(
+                actual.touched_files, expected.touched_files,
+                "touched files differ for {args}"
+            );
+            assert!(actual.internal_analytics().is_none(), "for {args}");
+        }
+    }
 
     #[test]
     fn test_require_node_id_canonical() {

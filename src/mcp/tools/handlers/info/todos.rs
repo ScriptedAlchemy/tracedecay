@@ -123,11 +123,10 @@ pub(crate) async fn handle_todos(
         "by_kind": counts,
         "markers": markers,
     });
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched,
-        || render::generic_md(&output),
     ))
 }

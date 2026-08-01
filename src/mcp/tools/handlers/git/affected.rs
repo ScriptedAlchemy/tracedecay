@@ -171,12 +171,11 @@ pub(crate) async fn handle_affected(cg: &TraceDecay, args: Value) -> Result<Tool
         },
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 #[cfg(test)]
