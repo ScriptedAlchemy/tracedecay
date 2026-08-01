@@ -17,7 +17,9 @@ pub(crate) async fn handle_recursion(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    debug_assert!(limit > 0, "handle_recursion limit must be positive");
+    // `min(100)` leaves an explicit `"limit": 0` intact, so this is caller
+    // input rather than an invariant.
+    require_positive_limit(limit, "tracedecay_recursion")?;
 
     let call_edges = cg.get_call_edges_with_lines(path_prefix).await?;
 

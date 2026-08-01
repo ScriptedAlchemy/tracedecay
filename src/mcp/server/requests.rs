@@ -54,6 +54,21 @@ pub(super) fn accounting_project_root<'a>(
     }
 }
 
+/// Locks a server-side `std::sync::Mutex`, recovering from poisoning.
+///
+/// A panic anywhere in a client task poisons every `Mutex` a guard was alive
+/// for, and the previous `.lock().ok()` / `if let Ok(..)` call sites treated
+/// that as "skip this work" *forever*: request counters stopped counting and,
+/// worse, the cancellation registry stopped registering, so shutdown could no
+/// longer cancel in-flight requests and the drain hung. None of the guarded
+/// state is left torn by an unwind (each critical section is a single map or
+/// counter update), so recovering the value is the correct response.
+pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct ApplicationCancellationRegistration<'a> {
     registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
     request_id: Option<String>,
@@ -61,10 +76,8 @@ struct ApplicationCancellationRegistration<'a> {
 
 impl Drop for ApplicationCancellationRegistration<'_> {
     fn drop(&mut self) {
-        if let Some(request_id) = self.request_id.as_deref()
-            && let Ok(mut cancellations) = self.registry.lock()
-        {
-            cancellations.remove(request_id);
+        if let Some(request_id) = self.request_id.as_deref() {
+            recover_lock(self.registry).remove(request_id);
         }
     }
 }
@@ -284,10 +297,9 @@ impl McpServer {
         let Some(cancelled_id) = application_surface_request_id(id, connection_scope) else {
             return false;
         };
-        self.application_surface_cancellations
-            .lock()
-            .ok()
-            .and_then(|cancellations| cancellations.get(&cancelled_id).cloned())
+        recover_lock(&self.application_surface_cancellations)
+            .get(&cancelled_id)
+            .cloned()
             .is_some_and(|cancellation| cancellation.cancel(mcp_now_micros()))
     }
 
@@ -343,14 +355,10 @@ impl McpServer {
         connection: &mut ConnectionRouteState,
         pre_cancelled: bool,
     ) -> Option<JsonRpcResponse> {
-        debug_assert!(
-            !request.method.is_empty(),
-            "handle_request called with empty method"
-        );
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut counts) = self.method_call_counts.lock() {
-            *counts.entry(request.method.clone()).or_insert(0) += 1;
-        }
+        *recover_lock(&self.method_call_counts)
+            .entry(request.method.clone())
+            .or_insert(0) += 1;
         if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
             Box::pin(self.handle_hook_event_notification(
                 request.params.as_ref(),
@@ -550,10 +558,8 @@ impl McpServer {
             .and_then(|ci| ci.get("name"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
-        if client_name.is_some()
-            && let Ok(mut slot) = self.client_name.lock()
-        {
-            *slot = client_name;
+        if client_name.is_some() {
+            *recover_lock(&self.client_name) = client_name;
         }
         JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
     }
@@ -561,7 +567,7 @@ impl McpServer {
     /// The negotiated MCP client name recorded by the most recent
     /// `initialize` handshake, if any (see [`Self::client_name`] field doc).
     pub(crate) fn client_name(&self) -> Option<String> {
-        self.client_name.lock().ok().and_then(|slot| slot.clone())
+        recover_lock(&self.client_name).clone()
     }
 
     /// Handles the `tools/list` method, returning all available tool definitions.
@@ -632,9 +638,9 @@ impl McpServer {
                 "missing 'uri' in resources/read params".to_string(),
             );
         };
-        if let Ok(mut counts) = self.resource_read_counts.lock() {
-            *counts.entry(uri.to_string()).or_insert(0) += 1;
-        }
+        *recover_lock(&self.resource_read_counts)
+            .entry(uri.to_string())
+            .or_insert(0) += 1;
 
         match uri {
             "tracedecay://status" => self.read_resource_status(id).await,
@@ -1153,9 +1159,9 @@ impl McpServer {
 
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(tool_name, "dispatching MCP tool call");
-        if let Ok(mut counts) = self.tool_call_counts.lock() {
-            *counts.entry(tool_name.to_string()).or_insert(0) += 1;
-        }
+        *recover_lock(&self.tool_call_counts)
+            .entry(tool_name.to_string())
+            .or_insert(0) += 1;
         if publish_activity {
             self.publish_tool_call_activity(tool_name, cg).await;
         }
@@ -1181,7 +1187,9 @@ impl McpServer {
             .flatten()
             .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
         let cancellation = request_id.as_ref().and_then(|request_id| {
-            let mut cancellations = self.application_surface_cancellations.lock().ok()?;
+            // The signal is built before the lock is taken: nothing fallible
+            // runs inside the critical section, so an unwind can never leave
+            // the registry half-updated.
             let cancellation = tracedecay_application::CancellationSignal::active(format!(
                 "cancellation.{}",
                 request_id.as_str()
@@ -1190,7 +1198,8 @@ impl McpServer {
             if pre_cancelled {
                 cancellation.cancel(mcp_now_micros());
             }
-            cancellations.insert(request_id.as_str().to_owned(), cancellation.clone());
+            recover_lock(&self.application_surface_cancellations)
+                .insert(request_id.as_str().to_owned(), cancellation.clone());
             Some(cancellation)
         });
         let registration = ApplicationCancellationRegistration {
@@ -1437,17 +1446,15 @@ impl McpServer {
             {
                 content.insert(0, json!({"type": "text", "text": &warning}));
             }
-            if let Ok(mut pending) = self.pending_notifications.lock() {
-                pending.push(json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/message",
-                    "params": {
-                        "level": "warning",
-                        "logger": "tracedecay",
-                        "data": warning
-                    }
-                }));
-            }
+            recover_lock(&self.pending_notifications).push(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {
+                    "level": "warning",
+                    "logger": "tracedecay",
+                    "data": warning
+                }
+            }));
         }
 
         // Staged-automation nudge (Hermes parity R5): when automation

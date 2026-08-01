@@ -545,11 +545,14 @@ impl McpServer {
 
     pub(crate) fn abort_project_server_requests(&self) {
         self.project_server_lifecycle.abort_requests();
-        if let Ok(cancellations) = self.application_surface_cancellations.lock() {
-            let now = crate::mcp::server::requests::mcp_now_micros();
-            for cancellation in cancellations.values() {
-                cancellation.cancel(now);
-            }
+        // Poison recovery matters most here: skipping this on a poisoned
+        // mutex leaves every in-flight request uncancelled and the shutdown
+        // drain waits forever.
+        let cancellations =
+            crate::mcp::server::requests::recover_lock(&self.application_surface_cancellations);
+        let now = crate::mcp::server::requests::mcp_now_micros();
+        for cancellation in cancellations.values() {
+            cancellation.cancel(now);
         }
     }
 
@@ -702,9 +705,7 @@ impl McpServer {
         };
         match refresh(request).await {
             Ok(Some(fresh)) => {
-                if let Ok(mut guard) = self.file_token_map.lock() {
-                    *guard = fresh;
-                }
+                *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
             }
             Ok(None) => {}
             Err(e) => {

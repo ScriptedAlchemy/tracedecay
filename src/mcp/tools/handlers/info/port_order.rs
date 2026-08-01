@@ -4,10 +4,7 @@ use super::*;
 
 /// Handles `tracedecay_port_order` tool calls.
 pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    debug_assert!(
-        args.is_object(),
-        "handle_port_order expects an object argument"
-    );
+    require_object_args(&args, "tracedecay_port_order")?;
 
     let source_dir = args
         .get("source_dir")
