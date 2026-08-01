@@ -26,13 +26,7 @@ use crate::application::settings_control::{
     ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
     TelemetrySettingsPatchV1, preview_project_settings,
 };
-use crate::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationBatchSurfaceRequest,
-    ConfigurationDirectMutationSurfaceRequest, ConfigurationSurfaceRequest,
-    resolve_dashboard_application_surface,
-};
 use crate::config::TraceDecayConfig;
-use crate::daemon_client::RequestedOutputFormat;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::user_config;
 use tracedecay_agent_hosts::automation::config as automation_config;
@@ -244,34 +238,19 @@ pub async fn patch_project_settings(
     )
     .map_err(project_preview_error)?;
     if preview.changed {
-        let executor = state
+        let runtime = state
             .application_invocation_executor
             .as_deref()
             .ok_or_else(configuration_authority_unavailable_error)?;
         let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
             return Err(configuration_authority_unavailable_error());
         };
-        let mutations = mutations
-            .into_iter()
-            .map(surface_mutation)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
         let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
             .map_err(|_| configuration_authority_unavailable_error())?;
-        let outcome = resolve_dashboard_application_surface(
-            ApplicationSurfaceOperation::ConfigurationBatch,
-            request_id,
-            ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::Batch(
-                ConfigurationBatchSurfaceRequest {
-                    mutations,
-                    expected_revision: preview.expected_revision,
-                },
-            )),
-            RequestedOutputFormat::Json,
-            Some(executor),
-        )
-        .await
-        .map_err(|_| configuration_authority_unavailable_error())?;
-        if let Err(problem) = outcome.result {
+        if let Err(problem) = runtime
+            .apply_configuration_batch(request_id, mutations, preview.expected_revision)
+            .await
+        {
             return Err(configuration_application_problem_error(problem));
         }
     }
@@ -563,25 +542,6 @@ fn env_variable(name: &str, description: &str) -> EnvironmentVariableV1 {
 
 fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
-}
-
-fn surface_mutation(
-    mutation: DirectConfigurationMutation,
-) -> std::result::Result<
-    ConfigurationDirectMutationSurfaceRequest,
-    DashboardConfigurationRouteErrorV1,
-> {
-    match mutation {
-        DirectConfigurationMutation::Set { layer, key, value } => {
-            Ok(ConfigurationDirectMutationSurfaceRequest::Set { layer, key, value })
-        }
-        DirectConfigurationMutation::Unset { layer, key } => {
-            Ok(ConfigurationDirectMutationSurfaceRequest::Unset { layer, key })
-        }
-        DirectConfigurationMutation::Batch { .. } => {
-            Err(configuration_authority_unavailable_error())
-        }
-    }
 }
 
 fn project_preview_error(
