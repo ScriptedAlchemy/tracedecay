@@ -14,6 +14,53 @@ use super::{
     scalar_i64_params, validate_scope, validate_v1_compatibility_source,
 };
 
+/// Whether this owner has no V1 legacy memory to migrate at all.
+///
+/// A store that never held a V1 memory bank has nothing to cut over, yet the
+/// capture → drain → finalize ladder still runs end to end on it: it inserts
+/// an all-zero `memory_v2_backfill_progress` row and a cutover receipt for a
+/// migration that never happened, then re-reads them forever.
+///
+/// Vacuity requires both no recorded progress *and* no legacy source rows.
+/// Once progress exists the ladder owns the decision — in particular after a
+/// legacy purge, where the source tables are empty precisely because the
+/// cutover already moved them.
+pub(in crate::db) async fn memory_v2_cutover_is_vacuous(
+    conn: &engine::Connection,
+    owner: &FactOwnerV1,
+    source_store_id: &SourceStoreId,
+) -> Result<bool> {
+    validate_scope(owner, source_store_id)?;
+    validate_v1_compatibility_source(source_store_id)?;
+    let owner = owner_key(owner)?;
+    let recorded = scalar_i64_params(
+        conn,
+        "SELECT EXISTS(
+             SELECT 1 FROM memory_v2_backfill_progress
+             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
+         )",
+        params![
+            owner.kind,
+            owner.project_id.as_str(),
+            source_store_id.as_str()
+        ],
+    )
+    .await?;
+    if recorded != 0 {
+        return Ok(false);
+    }
+    for probe in [
+        "SELECT EXISTS(SELECT 1 FROM memory_facts)",
+        "SELECT EXISTS(SELECT 1 FROM memory_feedback_events)",
+        "SELECT EXISTS(SELECT 1 FROM memory_oplog)",
+    ] {
+        if scalar_i64(conn, probe).await? != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(in crate::db) async fn load_or_capture_memory_v2_frontiers(
     conn: &engine::Connection,
     owner: &FactOwnerV1,
@@ -361,6 +408,26 @@ pub(super) async fn verify_memory_v2_cutover_complete(
     require_complete_cutover_coverage(conn, owner, source_store_id, frontiers).await
 }
 
+/// Whether a stored cutover receipt already carries a complete coverage
+/// witness. A receipt written before coverage was recorded, or one whose
+/// witness is incomplete, returns `false` so the caller recomputes and
+/// persists it once.
+fn stored_coverage_is_verified(receipt_json: &str) -> Result<bool> {
+    let receipt: serde_json::Value = serde_json::from_str(receipt_json).map_err(|_| {
+        db_message(
+            "memory_v2_cutover",
+            "stored cutover receipt is invalid JSON",
+        )
+    })?;
+    let Some(coverage) = receipt.get("coverage") else {
+        return Ok(false);
+    };
+    Ok(
+        serde_json::from_value::<MemoryV2CutoverCoverage>(coverage.clone())
+            .is_ok_and(MemoryV2CutoverCoverage::is_complete),
+    )
+}
+
 fn receipt_json_with_coverage(
     receipt_json: &str,
     coverage: MemoryV2CutoverCoverage,
@@ -436,6 +503,14 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
                     .get::<String>(4)
                     .map_err(|error| db_error("memory_v2_cutover", error))?;
                 canonical_cutover_replay(existing.clone(), &candidate_receipt_json)?;
+                // A completed cutover is frozen: the frontiers no longer move
+                // and the legacy source rows below them are immutable, so the
+                // stored witness stays true. Recomputing the four-table
+                // coverage join here re-proves that same fact on every daemon
+                // tick, for every project, and then writes nothing.
+                if stored_coverage_is_verified(&existing)? {
+                    return Ok(MemoryV2CutoverOutcome::Complete);
+                }
                 let coverage = require_complete_cutover_coverage(
                     conn,
                     &owner,
