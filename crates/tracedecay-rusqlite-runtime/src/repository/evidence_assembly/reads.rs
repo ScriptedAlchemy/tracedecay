@@ -10,8 +10,10 @@ use tracedecay_store::{
     EvidenceSourceOccurrenceRecordV1, RetrieverContributionRecordV1,
 };
 
+use std::collections::BTreeSet;
+
 use super::super::support::{canonical_digest, decode, invalid, u64_to_i64, usize_to_i64};
-use super::anchor_state::{evidence_anchor_is_current, require_source_anchor_current};
+use super::anchor_state::{self, evidence_anchor_is_current};
 
 pub(super) fn publication_by_idempotency(
     snapshot: &Transaction<'_>,
@@ -231,11 +233,17 @@ pub(super) fn contribution_page(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let consumed =
         start_ordinal.saturating_add(u64::try_from(occurrences.len()).unwrap_or(u64::MAX));
+    let mut anchor_ids = BTreeSet::new();
     for occurrence in &occurrences {
-        if !evidence_anchor_is_current(snapshot, &occurrence.occurrence_anchor)? {
+        anchor_ids.insert(occurrence.occurrence_anchor.anchor_id().as_str().to_owned());
+        anchor_ids.insert(occurrence.exact_source_anchor.as_str().to_owned());
+    }
+    let liveness = anchor_state::load_anchor_liveness(snapshot, &anchor_ids)?;
+    for occurrence in &occurrences {
+        if !liveness.evidence_anchor_is_current(&occurrence.occurrence_anchor)? {
             return Ok(EvidenceAssemblyReadResultV1::ContributionPage(None));
         }
-        require_source_anchor_current(snapshot, occurrence)?;
+        liveness.require_source_anchor_current(occurrence)?;
     }
     let total = u64::try_from(span.ordered_occurrence_ids().len()).unwrap_or(u64::MAX);
     Ok(EvidenceAssemblyReadResultV1::ContributionPage(Some(

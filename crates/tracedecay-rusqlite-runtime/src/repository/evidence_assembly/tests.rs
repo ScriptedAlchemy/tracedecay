@@ -839,3 +839,170 @@ fn publication_rejects_unresolved_v2_owner_without_partial_rows() {
         0
     );
 }
+
+#[test]
+fn batched_anchor_liveness_matches_row_at_a_time() {
+    use std::collections::BTreeSet;
+
+    fn dispose(
+        connection: &rusqlite::Connection,
+        anchor_id: &str,
+        owner_json: &str,
+        disposition_id: &str,
+        state: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO retrieval_anchor_dispositions
+                    (disposition_id, anchor_id, owner_json, state)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![disposition_id, anchor_id, owner_json, state],
+            )
+            .unwrap();
+    }
+
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    install(&connection);
+    let write = write_fixture("1");
+    let owner_json = encode(&write.owner.owner).unwrap();
+    connection
+        .execute(
+            "INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES (?1, '{}', ?2, 'source.fixture')",
+            params![
+                write.occurrences[0].exact_source_anchor.as_str(),
+                owner_json
+            ],
+        )
+        .unwrap();
+    {
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        EvidenceAssemblyExecutor
+            .execute_write(&savepoint, &write)
+            .unwrap();
+        savepoint.commit().unwrap();
+        transaction.commit().unwrap();
+    }
+    let occurrence = write.occurrences[0].clone();
+
+    // Compares the batched cache against the row-at-a-time free functions it
+    // replaced, asserting they agree, and hands back the shared outcome.
+    let compare = |connection: &rusqlite::Connection| {
+        let mut anchor_ids = BTreeSet::new();
+        anchor_ids.insert(occurrence.occurrence_anchor.anchor_id().as_str().to_owned());
+        anchor_ids.insert(occurrence.exact_source_anchor.as_str().to_owned());
+        let cache = super::anchor_state::load_anchor_liveness(connection, &anchor_ids).unwrap();
+
+        let free_current = super::anchor_state::evidence_anchor_is_current(
+            connection,
+            &occurrence.occurrence_anchor,
+        )
+        .map_err(|error| error.to_string());
+        let cached_current = cache
+            .evidence_anchor_is_current(&occurrence.occurrence_anchor)
+            .map_err(|error| error.to_string());
+        assert_eq!(free_current, cached_current);
+
+        let free_source =
+            super::anchor_state::require_source_anchor_current(connection, &occurrence)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        let cached_source = cache
+            .require_source_anchor_current(&occurrence)
+            .map_err(|error| error.to_string());
+        assert_eq!(free_source, cached_source);
+
+        (free_current, free_source)
+    };
+
+    // Active: both anchors resolve as current.
+    assert_eq!(compare(&connection), (Ok(true), Ok(())));
+
+    // A disposed occurrence anchor makes the drilldown page read as absent.
+    dispose(
+        &connection,
+        occurrence.occurrence_anchor.anchor_id().as_str(),
+        &owner_json,
+        "disposition.occurrence.revoked",
+        "revoked",
+    );
+    assert_eq!(compare(&connection).0, Ok(false));
+
+    // A newer active disposition supersedes the revocation (latest by
+    // sequence), while a disposed source anchor is rejected.
+    dispose(
+        &connection,
+        occurrence.occurrence_anchor.anchor_id().as_str(),
+        &owner_json,
+        "disposition.occurrence.reactivated",
+        "active",
+    );
+    dispose(
+        &connection,
+        occurrence.exact_source_anchor.as_str(),
+        &owner_json,
+        "disposition.source.revoked",
+        "revoked",
+    );
+    let (current, source) = compare(&connection);
+    assert_eq!(current, Ok(true));
+    assert!(source.is_err());
+}
+
+#[test]
+fn reverse_lineage_reuses_source_owner_json() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    install(&connection);
+    let write = write_fixture("1");
+    let owner_json = encode(&write.owner.owner).unwrap();
+    connection
+        .execute(
+            "INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES (?1, '{}', ?2, 'source.fixture')",
+            params![
+                write.occurrences[0].exact_source_anchor.as_str(),
+                owner_json
+            ],
+        )
+        .unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    EvidenceAssemblyExecutor
+        .execute_write(&savepoint, &write)
+        .unwrap();
+    savepoint.commit().unwrap();
+    transaction.commit().unwrap();
+
+    let source_anchor_id = write.occurrences[0].exact_source_anchor.as_str().to_owned();
+    let stored_owner_json: String = connection
+        .query_row(
+            "SELECT owner_json FROM retrieval_anchors WHERE anchor_id = ?1",
+            [source_anchor_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    let lineage_owner_jsons: Vec<String> = connection
+        .prepare(
+            "SELECT owner_json FROM retrieval_anchor_reverse_lineage
+             WHERE source_anchor_id = ?1",
+        )
+        .unwrap()
+        .query_map([source_anchor_id.as_str()], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        lineage_owner_jsons.len(),
+        2,
+        "one reverse-lineage row per derivative kind (span, contribution)"
+    );
+    assert!(
+        lineage_owner_jsons
+            .iter()
+            .all(|json| *json == stored_owner_json),
+        "threaded owner_json must equal the source anchor's stored owner_json"
+    );
+}

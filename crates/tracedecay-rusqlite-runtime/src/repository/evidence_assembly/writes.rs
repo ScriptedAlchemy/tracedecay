@@ -117,16 +117,18 @@ pub(super) fn insert_span_membership(
     )
 }
 
+/// Records reverse lineage for every occurrence's source anchor.
+///
+/// `source_owner_jsons` carries the `owner_json` each source anchor was already
+/// read under in `execute_write` (via `require_source_anchor_current`), parallel
+/// to `write.occurrences`, so this pass reuses those values instead of reading
+/// each `retrieval_anchors` row a second time.
 pub(super) fn publish_reverse_lineage(
     connection: &rusqlite::Connection,
     write: &EvidenceAssemblyWriteV1,
+    source_owner_jsons: &[String],
 ) -> rusqlite::Result<()> {
-    for occurrence in &write.occurrences {
-        let owner_json = connection.query_row(
-            "SELECT owner_json FROM retrieval_anchors WHERE anchor_id = ?1",
-            [occurrence.exact_source_anchor.as_str()],
-            |row| row.get::<_, String>(0),
-        )?;
+    for (occurrence, owner_json) in write.occurrences.iter().zip(source_owner_jsons) {
         for (kind, derivative_id) in [
             ("span", write.span.span_id.as_str()),
             ("contribution", write.contribution.contribution_id.as_str()),

@@ -61,8 +61,10 @@ impl EvidenceAssemblyExecutor {
             };
         }
 
+        let mut source_owner_jsons = Vec::with_capacity(write.occurrences.len());
         for occurrence in &write.occurrences {
-            require_source_anchor_current(savepoint, occurrence)?;
+            let source_owner_json = require_source_anchor_current(savepoint, occurrence)?;
+            source_owner_jsons.push(source_owner_json);
             insert_anchor(savepoint, &occurrence.occurrence_anchor)?;
             insert_immutable(
                 savepoint,
@@ -185,7 +187,7 @@ impl EvidenceAssemblyExecutor {
             insert_derived_anchor(savepoint, anchor, &evidence_owner_digest)?;
         }
 
-        publish_reverse_lineage(savepoint, write)?;
+        publish_reverse_lineage(savepoint, write, &source_owner_jsons)?;
         savepoint.execute(
             "INSERT INTO evidence_assembly_receipts (
                 publication_receipt_id, owner_digest, privacy_domain_id, key_epoch,
