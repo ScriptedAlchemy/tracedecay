@@ -1,8 +1,11 @@
+#[cfg(feature = "test-transport")]
 use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
+#[cfg(feature = "test-transport")]
 use std::path::Path;
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::get_tool_definitions;
 
@@ -243,6 +246,7 @@ async fn project_registry_tools_missing_registry_carries_stable_shape() {
     assert_eq!(search_payload["projects"].as_array().unwrap().len(), 0);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -303,6 +307,7 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -359,6 +364,7 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -460,6 +466,7 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
     let project_dir = test_temp_dir();

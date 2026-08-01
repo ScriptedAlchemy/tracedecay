@@ -73,7 +73,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
 }
@@ -170,7 +170,7 @@ impl McpServerConstructionContext {
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             project_server_live: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
     }
@@ -247,7 +247,7 @@ impl McpServerConstructionContext {
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
     }
@@ -303,7 +303,7 @@ impl McpServerConstructionContext {
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
     }

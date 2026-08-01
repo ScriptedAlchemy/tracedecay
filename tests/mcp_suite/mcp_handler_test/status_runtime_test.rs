@@ -1,9 +1,12 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
+#[cfg(feature = "test-transport")]
 use std::process::Command;
+#[cfg(feature = "test-transport")]
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
+#[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::sessions::SessionRecord;
 
@@ -301,6 +304,7 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
     assert!(db.get("authority_audit_error").is_none());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
     let isolation = TempDir::new().unwrap();

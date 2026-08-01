@@ -230,6 +230,7 @@ async fn lcm_doctor_clean_apply_is_denied_by_default() {
     assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -343,6 +344,7 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     assert!(!text.contains("valuable payload to preserve"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -528,6 +530,7 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
     assert!(!text.contains("gc candidate body that must not be returned"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -914,6 +917,7 @@ async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -1008,6 +1012,7 @@ async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
     close_test_graph(cg).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2052,6 +2057,7 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
     assert_eq!(payload["lcm"]["lifecycle"]["maintenance_debt_count"], 1);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
     let (cg, _dir) = setup_project().await;
@@ -2550,6 +2556,7 @@ async fn lcm_large_json_response_stays_parseable_after_truncation() {
     assert!(payload["preview"].as_str().unwrap().len() <= MCP_TEST_RESPONSE_CHAR_LIMIT);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2618,6 +2625,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -2765,6 +2773,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3014,6 +3023,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3076,6 +3086,7 @@ async fn lcm_expand_resolves_cross_session_store_ids_over_mcp() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3236,6 +3247,7 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
     server.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -3644,6 +3656,7 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 // request. Observable via the version gate: after admission, a manually
 // downgraded version marker stays downgraded across calls on the same server
 // — reconstructing the server would correctly admit and migrate it again.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     let dir = test_temp_dir();

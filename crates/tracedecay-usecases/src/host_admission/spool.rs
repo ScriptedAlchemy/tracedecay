@@ -241,7 +241,7 @@ impl HostAdmissionSpool {
         self.append_recovery_required || self.quarantine_recovery_required
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub(crate) fn quarantine_count(&self) -> usize {
         self.quarantine.len()
     }

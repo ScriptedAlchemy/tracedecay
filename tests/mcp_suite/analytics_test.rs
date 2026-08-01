@@ -2,14 +2,23 @@
 //! hint telemetry, the fact-store funnel, and automation run rollups over a
 //! seeded `analytics_events` store.
 
-use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
+use serde_json::Value;
+use serde_json::json;
 
+#[cfg(feature = "test-transport")]
 use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(feature = "test-transport")]
 use tracedecay::global_db::AnalyticsEventInsert;
-use tracedecay::mcp::{McpServer, handle_tool_call};
+#[cfg(feature = "test-transport")]
+use tracedecay::mcp::McpServer;
+use tracedecay::mcp::handle_tool_call;
+#[cfg(feature = "test-transport")]
 use tracedecay::tracedecay::current_timestamp;
 
+#[cfg(feature = "test-transport")]
 fn extract_text(v: &Value) -> String {
     v.get("content")
         .and_then(|c| c.as_array())
@@ -20,10 +29,12 @@ fn extract_text(v: &Value) -> String {
         .to_string()
 }
 
+#[cfg(feature = "test-transport")]
 fn extract_json(v: &Value) -> Value {
     serde_json::from_str(&extract_text(v)).expect("tool response should be valid JSON")
 }
 
+#[cfg(feature = "test-transport")]
 fn tool_call_event(
     project_id: &str,
     tool_name: &str,
@@ -47,6 +58,7 @@ fn tool_call_event(
     }
 }
 
+#[cfg(feature = "test-transport")]
 fn hint_event(
     project_id: &str,
     event_kind: &str,
@@ -70,6 +82,7 @@ fn hint_event(
     }
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
@@ -181,6 +194,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
@@ -238,6 +252,7 @@ async fn analytics_rejects_unknown_scope_and_section() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
@@ -288,6 +303,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;

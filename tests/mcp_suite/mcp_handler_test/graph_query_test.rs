@@ -1,8 +1,11 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
+#[cfg(feature = "test-transport")]
 use std::process::Command;
+#[cfg(feature = "test-transport")]
 use tempfile::TempDir;
+#[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
 // 1. tracedecay_search
@@ -925,6 +928,7 @@ async fn test_affected() {
     assert!(text.contains("count"), "should have count key");
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over_mcp() {
     let isolation = TempDir::new().unwrap();

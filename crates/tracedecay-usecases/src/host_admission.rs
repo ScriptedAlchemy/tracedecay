@@ -130,12 +130,12 @@ impl HostAdmissionBroker {
         })
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn pending_count(&self) -> usize {
         self.pending_replay_count().await.unwrap_or_default()
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub async fn quarantine_count(&self) -> usize {
         self.with_runtime(|runtime| Ok(runtime.quarantine_count()))
             .await
@@ -187,7 +187,7 @@ pub use wire::{
     read_bounded_to_string, wire_oversized_inspect_prefix, wire_oversized_io_error,
     wire_oversized_io_error_with_prefix,
 };
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use wire::{line_outcome_to_io, read_bounded_line};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

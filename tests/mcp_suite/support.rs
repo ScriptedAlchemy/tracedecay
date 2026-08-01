@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 use std::sync::Arc;
+#[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -47,8 +48,10 @@ use tracedecay_store::{
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
+#[cfg(feature = "test-transport")]
 static NEXT_SOURCE_EDIT_TEST_KEY: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(feature = "test-transport")]
 const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
     "tracedecay_str_replace",
     "tracedecay_multi_str_replace",
@@ -708,6 +711,7 @@ impl Drop for TestTraceDecay {
     }
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
     let project_id = cg
         .store_layout()

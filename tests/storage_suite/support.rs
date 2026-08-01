@@ -142,29 +142,10 @@ where
 /// `Database::initialize` would produce — without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
     let template = ensure_template_db("graph-empty", &[], |path| async move {
-        let profile_root = path.parent().expect("template path has parent");
-        let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
-            profile_root,
-            "build checkpointed graph fixture",
-        )
-        .expect("failed to acquire fixture lifecycle lease");
-        let _scope = tracedecay::db::enter_maintenance_database_scope(
-            &lifecycle,
-            profile_root,
-            "build checkpointed graph fixture",
-        )
-        .expect("failed to enter fixture maintenance scope");
-        let authority =
-            tracedecay::db::DatabaseAuthority::for_runtime(&path, "build graph fixture")
-                .expect("failed to acquire fixture maintenance authority");
-        let (db, _) = tracedecay::db::Database::publish_maintenance_test_runtime(
-            &path,
-            &authority,
-            tracedecay::db::TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("failed to initialize template database");
-        db.truncate_wal_for_test_artifact()
+        let (db, _) = crate::common::initialize_test_database(&path)
+            .await
+            .expect("failed to initialize template database");
+        db.checkpoint()
             .await
             .expect("failed to checkpoint template database");
         db.close();

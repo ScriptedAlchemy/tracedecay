@@ -345,7 +345,7 @@ impl HostAdmissionRuntime {
         self.spool.pending_count()
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     pub(super) fn quarantine_count(&self) -> usize {
         self.spool.quarantine_count()
     }

@@ -10,11 +10,13 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::db::{Database, DatabaseAuthority};
+#[cfg(feature = "test-transport")]
 use tracedecay::db::{
-    Database, DatabaseAuthority, DatabaseAuthorityRole, TestDatabaseRuntimeMode,
-    enter_maintenance_database_scope,
+    DatabaseAuthorityRole, TestDatabaseRuntimeMode, enter_maintenance_database_scope,
 };
 use tracedecay::global_db::StoreInstanceUpsert;
+#[cfg(feature = "test-transport")]
 use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::store::DatabaseFactStore;
 use tracedecay_domain::{
@@ -258,10 +260,12 @@ fn committed(outcome: FactCommitOutcome) -> tracedecay_store::FactCommitReceipt 
     }
 }
 
+#[cfg(feature = "test-transport")]
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let tmp = TempDir::new().unwrap();
@@ -787,6 +791,7 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_token() {
     let tmp = TempDir::new().unwrap();

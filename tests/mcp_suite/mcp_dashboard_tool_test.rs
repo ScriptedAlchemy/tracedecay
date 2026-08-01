@@ -3,16 +3,22 @@
 //! plus live HTTP probe of /api/capabilities on the returned URL.
 
 use std::fs;
+#[cfg(feature = "test-transport")]
 use std::time::Duration;
 
+#[cfg(feature = "test-transport")]
 use crate::common::http_agent;
 use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::mcp::{McpServer, handle_tool_call};
+#[cfg(feature = "test-transport")]
+use tracedecay::mcp::McpServer;
+use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
+#[cfg(feature = "test-transport")]
 use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
 
 /// The dashboard manager is process-global (one dashboard per MCP server
@@ -44,6 +50,7 @@ fn main() { println!("hi"); }
     (cg, dir, home)
 }
 
+#[cfg(feature = "test-transport")]
 async fn dashboard_test_server(cg: TraceDecay) -> Arc<McpServer> {
     let runtime = open_active_project_scoped_runtime(&cg).await;
     McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
@@ -87,6 +94,7 @@ async fn tracedecay_dashboard_tool_rejects_wildcard_host_without_starting() {
     assert!(extract_text(&stop_res.value).contains("not_running"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
@@ -153,6 +161,7 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let _guard = TEST_LOCK.lock().await;
@@ -204,6 +213,7 @@ fn extract_text(v: &Value) -> String {
         .to_string()
 }
 
+#[cfg(feature = "test-transport")]
 fn extract_url(text: &str) -> String {
     if let Some(start) = text.find("http://") {
         let rest = &text[start..];
