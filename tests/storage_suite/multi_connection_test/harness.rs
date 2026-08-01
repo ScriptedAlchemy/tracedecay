@@ -11,7 +11,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tracedecay::db::SQLITE_UNSAFE_FAST_ENV;
 use tracedecay::storage::{default_profile_project_id, profile_sharded_data_root};
 
 use crate::common;
@@ -58,7 +57,6 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
 
     let output = common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .arg("init")
         .current_dir(project)
         .output()
@@ -100,7 +98,6 @@ fn wait_for_socket(socket_path: &Path, child: &mut Child) {
 pub(super) fn spawn_daemon(home: &Path, socket_path: &Path) -> ChildGuard {
     let mut child = ChildGuard::new(
         common::tracedecay_command_with_home(home)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .args(["daemon", "run", "--socket"])
             .arg(socket_path)
             .stdin(Stdio::null())
@@ -120,7 +117,6 @@ pub(super) fn spawn_daemon_with_stderr(
 ) -> ChildGuard {
     let mut child = ChildGuard::new(
         common::tracedecay_command_with_home(home)
-            .env_remove(SQLITE_UNSAFE_FAST_ENV)
             .args(["daemon", "run", "--socket"])
             .arg(socket_path)
             .stdin(Stdio::null())
@@ -244,7 +240,6 @@ impl McpProxy {
                     "TRACEDECAY_CLIENT_INSTANCE_ID",
                     format!("broker-test-{ordinal}"),
                 )
-                .env_remove(SQLITE_UNSAFE_FAST_ENV)
                 .args(["serve", "--path"])
                 .arg(project)
                 .current_dir(project)
@@ -455,7 +450,6 @@ pub(super) fn tool_status(home: &Path, project: &Path, socket_path: &Path) -> st
     let project_arg = project.to_string_lossy().to_string();
     common::tracedecay_command_with_home(home)
         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .current_dir(project)
         .args([
             "tool",

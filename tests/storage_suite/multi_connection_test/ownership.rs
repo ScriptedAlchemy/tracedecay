@@ -84,7 +84,6 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
                 let mut tool = ChildGuard::new(
                     common::tracedecay_command_with_home(home_path)
                         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-                        .env_remove(SQLITE_UNSAFE_FAST_ENV)
                         .current_dir(project_path)
                         .args([
                             "tool",
@@ -117,7 +116,6 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
                 let mut hook = ChildGuard::new(
                     common::tracedecay_command_with_home(home_path)
                         .env("TRACEDECAY_DAEMON_SOCKET", socket_path)
-                        .env_remove(SQLITE_UNSAFE_FAST_ENV)
                         .arg("hook-cursor-after-file-edit")
                         .current_dir(project_path)
                         .stdin(Stdio::piped())
@@ -144,7 +142,6 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
 
     let doctor = common::tracedecay_command_with_home(&home_path)
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
-        .env_remove(SQLITE_UNSAFE_FAST_ENV)
         .arg("doctor")
         .args(["--agent", "claude"])
         .current_dir(&project_path)

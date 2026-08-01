@@ -44,12 +44,8 @@ mod memory_v2_authority;
 mod pragmas;
 mod registry;
 
-pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
 #[cfg(test)]
-pub(crate) use pragmas::{
-    adaptive_cache_sizes, platform_safe_journal_mode, platform_safe_mmap_size,
-    platform_safe_synchronous_mode,
-};
+pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 use registry::{DatabaseInner, database_slot};
 
 /// `SQLite` database backed by one daemon-owned native runtime attachment.
@@ -1835,45 +1831,6 @@ mod tests {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
 
-    /// Serializes tests that mutate [`SQLITE_UNSAFE_FAST_ENV`]; process env is
-    /// shared across threads under plain `cargo test`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(previous) = self.previous.take() {
-                    std::env::set_var(self.key, previous);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
-
     #[test]
     fn adaptive_new_db_gets_minimum() {
         let (cache_kb, mmap) = adaptive_cache_sizes(0);
@@ -2377,45 +2334,5 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[test]
-    fn journal_mode_uses_wal_except_on_windows() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // Pin the CI-only escape hatch off: Windows CI exports it for the
-        // whole test run, and this test asserts the durable defaults.
-        let _env = EnvVarGuard::unset(SQLITE_UNSAFE_FAST_ENV);
-        if cfg!(windows) {
-            assert_eq!(platform_safe_journal_mode(), "DELETE");
-        } else {
-            assert_eq!(platform_safe_journal_mode(), "WAL");
-        }
-    }
-
-    #[test]
-    fn synchronous_mode_matches_platform_journal_mode() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::unset(SQLITE_UNSAFE_FAST_ENV);
-        if cfg!(windows) {
-            assert_eq!(platform_safe_synchronous_mode(), "FULL");
-        } else {
-            assert_eq!(platform_safe_synchronous_mode(), "NORMAL");
-        }
-    }
-
-    #[test]
-    fn unsafe_fast_env_overrides_journal_and_synchronous_modes() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::set(SQLITE_UNSAFE_FAST_ENV, "1");
-        assert_eq!(platform_safe_journal_mode(), "MEMORY");
-        assert_eq!(platform_safe_synchronous_mode(), "OFF");
-    }
-
-    #[test]
-    fn unsafe_fast_env_requires_exact_value_one() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _env = EnvVarGuard::set(SQLITE_UNSAFE_FAST_ENV, "true");
-        assert_ne!(platform_safe_journal_mode(), "MEMORY");
-        assert_ne!(platform_safe_synchronous_mode(), "OFF");
     }
 }

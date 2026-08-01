@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::db::{Database, DatabaseAuthority, SQLITE_UNSAFE_FAST_ENV};
+use tracedecay::db::{Database, DatabaseAuthority};
 
 use crate::common;
 
