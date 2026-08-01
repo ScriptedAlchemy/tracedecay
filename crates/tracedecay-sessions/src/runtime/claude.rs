@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::privacy::protect_sensitive_structural_id;
+use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocationMetadataKeys, path_belongs_to_project,
 };
@@ -253,7 +253,7 @@ pub async fn ingest_user_sessions_with_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
-    admission: &crate::application::host_admission::HostAdmissionFacade<'_>,
+    admission: &dyn crate::admission::HostAdmission,
 ) -> crate::runtime::shared::TranscriptIngestStats {
     match crate::runtime::claude_observation::ingest_user_sessions_with_admission(
         profile_root,
@@ -261,7 +261,7 @@ pub async fn ingest_user_sessions_with_admission(
         registered_roots,
         admission,
         None,
-        crate::application::observation::ObservationCancellation::default(),
+        crate::observation::ObservationCancellation::default(),
     )
     .await
     {
@@ -491,7 +491,7 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
     let parent_transcript_path = parent_session_dir.parent()?.join(parent_filename);
 
     let meta = read_subagent_meta(path);
-    let sanitize = crate::privacy::sanitize_provider_metadata_text;
+    let sanitize = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text;
     let retain_identifier = |value: Option<String>| {
         value.and_then(|value| {
             (sanitize(&value).as_deref() == Some(value.as_str())).then_some(value)

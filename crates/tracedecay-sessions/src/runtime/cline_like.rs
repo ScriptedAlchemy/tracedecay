@@ -19,14 +19,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::application::host_admission::HostAdmissionFacade;
+use crate::admission::HostAdmission;
 #[cfg(test)]
-use crate::application::host_admission::{
+use crate::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus, HostAdmissionTestRuntimeV1,
 };
-use crate::application::observation::ObservationCancellation;
+use crate::observation::ObservationCancellation;
 #[cfg(test)]
-use crate::privacy::parse_normalized_observation_record_v1;
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
@@ -156,7 +156,7 @@ impl ClineLikeSource {
         Self {
             provider: "cline",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
             user_registered_roots: None,
@@ -167,7 +167,7 @@ impl ClineLikeSource {
         Self {
             provider: "roo-code",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
             user_registered_roots: None,
@@ -178,7 +178,7 @@ impl ClineLikeSource {
         Self {
             provider: "kilo",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/kilocode.kilo-code/tasks"),
                 home.join(".kilocode/cli/global/tasks"),
             ],
@@ -380,7 +380,7 @@ impl ClineLikeSource {
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 pub async fn capture_cline_like_snapshot_observations(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     source: &ClineLikeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
@@ -1192,7 +1192,7 @@ mod observation_tests {
         let first_bytes = snapshot_input_bytes("cline", &paths[0]).unwrap();
         let second_bytes = snapshot_input_bytes("cline", &paths[1]).unwrap();
 
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
             temp.path().join("profile"),
         )
         .await
@@ -1260,7 +1260,7 @@ mod observation_tests {
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
         };
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
             temp.path().join("profile"),
         )
         .await

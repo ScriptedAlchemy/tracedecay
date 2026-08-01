@@ -27,17 +27,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_domain::ProjectId;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Error as EngineError, Executor, QueryExecutor, Result as EngineResult, params,
 };
-use crate::global_db::RegisteredGlobalDb;
+use crate::runtime::store_port::{SessionStoreAuthority, SessionWriteTxn};
 use crate::runtime::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::runtime::cursor::TimestampCarry;
 use crate::runtime::shared::usage_counters_from;
@@ -136,11 +134,11 @@ impl std::error::Error for BackfillError {
     }
 }
 
-pub async fn transcript_facts_backfill_status(
-    db: &RegisteredGlobalDb,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+pub async fn transcript_facts_backfill_status<A: SessionStoreAuthority>(
+    db: &A,
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     if !matches!(
-        &db.binding().shard_id.scope,
+        &db.shard_id().scope,
         StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions
     ) {
         return Ok(TranscriptFactsBackfillOutcome::NotRequired);
@@ -162,16 +160,16 @@ pub async fn transcript_facts_backfill_status(
     Ok(TranscriptFactsBackfillOutcome::Pending { cursor })
 }
 
-pub async fn advance_transcript_facts_backfill(
-    db: &RegisteredGlobalDb,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+pub async fn advance_transcript_facts_backfill<A: SessionStoreAuthority>(
+    db: &A,
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     advance_transcript_facts_backfill_with_limit(db, TRANSCRIPT_FACTS_BATCH).await
 }
 
-async fn advance_transcript_facts_backfill_with_limit(
-    db: &RegisteredGlobalDb,
+async fn advance_transcript_facts_backfill_with_limit<A: SessionStoreAuthority>(
+    db: &A,
     limit: usize,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     let TranscriptFactsBackfillOutcome::Pending { cursor } =
         transcript_facts_backfill_status(db).await?
     else {
@@ -270,8 +268,8 @@ fn derive_candidate_updates(
 fn backfill_error(
     operation: &'static str,
     error: impl std::fmt::Display,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Database {
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: operation.to_string(),
         message: error.to_string(),
     }
@@ -499,9 +497,9 @@ async fn update_session_windows(conn: &(impl Executor + ?Sized)) -> EngineResult
     Ok(())
 }
 
-async fn mark_transcript_facts_backfill_complete(
-    db: &RegisteredGlobalDb,
-) -> crate::errors::Result<()> {
+async fn mark_transcript_facts_backfill_complete<A: SessionStoreAuthority>(
+    db: &A,
+) -> tracedecay_runtime_core::errors::Result<()> {
     let transaction = db.begin_write_transaction().await?;
     let completed: EngineResult<()> = async {
         // Sessions ingested while messages were undated also have NULL
@@ -655,7 +653,7 @@ fn derive_timestamp(provider: &str, record: &Value, carry: &mut TimestampCarry) 
         "claude" | "codex" => record
             .get("timestamp")
             .and_then(Value::as_str)
-            .and_then(crate::accounting::parser::parse_timestamp)
+            .and_then(crate::host_ports::parse_timestamp)
             .and_then(|secs| i64::try_from(secs).ok()),
         // Vibe: numeric `ts`/`timestamp`/`created_at`.
         "vibe" => record
@@ -775,18 +773,18 @@ fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
 #[doc(hidden)]
 pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::File> {
     let lock_path = structured_backfill_lock_path(db_path);
-    crate::storage::try_acquire_sidecar_lock(&lock_path)
+    tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path)
         .ok()
         .flatten()
 }
 
 /// Re-parses the next bounded transcript batch and inserts rows missing from
 /// legacy stores.
-pub async fn backfill_structured_rows(
-    db: &RegisteredGlobalDb,
+pub async fn backfill_structured_rows<A: SessionStoreAuthority>(
+    db: &A,
 ) -> Option<StructuredBackfillStats> {
     if !matches!(
-        &db.binding().shard_id.scope,
+        &db.shard_id().scope,
         StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions
     ) {
         return None;
@@ -911,8 +909,8 @@ async fn migrate_legacy_global_marker(conn: &(impl Executor + ?Sized)) -> Option
 /// Sweeps one provider's next bounded transcript batch, advancing that
 /// provider's own version-namespaced cursor and marking it complete when it
 /// drains. A provider already at its target version returns immediately.
-async fn sweep_provider(
-    db: &RegisteredGlobalDb,
+async fn sweep_provider<A: SessionStoreAuthority>(
+    db: &A,
     provider: &str,
     target_version: i64,
     stats: &mut StructuredBackfillStats,
@@ -1193,8 +1191,8 @@ async fn write_backfill_cursor(
 /// exactly as the sweep does, so tests can assert the compare-and-set
 /// monotonicity guard rejects backwards moves.
 #[doc(hidden)]
-pub async fn write_structured_backfill_cursor_for_test(
-    db: &RegisteredGlobalDb,
+pub async fn write_structured_backfill_cursor_for_test<A: SessionStoreAuthority>(
+    db: &A,
     value: &str,
 ) -> Option<()> {
     let transaction = db.begin_write_transaction().await.ok()?;
@@ -1207,7 +1205,9 @@ pub async fn write_structured_backfill_cursor_for_test(
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
-pub async fn read_structured_backfill_cursor_for_test(db: &RegisteredGlobalDb) -> String {
+pub async fn read_structured_backfill_cursor_for_test<A: SessionStoreAuthority>(
+    db: &A,
+) -> String {
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
     let Ok(snapshot) = db.read_snapshot().await else {
         return String::new();
@@ -1240,481 +1240,6 @@ async fn mark_structured_backfill_complete(
     .await
     .ok()?;
     Some(())
-}
-
-/// Opaque registered ProjectSessions fixture for transcript-facts backfill tests.
-#[doc(hidden)]
-pub struct TranscriptFactsBackfillTestRuntimeV1 {
-    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
-}
-
-impl TranscriptFactsBackfillTestRuntimeV1 {
-    pub async fn project(
-        profile_root: impl AsRef<Path>,
-        project_root: impl AsRef<Path>,
-        project_id: ProjectId,
-    ) -> crate::errors::Result<Self> {
-        Ok(Self {
-            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
-                profile_root,
-                project_root,
-                project_id,
-            )
-            .await?,
-        })
-    }
-
-    fn database(&self) -> &RegisteredGlobalDb {
-        match self
-            .authority
-            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
-        {
-            Some(database) => database,
-            None => panic!("transcript facts test runtime has ProjectSessions authority"),
-        }
-    }
-
-    pub async fn transcript_facts_backfill_status_for_test(
-        &self,
-    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
-        transcript_facts_backfill_status(self.database()).await
-    }
-
-    pub async fn advance_transcript_facts_backfill_for_test(
-        &self,
-        limit: usize,
-    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
-        advance_transcript_facts_backfill_with_limit(self.database(), limit).await
-    }
-}
-
-impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
-    type Target = crate::application::host_admission::HostAdmissionTestRuntimeV1;
-
-    fn deref(&self) -> &Self::Target {
-        &self.authority
-    }
-}
-
-/// Opaque registered ProjectSessions fixture for structured-backfill integration tests.
-#[doc(hidden)]
-pub struct StructuredBackfillTestRuntimeV1 {
-    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
-}
-
-impl StructuredBackfillTestRuntimeV1 {
-    pub async fn project(
-        profile_root: impl AsRef<Path>,
-        project_root: impl AsRef<Path>,
-        project_id: ProjectId,
-    ) -> crate::errors::Result<Self> {
-        Ok(Self {
-            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
-                profile_root,
-                project_root,
-                project_id,
-            )
-            .await?,
-        })
-    }
-
-    fn database(&self) -> &RegisteredGlobalDb {
-        match self
-            .authority
-            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
-        {
-            Some(database) => database,
-            None => panic!("structured backfill test runtime has ProjectSessions authority"),
-        }
-    }
-
-    pub fn database_path(&self) -> &Path {
-        self.database().db_path()
-    }
-
-    pub async fn seed_source(
-        &self,
-        source: &dyn TranscriptSource,
-        project_root: &Path,
-    ) -> Result<crate::runtime::shared::TranscriptIngestStats, String> {
-        let discovery = source.discover_transcript_paths(
-            project_root,
-            crate::runtime::source::TranscriptDiscoveryBounds::default_walk(),
-        );
-        let mut stats = crate::runtime::shared::TranscriptIngestStats::default();
-        for path in discovery.paths {
-            let Some(parsed) = source
-                .try_parse_new(&path, StoredCursor::default(), project_root, None)
-                .map_err(|error| error.to_string())?
-            else {
-                continue;
-            };
-            let started_at = parsed
-                .messages
-                .iter()
-                .filter_map(|message| message.timestamp)
-                .min();
-            let ended_at = parsed
-                .messages
-                .iter()
-                .filter_map(|message| message.timestamp)
-                .max();
-            let transaction = self
-                .database()
-                .begin_write_transaction()
-                .await
-                .map_err(|error| error.to_string())?;
-            transaction
-                .execute(
-                    "INSERT INTO sessions
-                         (provider, session_id, project_key, project_path, title, started_at,
-                          ended_at, transcript_path, metadata_json, parent_session_id,
-                          is_subagent, agent_id, parent_tool_use_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                     ON CONFLICT(provider, session_id) DO UPDATE SET
-                        project_key = excluded.project_key,
-                        project_path = excluded.project_path,
-                        title = excluded.title,
-                        started_at = excluded.started_at,
-                        ended_at = excluded.ended_at,
-                        transcript_path = excluded.transcript_path,
-                        metadata_json = excluded.metadata_json,
-                        parent_session_id = excluded.parent_session_id,
-                        is_subagent = excluded.is_subagent,
-                        agent_id = excluded.agent_id,
-                        parent_tool_use_id = excluded.parent_tool_use_id",
-                    params![
-                        source.provider(),
-                        parsed.draft.session_id.as_str(),
-                        parsed.draft.project_key.as_str(),
-                        parsed.draft.project_path.as_str(),
-                        parsed.draft.title.as_deref(),
-                        started_at,
-                        ended_at,
-                        path.to_string_lossy().as_ref(),
-                        parsed.draft.metadata_json.as_deref(),
-                        parsed.draft.parent_session_id.as_deref(),
-                        i64::from(parsed.draft.is_subagent),
-                        parsed.draft.agent_id.as_deref(),
-                        parsed.draft.parent_tool_use_id.as_deref(),
-                    ],
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            let inserted = insert_absent_session_messages(&transaction, &parsed.messages)
-                .await
-                .ok_or_else(|| "seed structured transcript messages".to_string())?;
-            transaction
-                .commit()
-                .await
-                .map_err(|error| error.to_string())?;
-            stats.sessions_upserted = stats.sessions_upserted.saturating_add(1);
-            stats.messages_upserted = stats.messages_upserted.saturating_add(inserted);
-        }
-        Ok(stats)
-    }
-
-    pub async fn run(&self) -> Option<u64> {
-        backfill_structured_rows(self.database())
-            .await
-            .map(|stats| stats.inserted)
-    }
-
-    pub async fn count_kind(&self, provider: &str, kind: &str) -> Result<i64, String> {
-        let snapshot = self
-            .database()
-            .read_snapshot()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COUNT(*) FROM session_messages WHERE provider = ?1 AND kind = ?2",
-                params![provider, kind],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        rows.next()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "missing structured kind count".to_string())?
-            .get(0)
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn remove_kind_and_reset(&self, provider: &str, kind: &str) -> Result<(), String> {
-        let transaction = self
-            .database()
-            .begin_write_transaction()
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM lcm_raw_messages
-                 WHERE provider = ?1
-                   AND message_id IN (
-                       SELECT message_id FROM session_messages
-                       WHERE provider = ?1 AND kind = ?2)",
-                params![provider, kind],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_messages WHERE provider = ?1 AND kind = ?2",
-                params![provider, kind],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_schema_migrations
-                 WHERE name LIKE 'structured_rows_backfill%'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_backfill_meta
-                 WHERE key LIKE 'structured_backfill_cursor%'",
-                (),
-            )
-            .await
-            .ok();
-        transaction
-            .commit()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn goal_row(&self) -> Result<(String, Option<String>, Option<String>), String> {
-        let snapshot = self
-            .database()
-            .read_snapshot()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = snapshot
-            .query(
-                "SELECT text, kind, metadata_json FROM session_messages
-                 WHERE provider = 'codex' AND kind = 'goal'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "missing Codex goal row".to_string())?;
-        Ok((
-            row.get(0).map_err(|error| error.to_string())?,
-            row.get(1).map_err(|error| error.to_string())?,
-            row.get(2).map_err(|error| error.to_string())?,
-        ))
-    }
-
-    pub async fn marker_version(&self, provider: Option<&str>) -> Result<Option<i64>, String> {
-        let name = provider.map_or_else(
-            || STRUCTURED_MARKER_NAME.to_string(),
-            structured_marker_name,
-        );
-        let snapshot = self
-            .database()
-            .read_snapshot()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = snapshot
-            .query(
-                "SELECT version FROM session_schema_migrations WHERE name = ?1",
-                params![name],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        rows.next()
-            .await
-            .map_err(|error| error.to_string())
-            .map(|row| row.and_then(|row| row.get(0).ok()))
-    }
-
-    pub async fn session(
-        &self,
-        provider: &str,
-        session_id: &str,
-    ) -> Result<Option<crate::runtime::SessionRecord>, String> {
-        let snapshot = self
-            .database()
-            .read_snapshot()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = snapshot
-            .query(
-                "SELECT provider, session_id, project_key, project_path, title, started_at,
-                        ended_at, transcript_path, metadata_json, parent_session_id,
-                        is_subagent, agent_id, parent_tool_use_id
-                 FROM sessions WHERE provider = ?1 AND session_id = ?2",
-                params![provider, session_id],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let Some(row) = rows.next().await.map_err(|error| error.to_string())? else {
-            return Ok(None);
-        };
-        Ok(Some(crate::runtime::SessionRecord {
-            provider: row.get(0).map_err(|error| error.to_string())?,
-            session_id: row.get(1).map_err(|error| error.to_string())?,
-            project_key: row.get(2).map_err(|error| error.to_string())?,
-            project_path: row.get(3).map_err(|error| error.to_string())?,
-            title: row.get(4).map_err(|error| error.to_string())?,
-            started_at: row.get(5).map_err(|error| error.to_string())?,
-            ended_at: row.get(6).map_err(|error| error.to_string())?,
-            transcript_path: row.get(7).map_err(|error| error.to_string())?,
-            metadata_json: row.get(8).map_err(|error| error.to_string())?,
-            parent_session_id: row.get(9).map_err(|error| error.to_string())?,
-            is_subagent: row.get::<i64>(10).map_err(|error| error.to_string())? != 0,
-            agent_id: row.get(11).map_err(|error| error.to_string())?,
-            parent_tool_use_id: row.get(12).map_err(|error| error.to_string())?,
-        }))
-    }
-
-    pub async fn seed_stale_unversioned_cursor(&self) -> Result<(), String> {
-        let transaction = self
-            .database()
-            .begin_write_transaction()
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM lcm_raw_messages
-                 WHERE provider = 'codex'
-                   AND message_id IN (
-                       SELECT message_id FROM session_messages
-                       WHERE provider = 'codex' AND kind = 'goal')",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_messages WHERE provider = 'codex' AND kind = 'goal'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_schema_migrations
-                 WHERE name LIKE 'structured_rows_backfill%'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = transaction
-            .query(
-                "SELECT MAX(source_path) FROM session_messages WHERE provider = 'codex'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let last_path: String = rows
-            .next()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "missing Codex source path".to_string())?
-            .get(0)
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "INSERT INTO session_backfill_meta(key, value)
-                 VALUES ('structured_backfill_cursor', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![last_path],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn seed_legacy_global_marker(&self, version: i64) -> Result<(), String> {
-        let transaction = self
-            .database()
-            .begin_write_transaction()
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_schema_migrations
-                 WHERE name LIKE 'structured_rows_backfill%'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "INSERT INTO session_schema_migrations(name, version)
-                 VALUES (?1, ?2)",
-                params![STRUCTURED_MARKER_NAME, version],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "DELETE FROM session_backfill_meta
-                 WHERE key LIKE 'structured_backfill_cursor%'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        for key in [
-            STRUCTURED_CURSOR_KEY_PREFIX.to_string(),
-            format!("{STRUCTURED_CURSOR_KEY_PREFIX}:v{version}"),
-        ] {
-            transaction
-                .execute(
-                    "INSERT INTO session_backfill_meta(key, value)
-                     VALUES (?1, 'legacy/path.jsonl')",
-                    params![key],
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn cursor_count(&self) -> Result<i64, String> {
-        let snapshot = self
-            .database()
-            .read_snapshot()
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut rows = snapshot
-            .query(
-                "SELECT COUNT(*) FROM session_backfill_meta
-                 WHERE key LIKE 'structured_backfill_cursor%'",
-                (),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        rows.next()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "missing structured cursor count".to_string())?
-            .get(0)
-            .map_err(|error| error.to_string())
-    }
-
-    pub async fn write_cursor(&self, value: &str) -> Option<()> {
-        write_structured_backfill_cursor_for_test(self.database(), value).await
-    }
-
-    pub async fn read_cursor(&self) -> String {
-        read_structured_backfill_cursor_for_test(self.database()).await
-    }
 }
 
 #[cfg(test)]
@@ -1796,7 +1321,7 @@ mod tests {
     async fn dogfood_recovery_transcript_fact_failure_rolls_back_entire_batch() {
         let directory = tempfile::tempdir().unwrap();
         let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
         let transaction = connection.transaction().await.unwrap();
         transaction
             .execute_batch(

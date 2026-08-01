@@ -1,6 +1,6 @@
 use tempfile::TempDir;
 
-use crate::db::engine::{TestConnection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::lcm::{raw, schema};
 

@@ -754,7 +754,7 @@ struct LcmLifecycleMetadata {
 
 #[cfg(test)]
 mod tests {
-    use crate::db::engine::{Connection, TestConnection};
+    use tracedecay_runtime_core::db::engine::{Connection, TestConnection};
     use tempfile::TempDir;
 
     use super::*;

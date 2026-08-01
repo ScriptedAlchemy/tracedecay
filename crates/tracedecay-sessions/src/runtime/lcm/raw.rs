@@ -2,15 +2,13 @@ use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue, json};
 
-pub use crate::application::session::compatibility::derived_text_for_index;
-pub use crate::application::session::compatibility::derived_text_for_snippet;
-use crate::application::session::compatibility::projected_content_hash;
-use crate::{
-    db::engine::{Executor, QueryExecutor, Row, params},
-    privacy::detector_kernel::{
-        JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
-    },
-    sessions::SessionMessageRecord,
+pub use crate::compatibility::derived_text_for_index;
+pub use crate::compatibility::derived_text_for_snippet;
+use crate::compatibility::projected_content_hash;
+use crate::runtime::SessionMessageRecord;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::privacy::detector_kernel::{
+    JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, visit_sensitive_json_mut,
 };
 
 use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};
@@ -755,17 +753,17 @@ struct IngestProtectionDefaults {
 
 impl IngestProtectionDefaults {
     fn from_profile() -> Self {
-        Self::from_user_config(&crate::user_config::UserConfig::load())
+        Self::from_policy(&crate::host_ports::lcm_redaction::resolve())
     }
 
-    fn from_user_config(config: &crate::user_config::UserConfig) -> Self {
-        let patterns: Vec<String> = config
-            .lcm_sensitive_redaction_patterns
+    fn from_policy(policy: &crate::host_ports::LcmRedactionPolicy) -> Self {
+        let patterns: Vec<String> = policy
+            .patterns
             .iter()
             .map(|pattern| pattern.to_ascii_lowercase())
             .collect();
         Self {
-            sensitive_patterns_enabled: config.lcm_sensitive_redaction_enabled,
+            sensitive_patterns_enabled: policy.enabled,
             sensitive_patterns: (!patterns.is_empty()).then_some(patterns),
         }
     }

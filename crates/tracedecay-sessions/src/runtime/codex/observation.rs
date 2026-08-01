@@ -18,9 +18,10 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use super::PROVIDER;
 use super::context::CodexContextState;
 use super::meta::session_meta_with_provenance;
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::ObservationCancellation;
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use crate::admission::HostAdmission;
+use crate::host_ports::unregistered_admission;
+use crate::observation::ObservationCancellation;
+use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
     admit_jsonl_observations,
@@ -47,14 +48,16 @@ pub async fn try_admit_codex_jsonl_observations_for_project(
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::unregistered_for_project(
-        project_id.clone(),
-    ));
+    let Some(admission) =
+        unregistered_admission::create(unregistered_admission::Scope::Project(project_id.clone()))
+    else {
+        return Ok(CodexJsonlAdmissionProgress::default());
+    };
     try_admit_codex_jsonl_observations_for_project_with_admission(
         path,
         project_root,
         project_id,
-        &admission,
+        admission.as_ref(),
         max_new_bytes,
     )
     .await
@@ -68,7 +71,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission(
     path: &Path,
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
@@ -86,7 +89,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission_and_c
     path: &Path,
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
@@ -113,12 +116,15 @@ pub async fn try_admit_codex_jsonl_observations_for_profile(
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::unregistered_for_profile());
+    let Some(admission) = unregistered_admission::create(unregistered_admission::Scope::Profile)
+    else {
+        return Ok(CodexJsonlAdmissionProgress::default());
+    };
     try_admit_codex_jsonl_observations_for_profile_with_admission(
         path,
         session_id,
         registered_roots,
-        &admission,
+        admission.as_ref(),
         max_new_bytes,
     )
     .await
@@ -128,7 +134,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission(
     path: &Path,
     session_id: Option<&str>,
     registered_roots: &[PathBuf],
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
@@ -146,7 +152,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_c
     path: &Path,
     session_id: Option<&str>,
     registered_roots: &[PathBuf],
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
@@ -212,7 +218,7 @@ impl CodexObservationAdmission<'_> {
 async fn try_admit_codex_jsonl_observations(
     path: &Path,
     admission_scope: CodexObservationAdmission<'_>,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {

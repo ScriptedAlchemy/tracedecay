@@ -1,15 +1,15 @@
 //! LCM value types owned by the session store.
 //!
 //! The DB-free retrieval and rendering contracts live in
-//! [`crate::application::session::lcm`] and are re-exported here so
+//! [`crate::lcm`] and are re-exported here so
 //! `sessions::lcm` remains the single import surface for the session engine.
 //! Only infrastructure-facing conversions — notably the SQL error mapping —
 //! stay in this module.
 
-pub use crate::application::session::compatibility::{
+pub use crate::compatibility::{
     DERIVED_TRUNCATION_MARKER, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
-pub use crate::application::session::lcm::contracts::{
+pub use crate::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
@@ -17,8 +17,8 @@ pub use crate::application::session::lcm::contracts::{
     LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview,
 };
 
-impl From<crate::db::engine::Error> for LcmError {
-    fn from(err: crate::db::engine::Error) -> Self {
+impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {
+    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }

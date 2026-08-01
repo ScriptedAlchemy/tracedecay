@@ -16,11 +16,11 @@ use tracedecay_domain::{
     ProviderId, RetentionClass, SessionId,
 };
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::{
+use crate::admission::HostAdmission;
+use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::parse_normalized_observation_record_v1;
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::source::TranscriptIngestError;
 
 use super::PROVIDER;
@@ -116,7 +116,7 @@ pub fn build_cursor_composer_capture_request(
 }
 
 pub async fn capture_cursor_composer_observation(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     request: CaptureObservationRequest,
 ) -> Result<CaptureObservationOutcome, TranscriptIngestError> {
     admission

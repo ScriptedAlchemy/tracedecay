@@ -14,14 +14,14 @@ use tracedecay_domain::{
 use tracedecay_store::ObservationPersistOutcome;
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::application::host_admission::{
-    HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionStatus, WireReadOutcome,
+use crate::admission::{
+    HostAdmission, HostAdmissionOutcome, HostAdmissionStatus, WireReadOutcome,
     read_bounded_to_string,
 };
-use crate::application::observation::{
+use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -177,7 +177,7 @@ pub fn snapshot_cursor_after(
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
 pub async fn capture_snapshot_observations<R, B, L>(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
     max_new_bytes: Option<u64>,
@@ -228,7 +228,7 @@ impl SnapshotAdmissionRunner {
 
     pub async fn admit_batch<R, F>(
         &mut self,
-        facade: &HostAdmissionFacade<'_>,
+        facade: &dyn HostAdmission,
         input_bytes: u64,
         scope: &ObservationScopeV1,
         cancellation: &ObservationCancellation,
@@ -368,7 +368,7 @@ impl SnapshotAdmissionRunner {
 /// Reads a session's durable cursor once per sweep, reusing the committed cursor
 /// carried by each capture receipt instead of re-selecting it per record.
 async fn session_cursor(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     cursors: &mut BTreeMap<String, Option<ObservationSourceCursorV1>>,
     provider: &'static str,
     session_id: &str,
@@ -487,7 +487,7 @@ pub fn host_admission_error(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_snapshot_coverage(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     provider: &'static str,
     source: ObservationSourceIdentityV1,
     range: ObservationSourceRangeV1,
@@ -517,7 +517,7 @@ pub async fn advance_snapshot_coverage(
 /// receipt is optional (structural covers carry no receipt; sanitizer covers do).
 #[allow(clippy::too_many_arguments)]
 pub async fn advance_snapshot_coverage_maybe(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     provider: &'static str,
     source: ObservationSourceIdentityV1,
     range: ObservationSourceRangeV1,
@@ -615,7 +615,7 @@ pub fn snapshot_message_fields(
 }
 
 pub async fn snapshot_range_was_committed(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
     generation: ObservationSourceGenerationV1,

@@ -11,7 +11,7 @@
 
 use serde::Serialize;
 
-use crate::db::engine::{ReadSnapshot, params};
+use tracedecay_runtime_core::db::engine::{ReadSnapshot, params};
 
 /// Max characters of collapsed evidence text kept per unfinished-run row before
 /// a single-character `…` truncation, so one row never dominates the listing.

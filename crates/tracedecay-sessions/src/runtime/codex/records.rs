@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::PROVIDER;
 use super::goals::{CodexGoalContext, codex_goal_context_from_text};
 use super::meta::CodexMeta;
-use crate::accounting::parser::parse_timestamp;
+use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_and_tools};
 

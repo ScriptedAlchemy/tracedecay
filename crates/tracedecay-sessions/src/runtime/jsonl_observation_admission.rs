@@ -8,11 +8,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::{
+use crate::admission::HostAdmission;
+use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::ParsedObservationRecordV1;
+use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
@@ -27,10 +27,10 @@ pub enum PersistedCursorUpdate {
     Monotonic,
 }
 
-pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
+pub struct JsonlObservationAdmissionRequest<'request> {
     provider: &'static str,
     path: &'request Path,
-    admission: &'request HostAdmissionFacade<'authority>,
+    admission: &'request dyn HostAdmission,
     source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
     retention_class: RetentionClass,
@@ -39,11 +39,11 @@ pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
     cancellation: ObservationCancellation,
 }
 
-impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority> {
+impl<'request> JsonlObservationAdmissionRequest<'request> {
     pub fn new(
         provider: &'static str,
         path: &'request Path,
-        admission: &'request HostAdmissionFacade<'authority>,
+        admission: &'request dyn HostAdmission,
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
         retention_class: RetentionClass,
@@ -146,9 +146,9 @@ struct DurableJsonlFrame {
     native_record_id: ObservationId,
 }
 
-struct ActiveAdmission<'request, 'authority> {
+struct ActiveAdmission<'request> {
     provider: &'static str,
-    admission: &'request HostAdmissionFacade<'authority>,
+    admission: &'request dyn HostAdmission,
     source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -156,7 +156,7 @@ struct ActiveAdmission<'request, 'authority> {
     cancellation: ObservationCancellation,
 }
 
-impl ActiveAdmission<'_, '_> {
+impl ActiveAdmission<'_> {
     fn cursor_at(
         &self,
         end_offset: u64,
@@ -322,7 +322,7 @@ impl ActiveAdmission<'_, '_> {
 }
 
 pub async fn admit_jsonl_observations<State>(
-    request: JsonlObservationAdmissionRequest<'_, '_>,
+    request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
     mut normalize: impl FnMut(
         &mut State,

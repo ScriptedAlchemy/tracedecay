@@ -62,7 +62,7 @@ use tracedecay_application::storage::{
 };
 use tracedecay_domain::UtcMicros;
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, params,
 };
 
@@ -527,7 +527,7 @@ impl RetentionQueryExecutor<'_> {
         &self,
         sql: &str,
         params: Params,
-    ) -> crate::db::engine::Result<crate::db::engine::Rows> {
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows> {
         match self {
             Self::Connection(connection) => connection.query(sql, params).await,
             Self::Transaction(transaction) => transaction.query(sql, params).await,

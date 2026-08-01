@@ -22,10 +22,10 @@ mod ingest_byte_budget;
 mod jsonl_observation_admission;
 pub mod kiro;
 pub mod lcm;
-pub mod session_temporal_benchmark;
 pub mod shared;
 pub mod snapshot_observation;
 pub mod source;
+pub mod store_port;
 // Exposes three `#[doc(hidden)]` process-safety test helpers that the root
 // integration tests reach through the `crate::sessions` shim.
 pub mod transcript_backfill;

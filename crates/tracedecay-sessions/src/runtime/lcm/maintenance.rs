@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use tracedecay_application::DirectorySyncPolicy;
 
-use crate::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::{LCM_SCAN_PAGE_ROWS, LcmError};
 
@@ -39,7 +39,7 @@ pub(super) async fn backup_database(
     let staging_path = staging_dir.join("sessions.db");
     let backup_path = published_dir.join("sessions.db");
     let result = async {
-        crate::sqlite_read_snapshot::backup_live_sqlite_database(db_path, &staging_path)
+        tracedecay_runtime_core::sqlite_read_snapshot::backup_live_sqlite_database(db_path, &staging_path)
             .await
             .map_err(|error| LcmError::Io(error.to_string()))?;
         sync_file(&staging_path)?;
@@ -167,7 +167,7 @@ async fn payload_metadata_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
     use rusqlite::Connection as RusqliteConnection;
 
     #[tokio::test]
