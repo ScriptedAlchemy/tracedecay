@@ -681,7 +681,7 @@ fn rollback_refuses_database_with_active_authority() {
 /// family for deletion, and a deletion fence refuses any database this process
 /// still holds an authority for — so branch sync used to fail with "this
 /// process already holds an incompatible database authority or deletion fence
-/// (operation: roll back published branch SQLite family)" and leave the failed
+/// (operation: roll back published branch `SQLite` family)" and leave the failed
 /// branch published until some other process cleaned it up.
 ///
 /// Retiring the registered runtime first must make the exact same rollback
