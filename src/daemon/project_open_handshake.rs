@@ -10,7 +10,7 @@
 
 use super::*;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,

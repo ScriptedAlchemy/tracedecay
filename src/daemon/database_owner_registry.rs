@@ -305,7 +305,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.servers.values().map(|entry| &entry.server)
     }
 
-    #[cfg(any(unix, test))]
+    #[cfg(unix)]
     pub(super) fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
         self.servers.keys()
     }

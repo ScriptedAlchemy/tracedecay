@@ -9,7 +9,7 @@ use tracedecay_application::{
     WorkExecutionService, WorkProviderExecutionError, WorkProviderSettlementV1, WorkStorageError,
     WorkStoragePort,
 };
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use tracedecay_domain::WorkProviderRouteV1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
@@ -104,17 +104,17 @@ where
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn provider_route(&self) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
         self.queue.route()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_ready(&self) -> bool {
         self.queue.provider().is_ready() && event_lane::enabled(Some(self.observation_db.as_ref()))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn in_flight(&self) -> usize {
         self.queue.in_flight()
     }

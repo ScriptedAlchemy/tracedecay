@@ -94,7 +94,7 @@ where
         route(CODEX_CLI_PROVIDER_ID, CODEX_CLI_ROUTE_ID)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_ready(&self) -> bool {
         executable_is_resolvable(&self.config.codex_app_server.codex_bin)
             || executable_is_resolvable(&self.config.claude_bin)

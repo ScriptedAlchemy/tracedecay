@@ -240,6 +240,156 @@ fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
     let _ = tracing_subscriber::registry().with(layer).try_init();
 }
 
+/// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
+/// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
+/// optionally double-quoted). Returns `None` for non-watcher lines.
+///
+/// The line must carry [`DAEMON_LOG_MARKER`] with `event=` immediately after
+/// it. The marker is searched for rather than required at column zero because
+/// journald and launchd prepend their own timestamp and unit prefix.
+#[cfg(unix)]
+fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
+    let idx = line.find(DAEMON_LOG_MARKER)?;
+    let rest = &line[idx + DAEMON_LOG_MARKER.len()..];
+    let mut fields = parse_log_fields(rest);
+    let event = fields.remove("__first__")?;
+    if !event.starts_with("git_watch_") {
+        return None;
+    }
+    let detail = fields
+        .remove("action")
+        .or_else(|| fields.remove("reason"))
+        .or_else(|| fields.remove("branch"));
+    Some(WatcherEvent {
+        event,
+        project: fields.remove("project"),
+        detail,
+    })
+}
+
+/// Splits a `key=value key="quoted value" …` tail into a map. The leading value
+/// (the event name, which has no key) is stored under `__first__`.
+#[cfg(unix)]
+fn parse_log_fields(rest: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    let mut first = true;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if first {
+            // Leading unkeyed event-name token.
+            let start = i;
+            while i < bytes.len() && bytes[i] != b' ' {
+                i += 1;
+            }
+            out.insert("__first__".to_string(), unquote(&rest[start..i]));
+            first = false;
+            continue;
+        }
+        // key
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && bytes[i] != b' ' {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            break;
+        }
+        let key = rest[key_start..i].to_string();
+        i += 1; // skip '='
+        let value = if i < bytes.len() && bytes[i] == b'"' {
+            i += 1;
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            let v = rest[val_start..i.min(rest.len())].to_string();
+            if i < bytes.len() {
+                i += 1; // closing quote
+            }
+            v.replace("\\\"", "\"").replace("\\\\", "\\")
+        } else {
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != b' ' {
+                i += 1;
+            }
+            rest[val_start..i].to_string()
+        };
+        out.insert(key, value);
+    }
+    out
+}
+
+#[cfg(unix)]
+fn unquote(s: &str) -> String {
+    s.trim_matches('"').to_string()
+}
+
+/// Reads recent `git_watch_*` events from the daemon log and returns the most
+/// recent event per project. Read-only; used by `tracedecay doctor`.
+///
+/// Source is platform-specific: systemd user journal on Linux, the launchd
+/// `daemon.err.log` on macOS. Returns an empty map when no log source is
+/// readable (the doctor treats that as "no watcher telemetry available").
+#[cfg(unix)]
+pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
+    let text = read_daemon_log_tail(max_lines);
+    let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
+    for line in text.lines() {
+        if let Some(ev) = parse_watcher_log_line(line) {
+            let key = ev.project.clone().unwrap_or_else(|| "<global>".to_string());
+            latest.insert(key, ev);
+        }
+    }
+    latest
+}
+
+/// Best-effort read of the tail of the daemon log across service runners.
+#[cfg(unix)]
+fn read_daemon_log_tail(max_lines: usize) -> String {
+    // macOS launchd: a plain err-log file next to the data dir.
+    if let Some(data_dir) = crate::config::user_data_dir() {
+        let err_log = data_dir.join("daemon.err.log");
+        if let Ok(contents) = std::fs::read_to_string(&err_log) {
+            let lines: Vec<&str> = contents.lines().collect();
+            let start = lines.len().saturating_sub(max_lines);
+            return lines[start..].join("\n");
+        }
+    }
+    // Linux systemd: pull recent journal lines for the user unit.
+    let output = std::process::Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            SERVICE_NAME,
+            "--no-pager",
+            "-n",
+            &max_lines.to_string(),
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
+pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "TraceDecay daemon socket '{}' is not available. Run `tracedecay daemon install-service` and ensure the service is running.",
+            socket_path.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod stderr_tracing_tests {
     use tracing::level_filters::LevelFilter;
@@ -361,99 +511,6 @@ mod stderr_tracing_tests {
     }
 }
 
-/// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
-/// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
-/// optionally double-quoted). Returns `None` for non-watcher lines.
-///
-/// The line must carry [`DAEMON_LOG_MARKER`] with `event=` immediately after
-/// it. The marker is searched for rather than required at column zero because
-/// journald and launchd prepend their own timestamp and unit prefix.
-#[cfg(unix)]
-fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
-    let idx = line.find(DAEMON_LOG_MARKER)?;
-    let rest = &line[idx + DAEMON_LOG_MARKER.len()..];
-    let mut fields = parse_log_fields(rest);
-    let event = fields.remove("__first__")?;
-    if !event.starts_with("git_watch_") {
-        return None;
-    }
-    let detail = fields
-        .remove("action")
-        .or_else(|| fields.remove("reason"))
-        .or_else(|| fields.remove("branch"));
-    Some(WatcherEvent {
-        event,
-        project: fields.remove("project"),
-        detail,
-    })
-}
-
-/// Splits a `key=value key="quoted value" …` tail into a map. The leading value
-/// (the event name, which has no key) is stored under `__first__`.
-#[cfg(unix)]
-fn parse_log_fields(rest: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    let mut first = true;
-    while i < bytes.len() {
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        if first {
-            // Leading unkeyed event-name token.
-            let start = i;
-            while i < bytes.len() && bytes[i] != b' ' {
-                i += 1;
-            }
-            out.insert("__first__".to_string(), unquote(&rest[start..i]));
-            first = false;
-            continue;
-        }
-        // key
-        let key_start = i;
-        while i < bytes.len() && bytes[i] != b'=' && bytes[i] != b' ' {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] != b'=' {
-            break;
-        }
-        let key = rest[key_start..i].to_string();
-        i += 1; // skip '='
-        let value = if i < bytes.len() && bytes[i] == b'"' {
-            i += 1;
-            let val_start = i;
-            while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            let v = rest[val_start..i.min(rest.len())].to_string();
-            if i < bytes.len() {
-                i += 1; // closing quote
-            }
-            v.replace("\\\"", "\"").replace("\\\\", "\\")
-        } else {
-            let val_start = i;
-            while i < bytes.len() && bytes[i] != b' ' {
-                i += 1;
-            }
-            rest[val_start..i].to_string()
-        };
-        out.insert(key, value);
-    }
-    out
-}
-
-#[cfg(unix)]
-fn unquote(s: &str) -> String {
-    s.trim_matches('"').to_string()
-}
-
 #[cfg(all(unix, test))]
 mod watcher_log_tests {
     use super::parse_watcher_log_line;
@@ -490,62 +547,5 @@ mod watcher_log_tests {
         let line = "[tracedecay] event=scheduler_task task=memory_curator outcome=start";
 
         assert!(parse_watcher_log_line(line).is_none());
-    }
-}
-
-/// Reads recent `git_watch_*` events from the daemon log and returns the most
-/// recent event per project. Read-only; used by `tracedecay doctor`.
-///
-/// Source is platform-specific: systemd user journal on Linux, the launchd
-/// `daemon.err.log` on macOS. Returns an empty map when no log source is
-/// readable (the doctor treats that as "no watcher telemetry available").
-#[cfg(unix)]
-pub fn recent_watcher_events(max_lines: usize) -> HashMap<String, WatcherEvent> {
-    let text = read_daemon_log_tail(max_lines);
-    let mut latest: HashMap<String, WatcherEvent> = HashMap::new();
-    for line in text.lines() {
-        if let Some(ev) = parse_watcher_log_line(line) {
-            let key = ev.project.clone().unwrap_or_else(|| "<global>".to_string());
-            latest.insert(key, ev);
-        }
-    }
-    latest
-}
-
-/// Best-effort read of the tail of the daemon log across service runners.
-#[cfg(unix)]
-fn read_daemon_log_tail(max_lines: usize) -> String {
-    // macOS launchd: a plain err-log file next to the data dir.
-    if let Some(data_dir) = crate::config::user_data_dir() {
-        let err_log = data_dir.join("daemon.err.log");
-        if let Ok(contents) = std::fs::read_to_string(&err_log) {
-            let lines: Vec<&str> = contents.lines().collect();
-            let start = lines.len().saturating_sub(max_lines);
-            return lines[start..].join("\n");
-        }
-    }
-    // Linux systemd: pull recent journal lines for the user unit.
-    let output = std::process::Command::new("journalctl")
-        .args([
-            "--user",
-            "-u",
-            SERVICE_NAME,
-            "--no-pager",
-            "-n",
-            &max_lines.to_string(),
-        ])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
-        _ => String::new(),
-    }
-}
-
-pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!(
-            "TraceDecay daemon socket '{}' is not available. Run `tracedecay daemon install-service` and ensure the service is running.",
-            socket_path.display()
-        ),
     }
 }

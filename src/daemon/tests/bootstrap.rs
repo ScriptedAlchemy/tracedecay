@@ -6,6 +6,7 @@ use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
+#[cfg(unix)]
 use std::process::Command;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -91,6 +92,7 @@ fn host_ingest_waits_for_registered_project_authority_publication() {
     );
 }
 
+#[cfg(unix)]
 fn run_git(root: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
