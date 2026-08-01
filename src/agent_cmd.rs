@@ -276,12 +276,15 @@ fn apply_host_bundle_artifact_action_at(
 ) -> tracedecay::errors::Result<[u8; 16]> {
     if options.dry_run {
         return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "artifact backup/restore has no dry-run mode; it requires --yes".to_string(),
+            message: "artifact backup/restore has no dry-run mode".to_string(),
         });
     }
-    if !options.yes {
+    // A backup only ever writes a new snapshot; nothing deployed changes, so
+    // it needs no confirmation. A restore overwrites deployed bytes and keeps
+    // requiring `--yes`.
+    if matches!(action, crate::cli::HostBundleAction::ArtifactRestore { .. }) && !options.yes {
         return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "artifact backup/restore requires --yes".to_string(),
+            message: "artifact restore requires --yes".to_string(),
         });
     }
     let component =
