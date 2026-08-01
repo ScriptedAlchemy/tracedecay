@@ -21,6 +21,10 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
+pub use tracedecay_agent_hosts::analytics;
+pub use tracedecay_hooks as hooks;
+pub use tracedecay_usecases as application;
+
 pub mod analytics_api;
 mod automation_config_api;
 mod automation_fact_proposals_api;
