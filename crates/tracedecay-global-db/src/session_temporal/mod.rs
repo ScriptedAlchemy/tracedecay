@@ -16,6 +16,7 @@ pub mod render;
 mod retrieval;
 mod schema;
 mod sql;
+pub mod store;
 #[cfg(test)]
 mod tests;
 
@@ -63,6 +64,7 @@ pub use doctor_health::{
 pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 pub use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
+pub use store::GlobalDbSessionTemporalStore;
 
 impl RegisteredGlobalDb {
     pub async fn ensure_active_session_cursor_key_result(
