@@ -16,6 +16,9 @@
 //! invocation executor is attached the classifier defers it to the analysis
 //! group, and this row is what the deferred lookup resolves against.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpToolDispatchGroup {
@@ -147,10 +150,21 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },];
 
+/// Resolves a tool name against [`MCP_TOOL_BINDINGS`].
+///
+/// Every dispatched tool call asks this two or three times, so the table is
+/// indexed by name once per process rather than scanned each time.
+/// `MCP_TOOL_BINDINGS` stays the authority for the rows: a duplicate name
+/// would collapse in the index, which `every_tool_is_bound_once` forbids.
 fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
-    MCP_TOOL_BINDINGS
-        .iter()
-        .find(|binding| binding.name == tool_name)
+    static BY_NAME: LazyLock<HashMap<&'static str, &'static McpToolBinding>> =
+        LazyLock::new(|| {
+            MCP_TOOL_BINDINGS
+                .iter()
+                .map(|binding| (binding.name, binding))
+                .collect()
+        });
+    BY_NAME.get(tool_name).copied()
 }
 
 /// The statically bound dispatch group, if this tool has one.

@@ -33,6 +33,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
+use tracedecay_usecases::remote_json_cache::{
+    cache_is_stale as cache_file_is_stale, file_mtime_unix, refresh_cached_json,
+};
 
 /// `OpenRouter` public model list (pricing metadata needs no authentication).
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -146,16 +149,6 @@ pub fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>>
     }
 }
 
-/// Unix mtime of a file, when readable.
-fn file_mtime_unix(path: &std::path::Path) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let secs = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    i64::try_from(secs).ok()
-}
-
 /// Loads the current pricing table: disk cache first (served even when
 /// stale), bundled snapshot otherwise. Cheap enough to call per request —
 /// the dashboard is a local single-user server.
@@ -179,37 +172,23 @@ pub fn load_table() -> PriceTable {
 
 /// True when the disk cache is missing or older than the TTL.
 fn cache_is_stale() -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    match cache_path().as_deref().and_then(file_mtime_unix) {
-        Some(mtime) => now - mtime >= CACHE_TTL_SECS,
-        None => true,
-    }
+    cache_file_is_stale(cache_path().as_deref(), CACHE_TTL_SECS)
 }
 
 /// Fetches fresh pricing from `OpenRouter` and writes the cache file.
 /// Best-effort: validates the payload before writing, returns `false` on any
-/// failure (offline, timeout, bad body, unwritable cache).
+/// failure (offline, timeout, bad body, unwritable cache). The
+/// fetch/validate/write mechanism is shared with the root crate's `LiteLLM`
+/// table — see `remote_json_cache`; only the source, timeout, parser and
+/// cache path are ours.
 fn refresh_pricing_blocking() -> bool {
-    let agent = crate::cloud::agent_with_timeout(FETCH_TIMEOUT);
-    let Ok(mut resp) = agent.get(OPENROUTER_MODELS_URL).call() else {
-        return false;
-    };
-    let Ok(body) = resp.body_mut().read_to_string() else {
-        return false;
-    };
-    if parse_openrouter_json(&body).is_none() {
-        return false;
-    }
     let Some(path) = cache_path() else {
         return false;
     };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(path, body).is_ok()
+    let agent = crate::cloud::agent_with_timeout(FETCH_TIMEOUT);
+    refresh_cached_json(&agent, OPENROUTER_MODELS_URL, &path, |body| {
+        parse_openrouter_json(body).is_some()
+    })
 }
 
 /// Kicks off at most one background pricing refresh per process, and only
