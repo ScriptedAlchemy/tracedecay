@@ -14,9 +14,8 @@ use crate::sessions::git_correlation::{
     AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, CommitRelationFilter,
     CorrelationIndexHealth, GitCorrelationError, GitCorrelationSessionStore,
     GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
-    SpanObservation, SpanScanTarget, TargetScan, correlation_index_health,
-    record_span_observation_in_transaction, run_backfill, run_commit_attribution_sweep,
-    run_incremental_backfill, sessions_for_with_relation,
+    SpanObservation, correlation_index_health, record_span_observation_in_transaction,
+    run_backfill, run_incremental_backfill, sessions_for_with_relation,
 };
 
 /// Adapter over an already-open project-sessions database.
@@ -85,25 +84,6 @@ where
                 .await?;
         GitCorrelationWriteTxn::commit(transaction).await?;
         Ok(span_id)
-    }
-
-    /// Attributes commits for every span touched since the last sweep, holding
-    /// one write transaction so the watermark can only advance with the rows it
-    /// describes. The scanner stays with the caller: reading a worktree is the
-    /// caller's concern, and a target it cannot read must report
-    /// [`TargetScan::Unavailable`] so the watermark waits for a retry.
-    pub(crate) async fn run_commit_attribution_sweep<F>(
-        &self,
-        gap_secs: i64,
-        scan: F,
-    ) -> Result<usize, GitCorrelationError>
-    where
-        F: FnMut(&SpanScanTarget) -> TargetScan,
-    {
-        let transaction = self.open_write_transaction().await?;
-        let attributed = run_commit_attribution_sweep(&transaction, gap_secs, scan).await?;
-        GitCorrelationWriteTxn::commit(transaction).await?;
-        Ok(attributed)
     }
 
     pub(crate) async fn run_backfill<E, G>(
