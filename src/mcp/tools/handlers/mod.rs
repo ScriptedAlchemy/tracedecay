@@ -2576,11 +2576,6 @@ mod tests {
         let tools = get_tool_definitions();
         for operation in APPLICATION_SURFACE_OPERATIONS {
             let tool_name = format!("tracedecay_{}", operation.as_str());
-            if super::super::definitions::UNADVERTISED_HANDLE_GATED_TOOL_NAMES
-                .contains(&tool_name.as_str())
-            {
-                continue;
-            }
             let tool = tools
                 .iter()
                 .find(|tool| tool.name == tool_name)
