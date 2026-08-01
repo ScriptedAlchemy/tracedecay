@@ -13,6 +13,7 @@ mod probe;
 pub(crate) mod project_runtime;
 mod runner;
 mod unit_file;
+mod windows_task;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -21,11 +22,14 @@ mod tests;
 pub use probe::daemon_reachable;
 pub use unit_file::installed_service_socket_path;
 
-use probe::{DaemonProtocolState, DaemonSocketState, daemon_protocol_state, daemon_socket_state};
+use probe::{
+    DaemonProtocolState, DaemonSocketState, daemon_protocol_state, daemon_socket_state,
+    daemon_transport_display,
+};
 use runner::ServiceRunner;
 use unit_file::{
-    launchd_plist_env_value, read_service_unit, service_unit_path, socket_path_from_unit_text,
-    write_service_unit,
+    launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
+    service_unit_path, socket_path_from_unit_text, write_service_unit,
 };
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
@@ -414,6 +418,7 @@ impl DaemonServiceSpec {
         match ServiceRunner::current()? {
             ServiceRunner::Systemd => Ok(self.render_systemd_user_unit()),
             ServiceRunner::Launchd => self.render_launchd_plist(),
+            ServiceRunner::WindowsTask => windows_task::render_task_xml(self),
         }
     }
 }
@@ -532,8 +537,14 @@ pub fn service_spec(
     tracedecay_bin: impl Into<PathBuf>,
     socket: Option<String>,
 ) -> Result<DaemonServiceSpec> {
+    let tracedecay_bin = tracedecay_bin.into();
+    let tracedecay_bin = if cfg!(windows) {
+        windows_task::preferred_service_executable(&tracedecay_bin)
+    } else {
+        tracedecay_bin
+    };
     Ok(DaemonServiceSpec {
-        tracedecay_bin: tracedecay_bin.into(),
+        tracedecay_bin,
         socket_path: socket_path_or_default(socket)?,
         data_dir_override: std::env::var_os(crate::config::USER_DATA_DIR_ENV)
             .filter(|value| !value.is_empty())
@@ -621,11 +632,11 @@ fn refresh_installed_service_with_state(
     spec: &DaemonServiceSpec,
     previous_state: Option<DaemonServiceState>,
 ) -> Result<Option<PathBuf>> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         return Ok(None);
     }
     let unit = read_service_unit(&service_path)?;
@@ -634,13 +645,17 @@ fn refresh_installed_service_with_state(
         refreshed_spec.socket_path = socket_path;
     }
     let runner = ServiceRunner::current()?;
-    let previous_state =
-        previous_state.unwrap_or_else(|| runner.service_state(&refreshed_spec.socket_path));
+    let previous_state = match previous_state {
+        Some(state) => state,
+        None => runner.service_state(&refreshed_spec.socket_path)?,
+    };
     if matches!(runner, ServiceRunner::Launchd) {
         // The installed plist is the source of truth for the daemon's data
         // directory; the refreshing shell may not have the override set.
         refreshed_spec.data_dir_override =
             launchd_plist_env_value(&unit, crate::config::USER_DATA_DIR_ENV).map(PathBuf::from);
+    } else if matches!(runner, ServiceRunner::WindowsTask) {
+        refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
     refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
 }
@@ -650,11 +665,11 @@ fn refresh_installed_service_with_state(
 /// intentionally stop-then-lock.
 #[doc(hidden)]
 pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(DaemonServiceState::Missing);
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -670,7 +685,7 @@ pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
     let runner = ServiceRunner::current()?;
-    let state = runner.service_state(&socket_path);
+    let state = runner.service_state(&socket_path)?;
     if !state.is_running() {
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -691,11 +706,11 @@ pub fn quiesce_installed_service_before_lease() -> Result<DaemonServiceState> {
 /// a service while the caller owns the exclusive lifecycle lease.
 #[doc(hidden)]
 pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceState> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(DaemonServiceState::Missing);
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
         let socket_state = daemon_socket_state(&socket_path);
         if !socket_state.is_proven_quiesced() {
@@ -711,7 +726,7 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
     let runner = ServiceRunner::current()?;
-    let state = runner.service_state(&socket_path);
+    let state = runner.service_state(&socket_path)?;
     let socket_state = daemon_socket_state(&socket_path);
     if state.is_running() || !socket_state.is_proven_quiesced() {
         return Err(TraceDecayError::Config {
@@ -728,11 +743,12 @@ pub fn verify_installed_service_quiesced_under_lease() -> Result<DaemonServiceSt
 /// Callers hold a shared lifecycle lease, never the exclusive mutation lease.
 #[doc(hidden)]
 pub fn restore_installed_service_after_update(previous_state: DaemonServiceState) -> Result<()> {
-    if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !previous_state.is_running() || !cfg!(any(target_os = "linux", target_os = "macos", windows))
+    {
         return Ok(());
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         return Err(TraceDecayError::Config {
             message: format!(
                 "cannot restore TraceDecay daemon state: service unit '{}' is missing",
@@ -774,6 +790,8 @@ fn forward_only_service_spec(
         recovered_spec.data_dir_override =
             launchd_plist_env_value(&existing_unit, crate::config::USER_DATA_DIR_ENV)
                 .map(PathBuf::from);
+    } else if cfg!(windows) {
+        recovered_spec.data_dir_override = windows_task::profile_root_from_task_xml(&existing_unit);
     }
     Ok(recovered_spec)
 }
@@ -803,11 +821,11 @@ fn recover_forward_only_definition_with(
 fn prepare_forward_only_service_before_lease(
     spec: &DaemonServiceSpec,
 ) -> Result<DaemonServiceState> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return quiesce_installed_service_before_lease();
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         return quiesce_installed_service_before_lease();
     }
     let recovered_spec = forward_only_service_spec(spec, &service_path)?;
@@ -827,11 +845,11 @@ fn prepare_forward_only_service_before_lease(
 /// prior unit or running state.
 #[doc(hidden)]
 pub fn enforce_forward_only_service_recovery(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
-    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         let socket_state = daemon_socket_state(&spec.socket_path);
         if socket_state.is_proven_quiesced() {
             return Ok(None);
@@ -852,7 +870,7 @@ pub fn enforce_forward_only_service_recovery(spec: &DaemonServiceSpec) -> Result
         || runner.deactivate_for_forward_recovery(),
     )?;
 
-    let state = runner.service_state(&recovered_spec.socket_path);
+    let state = runner.service_state(&recovered_spec.socket_path)?;
     let socket_state = daemon_socket_state(&recovered_spec.socket_path);
     if state.is_running() || !socket_state.is_proven_quiesced() {
         let command_failure = deactivate_error
@@ -891,12 +909,33 @@ pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
 
 fn installed_service_state() -> Result<DaemonServiceState> {
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         return Ok(DaemonServiceState::Missing);
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    Ok(ServiceRunner::current()?.service_state(&socket_path))
+    ServiceRunner::current()?.service_state(&socket_path)
+}
+
+pub fn start_service() -> Result<()> {
+    let service_path = service_unit_path()?;
+    if !service_unit_exists(&service_path)? {
+        return Err(TraceDecayError::Config {
+            message: "no TraceDecay daemon service is installed".to_string(),
+        });
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    ServiceRunner::current()?.start(&service_path, &socket_path)
+}
+
+pub fn stop_service() -> Result<()> {
+    if matches!(installed_service_state()?, DaemonServiceState::Missing) {
+        return Err(TraceDecayError::Config {
+            message: "no TraceDecay daemon service is installed".to_string(),
+        });
+    }
+    ServiceRunner::current()?.stop()
 }
 
 /// Waits for a strict maintenance command to observe the exact managed-service
@@ -961,7 +1000,7 @@ fn installed_service_status_snapshot() -> Result<(
     DaemonProtocolState,
 )> {
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
         let socket_state = daemon_socket_state(&socket_path);
         return Ok((
@@ -973,7 +1012,7 @@ fn installed_service_status_snapshot() -> Result<(
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    let actual = ServiceRunner::current()?.service_state(&socket_path);
+    let actual = ServiceRunner::current()?.service_state(&socket_path)?;
     let socket_state = daemon_socket_state(&socket_path);
     let protocol_state = if actual.is_running() {
         daemon_protocol_state(&socket_path)
@@ -1020,26 +1059,35 @@ fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     let service_path = service_unit_path()?;
     runner.before_uninstall(stop)?;
-    match std::fs::remove_file(&service_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to remove service '{}': {e}", service_path.display()),
-            });
-        }
-    }
+    remove_service_unit(&service_path)?;
     runner.after_uninstall(stop);
     Ok(service_path)
 }
 
 pub fn service_status(socket_path: &Path) -> String {
-    let socket_state = daemon_socket_state(socket_path);
+    let transport_path = if cfg!(unix) {
+        socket_path.to_path_buf()
+    } else {
+        installed_service_socket_path()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| socket_path.to_path_buf())
+    };
+    let socket_state = daemon_socket_state(&transport_path);
     let service = service_unit_path().map_or_else(
         |e| format!("unavailable: {e}"),
         |path| path.display().to_string(),
     );
     let runner = ServiceRunner::current();
+    let state = runner.as_ref().map_or_else(
+        |error| format!("unavailable: {error}"),
+        |runner| {
+            runner.service_state(&transport_path).map_or_else(
+                |error| format!("unavailable: {error}"),
+                |state| format!("{state:?}"),
+            )
+        },
+    );
     let detail = runner
         .as_ref()
         .ok()
@@ -1047,12 +1095,9 @@ pub fn service_status(socket_path: &Path) -> String {
         .map(|hint| format!("service-detail: {hint}\n"))
         .unwrap_or_default();
     let logs = runner.map_or_else(|e| format!("unavailable: {e}"), |runner| runner.log_hint());
+    let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
+    let transport = daemon_transport_display(&transport_path);
     format!(
-        "service: {}\nsocket: {} ({})\n{}logs: {}\n",
-        service,
-        socket_path.display(),
-        socket_state,
-        detail,
-        logs,
+        "service: {service}\nstate: {state}\n{transport_kind}: {transport} ({socket_state})\n{detail}logs: {logs}\n",
     )
 }

@@ -1,16 +1,32 @@
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write as IoWrite};
+use std::io::{BufRead, BufReader, Read, Write as IoWrite};
 #[cfg(not(unix))]
 use std::net::TcpStream as StdTcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 
-#[cfg(unix)]
 use crate::errors::{Result, TraceDecayError};
 
 #[cfg(unix)]
 use super::default_socket_path;
+
+trait ProbeStream: Read + IoWrite {
+    fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()>;
+}
+
+#[cfg(unix)]
+impl ProbeStream for StdUnixStream {
+    fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
+
+#[cfg(not(unix))]
+impl ProbeStream for StdTcpStream {
+    fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
 
 /// Whether a daemon is accepting connections at the default socket path.
 ///
@@ -23,44 +39,25 @@ pub fn daemon_reachable() -> bool {
 
 #[cfg(not(unix))]
 pub fn daemon_reachable() -> bool {
-    let Some(profile_root) = crate::config::user_data_dir() else {
-        return false;
-    };
-    let Ok(profile_root) = super::super::authority::canonical_identity_path(&profile_root) else {
-        return false;
-    };
-    let Ok(Some(record)) = super::super::authority::current_record(&profile_root) else {
-        return false;
-    };
-    if record.profile_root != profile_root {
-        return false;
-    }
-    let super::super::transport::DaemonEndpoint::Loopback(address) = record.endpoint;
-    address.ip().is_loopback()
-        && StdTcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)).is_ok()
+    super::default_socket_path()
+        .is_ok_and(|path| matches!(daemon_socket_state(&path), DaemonSocketState::Connectable))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DaemonSocketState {
     Missing,
     Connectable,
-    #[cfg(unix)]
     Stale,
     #[cfg(unix)]
     PresentNotAccessible,
-    #[cfg(unix)]
     PresentUnreachable,
-    #[cfg(not(unix))]
-    Present,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DaemonProtocolState {
     NotRequired,
-    #[cfg_attr(not(unix), allow(dead_code))]
     Ready,
     Unresponsive(String),
-    #[cfg_attr(not(unix), allow(dead_code))]
     IdentityMismatch {
         name: Option<String>,
         version: Option<String>,
@@ -99,8 +96,17 @@ pub(super) fn daemon_protocol_state(socket_path: &Path) -> DaemonProtocolState {
 }
 
 #[cfg(not(unix))]
-pub(super) fn daemon_protocol_state(_socket_path: &Path) -> DaemonProtocolState {
-    DaemonProtocolState::Unresponsive("daemon protocol is unavailable on this platform".to_string())
+pub(super) fn daemon_protocol_state(transport_hint: &Path) -> DaemonProtocolState {
+    match query_daemon_identity(transport_hint) {
+        Ok((name, version))
+            if name.as_deref() == Some("tracedecay")
+                && version.as_deref() == Some(crate::version::build_version()) =>
+        {
+            DaemonProtocolState::Ready
+        }
+        Ok((name, version)) => DaemonProtocolState::IdentityMismatch { name, version },
+        Err(error) => DaemonProtocolState::Unresponsive(error.to_string()),
+    }
 }
 
 #[cfg(unix)]
@@ -109,12 +115,31 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
     // on the daemon side; a sub-second read deadline misclassifies a busy,
     // healthy daemon as unresponsive.
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-    const REQUEST_ID: i64 = 1;
 
     let connection = super::super::client_connection(socket_path)?;
     let mut stream = StdUnixStream::connect(socket_path)?;
     stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
     stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
+    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), PROBE_TIMEOUT)
+}
+
+#[cfg(not(unix))]
+fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<String>)> {
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let (address, auth_token) =
+        current_loopback_authority(socket_path)?.ok_or_else(missing_loopback_authority)?;
+    let stream = StdTcpStream::connect_timeout(&address, PROBE_TIMEOUT)?;
+    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
+    stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
+    query_daemon_identity_stream(stream, Some(&auth_token), PROBE_TIMEOUT)
+}
+
+fn query_daemon_identity_stream(
+    mut stream: impl ProbeStream,
+    auth_token: Option<&str>,
+    probe_timeout: std::time::Duration,
+) -> Result<(Option<String>, Option<String>)> {
+    const REQUEST_ID: i64 = 1;
     let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -122,7 +147,7 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
         "method": "initialize"
     });
     let mut preamble = String::new();
-    if let Some(auth_token) = connection.auth_token.as_deref() {
+    if let Some(auth_token) = auth_token {
         preamble.push_str(&super::super::transport::DaemonAuthPreface::new(auth_token).to_line()?);
         preamble.push('\n');
     }
@@ -133,7 +158,7 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
     IoWrite::write_all(&mut stream, preamble.as_bytes())?;
     IoWrite::flush(&mut stream)?;
 
-    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let deadline = std::time::Instant::now() + probe_timeout;
     let mut reader = BufReader::new(stream);
     loop {
         let now = std::time::Instant::now();
@@ -143,8 +168,8 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
             });
         }
         reader
-            .get_mut()
-            .set_read_timeout(Some(deadline.saturating_duration_since(now)))?;
+            .get_ref()
+            .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
             return Err(TraceDecayError::Config {
@@ -175,14 +200,7 @@ fn query_daemon_identity(socket_path: &Path) -> Result<(Option<String>, Option<S
 
 impl DaemonSocketState {
     pub(super) fn is_proven_quiesced(self) -> bool {
-        #[cfg(unix)]
-        {
-            matches!(self, Self::Missing | Self::Stale)
-        }
-        #[cfg(not(unix))]
-        {
-            matches!(self, Self::Missing)
-        }
+        matches!(self, Self::Missing | Self::Stale)
     }
 }
 
@@ -191,14 +209,10 @@ impl std::fmt::Display for DaemonSocketState {
         let text = match self {
             Self::Missing => "missing",
             Self::Connectable => "connectable",
-            #[cfg(unix)]
             Self::Stale => "stale",
             #[cfg(unix)]
             Self::PresentNotAccessible => "present but not accessible",
-            #[cfg(unix)]
             Self::PresentUnreachable => "present but unreachable",
-            #[cfg(not(unix))]
-            Self::Present => "present",
         };
         f.write_str(text)
     }
@@ -220,10 +234,72 @@ pub(super) fn daemon_socket_state(socket_path: &Path) -> DaemonSocketState {
 }
 
 #[cfg(not(unix))]
-pub(super) fn daemon_socket_state(socket_path: &Path) -> DaemonSocketState {
-    if socket_path.exists() {
-        DaemonSocketState::Present
-    } else {
-        DaemonSocketState::Missing
+pub(super) fn daemon_socket_state(transport_hint: &Path) -> DaemonSocketState {
+    let address = match current_loopback_authority(transport_hint) {
+        Ok(Some((address, _))) => address,
+        Ok(None) => return DaemonSocketState::Missing,
+        Err(_) => return DaemonSocketState::PresentUnreachable,
+    };
+    match StdTcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)) {
+        Ok(_) => DaemonSocketState::Connectable,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            DaemonSocketState::Stale
+        }
+        Err(_) => DaemonSocketState::PresentUnreachable,
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn daemon_transport_display(socket_path: &Path) -> String {
+    socket_path.display().to_string()
+}
+
+#[cfg(not(unix))]
+pub(super) fn daemon_transport_display(transport_hint: &Path) -> String {
+    current_loopback_authority(transport_hint).map_or_else(
+        |_| "authority record unavailable".to_string(),
+        |authority| {
+            authority.map_or_else(
+                || "authority record unavailable".to_string(),
+                |(address, _)| format!("tcp://{address}"),
+            )
+        },
+    )
+}
+
+#[cfg(not(unix))]
+fn current_loopback_authority(
+    transport_hint: &Path,
+) -> Result<Option<(std::net::SocketAddr, String)>> {
+    let profile_root = transport_hint
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(crate::config::user_data_dir)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "could not determine TraceDecay user data directory".to_string(),
+        })?;
+    let profile_root = super::super::authority::canonical_identity_path(&profile_root)?;
+    let Some(record) = super::super::authority::current_record(&profile_root)? else {
+        return Ok(None);
+    };
+    if record.profile_root != profile_root {
+        return Err(TraceDecayError::Config {
+            message: "TraceDecay daemon authority record names a different profile".to_string(),
+        });
+    }
+    let super::super::transport::DaemonEndpoint::Loopback(address) = record.endpoint;
+    if !address.ip().is_loopback() {
+        return Err(TraceDecayError::Config {
+            message: format!("daemon authority endpoint '{address}' is not loopback"),
+        });
+    }
+    Ok(Some((address, record.auth_token)))
+}
+
+#[cfg(not(unix))]
+fn missing_loopback_authority() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "TraceDecay daemon authority record is not available".to_string(),
     }
 }

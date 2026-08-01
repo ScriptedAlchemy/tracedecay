@@ -8,7 +8,7 @@ use crate::errors::{Result, TraceDecayError};
 use super::runner::ServiceRunner;
 use super::{
     DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, home_for_service_env,
-    plist_xml_escape, plist_xml_unescape,
+    plist_xml_escape, plist_xml_unescape, windows_task,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,13 +116,19 @@ pub(super) fn atomic_replace_service_unit_with(
 
 pub(super) fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let service_path = service_unit_path()?;
-    atomic_replace_service_unit_with(&service_path, &spec.render_unit()?, &mut |_| Ok(()))?;
+    let unit = spec.render_unit()?;
+    match ServiceRunner::current()? {
+        ServiceRunner::WindowsTask => windows_task::register_task_xml(&unit)?,
+        ServiceRunner::Systemd | ServiceRunner::Launchd => {
+            atomic_replace_service_unit_with(&service_path, &unit, &mut |_| Ok(()))?;
+        }
+    }
     Ok(service_path)
 }
 
 pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
     let service_path = service_unit_path()?;
-    if !service_path.exists() {
+    if !service_unit_exists(&service_path)? {
         return Ok(None);
     }
     Ok(socket_path_from_unit_text(&read_service_unit(
@@ -131,9 +137,42 @@ pub fn installed_service_socket_path() -> Result<Option<PathBuf>> {
 }
 
 pub(super) fn read_service_unit(service_path: &Path) -> Result<String> {
-    std::fs::read_to_string(service_path).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to read service '{}': {e}", service_path.display()),
-    })
+    match ServiceRunner::current()? {
+        ServiceRunner::WindowsTask => {
+            windows_task::registered_task_xml()?.ok_or_else(|| TraceDecayError::Config {
+                message: format!("daemon task '{}' is not registered", service_path.display()),
+            })
+        }
+        ServiceRunner::Systemd | ServiceRunner::Launchd => std::fs::read_to_string(service_path)
+            .map_err(|e| TraceDecayError::Config {
+                message: format!("failed to read service '{}': {e}", service_path.display()),
+            }),
+    }
+}
+
+pub(super) fn service_unit_exists(service_path: &Path) -> Result<bool> {
+    match ServiceRunner::current()? {
+        ServiceRunner::WindowsTask => windows_task::task_exists(),
+        ServiceRunner::Systemd | ServiceRunner::Launchd => Ok(service_path.exists()),
+    }
+}
+
+pub(super) fn remove_service_unit(service_path: &Path) -> Result<()> {
+    match ServiceRunner::current()? {
+        ServiceRunner::WindowsTask => windows_task::delete(),
+        ServiceRunner::Systemd | ServiceRunner::Launchd => {
+            match std::fs::remove_file(service_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to remove service '{}': {error}",
+                        service_path.display()
+                    ),
+                }),
+            }
+        }
+    }
 }
 
 fn socket_path_from_args<'a>(mut args: impl Iterator<Item = &'a str>) -> Option<PathBuf> {
@@ -200,6 +239,8 @@ pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
     match ServiceRunner::current().ok()? {
         ServiceRunner::Systemd => socket_path_from_service_unit(unit),
         ServiceRunner::Launchd => socket_path_from_launchd_plist(unit),
+        ServiceRunner::WindowsTask => windows_task::profile_root_from_task_xml(unit)
+            .map(|profile_root| profile_root.join("daemon.sock")),
     }
 }
 
@@ -207,6 +248,7 @@ pub(super) fn service_unit_path() -> Result<PathBuf> {
     match ServiceRunner::current()? {
         ServiceRunner::Systemd => systemd_user_service_path(),
         ServiceRunner::Launchd => launchd_user_service_path(),
+        ServiceRunner::WindowsTask => Ok(windows_task::task_path()),
     }
 }
 

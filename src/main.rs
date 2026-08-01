@@ -185,6 +185,21 @@ fn async_main() -> tracedecay::errors::Result<()> {
         return Ok(());
     }
     let cli = Cli::parse_from(args);
+    if let Some(Commands::Daemon {
+        action:
+            DaemonAction::Run {
+                profile_root: Some(profile_root),
+                ..
+            },
+    }) = cli.command.as_ref()
+    {
+        // The foreground daemon is the only long-lived owner in this process.
+        // Pin its profile before Tokio starts worker threads so every canonical
+        // configuration authority observes the Task Scheduler argument.
+        unsafe {
+            std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, profile_root);
+        }
+    }
     // Route tracing events (degradation causes, ingest warnings) to stderr —
     // without a subscriber every `tracing::warn!` in the runtime is silently
     // dropped, which hid the causes behind typed catch-up reason codes. The
@@ -791,7 +806,10 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
 
 async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Result<()> {
     match action {
-        DaemonAction::Run { socket } => {
+        DaemonAction::Run {
+            socket,
+            profile_root: _,
+        } => {
             // Long-lived host: allowed to run the structured-row sweep.
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
             let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
@@ -809,7 +827,16 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 "Installed TraceDecay daemon service at {}",
                 service_path.display()
             );
-            eprintln!("Daemon socket: {}", spec.socket_path.display());
+            if cfg!(windows) {
+                let profile_root = match spec.data_dir_override.as_ref() {
+                    Some(profile_root) => profile_root.clone(),
+                    None => tracedecay::storage::default_profile_root()?,
+                };
+                eprintln!("Daemon profile root: {}", profile_root.display());
+                eprintln!("Daemon endpoint: authenticated loopback (authority-discovered)");
+            } else {
+                eprintln!("Daemon socket: {}", spec.socket_path.display());
+            }
         }
         DaemonAction::UninstallService { no_stop } => {
             let service_path = tracedecay::daemon::uninstall_service(!no_stop)?;
@@ -817,6 +844,14 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 "Removed TraceDecay daemon service at {}",
                 service_path.display()
             );
+        }
+        DaemonAction::Start => {
+            tracedecay::daemon::start_service()?;
+            eprintln!("Started TraceDecay daemon service");
+        }
+        DaemonAction::Stop => {
+            tracedecay::daemon::stop_service()?;
+            eprintln!("Stopped TraceDecay daemon service");
         }
         DaemonAction::Restart => {
             update_cmd::restart_daemon_service()?;

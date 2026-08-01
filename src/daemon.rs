@@ -293,7 +293,7 @@ pub use service::{
     refresh_installed_service, refresh_installed_service_under_lease,
     refresh_installed_service_under_lease_with_state, refresh_service,
     restore_installed_service_after_update, service_spec, service_status, socket_path_or_default,
-    uninstall_service, verify_installed_service_quiesced_under_lease,
+    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };

@@ -4,14 +4,15 @@ use std::process::Command;
 use crate::errors::{Result, TraceDecayError};
 
 use super::probe::{DaemonSocketState, daemon_socket_state};
-use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir};
+use super::{DaemonServiceState, LAUNCHD_LABEL, tracedecay_data_dir, windows_task};
 
-/// Both variants exist on every platform so that `match` dispatch stays
+/// All variants exist on every platform so that `match` dispatch stays
 /// exhaustive everywhere; `current()` is the only constructor and returns an
 /// error on platforms without a supported service manager.
 pub(super) enum ServiceRunner {
     Systemd,
     Launchd,
+    WindowsTask,
 }
 
 impl ServiceRunner {
@@ -20,6 +21,8 @@ impl ServiceRunner {
             Ok(Self::Systemd)
         } else if cfg!(target_os = "macos") {
             Ok(Self::Launchd)
+        } else if cfg!(windows) {
+            Ok(Self::WindowsTask)
         } else {
             Err(unsupported_service_platform())
         }
@@ -40,6 +43,11 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd => launchd_install(service_path, start, socket_path),
+            Self::WindowsTask => windows_task::apply_state(if start {
+                DaemonServiceState::RunningEnabled
+            } else {
+                DaemonServiceState::StoppedDisabled
+            }),
         }
     }
 
@@ -68,10 +76,11 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd => Ok(()),
+            Self::WindowsTask => windows_task::apply_state(previous_state),
         }
     }
 
-    pub(super) fn service_state(&self, socket_path: &Path) -> DaemonServiceState {
+    pub(super) fn service_state(&self, socket_path: &Path) -> Result<DaemonServiceState> {
         match self {
             Self::Systemd => {
                 let running = Command::new("systemctl")
@@ -85,15 +94,15 @@ impl ServiceRunner {
                     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
                     .unwrap_or_default();
                 if enablement.starts_with("masked") {
-                    DaemonServiceState::Masked
+                    Ok(DaemonServiceState::Masked)
                 } else if running && enablement.starts_with("enabled") {
-                    DaemonServiceState::RunningEnabled
+                    Ok(DaemonServiceState::RunningEnabled)
                 } else if running {
-                    DaemonServiceState::RunningDisabled
+                    Ok(DaemonServiceState::RunningDisabled)
                 } else if enablement.starts_with("enabled") {
-                    DaemonServiceState::StoppedEnabled
+                    Ok(DaemonServiceState::StoppedEnabled)
                 } else {
-                    DaemonServiceState::StoppedDisabled
+                    Ok(DaemonServiceState::StoppedDisabled)
                 }
             }
             Self::Launchd => {
@@ -102,13 +111,14 @@ impl ServiceRunner {
                     DaemonSocketState::Connectable
                 );
                 let enabled = !launchd_service_is_disabled();
-                match (running, enabled) {
+                Ok(match (running, enabled) {
                     (true, true) => DaemonServiceState::RunningEnabled,
                     (true, false) => DaemonServiceState::RunningDisabled,
                     (false, true) => DaemonServiceState::StoppedEnabled,
                     (false, false) => DaemonServiceState::StoppedDisabled,
-                }
+                })
             }
+            Self::WindowsTask => windows_task::service_state(),
         }
     }
 
@@ -121,14 +131,32 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd => launchd_before_uninstall(stop),
+            Self::WindowsTask if stop => windows_task::deactivate(),
+            Self::WindowsTask => Ok(()),
+        }
+    }
+
+    pub(super) fn start(&self, service_path: &Path, socket_path: &Path) -> Result<()> {
+        match self {
+            Self::Systemd => run_systemctl(&["start", super::super::SERVICE_NAME]),
+            Self::Launchd => {
+                let target = launchd_service_target()?;
+                launchd_start_preserving_enablement(&target, service_path, socket_path)
+            }
+            Self::WindowsTask => windows_task::start(),
+        }
+    }
+
+    pub(super) fn stop(&self) -> Result<()> {
+        match self {
+            Self::Systemd => run_systemctl(&["stop", super::super::SERVICE_NAME]),
+            Self::Launchd => launchd_stop(),
+            Self::WindowsTask => windows_task::stop(),
         }
     }
 
     pub(super) fn stop_for_update(&self) -> Result<()> {
-        match self {
-            Self::Systemd => run_systemctl(&["stop", super::super::SERVICE_NAME]),
-            Self::Launchd => launchd_before_uninstall(true),
-        }
+        self.stop()
     }
 
     pub(super) fn deactivate_for_forward_recovery(&self) -> Result<()> {
@@ -155,6 +183,7 @@ impl ServiceRunner {
                 }
             },
             Self::Launchd => launchd_before_uninstall(true),
+            Self::WindowsTask => windows_task::deactivate(),
         }
     }
 
@@ -169,6 +198,7 @@ impl ServiceRunner {
                 let _ = service_path;
                 Ok(())
             }
+            Self::WindowsTask => Ok(()),
         }
     }
 
@@ -198,6 +228,7 @@ impl ServiceRunner {
                 }
                 Ok(())
             }
+            Self::WindowsTask => windows_task::apply_state(previous_state),
         }
     }
 
@@ -209,6 +240,7 @@ impl ServiceRunner {
                 }
             }
             Self::Launchd => {}
+            Self::WindowsTask => {}
         }
     }
 
@@ -219,6 +251,10 @@ impl ServiceRunner {
                 || "tail -f <tracedecay-data-dir>/daemon.err.log".to_string(),
                 |dir| format!("tail -f \"{}\"", dir.join("daemon.err.log").display()),
             ),
+            Self::WindowsTask => {
+                "Event Viewer: Applications and Services Logs/Microsoft/Windows/TaskScheduler/Operational"
+                    .to_string()
+            }
         }
     }
 
@@ -228,6 +264,10 @@ impl ServiceRunner {
             Self::Launchd => launchd_service_target()
                 .ok()
                 .map(|target| format!("launchctl print {target}")),
+            Self::WindowsTask => Some(format!(
+                "Get-ScheduledTask -TaskName '{}'",
+                windows_task::task_name()
+            )),
         }
     }
 }
@@ -275,7 +315,7 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
 
 fn unsupported_service_platform() -> TraceDecayError {
     TraceDecayError::Config {
-        message: "daemon service install is currently supported on Linux systemd user services and macOS launchd agents"
+        message: "daemon service install is currently supported on Linux systemd user services, macOS launchd agents, and per-user Windows scheduled tasks"
             .to_string(),
     }
 }
@@ -421,6 +461,28 @@ fn launchd_refresh(service_path: &Path, socket_path: &Path) -> Result<()> {
     launchd_start(&target, service_path, socket_path)
 }
 
+fn launchd_start_preserving_enablement(
+    target: &str,
+    service_path: &Path,
+    socket_path: &Path,
+) -> Result<()> {
+    let was_disabled = launchd_service_is_disabled();
+    let start_result = launchd_start(target, service_path, socket_path);
+    if !was_disabled {
+        return start_result;
+    }
+    let restore_result = run_launchctl(&["disable", target]);
+    match (start_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(start), Err(restore)) => Err(TraceDecayError::Config {
+            message: format!(
+                "failed to start disabled launchd service: {start}; restoring disabled state also failed: {restore}"
+            ),
+        }),
+    }
+}
+
 fn launchd_start(target: &str, service_path: &Path, socket_path: &Path) -> Result<()> {
     let domain = launchd_domain()?;
     run_launchd_commands(&launchd_start_command_plan(&domain, target, service_path))?;
@@ -433,6 +495,11 @@ fn launchd_before_uninstall(stop: bool) -> Result<()> {
     }
     let target = launchd_service_target()?;
     run_launchd_commands(&launchd_uninstall_command_plan(&target))
+}
+
+fn launchd_stop() -> Result<()> {
+    let target = launchd_service_target()?;
+    run_launchctl_allow_not_loaded(&["bootout", &target])
 }
 
 fn verify_launchd_started(target: &str, socket_path: &Path) -> Result<()> {

@@ -739,6 +739,9 @@ pub enum DaemonAction {
         /// Unix socket path for MCP clients
         #[arg(long)]
         socket: Option<String>,
+        /// Profile data root owned by this daemon process
+        #[arg(long = "profile-root")]
+        profile_root: Option<String>,
     },
     /// Install the daemon as a user service
     #[command(name = "install-service")]
@@ -757,6 +760,10 @@ pub enum DaemonAction {
         #[arg(long)]
         no_stop: bool,
     },
+    /// Start the installed daemon service
+    Start,
+    /// Stop the installed daemon service
+    Stop,
     /// Restart the installed daemon service (e.g. after a version mismatch)
     Restart,
     /// Print daemon service/socket status
