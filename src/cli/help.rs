@@ -617,12 +617,14 @@ pub(crate) const WIPE_LONG_ABOUT: &str = "\
 Deletes .tracedecay stores (code graph, memory, sessions) for the current \
 folder, its parents, and its children — or every tracked project with --all. \
 Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
-Agent integration config is untouched (see `tracedecay uninstall`).";
+Agent integration config is untouched (see `tracedecay uninstall`). \
+Prompts for a `go!` confirmation unless `--yes` is passed.";
 
 pub(crate) const WIPE_AFTER_HELP: &str = "\
 Examples:
   tracedecay wipe                                Wipe stores around the cwd
   tracedecay wipe --all                          Wipe every tracked project
+  tracedecay wipe --all --yes                    Confirm without the prompt
 
 Related: tracedecay list (see what would be affected), tracedecay init
 (re-index afterwards), tracedecay uninstall (remove agent config instead).";

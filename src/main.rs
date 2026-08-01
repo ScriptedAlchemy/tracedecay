@@ -538,9 +538,24 @@ impl CommandFamily {
 }
 
 fn validate_host_bundle_options(
+    command: &Commands,
     family: CommandFamily,
     host_bundle: &HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
+    // `wipe` is the one non-lifecycle command that destroys deployed state, so
+    // it takes the same `--yes` confirmation as the lifecycle mutations instead
+    // of an interactive-only `go!` prompt. It owns no host component and has no
+    // preview, so `--component` and `--dry-run` stay rejected.
+    if matches!(command, Commands::Wipe { .. }) {
+        if host_bundle.component.is_some() || host_bundle.dry_run {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "wipe accepts --yes to confirm; --component and --dry-run are only valid \
+                          with install, update-plugin, reinstall, or uninstall"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
     // `--component`, `--dry-run`, and `--yes` are declared as global flags so
     // clap accepts them before the subcommand is known, but they are only
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
@@ -564,9 +579,9 @@ async fn dispatch_command(
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
     let family = CommandFamily::for_command(&command);
-    validate_host_bundle_options(family, &host_bundle)?;
+    validate_host_bundle_options(&command, family, &host_bundle)?;
     match family {
-        CommandFamily::Project => dispatch_project_command(command).await,
+        CommandFamily::Project => dispatch_project_command(command, host_bundle.yes).await,
         CommandFamily::Runtime => dispatch_runtime_command(command).await,
         CommandFamily::Agent => dispatch_agent_command(command, host_bundle).await,
         CommandFamily::Hook => dispatch_hook_command(command).await,
@@ -577,7 +592,10 @@ async fn dispatch_command(
     }
 }
 
-async fn dispatch_project_command(command: Commands) -> tracedecay::errors::Result<()> {
+async fn dispatch_project_command(
+    command: Commands,
+    assume_yes: bool,
+) -> tracedecay::errors::Result<()> {
     match command {
         Commands::Init {
             path,
@@ -630,7 +648,7 @@ async fn dispatch_project_command(command: Commands) -> tracedecay::errors::Resu
             commands::handle_migrate_action(action).await?;
         }
         Commands::Wipe { all } => {
-            commands::handle_wipe(all).await?;
+            commands::handle_wipe(all, assume_yes).await?;
         }
         Commands::List { all } => {
             commands::handle_list(all).await?;
