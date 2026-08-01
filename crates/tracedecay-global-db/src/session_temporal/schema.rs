@@ -1903,5 +1903,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../../../../tests/session_suite/lcm_schema/mod.rs"]
+#[path = "lcm_schema/mod.rs"]
 mod stage_e_schema_tests;
