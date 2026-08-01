@@ -576,9 +576,9 @@ mod tests {
 
         let contender = DaemonAuthority::acquire(&profile, &endpoint, "contender");
 
-        let error = contender.unwrap_err();
+        assert!(contender.is_err());
         #[cfg(windows)]
-        assert!(error.to_string().contains("already held"));
+        assert!(contender.unwrap_err().to_string().contains("already held"));
         assert_eq!(read_record_if_present(&record_path).unwrap(), Some(live));
         drop(first);
     }
