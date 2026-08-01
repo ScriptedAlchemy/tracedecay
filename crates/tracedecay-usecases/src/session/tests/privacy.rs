@@ -716,7 +716,7 @@ fn request_context(policy_digest: [u8; 32]) -> (RequestContext, SessionRequestBi
     let capability = CapabilityDigest::new(DIGEST);
     let policy = PolicyDigest::new(policy_digest);
     let configuration = ConfigurationDigest::new(DIGEST);
-    let cancellation = CancellationToken::for_application_request(&request_id);
+    let cancellation = CancellationToken::for_application_request(request_id.as_str());
     let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
     let observed_at = application_observed_at();
     let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
