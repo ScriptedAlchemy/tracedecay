@@ -8,9 +8,9 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_application::{
     CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
 };
-use tracedecay_domain::{ManifestDigest, ScopeSetId, ScopeSetRevision, UtcMicros};
+use tracedecay_domain::{ScopeSetId, UtcMicros};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
@@ -83,11 +83,11 @@ fn wire_round_trip(request: &DaemonInvocationRequest) -> DaemonInvocationRequest
 
 #[cfg(unix)]
 #[test]
-fn authenticated_multi_root_cas_is_quarantined_before_storage() {
+fn authenticated_multi_root_journey_reaches_scope_set_storage() {
     const STACK_SIZE: usize = 16 * 1024 * 1024;
 
     std::thread::Builder::new()
-        .name("multi-root-quarantine-journey".to_owned())
+        .name("multi-root-journey".to_owned())
         .stack_size(STACK_SIZE)
         .spawn(|| {
             tokio::runtime::Builder::new_multi_thread()
@@ -95,16 +95,16 @@ fn authenticated_multi_root_cas_is_quarantined_before_storage() {
                 .thread_stack_size(STACK_SIZE)
                 .enable_all()
                 .build()
-                .expect("multi-root quarantine runtime")
-                .block_on(run_authenticated_multi_root_quarantine_journey());
+                .expect("multi-root journey runtime")
+                .block_on(run_authenticated_multi_root_journey());
         })
-        .expect("multi-root quarantine thread")
+        .expect("multi-root journey thread")
         .join()
-        .expect("multi-root quarantine thread must not panic");
+        .expect("multi-root journey thread must not panic");
 }
 
 #[cfg(unix)]
-async fn run_authenticated_multi_root_quarantine_journey() {
+async fn run_authenticated_multi_root_journey() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
     let first = repository();
@@ -124,115 +124,26 @@ async fn run_authenticated_multi_root_quarantine_journey() {
     let engine = test_daemon_engine_for_profile(&profile_root);
     let _database_scope = enter_test_daemon_database_scope(&profile_root, "multi-root-journey");
     let scope_set_id = ScopeSetId::new("scope-set.daemon-journey").expect("scope set id");
+
+    // A malformed multi-root payload is still rejected on its own terms, and
+    // still before the daemon spends a project admission on it.
     let observed_at = now();
-    let (deadline, cancellation) = controls("pre-admission-read", observed_at);
-    let read_request = DaemonInvocationRequest::multi_root_scope_set_read(
-        "request.multi-root.pre-admission-read",
+    let (deadline, cancellation) = controls("invalid-read", observed_at);
+    let mut invalid_read = DaemonInvocationRequest::multi_root_scope_set_read(
+        "request.multi-root.invalid-read",
         MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
         observed_at,
         deadline,
         cancellation,
     );
-    let mut pre_admission_requests = vec![wire_round_trip(&read_request)];
-    pre_admission_requests.push(DaemonInvocationRequest::lsp_open(
-        "request.multi-root.pre-admission-lsp",
-        "client.multi-root",
-        None,
-        vec![
-            url::Url::from_file_path(first.path())
-                .expect("first URI")
-                .to_string(),
-            url::Url::from_file_path(second.path())
-                .expect("second URI")
-                .to_string(),
-        ],
-    ));
-    let (cas_deadline, cas_cancellation) = controls("pre-admission-cas", observed_at);
-    pre_admission_requests.push(
-        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
-            "request.multi-root.pre-admission-cas",
-            MultiRootScopeSetCasRequestV1::new(
-                scope_set_id.clone(),
-                None,
-                vec![tracedecay_domain::ProjectId::new("project.pre-admission").expect("project")],
-            )
-            .expect("CAS request"),
-            observed_at,
-            cas_deadline,
-            cas_cancellation,
-        ),
-    );
-    let pre_admission_revision = ScopeSetRevision::new(1).expect("revision");
-    let pre_admission_digest =
-        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("digest");
-    for (index, operation) in [
-        MultiRootOperationV1::Work { request: json!({}) },
-        MultiRootOperationV1::Git { request: json!({}) },
-        MultiRootOperationV1::Feedback { request: json!({}) },
-        MultiRootOperationV1::Impact { request: json!({}) },
-        MultiRootOperationV1::Query { request: json!({}) },
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (deadline, cancellation) =
-            controls(&format!("pre-admission-execute-{index}"), observed_at);
-        pre_admission_requests.push(DaemonInvocationRequest::multi_root_execute(
-            format!("request.multi-root.pre-admission-execute-{index}"),
-            MultiRootExecuteRequestV1::new(
-                scope_set_id.clone(),
-                pre_admission_revision,
-                pre_admission_digest.clone(),
-                operation,
-                0,
-                None,
-            )
-            .expect("execute request"),
-            observed_at,
-            deadline,
-            cancellation,
-        ));
-    }
-    for request in &pre_admission_requests {
-        let unix =
-            execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(request)).await;
-        assert!(matches!(
-            unix.outcome,
-            DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable
-            }
-        ));
-        let portable = execute_portable_daemon_invocation(
-            engine.lifecycle.clone(),
-            engine.store_administration.clone(),
-            Arc::clone(&engine.project_open_gates),
-            &first_handshake,
-            &engine.invocation,
-            engine.http_application_registry.clone(),
-            wire_round_trip(request),
-            Some(Arc::clone(&engine.project_open_attempts)),
-        )
-        .await;
-        assert!(matches!(
-            portable.outcome,
-            DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable
-            }
-        ));
-    }
-    assert_eq!(
-        engine.project_open_attempts.load(Ordering::Relaxed),
-        0,
-        "all quarantined payloads must refuse before Unix or portable project admission"
-    );
-
-    let mut invalid_read = read_request;
-    let DaemonInvocationPayload::MultiRootScopeSetRead { observed_at, .. } =
-        &mut invalid_read.payload
+    let DaemonInvocationPayload::MultiRootScopeSetRead {
+        observed_at: invalid_observed_at,
+        ..
+    } = &mut invalid_read.payload
     else {
         unreachable!("constructed read payload")
     };
-    *observed_at = UtcMicros(0);
+    *invalid_observed_at = UtcMicros(0);
     let invalid_response =
         execute_daemon_invocation(&engine, &first_handshake, wire_round_trip(&invalid_read)).await;
     assert!(matches!(
@@ -241,11 +152,29 @@ async fn run_authenticated_multi_root_quarantine_journey() {
             problem: DaemonInvocationProblem::InvalidRequest
         }
     ));
+    let portable_invalid = execute_portable_daemon_invocation(
+        engine.lifecycle.clone(),
+        engine.store_administration.clone(),
+        Arc::clone(&engine.project_open_gates),
+        &first_handshake,
+        &engine.invocation,
+        engine.http_application_registry.clone(),
+        wire_round_trip(&invalid_read),
+        Some(Arc::clone(&engine.project_open_attempts)),
+    )
+    .await;
+    assert!(matches!(
+        portable_invalid.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::InvalidRequest
+        }
+    ));
     assert_eq!(
         engine.project_open_attempts.load(Ordering::Relaxed),
         0,
-        "invalid quarantined payload must be validated before project admission"
+        "an invalid multi-root payload must be rejected before project admission"
     );
+
     let (first_key, _, _, _) = engine
         .open_project_server(&first_handshake)
         .await
@@ -276,82 +205,9 @@ async fn run_authenticated_multi_root_quarantine_journey() {
     let second_uri = url::Url::from_file_path(second.path())
         .expect("second URI")
         .to_string();
-    let mut lsp_scopes = [
-        crate::daemon::project_open_owners::resolved_scope_for_project(
-            first.path(),
-            &first_project,
-        )
-        .expect("first scope"),
-        crate::daemon::project_open_owners::resolved_scope_for_project(
-            second.path(),
-            &second_project,
-        )
-        .expect("second scope"),
-    ];
-    lsp_scopes.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
-    let selector_digest = tracedecay_domain::canonical_sha256(&(
-        "tracedecay.daemon.lsp-workspace-selector.v1",
-        lsp_scopes
-            .iter()
-            .map(|scope| &scope.scope_digest)
-            .collect::<Vec<_>>(),
-    ))
-    .expect("selector digest");
-    let quarantined_scope_set_id = ScopeSetId::new(format!(
-        "scope-set.lsp.{}",
-        selector_digest.as_str().trim_start_matches("sha256:")
-    ))
-    .expect("scope set id");
-    let lsp = execute_daemon_invocation(
-        &engine,
-        &first_handshake,
-        DaemonInvocationRequest::lsp_open(
-            "request.multi-root.lsp",
-            "client.multi-root",
-            Some(first_uri.clone()),
-            vec![second_uri.clone(), first_uri.clone()],
-        ),
-    )
-    .await;
-    assert!(matches!(
-        lsp.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
-    ));
-    assert_eq!(
-        engine
-            .invocation
-            .lsp_session_registry
-            .lock()
-            .await
-            .active_sessions(),
-        0,
-        "quarantined multi-root initialize must not mount an LSP runtime"
-    );
-    assert_eq!(
-        engine.invocation.service.active_lsp_runtime_count().await,
-        0,
-        "quarantined multi-root initialize must not create a runtime actor"
-    );
-    assert!(
-        engine
-            .invocation
-            .service
-            .persisted_scope_set(first.path(), &quarantined_scope_set_id)
-            .await
-            .is_none(),
-        "quarantined initialize must not persist the scope set in the first store"
-    );
-    assert!(
-        engine
-            .invocation
-            .service
-            .persisted_scope_set(second.path(), &quarantined_scope_set_id)
-            .await
-            .is_none(),
-        "quarantined initialize must not persist the scope set in the second store"
-    );
+
+    // A single folder that is not the active project is still refused: a lone
+    // sibling hint must not reroute the session.
     let sibling_root_lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -374,6 +230,7 @@ async fn run_authenticated_multi_root_quarantine_journey() {
         0,
         "a sibling single-folder hint must not mount a runtime"
     );
+
     let single_root_lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -404,6 +261,50 @@ async fn run_authenticated_multi_root_quarantine_journey() {
         "single-root initialize must keep the existing runtime path working"
     );
 
+    // A multi-folder initialize now admits a federated workspace and reports
+    // the authorized scope set it was bound to.
+    let lsp = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::lsp_open(
+            "request.multi-root.lsp",
+            "client.multi-root",
+            Some(first_uri.clone()),
+            vec![second_uri.clone(), first_uri.clone()],
+        ),
+    )
+    .await;
+    let DaemonInvocationOutcome::LspOpened {
+        scope_set_id: lsp_scope_set_id,
+        scope_set_digest: lsp_scope_set_digest,
+        ..
+    } = &lsp.outcome
+    else {
+        panic!(
+            "multi-folder initialize must open a session: {:?}",
+            lsp.outcome
+        );
+    };
+    let lsp_scope_set_id = lsp_scope_set_id
+        .clone()
+        .expect("federated initialize must report its scope set id");
+    assert!(
+        lsp_scope_set_digest.is_some(),
+        "federated initialize must report its scope set digest"
+    );
+    for root in [first.path(), second.path()] {
+        assert!(
+            engine
+                .invocation
+                .service
+                .persisted_scope_set(root, &lsp_scope_set_id)
+                .await
+                .is_some(),
+            "federated admission must persist the scope set in every participating store"
+        );
+    }
+
+    // Compare-and-swap is the authorization boundary for an explicit scope set.
     let observed_at = now();
     let (deadline, cancellation) = controls("cas", observed_at);
     let cas = execute_daemon_invocation(
@@ -423,22 +324,38 @@ async fn run_authenticated_multi_root_quarantine_journey() {
         ),
     )
     .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = &cas.outcome
+    else {
+        panic!("multi-root CAS must reach the executor: {:?}", cas.outcome);
+    };
+    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("multi-root CAS must return evidence");
+    };
+    let cas_result = packet
+        .payload
+        .clone()
+        .expect("multi-root CAS evidence must carry a result");
     assert!(matches!(
-        cas.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
+        cas_result.status,
+        MultiRootScopeSetCasStatusV1::Applied
     ));
-    assert!(
-        engine
-            .invocation
-            .service
-            .persisted_scope_set(first.path(), &scope_set_id)
-            .await
-            .is_none(),
-        "quarantined CAS must not write scope-set storage"
-    );
+    let stored = cas_result
+        .scope_set
+        .expect("applied CAS must return the scope set");
+    for root in [first.path(), second.path()] {
+        assert_eq!(
+            engine
+                .invocation
+                .service
+                .persisted_scope_set(root, &scope_set_id)
+                .await
+                .as_ref(),
+            Some(&stored),
+            "an applied CAS must be durable in every participating store"
+        );
+    }
 
+    // The read surface returns exactly what the CAS persisted.
     let observed_at = now();
     let (deadline, cancellation) = controls("read", observed_at);
     let read = execute_daemon_invocation(
@@ -453,23 +370,59 @@ async fn run_authenticated_multi_root_quarantine_journey() {
         ),
     )
     .await;
+    let DaemonInvocationOutcome::MultiRootScopeSetRead { outcome, .. } = &read.outcome else {
+        panic!(
+            "multi-root read must reach the executor: {:?}",
+            read.outcome
+        );
+    };
+    let tracedecay_application::ApplicationOutcome::Evidence(packet) = outcome else {
+        panic!("multi-root read must return evidence");
+    };
+    assert_eq!(packet.payload.clone().flatten().as_ref(), Some(&stored));
+
+    // A stale revision or digest is refused by the executor, not by a gate.
+    let observed_at = now();
+    let (deadline, cancellation) = controls("stale-execute", observed_at);
+    let stale = execute_daemon_invocation(
+        &engine,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.stale-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("digest"),
+                MultiRootOperationV1::Query { request: json!({}) },
+                0,
+                None,
+            )
+            .expect("execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
     assert!(matches!(
-        read.outcome,
+        stale.outcome,
         DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
+            problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
     ));
 
-    let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("digest");
-    let revision = ScopeSetRevision::new(1).expect("revision");
-    let operations = [
+    // Every operation family fans out over the authorized scope set.
+    for (index, operation) in [
         MultiRootOperationV1::Work { request: json!({}) },
         MultiRootOperationV1::Git { request: json!({}) },
         MultiRootOperationV1::Feedback { request: json!({}) },
         MultiRootOperationV1::Impact { request: json!({}) },
         MultiRootOperationV1::Query { request: json!({}) },
-    ];
-    for (index, operation) in operations.into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let observed_at = now();
         let (deadline, cancellation) = controls(&format!("execute-{index}"), observed_at);
         let response = execute_daemon_invocation(
@@ -479,8 +432,8 @@ async fn run_authenticated_multi_root_quarantine_journey() {
                 format!("request.multi-root.execute-{index}"),
                 MultiRootExecuteRequestV1::new(
                     scope_set_id.clone(),
-                    revision,
-                    digest.clone(),
+                    stored.revision(),
+                    stored.digest().clone(),
                     operation,
                     0,
                     None,
@@ -492,22 +445,15 @@ async fn run_authenticated_multi_root_quarantine_journey() {
             ),
         )
         .await;
-        assert!(matches!(
-            response.outcome,
-            DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable
-            }
-        ));
+        assert!(
+            matches!(
+                response.outcome,
+                DaemonInvocationOutcome::MultiRootQueryPage { .. }
+            ),
+            "execute-{index} must reach the multi-root executor: {:?}",
+            response.outcome
+        );
     }
-    assert!(
-        engine
-            .invocation
-            .service
-            .persisted_scope_set(first.path(), &scope_set_id)
-            .await
-            .is_none(),
-        "quarantined read and fan-out must not create scope-set storage"
-    );
 
     engine.shutdown_all().await;
 }

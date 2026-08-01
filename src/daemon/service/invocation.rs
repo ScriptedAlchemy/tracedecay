@@ -7933,7 +7933,8 @@ impl DaemonInvocationService {
             CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
                 .ok()?;
         let use_case =
-            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1).ok()?;
+            UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
+                .ok()?;
         let mut contexts = Vec::with_capacity(roots.len());
         let mut factories = Vec::with_capacity(roots.len());
         let mut admitted = Vec::with_capacity(roots.len());
@@ -7997,13 +7998,13 @@ impl DaemonInvocationService {
         }
         let digest = scope_set.digest().clone();
         let workspace = AuthorizedLspWorkspace::new(Some(digest.clone()), admitted).ok()?;
-        self.authorized_lsp_workspaces
-            .lock()
-            .await
-            .insert(digest, AuthorizedDaemonLspWorkspace {
+        self.authorized_lsp_workspaces.lock().await.insert(
+            digest,
+            AuthorizedDaemonLspWorkspace {
                 scope_set,
                 factories,
-            });
+            },
+        );
         Some(workspace)
     }
 
@@ -10907,7 +10908,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_root_payloads_refuse_before_runtime_or_projection_dispatch() {
+    async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
         let service = DaemonInvocationService::default();
         let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
         let project_root = PathBuf::from("/quarantined-multi-root");
@@ -10977,6 +10978,10 @@ mod tests {
             ));
         }
 
+        // `invoke_for_project` owns every multi-root payload and routes it to
+        // the multi-root executor before this service is consulted. Reaching
+        // the per-project dispatch means the request was mis-routed, so the
+        // arm must stay a typed rejection rather than a silent runtime mount.
         for request in requests {
             let response = service
                 .invoke(&registry, Some(&project_root), None, None, request)
@@ -10984,7 +10989,7 @@ mod tests {
             assert!(matches!(
                 response.outcome,
                 DaemonInvocationOutcome::Problem {
-                    problem: DaemonInvocationProblem::Unavailable
+                    problem: DaemonInvocationProblem::InvalidRequest
                 }
             ));
         }
