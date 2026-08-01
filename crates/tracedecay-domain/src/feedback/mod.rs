@@ -480,12 +480,8 @@ impl FeedbackSavedEvaluationV1 {
             &self.target,
             evidence_identity,
         ))?;
-        let encoded = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(DomainError::NonCanonical {
-                field: "feedback dedupe digest",
-            })?;
+        let encoded =
+            crate::canonical_text::sha256_hex_body(digest.as_str(), "feedback dedupe digest")?;
         FeedbackSavedDedupeKeyV1::new(format!("feedback.dedupe.v1.{encoded}"))
     }
 }
@@ -996,12 +992,8 @@ pub fn derive_feedback_finding_id(
         diagnostic_anchor,
         provider_identity_digest,
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "feedback finding digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "feedback finding digest")?;
     FeedbackFindingId::new(format!("feedback.finding.v1.{encoded}"))
 }
 
@@ -1019,12 +1011,8 @@ pub fn derive_overlay_feedback_finding_id(
         diagnostic,
         provider_identity_digest,
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "overlay feedback finding digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "overlay feedback finding digest")?;
     FeedbackFindingId::new(format!("feedback.finding.v1.{encoded}"))
 }
 
@@ -1287,12 +1275,8 @@ fn derive_result_id(
         returned_findings,
         omitted_findings,
     ))?;
-    let encoded = digest
-        .as_str()
-        .strip_prefix("sha256:")
-        .ok_or(DomainError::NonCanonical {
-            field: "feedback result digest",
-        })?;
+    let encoded =
+        crate::canonical_text::sha256_hex_body(digest.as_str(), "feedback result digest")?;
     FeedbackResultId::new(format!("feedback.result.v1.{encoded}"))
 }
 

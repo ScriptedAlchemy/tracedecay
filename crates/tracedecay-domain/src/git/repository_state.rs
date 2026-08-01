@@ -384,12 +384,10 @@ impl RepositoryStateSnapshotV1 {
                 coverage: &self.coverage,
             },
         ))?;
-        let encoded = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(DomainError::NonCanonical {
-                field: "repository state snapshot digest",
-            })?;
+        let encoded = crate::canonical_text::sha256_hex_body(
+            digest.as_str(),
+            "repository state snapshot digest",
+        )?;
         RepositoryStateSnapshotId::new(format!("repository.state.v1.{encoded}"))
     }
 }
