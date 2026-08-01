@@ -176,7 +176,10 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
-test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+test-transport = [
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-migrate/test-transport",
+]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
 # it and are link-checked separately.
