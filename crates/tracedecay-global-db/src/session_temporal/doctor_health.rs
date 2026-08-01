@@ -707,12 +707,12 @@ impl SessionTemporalHealthReport {
         self.reason.as_deref()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub const fn is_fts_virtual_table_error_code_for_test(code: i32) -> bool {
         code == SQLITE_CORRUPT_VTAB
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn is_allowed_fts_quick_check_for_test(
         message: &str,
         repair_occurrences: bool,
