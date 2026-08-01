@@ -85,42 +85,42 @@ impl Runtime for MigrationSqlHandle {
 }
 
 #[derive(Clone)]
-pub(crate) struct Connection {
+pub struct Connection {
     runtime: Arc<dyn Runtime>,
 }
 
 #[derive(Clone)]
-pub(crate) struct ReadConnection {
+pub struct ReadConnection {
     connection: Connection,
 }
 
 impl ReadConnection {
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
         self.connection.query(sql, params).await
     }
 
-    pub(crate) async fn read_snapshot(&self) -> Result<ReadSnapshot> {
+    pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         self.connection.read_snapshot().await
     }
 }
 
 impl Connection {
-    pub(crate) fn attach(runtime: MigrationSqlHandle) -> Self {
+    pub fn attach(runtime: MigrationSqlHandle) -> Self {
         Self {
             runtime: Arc::new(runtime),
         }
     }
 
-    pub(crate) fn read_only(&self) -> ReadConnection {
+    pub fn read_only(&self) -> ReadConnection {
         ReadConnection {
             connection: self.clone(),
         }
     }
 
-    pub(crate) async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
+    pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
@@ -132,7 +132,7 @@ impl Connection {
             .map(|result| result.changed_rows as u64)
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
@@ -152,7 +152,7 @@ impl Connection {
         ))
     }
 
-    pub(crate) async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
+    pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
         let rows = tokio::task::spawn_blocking(move || runtime.checkpoint_wal_truncate())
             .await
@@ -168,7 +168,7 @@ impl Connection {
         ))
     }
 
-    pub(crate) async fn execute_batch(&self, sql: &str) -> Result<()> {
+    pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
         tokio::task::spawn_blocking(move || runtime.execute_batch(sql))
@@ -177,7 +177,7 @@ impl Connection {
             .map(|_| ())
     }
 
-    pub(crate) async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
+    pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.repair_incremental_auto_vacuum())
             .await
@@ -185,7 +185,7 @@ impl Connection {
     }
 
     #[cfg(test)]
-    pub(crate) async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
+    pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
         let statement = statement(sql, ())?;
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.validate(statement))
@@ -195,11 +195,11 @@ impl Connection {
     }
 
     #[cfg(test)]
-    pub(crate) fn last_insert_rowid(&self) -> i64 {
+    pub fn last_insert_rowid(&self) -> i64 {
         self.runtime.last_insert_rowid()
     }
 
-    pub(crate) async fn read_snapshot(&self) -> Result<ReadSnapshot> {
+    pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_read_snapshot())
             .await
@@ -207,7 +207,7 @@ impl Connection {
             .map(ReadSnapshot::from_runtime)
     }
 
-    pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
+    pub async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot())
             .await
@@ -216,12 +216,12 @@ impl Connection {
     }
 
     #[cfg(test)]
-    pub(crate) async fn transaction(&self) -> Result<Transaction> {
+    pub async fn transaction(&self) -> Result<Transaction> {
         self.transaction_with_behavior(TransactionBehavior::Deferred)
             .await
     }
 
-    pub(crate) async fn transaction_with_behavior(
+    pub async fn transaction_with_behavior(
         &self,
         behavior: TransactionBehavior,
     ) -> Result<Transaction> {
@@ -252,7 +252,7 @@ impl Connection {
     ///
     /// Only its explicit schema-step methods may bypass the ordinary
     /// per-statement deadline. All other operations retain ordinary bounds.
-    pub(crate) async fn schema_migration_transaction(&self) -> Result<Transaction> {
+    pub async fn schema_migration_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_schema_migration_immediate())
             .await

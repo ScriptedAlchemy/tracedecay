@@ -214,7 +214,7 @@ impl MemoryStore<'_> {
         .await
     }
 
-    pub(crate) async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
+    pub async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
         let Some(fact) = self.get_fact(fact_id).await? else {
             return Err(db_message(
                 "repair_fact_vector",

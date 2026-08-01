@@ -102,7 +102,7 @@ impl LifecycleLease {
     }
 }
 
-pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
+pub fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 

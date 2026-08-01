@@ -4,7 +4,7 @@ use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlReadSnapshot;
 
 use super::{IntoParams, Result, Rows, Value, connection::statement};
 
-pub(crate) struct ReadSnapshot {
+pub struct ReadSnapshot {
     runtime: Arc<Mutex<MigrationSqlReadSnapshot>>,
 }
 
@@ -15,7 +15,7 @@ impl ReadSnapshot {
         }
     }
 
-    pub(crate) async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
+    pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {

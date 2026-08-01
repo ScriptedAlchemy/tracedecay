@@ -84,7 +84,7 @@ async fn current_disposition(
         .transpose()?)
 }
 
-pub(crate) async fn publish_anchor_derivative(
+pub async fn publish_anchor_derivative(
     connection: &(impl Executor + Sync),
     derivative: &RetrievalAnchorDerivativeV1,
 ) -> Result<AnchorDispositionAppendOutcomeV1> {
@@ -143,7 +143,7 @@ pub(crate) async fn publish_anchor_derivative(
     }
 }
 
-pub(crate) async fn resolve_anchor_derivatives<O>(
+pub async fn resolve_anchor_derivatives<O>(
     connection: &(impl QueryExecutor + Sync),
     owner: &O,
     anchor_id: &RetrievalAnchorId,
@@ -187,7 +187,7 @@ where
     Ok(derivatives)
 }
 
-pub(crate) async fn resolve_anchor_derivative(
+pub async fn resolve_anchor_derivative(
     connection: &(impl QueryExecutor + Sync),
     owner: &FactOwnerV1,
     kind: AnchorDerivativeKindV1,
@@ -228,7 +228,7 @@ pub(crate) async fn resolve_anchor_derivative(
         .map(|row| row.is_some())
 }
 
-pub(crate) async fn tombstone_fact_derivatives_tx<E>(
+pub async fn tombstone_fact_derivatives_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,
@@ -280,7 +280,7 @@ where
         .map_err(database_error)
 }
 
-pub(crate) async fn publish_fact_feedback_finding_tx<E>(
+pub async fn publish_fact_feedback_finding_tx<E>(
     transaction: &E,
     owner: &FactOwnerV1,
     fact_id: &str,

@@ -256,12 +256,12 @@ pub(super) fn read_owner(path: &Path) -> Option<WriterOwner> {
 }
 
 #[cfg(windows)]
-pub(crate) fn is_lock_contended(error: &std::io::Error) -> bool {
+pub fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
 }
 
 #[cfg(not(windows))]
-pub(crate) fn is_lock_contended(error: &std::io::Error) -> bool {
+pub fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
 }
 

@@ -19,7 +19,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn insert_edge_unguarded(
+    pub async fn insert_edge_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         edge: &Edge,
@@ -76,7 +76,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn insert_edges_unguarded(
+    pub async fn insert_edges_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         edges: &[Edge],
@@ -332,7 +332,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn delete_edges_by_source_unguarded(
+    pub async fn delete_edges_by_source_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         source_id: &str,

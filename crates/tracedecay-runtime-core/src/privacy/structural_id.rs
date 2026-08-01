@@ -8,11 +8,11 @@ const CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1: &str =
     "tracedecay-claude-observation-source-v1-sha256-";
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct StructuralIdProtectionError;
+pub struct StructuralIdProtectionError;
 
 /// True when `value` is already a protected structural-ID token or an opaque
 /// Claude observation source digest that must not be re-hashed.
-pub(crate) fn is_already_protected_structural_id(value: &str) -> bool {
+pub fn is_already_protected_structural_id(value: &str) -> bool {
     has_canonical_sha256_suffix(value, PROTECTION_PREFIX_V1)
         || has_canonical_sha256_suffix(value, CLAUDE_OBSERVATION_SOURCE_ID_PREFIX_V1)
 }
@@ -29,7 +29,7 @@ fn has_canonical_sha256_suffix(value: &str, prefix: &str) -> bool {
 /// Replaces credential-shaped structural identifiers with a stable,
 /// versioned digest. Public identifiers and values already protected by this
 /// version are preserved byte-for-byte.
-pub(crate) fn protect_sensitive_structural_id(
+pub fn protect_sensitive_structural_id(
     value: &str,
 ) -> Result<String, StructuralIdProtectionError> {
     if is_already_protected_structural_id(value) {
@@ -53,7 +53,7 @@ pub(crate) fn protect_sensitive_structural_id(
 
 /// Protects an optional structural identifier. Empty and missing values stay
 /// absent; already-protected and public values are preserved byte-for-byte.
-pub(crate) fn protect_optional_sensitive_structural_id(
+pub fn protect_optional_sensitive_structural_id(
     value: Option<&str>,
 ) -> Result<Option<String>, StructuralIdProtectionError> {
     match value {

@@ -11,14 +11,14 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct CapturedMemoryV2Frontiers {
-    pub(crate) feedback: i64,
-    pub(crate) oplog: i64,
-    pub(crate) facts: i64,
+pub struct CapturedMemoryV2Frontiers {
+    pub feedback: i64,
+    pub oplog: i64,
+    pub facts: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryV2BackfillBatchOutcome {
+pub enum MemoryV2BackfillBatchOutcome {
     Advanced { processed: usize },
     AwaitingCutover,
 }
@@ -26,14 +26,14 @@ pub(crate) enum MemoryV2BackfillBatchOutcome {
 /// A V22 repair snapshot for legacy feedback rows that had already been
 /// imported before history/map projections existed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MemoryV2FeedbackHistoryRepairProgress {
-    pub(crate) feedback_frontier: i64,
-    pub(crate) feedback_cursor: i64,
-    pub(crate) complete: bool,
+pub struct MemoryV2FeedbackHistoryRepairProgress {
+    pub feedback_frontier: i64,
+    pub feedback_cursor: i64,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryV2FeedbackHistoryRepairBatchOutcome {
+pub enum MemoryV2FeedbackHistoryRepairBatchOutcome {
     Advanced { processed: usize },
     Complete { processed: usize },
     NotRequired,
@@ -58,7 +58,7 @@ impl MemoryV2CutoverCoverage {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct MemoryV2CutoverReceipt {
+pub struct MemoryV2CutoverReceipt {
     receipt_id: ProvenanceId,
     pub(super) owner: FactOwnerV1,
     pub(super) source_store_id: SourceStoreId,
@@ -69,7 +69,7 @@ pub(crate) struct MemoryV2CutoverReceipt {
 }
 
 impl MemoryV2CutoverReceipt {
-    pub(crate) fn new(
+    pub fn new(
         receipt_id: ProvenanceId,
         owner: FactOwnerV1,
         source_store_id: SourceStoreId,
@@ -100,7 +100,7 @@ impl MemoryV2CutoverReceipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MemoryV2CutoverOutcome {
+pub enum MemoryV2CutoverOutcome {
     TailPending(CapturedMemoryV2Frontiers),
     Complete,
 }

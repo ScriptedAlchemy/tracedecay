@@ -130,7 +130,7 @@ impl Database {
         result
     }
 
-    pub(crate) async fn collect_test_marker_ids_on(
+    pub async fn collect_test_marker_ids_on(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<Vec<String>> {
@@ -175,7 +175,7 @@ impl Database {
     /// (e.g. consecutive `find_dead_code` from the same MCP client) does
     /// not collide. The caller should also drop the table when done — see
     /// `find_dead_code` for the wrapping pattern.
-    pub(crate) async fn populate_test_marker_temp_table_unlocked(
+    pub async fn populate_test_marker_temp_table_unlocked(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
         ids: &[String],
@@ -221,7 +221,7 @@ impl Database {
     /// same connection.
     ///
     /// Safe to call even if the table doesn't exist (uses `IF EXISTS`).
-    pub(crate) async fn drop_test_marker_temp_table_unlocked(
+    pub async fn drop_test_marker_temp_table_unlocked(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
@@ -255,7 +255,7 @@ impl Database {
     /// per-candidate probe becomes a single indexed lookup against a
     /// table with ~15 K rows. Real measurement on chromium 7.5 GB DB:
     /// 0.75 s end-to-end (vs. >60 s for the single-temp-table form).
-    pub(crate) async fn populate_test_annotated_targets_temp_table_unlocked(
+    pub async fn populate_test_annotated_targets_temp_table_unlocked(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
@@ -295,7 +295,7 @@ impl Database {
 
     /// Drops `temp.test_annotated_targets` if it exists. Cleanup pair for
     /// `populate_test_annotated_targets_temp_table`.
-    pub(crate) async fn drop_test_annotated_targets_temp_table_unlocked(
+    pub async fn drop_test_annotated_targets_temp_table_unlocked(
         &self,
         conn: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {

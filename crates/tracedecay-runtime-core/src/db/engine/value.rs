@@ -50,7 +50,7 @@ impl From<Value> for tracedecay_rusqlite_runtime::migration_sql::MigrationSqlVal
     }
 }
 
-pub(crate) trait FromValue: Sized {
+pub trait FromValue: Sized {
     const EXPECTED: &'static str;
 
     fn from_value(value: &Value, column: i32) -> Result<Self>;

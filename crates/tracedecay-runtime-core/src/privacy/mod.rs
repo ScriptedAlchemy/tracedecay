@@ -5,7 +5,7 @@
 //! carries payload bytes.
 
 mod detect;
-pub(crate) mod detector_kernel;
+pub mod detector_kernel;
 mod sanitize;
 mod structural_id;
 
@@ -15,7 +15,7 @@ pub use detect::{
     SanitizationEvidenceAnchorV1, SanitizationFindingV1, SanitizationRemediationClassV1,
     SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
-pub(crate) use detect::{
+pub use detect::{
     CodeSourceSanitizationV1, MemoryFactSanitizationV1, sanitize_code_source_bytes,
     sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
@@ -25,7 +25,7 @@ pub use sanitize::{
     PrivacySanitizerError, RecordSanitizerPolicyV1, RecordSanitizerV1, SanitizedClaudeRecordV1,
     SanitizedObservationRecordV1,
 };
-pub(crate) use structural_id::{
+pub use structural_id::{
     protect_optional_sensitive_structural_id, protect_sensitive_structural_id,
 };
 pub use tracedecay_capture::{
@@ -33,7 +33,7 @@ pub use tracedecay_capture::{
     ParsedClaudeRecordV1, ParsedObservationRecordV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
-pub(crate) use tracedecay_capture::{ParseLimits, ParsedPolicyLimitViolation};
+pub use tracedecay_capture::{ParseLimits, ParsedPolicyLimitViolation};
 
 #[cfg(test)]
 mod tests;

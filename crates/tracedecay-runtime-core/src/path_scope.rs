@@ -1,4 +1,4 @@
-pub(crate) fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
+pub fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
     scope_prefix.is_none_or(|prefix| {
         let with_slash = if prefix.ends_with('/') {
             prefix.to_string()

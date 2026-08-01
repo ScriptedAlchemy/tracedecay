@@ -17,16 +17,16 @@ mod owner_io;
 mod path_layout;
 
 #[cfg(windows)]
-pub(crate) use bootstrap::windows_hard_link_count;
+pub use bootstrap::windows_hard_link_count;
 use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
 #[cfg(not(any(test, feature = "test-transport")))]
-pub(crate) use lease::enter_owned_maintenance_database_scope;
+pub use lease::enter_owned_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
-pub(crate) use lease::{
+pub use lease::{
     database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner,
 };
-pub(crate) use owner_io::is_lock_contended;
+pub use owner_io::is_lock_contended;
 use owner_io::{
     authority_token, epoch_ms, open_lock_file, publish_record_atomically, read_owner,
     read_record_strict, remove_record_durably, write_owner, write_record_atomically, writer_owner,
@@ -88,7 +88,7 @@ pub struct DatabaseAuthority {
 }
 
 #[derive(Debug)]
-pub(crate) struct DatabaseDeletionFence {
+pub struct DatabaseDeletionFence {
     transaction_id: String,
     entries: Vec<DeletionFenceEntry>,
 }
@@ -101,14 +101,14 @@ enum DatabaseDeletionState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DatabaseDeletionStates {
+pub struct DatabaseDeletionStates {
     missing: usize,
     deleting: usize,
     deleted: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct DaemonDatabaseScope {
+pub struct DaemonDatabaseScope {
     profile_root: PathBuf,
     token: String,
 }
@@ -126,7 +126,7 @@ pub struct MaintenanceDatabaseScope<'lease> {
 /// Dropping the scope revokes database authority before its retained lifecycle
 /// lease is released.
 #[derive(Debug)]
-pub(crate) struct OwnedMaintenanceDatabaseScope {
+pub struct OwnedMaintenanceDatabaseScope {
     profile_root: PathBuf,
     token: String,
     _lifecycle: crate::lifecycle_lease::LifecycleLease,
@@ -135,7 +135,7 @@ pub(crate) struct OwnedMaintenanceDatabaseScope {
 impl MaintenanceDatabaseScope<'_> {
     /// Issues database authority for one exact artifact beneath this retained
     /// exclusive-maintenance profile scope.
-    pub(crate) fn database_authority(
+    pub fn database_authority(
         &self,
         db_path: &Path,
         intent: &str,
@@ -166,7 +166,7 @@ impl MaintenanceDatabaseScope<'_> {
 
 impl OwnedMaintenanceDatabaseScope {
     #[cfg(not(any(test, feature = "test-transport")))]
-    pub(crate) fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
+    pub fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
         &self._lifecycle
     }
 }
@@ -240,16 +240,16 @@ enum HeldLocks {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WriterOwner {
-    pub(crate) token: String,
-    pub(crate) pid: u32,
-    pub(crate) started_epoch_ms: u128,
-    pub(crate) version: String,
-    pub(crate) intent: String,
+pub struct WriterOwner {
+    pub token: String,
+    pub pid: u32,
+    pub started_epoch_ms: u128,
+    pub version: String,
+    pub intent: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WriterOwnership {
+pub enum WriterOwnership {
     Idle,
     Active(WriterOwner),
     ActiveUnknown,
@@ -257,7 +257,7 @@ pub(crate) enum WriterOwnership {
 
 impl DatabaseAuthority {
     #[cfg(test)]
-    pub(crate) fn acquire_daemon(db_path: &Path, intent: &str) -> Result<Self> {
+    pub fn acquire_daemon(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if !DAEMON_SCOPES
             .lock()
@@ -274,14 +274,14 @@ impl DatabaseAuthority {
     }
 
     #[cfg(test)]
-    pub(crate) fn acquire_maintenance(db_path: &Path, intent: &str) -> Result<Self> {
+    pub fn acquire_maintenance(db_path: &Path, intent: &str) -> Result<Self> {
         Self::acquire(db_path, DatabaseAuthorityRole::Maintenance, intent)
     }
 
     /// Acquires only authority already owned by the active daemon or an
     /// exclusive maintenance scope. Unlike [`Self::for_runtime`], this never
     /// falls back to fixture-only `Test` authority.
-    pub(crate) fn for_owned_runtime(db_path: &Path, intent: &str) -> Result<Self> {
+    pub fn for_owned_runtime(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if let Some(role) = exact_scoped_runtime_role(&identity.profile_root, intent)? {
             return Self::acquire_identity(identity, role, intent);
@@ -402,7 +402,7 @@ impl DatabaseAuthority {
     /// it must not let a clone of a daemon-owned `Database` outlive the daemon
     /// election or an exclusive maintenance scope. Test authorities remain the
     /// explicit fixture escape hatch.
-    pub(crate) fn require_active_write_scope(&self, intent: &str) -> Result<()> {
+    pub fn require_active_write_scope(&self, intent: &str) -> Result<()> {
         if self.inner.role == DatabaseAuthorityRole::Test {
             return Ok(());
         }
@@ -432,7 +432,7 @@ impl DatabaseAuthority {
         &self.inner.token
     }
 
-    pub(crate) fn publish_record_atomically(
+    pub fn publish_record_atomically(
         temporary: &Path,
         destination: &Path,
         payload: &[u8],
@@ -441,11 +441,11 @@ impl DatabaseAuthority {
         publish_record_atomically(temporary, destination, payload, record_name)
     }
 
-    pub(crate) fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
+    pub fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
         read_record_strict(path, record_name)
     }
 
-    pub(crate) fn replace_file_atomically(
+    pub fn replace_file_atomically(
         temporary: &Path,
         destination: &Path,
         record_name: &str,
@@ -478,7 +478,7 @@ impl DatabaseAuthority {
         })
     }
 
-    pub(crate) fn hold_for(&self, db_path: &Path, operation: &str) -> Result<Self> {
+    pub fn hold_for(&self, db_path: &Path, operation: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if identity.database_key != self.inner.identity.database_key {
             return Err(access_error(
@@ -490,11 +490,11 @@ impl DatabaseAuthority {
         Ok(self.clone())
     }
 
-    pub(crate) fn canonical_database_path(&self) -> &Path {
+    pub fn canonical_database_path(&self) -> &Path {
         &self.inner.identity.database_path
     }
 
-    pub(crate) fn database_identity_key(&self) -> &Path {
+    pub fn database_identity_key(&self) -> &Path {
         &self.inner.identity.database_key
     }
 }
@@ -582,7 +582,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-pub(crate) fn is_isolated_test_path(path: &Path) -> bool {
+pub fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {
         return true;

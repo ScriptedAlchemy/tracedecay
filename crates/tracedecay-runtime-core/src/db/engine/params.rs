@@ -1,6 +1,6 @@
 use super::{Error, Result, Value};
 
-pub(crate) trait IntoValue {
+pub trait IntoValue {
     fn into_value(self) -> Result<Value>;
 }
 
@@ -61,12 +61,12 @@ impl<T: IntoValue> IntoValue for Option<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Params {
+pub struct Params {
     values: Result<Vec<Value>>,
 }
 
 impl Params {
-    pub(crate) fn from_results(values: Vec<Result<Value>>) -> Self {
+    pub fn from_results(values: Vec<Result<Value>>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }
@@ -129,7 +129,7 @@ tuple_params!(A, B, C, D, E, F, G, H, I, J);
 tuple_params!(A, B, C, D, E, F, G, H, I, J, K);
 tuple_params!(A, B, C, D, E, F, G, H, I, J, K, L);
 
-pub(crate) fn params_from_iter<I>(values: I) -> Params
+pub fn params_from_iter<I>(values: I) -> Params
 where
     I: IntoIterator,
     I::Item: IntoValue,
@@ -142,6 +142,10 @@ where
     )
 }
 
+// Exported at the crate root so the root crate's `global_db` SQL sites keep
+// using `db::engine::params!` across the split; the module-level `pub use`
+// below keeps the historical path working.
+#[macro_export]
 macro_rules! params {
     ($($value:expr),* $(,)?) => {
         $crate::db::engine::Params::from_results(vec![
@@ -150,4 +154,4 @@ macro_rules! params {
     };
 }
 
-pub(crate) use params;
+pub use crate::params;

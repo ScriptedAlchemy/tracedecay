@@ -22,7 +22,7 @@ mod tests;
 mod types;
 mod writers;
 
-pub(crate) use archive::{
+pub use archive::{
     MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
     list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
 };
@@ -38,13 +38,13 @@ pub(super) use schema::{
     install_v22_fresh_schema, install_v23_fresh_schema, upgrade_v20_schema, upgrade_v21_schema,
     upgrade_v22_schema, upgrade_v23_schema,
 };
-pub(crate) use types::{
+pub use types::{
     CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
     MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
     MemoryV2FeedbackHistoryRepairProgress,
 };
 use types::{CurrentFactState, OwnerKey, Progress};
-pub(crate) use writers::MemoryV2LegacyPurgeReceipt;
+pub use writers::MemoryV2LegacyPurgeReceipt;
 #[cfg(test)]
 pub(super) use writers::purge_memory_v2_fact;
 pub(super) use writers::purge_memory_v2_fact_in_transaction;

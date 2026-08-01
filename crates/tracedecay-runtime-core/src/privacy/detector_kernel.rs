@@ -7,7 +7,7 @@ use serde_json::Value;
 const KNOWN_CREDENTIAL_PATTERN: &str = r"\b(?:sk-[A-Za-z0-9_-]{20,}|sk-test-[0-9]{6,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,})\b";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternKind {
+pub enum CredentialPatternKind {
     PrivateKey,
     BearerToken,
     KnownCredential,
@@ -15,23 +15,23 @@ pub(crate) enum CredentialPatternKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CredentialPatternProfile {
+pub enum CredentialPatternProfile {
     Observation,
     Memory,
 }
 
-pub(crate) struct CredentialPattern {
+pub struct CredentialPattern {
     kind: CredentialPatternKind,
     regex: Regex,
     assignment_min_len: Option<usize>,
 }
 
 impl CredentialPattern {
-    pub(crate) fn kind(&self) -> CredentialPatternKind {
+    pub fn kind(&self) -> CredentialPatternKind {
         self.kind
     }
 
-    pub(crate) fn is_match(&self, text: &str) -> bool {
+    pub fn is_match(&self, text: &str) -> bool {
         if let Some(min_len) = self.assignment_min_len {
             return credential_assignment_ranges(text, &self.regex, min_len)
                 .next()
@@ -40,7 +40,7 @@ impl CredentialPattern {
         self.regex.is_match(text)
     }
 
-    pub(crate) fn ranges(&self, text: &str) -> Vec<Range<usize>> {
+    pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
         if let Some(min_len) = self.assignment_min_len {
             return credential_assignment_ranges(text, &self.regex, min_len).collect();
         }
@@ -51,7 +51,7 @@ impl CredentialPattern {
     }
 }
 
-pub(crate) fn compile_credential_patterns(
+pub fn compile_credential_patterns(
     profile: CredentialPatternProfile,
 ) -> Result<Vec<CredentialPattern>, regex::Error> {
     pattern_specs(profile)
@@ -174,14 +174,14 @@ fn credential_assignment_ranges<'a>(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NormalizedSensitiveKey {
+pub struct NormalizedSensitiveKey {
     ascii_compact: String,
     separated: String,
     compact: String,
 }
 
 impl NormalizedSensitiveKey {
-    pub(crate) fn new(key: &str) -> Self {
+    pub fn new(key: &str) -> Self {
         let ascii_compact = key
             .chars()
             .filter(char::is_ascii_alphanumeric)
@@ -219,37 +219,37 @@ impl NormalizedSensitiveKey {
         }
     }
 
-    pub(crate) fn ascii_compact(&self) -> &str {
+    pub fn ascii_compact(&self) -> &str {
         &self.ascii_compact
     }
 
-    pub(crate) fn separated(&self) -> &str {
+    pub fn separated(&self) -> &str {
         &self.separated
     }
 
-    pub(crate) fn compact(&self) -> &str {
+    pub fn compact(&self) -> &str {
         &self.compact
     }
 }
 
-pub(crate) trait SensitiveKeyPolicy {
+pub trait SensitiveKeyPolicy {
     type Match: Copy;
 
     fn classify(&self, key: &NormalizedSensitiveKey) -> Option<Self::Match>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum JsonPathSegment {
+pub enum JsonPathSegment {
     Field(usize),
     Index(usize),
 }
 
-pub(crate) enum JsonVisitMut<'a, M> {
+pub enum JsonVisitMut<'a, M> {
     SensitiveValue(&'a mut Value, M),
     String(&'a mut String),
 }
 
-pub(crate) fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
+pub fn visit_json_object_keys<P, V>(value: &Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
     V: FnMut(&str, &[JsonPathSegment]) -> bool,
@@ -288,7 +288,7 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
-pub(crate) fn visit_sensitive_json_mut<P, V>(value: &mut Value, policy: &P, mut visit: V) -> bool
+pub fn visit_sensitive_json_mut<P, V>(value: &mut Value, policy: &P, mut visit: V) -> bool
 where
     P: SensitiveKeyPolicy,
     V: FnMut(JsonVisitMut<'_, P::Match>, &[JsonPathSegment]) -> bool,
@@ -337,7 +337,7 @@ where
     walk(value, policy, &mut Vec::new(), &mut visit)
 }
 
-pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
+pub fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
     let mut start = 0usize;
@@ -370,7 +370,7 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
     ranges
 }
 
-pub(crate) fn looks_high_entropy_token(token: &str) -> bool {
+pub fn looks_high_entropy_token(token: &str) -> bool {
     if token.len() < 36
         || !token.bytes().all(token_byte)
         || token.bytes().all(|byte| byte.is_ascii_hexdigit())

@@ -33,7 +33,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn upsert_files_unguarded(
+    pub async fn upsert_files_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         files: &[FileRecord],
@@ -81,7 +81,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub(crate) async fn upsert_file_unguarded(
+    pub async fn upsert_file_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         file: &FileRecord,
@@ -270,7 +270,7 @@ impl Database {
     }
 
     /// Deletes a file while the caller holds the database writer lane.
-    pub(crate) async fn delete_file_unguarded(
+    pub async fn delete_file_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         path: &str,

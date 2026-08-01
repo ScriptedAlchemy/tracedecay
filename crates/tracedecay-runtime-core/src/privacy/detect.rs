@@ -220,7 +220,7 @@ impl TryFrom<SanitizationFindingWireV1> for SanitizationFindingV1 {
 }
 
 impl SanitizationFindingV1 {
-    pub(crate) fn new(
+    pub fn new(
         detector: PrivacyDetectorV1,
         location: impl Into<String>,
         confidence: DetectionConfidenceV1,
@@ -242,7 +242,7 @@ impl SanitizationFindingV1 {
         Self::new_with_origin(detector, origin, location, confidence, action)
     }
 
-    pub(crate) fn new_with_origin(
+    pub fn new_with_origin(
         detector: PrivacyDetectorV1,
         detector_origin: SanitizationDetectorOriginV1,
         location: impl Into<String>,
@@ -264,7 +264,7 @@ impl SanitizationFindingV1 {
         }
     }
 
-    pub(crate) fn new_with_incomplete_coverage(
+    pub fn new_with_incomplete_coverage(
         detector: PrivacyDetectorV1,
         location: impl Into<String>,
         confidence: DetectionConfidenceV1,
@@ -361,14 +361,14 @@ fn is_safe_structural_location(location: &str) -> bool {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum DetectionError {
+pub enum DetectionError {
     #[error("privacy detector initialization failed")]
     Initialization,
     #[error("privacy sanitizer receipt construction failed")]
     Receipt,
 }
 
-pub(crate) enum MemoryFactSanitizationV1 {
+pub enum MemoryFactSanitizationV1 {
     Durable {
         payload: Value,
         receipt: SanitizationReceiptV1,
@@ -376,27 +376,27 @@ pub(crate) enum MemoryFactSanitizationV1 {
     Quarantined,
 }
 
-pub(crate) struct CodeSourceSanitizationV1 {
+pub struct CodeSourceSanitizationV1 {
     sanitized_bytes: Vec<u8>,
     receipt: SanitizationReceiptV1,
 }
 
 impl CodeSourceSanitizationV1 {
     #[cfg(test)]
-    pub(crate) fn sanitized_bytes(&self) -> &[u8] {
+    pub fn sanitized_bytes(&self) -> &[u8] {
         &self.sanitized_bytes
     }
 
-    pub(crate) fn receipt(&self) -> &SanitizationReceiptV1 {
+    pub fn receipt(&self) -> &SanitizationReceiptV1 {
         &self.receipt
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<u8>, SanitizationReceiptV1) {
+    pub fn into_parts(self) -> (Vec<u8>, SanitizationReceiptV1) {
         (self.sanitized_bytes, self.receipt)
     }
 }
 
-pub(crate) struct DetectionResult {
+pub struct DetectionResult {
     pub payload: Value,
     pub findings: Vec<SanitizationFindingV1>,
     pub quarantine_findings: Vec<SanitizationFindingV1>,
@@ -447,7 +447,7 @@ fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> bool {
         .any(|compound| separated.ends_with(compound))
 }
 
-pub(crate) fn redact_sensitive_values(
+pub fn redact_sensitive_values(
     mut payload: Value,
     sensitive_keys: &BTreeSet<String>,
 ) -> Result<DetectionResult, DetectionError> {
@@ -499,7 +499,7 @@ pub(crate) fn redact_sensitive_values(
     })
 }
 
-pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
+pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
     let result = redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new()).ok()?;
     if !result.quarantine_findings.is_empty() {
         return None;
@@ -509,7 +509,7 @@ pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
 
 /// Sanitizes arbitrary source bytes through the canonical credential detector
 /// and issues receipt evidence bound to both the raw input and sanitized text.
-pub(crate) fn sanitize_code_source_bytes(
+pub fn sanitize_code_source_bytes(
     raw: &[u8],
 ) -> Result<CodeSourceSanitizationV1, DetectionError> {
     let source = String::from_utf8_lossy(raw);
@@ -575,7 +575,7 @@ pub(crate) fn sanitize_code_source_bytes(
 /// Sanitizes one structured legacy fact payload and binds durable output to
 /// an exact content reference. Raw input is never included in errors or the
 /// receipt identifier. Quarantine deliberately carries no payload or receipt.
-pub(crate) fn sanitize_memory_fact_payload(
+pub fn sanitize_memory_fact_payload(
     payload: Value,
 ) -> Result<MemoryFactSanitizationV1, DetectionError> {
     let sensitive_keys = [
@@ -726,7 +726,7 @@ fn pattern_metadata(
     }
 }
 
-pub(crate) fn normalize_key(key: &str) -> String {
+pub fn normalize_key(key: &str) -> String {
     NormalizedSensitiveKey::new(key).ascii_compact().to_string()
 }
 

@@ -2,17 +2,17 @@ use std::path::Path;
 
 use super::{Connection, IntoParams, ReadConnection, ReadSnapshot, Result, Rows, Transaction};
 
-pub(crate) trait QueryExecutor {
+pub trait QueryExecutor {
     async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams;
 }
 
-pub(crate) trait WalCheckpointExecutor: QueryExecutor {
+pub trait WalCheckpointExecutor: QueryExecutor {
     async fn checkpoint_wal_truncate(&self) -> Result<Rows>;
 }
 
-pub(crate) trait DatabaseAttachmentExecutor {
+pub trait DatabaseAttachmentExecutor {
     async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()>;
 }
 
@@ -64,7 +64,7 @@ impl QueryExecutor for ReadSnapshot {
     }
 }
 
-pub(crate) trait Executor: QueryExecutor {
+pub trait Executor: QueryExecutor {
     async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams;
