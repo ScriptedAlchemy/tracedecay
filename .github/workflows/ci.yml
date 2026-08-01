@@ -139,7 +139,6 @@ jobs:
     runs-on: ubuntu-latest
     # Advisory by owner decision 2026-08-01: subject style must not block
     # end-to-end delivery; findings stay visible in the run summary.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
         with:
@@ -153,6 +152,7 @@ jobs:
 
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -160,6 +160,7 @@ jobs:
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
+        continue-on-error: true
         env:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
