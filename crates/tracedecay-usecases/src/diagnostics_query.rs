@@ -296,7 +296,7 @@ pub struct DiagnosticsQuery<'a> {
 }
 
 impl<'a> DiagnosticsQuery<'a> {
-    pub(crate) fn new(conn: &'a Connection) -> Self {
+    pub fn new(conn: &'a Connection) -> Self {
         Self {
             conn,
             store: DiagnosticsStore::new_runtime(conn),

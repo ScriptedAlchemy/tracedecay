@@ -57,7 +57,7 @@ pub struct DiagnosticsStore<'a> {
 }
 
 impl<'a> DiagnosticsStore<'a> {
-    pub(crate) const fn new(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
+    pub const fn new(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
         Self {
             conn: MemoryConnection::runtime(conn),
         }
