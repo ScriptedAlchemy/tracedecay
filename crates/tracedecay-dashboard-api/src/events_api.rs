@@ -1246,7 +1246,7 @@ mod tests {
 
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let profile_root =
             tracedecay_runtime_core::storage::default_profile_root().expect("test profile root");
         #[cfg(unix)]
