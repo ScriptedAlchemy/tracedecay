@@ -735,9 +735,9 @@ jobs:
               }
             },
             "bin": "tracedecay.exe",
-            "pre_uninstall": "if (\$cmd -in @('update', 'uninstall')) { \$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; & (Join-Path \$dir 'tracedecay.exe') package-hook scoop prepare --package-id tracedecay --state-file \$state; if (\$LASTEXITCODE -ne 0) { throw 'TraceDecay service prepare failed' } }",
-            "post_install": "if (\$cmd -eq 'update') { \$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; & (Join-Path \$dir 'tracedecay.exe') package-hook scoop restore --package-id tracedecay --state-file \$state; if (\$LASTEXITCODE -ne 0) { throw 'TraceDecay service restore failed' } }",
-            "post_uninstall": "if (\$cmd -eq 'uninstall') { \$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; Remove-Item -LiteralPath \$state -Force -ErrorAction SilentlyContinue }",
+            "pre_uninstall": "\$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; & (Join-Path \$dir 'tracedecay.exe') package-hook scoop prepare --package-id tracedecay --state-file \$state; if (\$LASTEXITCODE -ne 0) { throw 'TraceDecay service prepare failed' }",
+            "post_install": "if (\$null -ne (Get-Variable -Name old_version -ErrorAction SilentlyContinue)) { \$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; & (Join-Path \$dir 'tracedecay.exe') package-hook scoop restore --package-id tracedecay --state-file \$state; if (\$LASTEXITCODE -ne 0) { throw 'TraceDecay service restore failed' } }",
+            "post_uninstall": "if (\$null -eq (Get-Variable -Name old_version -ErrorAction SilentlyContinue)) { \$state = Join-Path \$env:LOCALAPPDATA 'TraceDecay/service/tracedecay/scoop-state.json'; Remove-Item -LiteralPath \$state -Force -ErrorAction SilentlyContinue }",
             "checkver": {
               "github": "https://github.com/ScriptedAlchemy/tracedecay"
             },
