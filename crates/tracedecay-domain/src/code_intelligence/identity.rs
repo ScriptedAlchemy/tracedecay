@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::canonical_text::validated_string_newtype;
 use crate::research::DomainError;
 use crate::research::id::digest_id;
 
@@ -29,67 +30,12 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
 
 /// Reject code identities that are empty, untrimmed, over 512 bytes, or carry
 /// control characters.
-fn validate_code_identity(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+use crate::canonical_text::validate_canonical_identity as validate_code_identity;
 
-macro_rules! code_id {
-    ($($name:ident),+ $(,)?) => {$(
-        #[doc = concat!("Strongly typed canonical identity: `", stringify!($name), "`.")]
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                validate_code_identity(&value, stringify!($name))?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                validate_code_identity(&self.0, stringify!($name))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = DomainError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    )+};
-}
-
-code_id!(
+validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_code_identity;
     CodeGenerationId,
     FileOccurrenceId,
     SymbolOccurrenceId,

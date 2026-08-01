@@ -14,48 +14,14 @@ use super::FeedbackScopeV1;
 
 pub const PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1: &str = "feedback.proximity.risk_threshold";
 
-macro_rules! proximity_id {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                super::validate_label(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                super::validate_label(&self.0, $field)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    };
-}
-
-proximity_id!(ProximityContributionIdV1, "proximity contribution id");
-proximity_id!(ProximityWarningIdV1, "proximity warning id");
-proximity_id!(ProximityObservationIdV1, "proximity observation id");
+crate::canonical_text::validated_string_newtype!(
+    plain,
+    DomainError,
+    super::validate_label;
+    ProximityContributionIdV1 => "proximity contribution id",
+    ProximityWarningIdV1 => "proximity warning id",
+    ProximityObservationIdV1 => "proximity observation id",
+);
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

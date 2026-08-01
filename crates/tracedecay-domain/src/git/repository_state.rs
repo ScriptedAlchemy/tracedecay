@@ -20,16 +20,7 @@ const REPOSITORY_STATE_ID_DOMAIN: &str = "tracedecay.repository-state.v1";
 pub struct RepositoryStateSnapshotId(String);
 
 fn validate_repository_state_snapshot_id(value: &str) -> Result<(), DomainError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(DomainError::NonCanonical {
-            field: "repository state snapshot id",
-        });
-    }
-    Ok(())
+    crate::canonical_text::validate_canonical_identity(value, "repository state snapshot id")
 }
 
 impl RepositoryStateSnapshotId {
@@ -469,13 +460,4 @@ impl<'de> Deserialize<'de> for RepositoryStateSnapshotV1 {
     }
 }
 
-fn validate_native_identity(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty()
-        || value.len() > 512
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+use crate::canonical_text::validate_canonical_identity as validate_native_identity;
