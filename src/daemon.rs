@@ -1337,6 +1337,9 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
 
 #[cfg(unix)]
 async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
+    // Fill the composition-root ports the extracted crates expose before any
+    // runtime that might consume them starts.
+    store_runtime::session_registry::register_profile_sessions_port();
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
