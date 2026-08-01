@@ -246,17 +246,17 @@ mod tests {
 
     #[test]
     fn adapter_contains_only_the_borrowed_global_db_handle() {
-        fn assert_exact_fields(store: &GlobalDbTranscriptStore<'_>) {
+        fn assert_exact_fields(store: &GlobalDbTranscriptStore<&'_ RegisteredGlobalDb>) {
             let GlobalDbTranscriptStore { db: _ } = store;
         }
 
         let _ = assert_exact_fields;
         assert_eq!(
-            std::mem::size_of::<GlobalDbTranscriptStore<'static>>(),
+            std::mem::size_of::<GlobalDbTranscriptStore<&'static RegisteredGlobalDb>>(),
             std::mem::size_of::<&'static RegisteredGlobalDb>()
         );
         assert_eq!(
-            std::mem::align_of::<GlobalDbTranscriptStore<'static>>(),
+            std::mem::align_of::<GlobalDbTranscriptStore<&'static RegisteredGlobalDb>>(),
             std::mem::align_of::<&'static RegisteredGlobalDb>()
         );
     }

@@ -1,8 +1,8 @@
 use super::{
-    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, canonicalize_data_dir,
-    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
-    is_generated_dir_segment, is_generated_path_segment, is_ignored_by_explicit_global_excludes,
-    is_ignored_by_git, is_included, lock_user_data_dir_test_env, user_data_dir,
+    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path,
+    get_tracedecay_dir, is_excluded, is_excluded_dir, is_generated_dir_segment,
+    is_generated_path_segment, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
+    is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -88,7 +88,10 @@ fn nextest_shared_target_profile_is_isolated_by_test_name() {
 
     let resolved = user_data_dir().unwrap();
 
-    let canonical_profile = canonicalize_data_dir(profile);
+    let canonical_profile = target
+        .canonicalize()
+        .unwrap()
+        .join("test-profile/.tracedecay");
     assert!(resolved.starts_with(canonical_profile.join("nextest")));
     assert_ne!(resolved, canonical_profile);
 }
@@ -101,7 +104,13 @@ fn nextest_preserves_explicit_temp_profile_override() {
     let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
     let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::explicit_profile");
 
-    assert_eq!(user_data_dir().unwrap(), canonicalize_data_dir(profile));
+    assert_eq!(
+        user_data_dir().unwrap(),
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .join("test-profile/.tracedecay")
+    );
 }
 
 #[test]
