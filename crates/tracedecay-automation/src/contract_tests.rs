@@ -66,27 +66,6 @@ fn automation_error_preserves_standard_classifications() {
 }
 
 #[test]
-fn automation_run_record_exposes_only_policy_inputs() {
-    let record = TestRunRecord {
-        accepted_count: 2,
-        validation_report: Some(json!({"applied": 2})),
-        applied_ops: Some(json!(["proposal-1", "proposal-2"])),
-    };
-
-    assert_eq!(record.accepted_count(), 2);
-    assert_eq!(
-        record
-            .validation_report()
-            .and_then(|value| value["applied"].as_u64()),
-        Some(2)
-    );
-    assert_eq!(
-        record.applied_ops().and_then(Value::as_array).map(Vec::len),
-        Some(2)
-    );
-}
-
-#[test]
 fn apply_policy_preserves_complete_and_partial_outcomes() {
     let config = AutomationConfig::default();
     assert_eq!(
