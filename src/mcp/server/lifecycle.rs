@@ -19,6 +19,255 @@ async fn join_or_abort_startup_ingest(
     false
 }
 
+/// Retained startup task handles, carried by the phases that can still own
+/// one. Both are joined (or aborted) by shutdown before database authorities
+/// are released.
+#[derive(Default)]
+pub(crate) struct StartupCatchUpTasksV1 {
+    sync: Option<tokio::task::JoinHandle<()>>,
+    ingest: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// The startup catch-up lifecycle as one linear machine.
+///
+/// This replaces six independently mutable fields (two completion
+/// `AtomicBool`s, a dispatch `AtomicBool`, two task-handle mutexes, and the
+/// ingest cancellation) whose only valid combinations were these phases.
+/// The hazard that motivated the change: the completion flags defaulted to
+/// `true` so a server with no catch-up reported "settled", which forced the
+/// dispatch site to pre-clear them in a separate store *before* spawning —
+/// an ordering that was documented rather than enforced. Here, dispatch
+/// *is* the transition into [`Self::Syncing`], so no window exists in which
+/// a dispatched catch-up still reads as settled.
+pub(crate) enum StartupCatchUpStateV1 {
+    /// No catch-up was ever dispatched (session-start sync disabled, or a
+    /// construction path that opts out). Terminal, and *ready*: waiters must
+    /// not block on work that will never run.
+    NotStarted,
+    /// The synchronous index sync is running.
+    Syncing { tasks: StartupCatchUpTasksV1 },
+    /// The index sync finished; the detached transcript ingest is in flight.
+    Ingesting { tasks: StartupCatchUpTasksV1 },
+    /// Both phases finished — including the failure paths, which settle
+    /// rather than stranding waiters.
+    Settled { tasks: StartupCatchUpTasksV1 },
+    /// Shutdown tore the machine down. Ready, so a shutdown can never leave
+    /// a waiter blocked on a task that was just aborted.
+    Cancelled,
+}
+
+impl StartupCatchUpStateV1 {
+    /// True once the *synchronous* index-sync phase can no longer be
+    /// pending — the old `startup_catch_up_done` flag.
+    const fn sync_phase_settled(&self) -> bool {
+        !matches!(self, Self::Syncing { .. })
+    }
+
+    /// True once the detached transcript ingest can no longer be pending —
+    /// the old `transcript_ingest_done` flag.
+    const fn ingest_phase_settled(&self) -> bool {
+        matches!(
+            self,
+            Self::NotStarted | Self::Settled { .. } | Self::Cancelled
+        )
+    }
+
+    fn tasks_mut(&mut self) -> Option<&mut StartupCatchUpTasksV1> {
+        match self {
+            Self::Syncing { tasks } | Self::Ingesting { tasks } | Self::Settled { tasks } => {
+                Some(tasks)
+            }
+            Self::NotStarted | Self::Cancelled => None,
+        }
+    }
+
+    fn take_tasks(&mut self) -> StartupCatchUpTasksV1 {
+        self.tasks_mut().map(std::mem::take).unwrap_or_default()
+    }
+}
+
+/// Owns the startup catch-up state plus the ingest cancellation that the
+/// detached task honours.
+///
+/// Held behind an `Arc` on the server so the spawned ingest task can signal
+/// completion through the same lock the waiters read, instead of through a
+/// separate `Arc<AtomicBool>` that could disagree with the retained handle.
+/// The lock is a `std::sync::Mutex` on purpose: every critical section is a
+/// phase swap or a handle take, and joins always happen *outside* it, so the
+/// sync readiness accessors stay callable from non-async code.
+pub(crate) struct StartupCatchUpMachineV1 {
+    state: std::sync::Mutex<StartupCatchUpStateV1>,
+    /// Set once the first dispatch claims the machine. Kept distinct from
+    /// the phase so a completed catch-up still refuses a second dispatch.
+    dispatched: std::sync::atomic::AtomicBool,
+    cancellation: crate::application::observation::ObservationCancellation,
+}
+
+impl Default for StartupCatchUpMachineV1 {
+    fn default() -> Self {
+        Self {
+            state: std::sync::Mutex::new(StartupCatchUpStateV1::NotStarted),
+            dispatched: std::sync::atomic::AtomicBool::new(false),
+            cancellation: crate::application::observation::ObservationCancellation::default(),
+        }
+    }
+}
+
+impl StartupCatchUpMachineV1 {
+    fn state(&self) -> std::sync::MutexGuard<'_, StartupCatchUpStateV1> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn cancellation(&self) -> &crate::application::observation::ObservationCancellation {
+        &self.cancellation
+    }
+
+    /// One-shot dispatch claim. The first caller wins and the machine enters
+    /// [`StartupCatchUpStateV1::Syncing`] in the same critical section, so
+    /// there is no interval in which a dispatched catch-up reads as settled.
+    pub(crate) fn try_claim_dispatch(&self) -> bool {
+        if self
+            .dispatched
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        let mut state = self.state();
+        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
+            return false;
+        }
+        let tasks = state.take_tasks();
+        *state = StartupCatchUpStateV1::Syncing { tasks };
+        true
+    }
+
+    /// Enters the synchronous phase for a direct
+    /// [`McpServer::run_startup_catch_up_sync`] call. Idempotent for the
+    /// dispatched path, which is already `Syncing`. A cancelled machine
+    /// stays cancelled: shutdown has already released what this phase needs.
+    fn begin_sync(&self) {
+        let mut state = self.state();
+        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
+            return;
+        }
+        let tasks = state.take_tasks();
+        *state = StartupCatchUpStateV1::Syncing { tasks };
+    }
+
+    /// Index sync finished; the detached ingest is about to be spawned.
+    /// Called *before* the spawn so the ingest task can never settle a
+    /// machine that still claims to be syncing.
+    fn enter_ingesting(&self) {
+        let mut state = self.state();
+        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
+            return;
+        }
+        let tasks = state.take_tasks();
+        *state = StartupCatchUpStateV1::Ingesting { tasks };
+    }
+
+    /// Both phases are done. Used by the ingest task on every exit path and
+    /// by the index-sync failure path, so a failure never strands waiters.
+    fn settle(&self) {
+        let mut state = self.state();
+        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
+            return;
+        }
+        let tasks = state.take_tasks();
+        *state = StartupCatchUpStateV1::Settled { tasks };
+    }
+
+    pub(super) fn install_sync_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut state = self.state();
+        match state.tasks_mut() {
+            Some(tasks) => tasks.sync = Some(task),
+            // Shutdown won the race; nothing will ever join this handle.
+            None => task.abort(),
+        }
+    }
+
+    fn install_ingest_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut state = self.state();
+        match state.tasks_mut() {
+            Some(tasks) => tasks.ingest = Some(task),
+            None => task.abort(),
+        }
+    }
+
+    fn take_sync_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.state().tasks_mut().and_then(|tasks| tasks.sync.take())
+    }
+
+    fn take_ingest_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        self.state()
+            .tasks_mut()
+            .and_then(|tasks| tasks.ingest.take())
+    }
+
+    /// Shutdown abandoned the index-sync phase: it is no longer pending,
+    /// but the ingest teardown below still has to run.
+    fn abandon_sync_phase(&self) {
+        let mut state = self.state();
+        if matches!(*state, StartupCatchUpStateV1::Syncing { .. }) {
+            let tasks = state.take_tasks();
+            *state = StartupCatchUpStateV1::Ingesting { tasks };
+        }
+    }
+
+    /// Terminal shutdown state. Both phases read as settled so no waiter
+    /// blocks on work that was just aborted.
+    fn mark_cancelled(&self) {
+        *self.state() = StartupCatchUpStateV1::Cancelled;
+    }
+
+    fn sync_phase_settled(&self) -> bool {
+        self.state().sync_phase_settled()
+    }
+
+    fn ingest_phase_settled(&self) -> bool {
+        self.state().ingest_phase_settled()
+    }
+}
+
+/// Phase transitions exposed to the sibling test module, which asserts the
+/// machine's invariants directly rather than by racing a live server.
+#[cfg(test)]
+impl StartupCatchUpMachineV1 {
+    /// True once dispatch has been claimed — the old
+    /// `startup_catch_up_started` flag.
+    pub(super) fn dispatch_claimed(&self) -> bool {
+        self.dispatched.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn sync_phase_settled_for_test(&self) -> bool {
+        self.sync_phase_settled()
+    }
+
+    pub(super) fn ingest_phase_settled_for_test(&self) -> bool {
+        self.ingest_phase_settled()
+    }
+
+    pub(super) fn enter_ingesting_for_test(&self) {
+        self.enter_ingesting();
+    }
+
+    pub(super) fn settle_for_test(&self) {
+        self.settle();
+    }
+
+    pub(super) fn mark_cancelled_for_test(&self) {
+        self.mark_cancelled();
+    }
+}
+
 /// Cached result of a latest-version check against GitHub releases.
 pub(crate) struct VersionCheckState {
     pub(crate) latest: Option<String>,
@@ -305,12 +554,12 @@ impl McpServer {
     }
 
     pub(crate) fn cancel_startup_transcript_ingest(&self) {
-        self.startup_transcript_ingest_cancellation.cancel();
+        self.startup_catch_up.cancellation().cancel();
     }
 
     pub(super) async fn shutdown_startup_transcript_ingest(&self) {
         self.cancel_startup_transcript_ingest();
-        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take()
+        if let Some(task) = self.startup_catch_up.take_ingest_task()
             && !join_or_abort_startup_ingest(task, STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE).await
         {
             tracing::warn!(
@@ -318,7 +567,19 @@ impl McpServer {
                 "startup transcript ingest shutdown backstop aborted and joined the task"
             );
         }
-        self.transcript_ingest_done.store(true, Ordering::Release);
+        self.startup_catch_up.mark_cancelled();
+    }
+
+    /// Shutdown-side teardown of the index-sync phase, in the order
+    /// [`Self::shutdown_background_tasks`] requires: abort and join the
+    /// retained handle first, then record that the phase is no longer
+    /// pending, and only afterwards tear down the ingest.
+    pub(super) async fn shutdown_startup_catch_up_sync(&self) {
+        if let Some(task) = self.startup_catch_up.take_sync_task() {
+            task.abort();
+            let _ = task.await;
+            self.startup_catch_up.abandon_sync_phase();
+        }
     }
 
     /// Detects mid-session branch drift and reopens the served instance
@@ -427,11 +688,10 @@ impl McpServer {
     /// on the way out so the next lazy sync doesn't immediately re-walk the
     /// tree.
     ///
-    /// The completion flag is flipped on every exit path (including
-    /// errors) so [`Self::wait_for_startup_catch_up`] never hangs.
+    /// The machine is advanced on every exit path (including errors) so
+    /// [`Self::wait_for_startup_catch_up`] never hangs.
     pub async fn run_startup_catch_up_sync(&self) {
-        self.startup_catch_up_done.store(false, Ordering::Release);
-        self.transcript_ingest_done.store(false, Ordering::Release);
+        self.startup_catch_up.begin_sync();
 
         let cg = self.cg_snapshot().await;
         let refresh = Arc::clone(&self.background_refresh_writer);
@@ -449,8 +709,7 @@ impl McpServer {
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "startup catch-up sync failed");
-                self.startup_catch_up_done.store(true, Ordering::Release);
-                self.transcript_ingest_done.store(true, Ordering::Release);
+                self.startup_catch_up.settle();
                 return;
             }
         }
@@ -467,10 +726,12 @@ impl McpServer {
         // work in a timeout: cancelling it after BEGIN could leave the shared
         // connection inside an open transaction. Callers that need a bounded
         // readiness wait use `wait_for_startup_catch_up` instead.
-        // `transcript_ingest_done` is flipped inside the spawn (via an Arc
-        // clone) so tests that assert on LCM store content can wait for both
-        // flags via `wait_for_startup_catch_up`.
+        // The machine is moved to `Ingesting` *before* the spawn and settled
+        // from inside it (via an `Arc` clone), so tests that assert on LCM
+        // store content can wait for both phases via
+        // `wait_for_startup_catch_up`.
         {
+            self.startup_catch_up.enter_ingesting();
             let project_root = cg.project_root().to_path_buf();
             let project_id = cg.store_layout().identity.project_id.clone();
             // `session_db`/`registered_session_db` (and the user pair) are set
@@ -482,8 +743,8 @@ impl McpServer {
             let profile_identity = self.profile_identity.clone();
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
-            let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
-            let cancellation = self.startup_transcript_ingest_cancellation.clone();
+            let machine = Arc::clone(&self.startup_catch_up);
+            let cancellation = self.startup_catch_up.cancellation().clone();
             let analytics_db = self.accounting_db.clone();
             let transcript_source_home = self.transcript_source_home.clone();
             let task = tokio::spawn(async move {
@@ -500,7 +761,7 @@ impl McpServer {
                 .await;
                 if let Some(db) = catch_up.project_sessions {
                     if cancellation.is_cancelled() {
-                        ingest_done_flag.store(true, Ordering::Release);
+                        machine.settle();
                         return;
                     }
                     if let Some(wake) = &project_session_refresh_wake {
@@ -533,7 +794,7 @@ impl McpServer {
                         cancellation.clone(),
                     ));
                     if !post_ingest.await {
-                        ingest_done_flag.store(true, Ordering::Release);
+                        machine.settle();
                         return;
                     }
                 }
@@ -546,12 +807,10 @@ impl McpServer {
                 {
                     wake.wake();
                 }
-                ingest_done_flag.store(true, Ordering::Release);
+                machine.settle();
             });
-            *self.startup_transcript_ingest_task.lock().await = Some(task);
+            self.startup_catch_up.install_ingest_task(task);
         }
-
-        self.startup_catch_up_done.store(true, Ordering::Release);
     }
 
     /// Returns `true` once the *synchronous* portion of
@@ -559,13 +818,13 @@ impl McpServer {
     /// and index sync). See [`Self::transcript_ingest_done`] for the
     /// detached ingest task.
     pub fn startup_catch_up_done(&self) -> bool {
-        self.startup_catch_up_done.load(Ordering::Acquire)
+        self.startup_catch_up.sync_phase_settled()
     }
 
     /// Returns `true` once the detached transcript-ingest task spawned by
     /// [`Self::run_startup_catch_up_sync`] has completed (success or error).
     pub fn transcript_ingest_done(&self) -> bool {
-        self.transcript_ingest_done.load(Ordering::Acquire)
+        self.startup_catch_up.ingest_phase_settled()
     }
 
     /// Polls until both the synchronous catch-up sync *and* the detached

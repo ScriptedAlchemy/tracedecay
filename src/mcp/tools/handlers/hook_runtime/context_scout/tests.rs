@@ -148,6 +148,7 @@ async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
             worktree_id,
             &sessions,
         )
+        .is_bound()
     );
 
     for (provider, session, first_call, latest_call) in [

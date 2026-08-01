@@ -65,7 +65,9 @@ pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use lifecycle::{ProjectServerResponseLifecycle, VersionCheckState};
+pub(crate) use lifecycle::{
+    ProjectServerResponseLifecycle, StartupCatchUpMachineV1, VersionCheckState,
+};
 pub(crate) use protocol::*;
 use read_coalescing::*;
 pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
@@ -344,22 +346,13 @@ pub struct McpServer {
     /// spawn at most one pair of `git rev-parse` per session no matter how
     /// many tool calls fire. See [`crate::worktree`] and #312.
     worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
-    /// Flipped to `true` once the *synchronous* portion of
-    /// [`Self::run_startup_catch_up_sync`] finishes — i.e. the file-tree
-    /// walk and index sync. The detached transcript-ingest spawn is tracked
-    /// separately by [`Self::transcript_ingest_done`].
-    startup_catch_up_done: AtomicBool,
-    /// Retained startup catch-up task so shutdown joins it before database
-    /// authorities are released.
-    startup_catch_up_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    startup_transcript_ingest_cancellation:
-        crate::application::observation::ObservationCancellation,
-    /// Guards the one-shot startup catch-up spawn (D1). `compare_exchange`d
-    /// from `false` to `true` by the first caller so the catch-up runs at
-    /// most once per server even if two `new_with_dbs` paths race. Distinct
-    /// from [`startup_catch_up_done`](Self::startup_catch_up_done), which
-    /// tracks *completion* rather than *dispatch*.
-    startup_catch_up_started: AtomicBool,
+    /// The whole startup catch-up lifecycle (D1): dispatch claim, index-sync
+    /// and transcript-ingest phases, both retained task handles, and the
+    /// ingest cancellation — one typed state behind one lock. See
+    /// [`StartupCatchUpStateV1`] for the phases and the ordering hazard the
+    /// previous flag soup carried. `Arc` so the detached ingest task can
+    /// settle the same machine that waiters and shutdown read.
+    startup_catch_up: Arc<StartupCatchUpMachineV1>,
     /// `true` while a detached sync-on-read refresh (D4) is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
     /// before spawning and cleared on completion. Also read by the D7
@@ -384,14 +377,6 @@ pub struct McpServer {
     /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
     /// hot path never re-reads the config file per `tools/call`.
     sync_config: crate::config::SyncConfig,
-    /// Flipped to `true` when the detached transcript-ingest task spawned
-    /// inside [`Self::run_startup_catch_up_sync`] completes. Stored as
-    /// `Arc<AtomicBool>` so the spawned task can hold a
-    /// cheap clone and signal completion without a raw-pointer round-trip.
-    transcript_ingest_done: Arc<AtomicBool>,
-    /// Retained transcript-ingest task, which owns both project and profile
-    /// session authorities while its database work is in flight.
-    startup_transcript_ingest_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Savings-ledger recorder tasks spawned so far / finished so far, plus
     /// a notifier pinged on every completion. Production never awaits these
     /// (ledger writes stay fire-and-forget); tests await
@@ -926,17 +911,11 @@ impl McpServer {
             last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
-            startup_catch_up_done: AtomicBool::new(true),
-            startup_catch_up_task: tokio::sync::Mutex::new(None),
-            startup_transcript_ingest_cancellation:
-                crate::application::observation::ObservationCancellation::default(),
-            startup_catch_up_started: AtomicBool::new(false),
+            startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
             background_refresh_running: Arc::new(AtomicBool::new(false)),
             last_background_refresh_at: AtomicI64::new(0),
             last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
             sync_config,
-            transcript_ingest_done: Arc::new(AtomicBool::new(true)),
-            startup_transcript_ingest_task: tokio::sync::Mutex::new(None),
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
@@ -989,35 +968,28 @@ impl McpServer {
         // so we spawn it detached and return immediately.
         //
         // Gated on `SyncConfig.session_start_sync` (default true) and single-
-        // flighted by `startup_catch_up_started` so it runs at most once per
-        // server even if two `new_with_dbs` paths overlap.
+        // flighted by the machine's dispatch claim so it runs at most once
+        // per server even if two `new_with_dbs` paths overlap.
+        //
+        // Claiming dispatch *is* the transition into `Syncing`, which is what
+        // used to require pre-clearing two default-`true` completion flags
+        // before the spawn. Without that pre-clear there was a window between
+        // the spawn and the task's first instruction where both flags still
+        // read `true`, so a caller that reached `wait_for_startup_catch_up`
+        // in that window observed "done" and returned immediately — then the
+        // detached catch-up sync ran concurrently with the caller's own work
+        // (e.g. racing it to index a just-written file). The window cannot
+        // reopen now: no state exists in which a claimed dispatch reads as
+        // settled.
         if startup_catch_up_enabled
             && server.sync_config.session_start_sync
-            && server
-                .startup_catch_up_started
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+            && server.startup_catch_up.try_claim_dispatch()
         {
-            // Clear the completion flags *before* spawning. They default to
-            // `true` (so the no-sync path reports "done" immediately), and
-            // `run_startup_catch_up_sync` only flips them to `false` once it
-            // actually starts running. Without this pre-clear there is a
-            // window between the spawn and the task's first instruction where
-            // both flags still read `true`, so a caller that reaches
-            // `wait_for_startup_catch_up` in that window observes "done" and
-            // returns immediately — then the detached catch-up sync runs
-            // concurrently with the caller's own work (e.g. racing it to index
-            // a just-written file). Clearing here closes that window so the
-            // wait blocks until the catch-up sync genuinely completes.
-            server.startup_catch_up_done.store(false, Ordering::Release);
-            server
-                .transcript_ingest_done
-                .store(false, Ordering::Release);
             let s = Arc::clone(&server);
             let task = tokio::spawn(async move {
                 s.run_startup_catch_up_sync().await;
             });
-            *server.startup_catch_up_task.lock().await = Some(task);
+            server.startup_catch_up.install_sync_task(task);
         }
 
         server
