@@ -13,10 +13,13 @@ use super::*;
 /// Scope-specific MCP servers routed through one canonical physical DB owner.
 /// `Database` performs the actual same-process handle sharing; this registry
 /// keeps daemon cache aliases and branch-drift rekeys consistent with it.
+// Fields are `pub(super)`: the entry was private inside the flat `daemon.rs`,
+// which made it visible to every `crate::daemon` descendant — `branch_admin`
+// reads `server` directly, so the split must preserve that reach.
 struct DatabaseOwnerEntry<Server> {
-    server: Server,
-    last_used: Instant,
-    publication: ProjectServerPublication,
+    pub(super) server: Server,
+    pub(super) last_used: Instant,
+    pub(super) publication: ProjectServerPublication,
 }
 
 pub(super) struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
