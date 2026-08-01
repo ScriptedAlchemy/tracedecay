@@ -26,10 +26,12 @@ use tracedecay::application_output::markdown::render as render_markdown;
 use tracedecay::application_output::view::CanonicalHumanView;
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    FeedbackSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
-    execute_application_surface, http_application_router, parse_application_surface_request,
-    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
+    FeedbackSurfaceRequest, execute_application_surface, http_application_router,
+    parse_application_surface_request, resolve_application_surface_dispatch_with_controls,
+    resolve_http_application_surface,
 };
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay::application_surface::{GitApplySurfaceRequest, GitPreviewSurfaceRequest};
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
 use tracedecay::daemon_client::{
     DaemonInvocationClient, DaemonLspSessionClient, RequestedOutputFormat,
@@ -41,21 +43,26 @@ use tracedecay_application::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FeedbackDiagnosticsReadRequestV1,
 };
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_application::{ApplicationEnvelope, IdempotencyKey};
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationOutcome, ApplicationProblemKind, CancellationContext,
-    CancellationObservation, CancellationSignal, CancellationStage, CapabilityGrantId,
-    CapabilityGrantSnapshot, CoverageCompleteness, Deadline, DisclosureClass, IdempotencyKey,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, RequestContext,
-    RequestId, ResolvedScope,
+    ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
+    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId,
-    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, LocatorDigest, ManifestDigest,
-    ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
+    WorktreeId,
+};
+#[cfg(all(unix, feature = "test-transport"))]
+use tracedecay_domain::{
+    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
+    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
+    GitIndexTransactionReceiptV1,
 };
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
@@ -145,7 +152,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 async fn git_runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedEnv::acquire().await;
     copy_dir(
@@ -219,7 +226,7 @@ fn git(project: &Path, args: &[&str]) {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-transport"))]
 fn git_stdout(project: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new(common::git_program())
         .current_dir(project)
