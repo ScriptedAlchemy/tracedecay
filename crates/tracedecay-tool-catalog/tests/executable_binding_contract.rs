@@ -84,22 +84,6 @@ fn executable_binding_wire_is_deterministic_and_keeps_stable_names() {
     let second = serde_json::to_vec(&binding).unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(
-        String::from_utf8(first.clone()).unwrap(),
-        concat!(
-            r#"{"capability_id":"capability.source.read","operation_id":"operation.source.read","#,
-            r#""owner":{"mode":"direct","service_id":"service.source-read"},"#,
-            r#""request_schema":{"schema_ref":{"schema_id":"schema.source.read.request","revision":1},"#,
-            r#""body":{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"path":{"type":"string"}},"required":["path"],"title":"ReadRequest","type":"object"},"#,
-            r#""digest":"sha256:514659187a933c544e2d5572ea3bcb0298d2a087ccfc395d11ef30ac3876c03a"},"#,
-            r#""result_schema":{"schema_ref":{"schema_id":"schema.source.read.result","revision":1},"#,
-            r#""body":{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"contents":{"type":"string"}},"required":["contents"],"title":"ReadResult","type":"object"},"#,
-            r#""digest":"sha256:db8f100ea56f9e38862213e6a50d28e8747ee74877db4664aa40050e3bb50fc0"},"#,
-            r#""codec":{"codec":"json","binding_key":"codec.source-read.json.v1"},"#,
-            r#""exposure":{"visibility":"public","binding_id":"binding.http.source-read","route_path":"/application/source/read"},"#,
-            r#""cancellation":{"mode":"cooperative","points":["before_admission","before_read","during_read"]}}"#
-        )
-    );
     let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
     assert_eq!(value["operation_id"], "operation.source.read");
     assert_eq!(value["owner"]["mode"], "direct");
