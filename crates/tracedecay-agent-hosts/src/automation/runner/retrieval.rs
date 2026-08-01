@@ -37,8 +37,8 @@ use crate::application::session::{
 };
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::ports::session_evidence::LcmScope;
 use crate::tracedecay::TraceDecay;
