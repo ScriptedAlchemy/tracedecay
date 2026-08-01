@@ -21,15 +21,16 @@ use windows_sys::Win32::Security::{
     IsValidSecurityDescriptor, IsValidSid, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR, SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    SetSecurityDescriptorDacl, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
+    TokenOwner, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING,
-    READ_CONTROL, WRITE_DAC,
+    FILE_WRITE_DATA, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, OPEN_ALWAYS,
+    OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -64,7 +65,7 @@ impl PathKind {
 
 #[derive(Debug)]
 struct SecuritySnapshot {
-    owner_is_current_user: bool,
+    owner_is_token_owner: bool,
     dacl_is_protected: bool,
     ace_count: u32,
     ace_is_allowed: bool,
@@ -92,6 +93,11 @@ impl Drop for LocalAllocation {
 
 struct OwnedSid {
     storage: Vec<usize>,
+}
+
+struct ProcessSids {
+    user: OwnedSid,
+    owner: OwnedSid,
 }
 
 impl OwnedSid {
@@ -217,7 +223,9 @@ fn open_with_private_creation_acl(
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
     with_private_security_attributes(path, PathKind::Directory, |attributes| {
-        let encoded = encode_path(path)?;
+        let absolute = absolute_security_path(path)?;
+        let _ancestors = hold_directory_ancestors(&absolute)?;
+        let encoded = encode_path(&absolute)?;
         // SAFETY: `encoded` is NUL-terminated and the security attributes stay
         // valid for the complete creation call.
         if unsafe { CreateDirectoryW(encoded.as_ptr(), attributes) } != 0 {
@@ -236,9 +244,9 @@ fn with_private_security_attributes<T>(
     kind: PathKind,
     operation: impl FnOnce(*const SECURITY_ATTRIBUTES) -> io::Result<T>,
 ) -> io::Result<T> {
-    let current_user = current_user_sid()
-        .map_err(|error| wrap_error("resolve current Windows user", path, error))?;
-    let acl = private_acl(&current_user, kind.inheritance())
+    let process_sids = current_process_sids()
+        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
+    let acl = private_acl(&process_sids.user, kind.inheritance())
         .map_err(|error| wrap_error("build private Windows creation DACL", path, error))?;
     let mut descriptor = SECURITY_DESCRIPTOR::default();
     // SAFETY: `descriptor` is writable storage for an absolute descriptor.
@@ -291,20 +299,27 @@ fn reopen_private_file(
     additional_access: u32,
 ) -> io::Result<File> {
     let expected = file_identity(&security_handle, path)?;
-    let file = open_handle(
+    let share_mode = if additional_access & FILE_WRITE_DATA != 0 {
+        drop(security_handle);
+        SHARE_READ_WRITE
+    } else {
+        FILE_SHARE_READ
+    };
+    let file = open_handle_with_share(
         path,
         OPEN_EXISTING,
         SECURITY_ACCESS | additional_access,
         null(),
+        share_mode,
     )?;
     validate_file_kind(&file, path, PathKind::File)?;
     let actual = file_identity(&file, path)?;
     if expected != actual {
         return Err(rejected(path, "file identity changed while securing it"));
     }
-    let current_user = current_user_sid()
-        .map_err(|error| wrap_error("resolve current Windows user", path, error))?;
-    validate_private_security(&file, path, PathKind::File, &current_user)?;
+    let process_sids = current_process_sids()
+        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
+    validate_private_security(&file, path, PathKind::File, &process_sids)?;
     Ok(file)
 }
 
@@ -337,15 +352,49 @@ fn open_handle(
     access: u32,
     security_attributes: *const SECURITY_ATTRIBUTES,
 ) -> io::Result<File> {
+    open_handle_with_share(
+        path,
+        disposition,
+        access,
+        security_attributes,
+        FILE_SHARE_READ,
+    )
+}
+
+fn open_handle_with_share(
+    path: &Path,
+    disposition: u32,
+    access: u32,
+    security_attributes: *const SECURITY_ATTRIBUTES,
+    share_mode: u32,
+) -> io::Result<File> {
+    let absolute = absolute_security_path(path)?;
+    let _ancestors = hold_directory_ancestors(&absolute)?;
+    open_raw_handle(
+        &absolute,
+        disposition,
+        access,
+        security_attributes,
+        share_mode,
+    )
+}
+
+fn open_raw_handle(
+    path: &Path,
+    disposition: u32,
+    access: u32,
+    security_attributes: *const SECURITY_ATTRIBUTES,
+    share_mode: u32,
+) -> io::Result<File> {
     let encoded = encode_path(path)?;
 
-    // SAFETY: `encoded` is NUL-terminated, all optional pointers are null, and
-    // a successful raw handle is immediately transferred into `File`.
+    // SAFETY: `encoded` is NUL-terminated, the optional security attributes
+    // remain valid for the call, and a successful handle transfers into `File`.
     let handle = unsafe {
         CreateFileW(
             encoded.as_ptr(),
             access,
-            SHARE_READ_WRITE,
+            share_mode,
             security_attributes,
             disposition,
             SECURE_OPEN_FLAGS,
@@ -358,6 +407,37 @@ fn open_handle(
 
     // SAFETY: `CreateFileW` returned one owned, valid handle.
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
+    std::path::absolute(path)
+        .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))
+}
+
+fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
+    let mut ancestor_paths = Vec::new();
+    let mut current = path.parent();
+    while let Some(ancestor) = current {
+        if !ancestor.as_os_str().is_empty() {
+            ancestor_paths.push(ancestor);
+        }
+        current = ancestor.parent();
+    }
+    ancestor_paths.reverse();
+
+    let mut handles = Vec::with_capacity(ancestor_paths.len());
+    for ancestor in ancestor_paths {
+        let handle = open_raw_handle(
+            ancestor,
+            OPEN_EXISTING,
+            FILE_READ_ATTRIBUTES,
+            null(),
+            FILE_SHARE_READ,
+        )?;
+        validate_file_kind(&handle, ancestor, PathKind::Directory)?;
+        handles.push(handle);
+    }
+    Ok(handles)
 }
 
 fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
@@ -377,10 +457,10 @@ fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
 
 fn secure_handle(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
     validate_file_kind(file, path, kind)?;
-    let current_user = current_user_sid()
-        .map_err(|error| wrap_error("resolve current Windows user", path, error))?;
-    validate_current_owner(file, path, &current_user)?;
-    let acl = private_acl(&current_user, kind.inheritance())
+    let process_sids = current_process_sids()
+        .map_err(|error| wrap_error("resolve current Windows token SIDs", path, error))?;
+    validate_token_owner(file, path, &process_sids.owner)?;
+    let acl = private_acl(&process_sids.user, kind.inheritance())
         .map_err(|error| wrap_error("build private Windows DACL", path, error))?;
 
     // SAFETY: `file` owns a live file-system handle, `acl` remains allocated
@@ -404,7 +484,7 @@ fn secure_handle(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
         ));
     }
 
-    validate_private_security(file, path, kind, &current_user)
+    validate_private_security(file, path, kind, &process_sids)
 }
 
 fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()> {
@@ -442,7 +522,7 @@ fn validate_file_kind(file: &File, path: &Path, kind: PathKind) -> io::Result<()
     Ok(())
 }
 
-fn current_user_sid() -> io::Result<OwnedSid> {
+fn current_process_sids() -> io::Result<ProcessSids> {
     let mut token = null_mut();
     // SAFETY: the process pseudo-handle is always valid and `token` is writable.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
@@ -456,20 +536,38 @@ fn current_user_sid() -> io::Result<OwnedSid> {
     // SAFETY: `OpenProcessToken` returned one owned token handle.
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
 
+    let token_user = token_information(&token, TokenUser, size_of::<TOKEN_USER>())?;
+    let token_owner = token_information(&token, TokenOwner, size_of::<TOKEN_OWNER>())?;
+    // SAFETY: `token_information` verified the returned structure sizes and
+    // keeps the aligned buffers live while their SID pointers are copied.
+    let user = unsafe { (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: see the preceding comment.
+    let owner = unsafe { (*token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner };
+    Ok(ProcessSids {
+        user: copy_sid(user, "user")?,
+        owner: copy_sid(owner, "owner")?,
+    })
+}
+
+fn token_information(
+    token: &OwnedHandle,
+    information_class: TOKEN_INFORMATION_CLASS,
+    minimum_size: usize,
+) -> io::Result<Vec<usize>> {
     let mut required = 0_u32;
     // SAFETY: a null buffer with zero length is the documented sizing call.
     let sized = unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
+            information_class,
             null_mut(),
             0,
             &raw mut required,
         )
     };
-    if sized != 0 || required < size_of::<TOKEN_USER>() as u32 {
+    if sized != 0 || required < minimum_size as u32 {
         return Err(io::Error::other(
-            "GetTokenInformation returned an invalid TokenUser size",
+            "GetTokenInformation returned an invalid token information size",
         ));
     }
     let error = io::Error::last_os_error();
@@ -478,14 +576,14 @@ fn current_user_sid() -> io::Result<OwnedSid> {
     }
 
     let word_count = (required as usize).div_ceil(size_of::<usize>());
-    let mut token_user = vec![0_usize; word_count];
+    let mut information = vec![0_usize; word_count];
     let mut returned = required;
-    // SAFETY: `token_user` is aligned storage of at least `required` bytes.
+    // SAFETY: `information` is aligned storage of at least `required` bytes.
     if unsafe {
         GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
-            token_user.as_mut_ptr().cast(),
+            information_class,
+            information.as_mut_ptr().cast(),
             required,
             &raw mut returned,
         )
@@ -493,20 +591,20 @@ fn current_user_sid() -> io::Result<OwnedSid> {
     {
         return Err(io::Error::last_os_error());
     }
-    if returned > required {
+    if returned < minimum_size as u32 || returned > required {
         return Err(io::Error::other(
-            "GetTokenInformation exceeded its TokenUser buffer",
+            "GetTokenInformation returned an invalid token information length",
         ));
     }
+    Ok(information)
+}
 
-    // SAFETY: the successful API call initialized a `TOKEN_USER` at the aligned
-    // start of the output buffer.
-    let source = unsafe { (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-    // SAFETY: `source` came from a successfully populated `TOKEN_USER`.
+fn copy_sid(source: PSID, description: &str) -> io::Result<OwnedSid> {
+    // SAFETY: `source` came from successfully populated token information.
     if source.is_null() || unsafe { IsValidSid(source) } == 0 {
-        return Err(io::Error::other(
-            "GetTokenInformation returned an invalid user SID",
-        ));
+        return Err(io::Error::other(format!(
+            "GetTokenInformation returned an invalid {description} SID"
+        )));
     }
     // SAFETY: `source` is a valid SID.
     let sid_length = unsafe { GetLengthSid(source) };
@@ -522,7 +620,7 @@ fn current_user_sid() -> io::Result<OwnedSid> {
     Ok(OwnedSid { storage })
 }
 
-fn validate_current_owner(file: &File, path: &Path, current_user: &OwnedSid) -> io::Result<()> {
+fn validate_token_owner(file: &File, path: &Path, token_owner: &OwnedSid) -> io::Result<()> {
     let mut owner = null_mut();
     let mut descriptor = null_mut();
     // SAFETY: output pointers are writable and the handle remains live.
@@ -550,14 +648,14 @@ fn validate_current_owner(file: &File, path: &Path, current_user: &OwnedSid) -> 
     if descriptor.0.is_null()
         || owner.is_null()
         || unsafe { IsValidSid(owner) } == 0
-        || unsafe { EqualSid(owner, current_user.as_psid()) } == 0
+        || unsafe { EqualSid(owner, token_owner.as_psid()) } == 0
     {
-        return Err(rejected(path, "owner is not the current Windows user"));
+        return Err(rejected(path, "owner is not the process token owner"));
     }
     Ok(())
 }
 
-fn private_acl(current_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAllocation> {
+fn private_acl(token_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAllocation> {
     let entry = EXPLICIT_ACCESS_W {
         grfAccessPermissions: FILE_ALL_ACCESS,
         grfAccessMode: SET_ACCESS,
@@ -567,7 +665,7 @@ fn private_acl(current_user: &OwnedSid, inheritance: u32) -> io::Result<LocalAll
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
             TrusteeForm: TRUSTEE_IS_SID,
             TrusteeType: TRUSTEE_IS_USER,
-            ptstrName: current_user.as_psid().cast(),
+            ptstrName: token_user.as_psid().cast(),
         },
     };
     let mut acl: *mut ACL = null_mut();
@@ -588,10 +686,10 @@ fn validate_private_security(
     file: &File,
     path: &Path,
     kind: PathKind,
-    current_user: &OwnedSid,
+    process_sids: &ProcessSids,
 ) -> io::Result<()> {
-    let snapshot = security_snapshot(file, path, current_user)?;
-    let valid = snapshot.owner_is_current_user
+    let snapshot = security_snapshot(file, path, process_sids)?;
+    let valid = snapshot.owner_is_token_owner
         && snapshot.dacl_is_protected
         && snapshot.ace_count == 1
         && snapshot.ace_is_allowed
@@ -610,7 +708,7 @@ fn validate_private_security(
 fn security_snapshot(
     file: &File,
     path: &Path,
-    current_user: &OwnedSid,
+    process_sids: &ProcessSids,
 ) -> io::Result<SecuritySnapshot> {
     let mut owner = null_mut();
     let mut dacl: *mut ACL = null_mut();
@@ -675,11 +773,11 @@ fn security_snapshot(
     // SAFETY: a nonzero result initializes the complete output structure.
     let size_information = unsafe { size_information.assume_init() };
 
-    let owner_is_current_user = !owner.is_null()
+    let owner_is_token_owner = !owner.is_null()
         && unsafe { IsValidSid(owner) } != 0
-        && unsafe { EqualSid(owner, current_user.as_psid()) } != 0;
+        && unsafe { EqualSid(owner, process_sids.owner.as_psid()) } != 0;
     let mut snapshot = SecuritySnapshot {
-        owner_is_current_user,
+        owner_is_token_owner,
         dacl_is_protected: control & SE_DACL_PROTECTED != 0,
         ace_count: size_information.AceCount,
         ace_is_allowed: false,
@@ -710,7 +808,7 @@ fn security_snapshot(
     let trustee = addr_of!(ace.SidStart).cast_mut().cast();
     // SAFETY: an access-allowed ACE stores its SID starting at `SidStart`.
     snapshot.trustee_is_current_user = unsafe { IsValidSid(trustee) } != 0
-        && unsafe { EqualSid(trustee, current_user.as_psid()) } != 0;
+        && unsafe { EqualSid(trustee, process_sids.user.as_psid()) } != 0;
     Ok(snapshot)
 }
 
@@ -719,6 +817,9 @@ fn contextual_error(operation: &str, path: &Path) -> io::Error {
 }
 
 fn wrap_error(operation: &str, path: &Path, source: io::Error) -> io::Error {
+    if source.raw_os_error().is_some() {
+        return source;
+    }
     io::Error::new(
         source.kind(),
         format!("{operation} failed for '{}': {source}", path.display()),
@@ -739,12 +840,14 @@ fn rejected(path: &Path, reason: &str) -> io::Error {
 mod tests {
     use super::*;
     use std::io::Read;
+    use std::os::windows::fs::symlink_dir;
+    use windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD;
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
         let file = open_handle(path, OPEN_EXISTING, SECURITY_ACCESS, null()).unwrap();
         validate_file_kind(&file, path, kind).unwrap();
-        let current_user = current_user_sid().unwrap();
-        security_snapshot(&file, path, &current_user).unwrap()
+        let process_sids = current_process_sids().unwrap();
+        security_snapshot(&file, path, &process_sids).unwrap()
     }
 
     #[test]
@@ -754,7 +857,7 @@ mod tests {
         restrict_directory(temp.path()).unwrap();
 
         let snapshot = snapshot(temp.path(), PathKind::Directory);
-        assert!(snapshot.owner_is_current_user);
+        assert!(snapshot.owner_is_token_owner);
         assert!(snapshot.dacl_is_protected);
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
@@ -776,7 +879,7 @@ mod tests {
 
         for path in [&first, &nested] {
             let snapshot = snapshot(path, PathKind::Directory);
-            assert!(snapshot.owner_is_current_user);
+            assert!(snapshot.owner_is_token_owner);
             assert!(snapshot.dacl_is_protected);
             assert_eq!(snapshot.ace_count, 1);
             assert_eq!(
@@ -795,7 +898,7 @@ mod tests {
         drop(create_private_file(&path).unwrap());
 
         let snapshot = snapshot(&path, PathKind::File);
-        assert!(snapshot.owner_is_current_user);
+        assert!(snapshot.owner_is_token_owner);
         assert!(snapshot.dacl_is_protected);
         assert_eq!(snapshot.ace_count, 1);
         assert!(snapshot.ace_is_allowed);
@@ -828,5 +931,40 @@ mod tests {
         let error = restrict_file(temp.path()).unwrap_err();
 
         assert!(error.to_string().contains("expected a regular file"));
+    }
+
+    #[test]
+    fn ancestor_reparse_points_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        let nested = target.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let redirect = temp.path().join("redirect");
+        match symlink_dir(&target, &redirect) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD as i32) =>
+            {
+                return;
+            }
+            Err(error) => panic!("failed to create test directory symlink: {error}"),
+        }
+
+        let error = restrict_directory(&redirect.join("nested")).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("reparse points are not allowed"));
+    }
+
+    #[test]
+    fn native_error_codes_are_preserved() {
+        let error = wrap_error(
+            "test Windows operation",
+            Path::new("test"),
+            io::Error::from_raw_os_error(5),
+        );
+
+        assert_eq!(error.raw_os_error(), Some(5));
     }
 }
