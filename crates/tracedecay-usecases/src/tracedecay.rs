@@ -1,13 +1,18 @@
 //! Downward graph-runtime port used by transport-neutral use cases.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
+use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::retrieval::HealthDeltaResult;
 use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
@@ -328,56 +333,157 @@ pub fn validate_planned_source_edit(
         .unwrap_or(Ok(()))
 }
 
+/// Descriptor-scoped view of one source-edit candidate.
+///
+/// Every path component below the project root is opened with
+/// `open_dir_nofollow`, so neither an intermediate directory nor the final
+/// component can redirect the read through a symlink. Canonicalizing the
+/// parent is not enough on its own: it leaves the final component free to be
+/// a symlink pointing anywhere on the filesystem.
+struct SourceEditCandidateAuthority {
+    parent: Dir,
+    name: OsString,
+}
+
+impl SourceEditCandidateAuthority {
+    fn open(project_root: &Path, relative: &Path) -> Result<Self> {
+        let relative = normalize_source_edit_relative_path(relative)?;
+        let root = Dir::open_ambient_dir(project_root, ambient_authority())
+            .map_err(|error| source_edit_path_error("open authorized source edit root", error))?;
+        let components = relative.components().collect::<Vec<_>>();
+        let Some(Component::Normal(name)) = components.last() else {
+            return Err(source_edit_unsafe_path());
+        };
+        let mut parent = root
+            .open_dir_nofollow(".")
+            .map_err(|error| source_edit_path_error("open source edit root", error))?;
+        for component in &components[..components.len().saturating_sub(1)] {
+            let Component::Normal(component) = component else {
+                return Err(source_edit_unsafe_path());
+            };
+            parent = parent.open_dir_nofollow(component).map_err(|error| {
+                source_edit_path_error("open source edit parent without following symlinks", error)
+            })?;
+        }
+        Ok(Self {
+            parent,
+            name: name.to_os_string(),
+        })
+    }
+
+    fn open_optional(&self) -> Result<Option<cap_std::fs::File>> {
+        match self.parent.symlink_metadata(&self.name) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(source_edit_unsafe_path()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(source_edit_path_error(
+                    "inspect source edit candidate",
+                    error,
+                ));
+            }
+        }
+        let mut options = CapOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let input = self
+            .parent
+            .open_with(&self.name, &options)
+            .map_err(|error| {
+                source_edit_path_error(
+                    "open source edit candidate without following symlinks",
+                    error,
+                )
+            })?;
+        if !input
+            .metadata()
+            .map_err(|error| source_edit_path_error("inspect opened source edit candidate", error))?
+            .is_file()
+        {
+            return Err(source_edit_unsafe_path());
+        }
+        Ok(Some(input))
+    }
+
+    fn current_identity(&self) -> Result<Option<Handle>> {
+        self.open_optional()?
+            .map(|file| {
+                Handle::from_file(file.into_std()).map_err(|error| {
+                    source_edit_path_error("identify current source edit candidate", error)
+                })
+            })
+            .transpose()
+    }
+
+    /// Reads the candidate and re-checks its identity afterwards, so bytes
+    /// observed here always belong to the file that is still bound to the
+    /// descriptor-scoped parent.
+    fn read_optional(&self) -> Result<Option<Vec<u8>>> {
+        let Some(mut input) = self.open_optional()? else {
+            return Ok(None);
+        };
+        let identity = Handle::from_file(
+            input
+                .try_clone()
+                .map_err(|error| source_edit_path_error("clone source edit candidate", error))?
+                .into_std(),
+        )
+        .map_err(|error| source_edit_path_error("identify source edit candidate", error))?;
+        let mut bytes = Vec::new();
+        input
+            .read_to_end(&mut bytes)
+            .map_err(|error| source_edit_path_error("read source edit candidate", error))?;
+        let current = self
+            .current_identity()?
+            .ok_or_else(source_edit_unsafe_path)?;
+        if current != identity {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "source edit candidate changed while it was read".to_owned(),
+            });
+        }
+        Ok(Some(bytes))
+    }
+}
+
+fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(source_edit_unsafe_path());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            _ => return Err(source_edit_unsafe_path()),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(source_edit_unsafe_path());
+    }
+    Ok(normalized)
+}
+
+fn source_edit_unsafe_path() -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Config {
+        message: "source edit path is not a regular file beneath the authorized worktree"
+            .to_owned(),
+    }
+}
+
+fn source_edit_path_error(
+    operation: &'static str,
+    error: std::io::Error,
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Config {
+        message: format!("{operation}: {error}"),
+    }
+}
+
 pub fn validate_source_edit_candidate_parent(project_root: &Path, relative: &Path) -> Result<()> {
-    let _ = source_edit_candidate_path(project_root, relative)?;
-    Ok(())
+    SourceEditCandidateAuthority::open(project_root, relative).map(|_| ())
 }
 
 pub fn read_source_edit_candidate(project_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>> {
-    let path = source_edit_candidate_path(project_root, relative)?;
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn source_edit_candidate_path(project_root: &Path, relative: &Path) -> Result<PathBuf> {
-    if relative.as_os_str().is_empty()
-        || relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "source edit path is not a regular file beneath the authorized worktree"
-                .to_owned(),
-        });
-    }
-    let canonical_root = project_root.canonicalize()?;
-    let path = canonical_root.join(relative);
-    let parent =
-        path.parent().ok_or_else(
-            || tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "source edit path has no parent".to_owned(),
-            },
-        )?;
-    let canonical_parent = parent.canonicalize()?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "source edit path escapes the authorized worktree".to_owned(),
-        });
-    }
-    Ok(canonical_parent.join(path.file_name().ok_or_else(|| {
-        tracedecay_runtime_core::errors::TraceDecayError::Config {
-            message: "source edit path has no file name".to_owned(),
-        }
-    })?))
+    SourceEditCandidateAuthority::open(project_root, relative)?.read_optional()
 }
 
 pub struct SyncLockGuard(File);
