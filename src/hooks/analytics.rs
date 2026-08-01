@@ -470,11 +470,11 @@ fn record_hook_invoked_named(
     agent_key: &'static str,
     hook_name: &str,
     event_json: &str,
+    parsed: &Value,
 ) -> HookTimingSpan {
-    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
     // Length only — never persist event content, prompts, tools, credentials, or paths here.
     let payload_bytes = measure_host_event_payload_bytes(event_json);
-    let prompt_category = inferred_prompt_category(&parsed);
+    let prompt_category = inferred_prompt_category(parsed);
     record_hook_analytics(
         root,
         "hook_invoked",
@@ -490,13 +490,28 @@ fn record_hook_invoked_named(
     HookTimingSpan::new_named(root, agent_key, hook_name, prompt_category, payload_bytes)
 }
 
+/// Records `hook_invoked` for a handler that has not parsed the event itself.
 pub(crate) fn record_hook_invoked(
     root: Option<&Path>,
     agent: HintAgent,
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
-    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json)
+    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
+    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json, &parsed)
+}
+
+/// [`record_hook_invoked`] for handlers that already hold the parsed event.
+/// Hooks run on every agent event, so a handler that has parsed the payload
+/// once must not pay for a second parse just to classify the prompt.
+pub(crate) fn record_hook_invoked_parsed(
+    root: Option<&Path>,
+    agent: HintAgent,
+    hook_name: &str,
+    event_json: &str,
+    parsed: &Value,
+) -> HookTimingSpan {
+    record_hook_invoked_named(root, agent.as_key(), hook_name, event_json, parsed)
 }
 
 pub(crate) fn record_other_hook_invoked(
@@ -504,7 +519,8 @@ pub(crate) fn record_other_hook_invoked(
     hook_name: &str,
     event_json: &str,
 ) -> HookTimingSpan {
-    record_hook_invoked_named(root, "other", hook_name, event_json)
+    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
+    record_hook_invoked_named(root, "other", hook_name, event_json, &parsed)
 }
 
 pub(super) fn mint_hint_id() -> String {
@@ -631,12 +647,9 @@ pub(super) fn record_hook_analytics(
 /// `projects/proj_<path hash>/` for directories that never became projects, and
 /// those shards then outnumbered the real stores.
 fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
-    let enrolled_data_root = root.and_then(|root| {
-        crate::storage::resolve_enrolled_layout_for_current_profile(root)
-            .ok()
-            .flatten()
-            .map(|layout| layout.data_root)
-    });
+    let enrolled_data_root = root
+        .and_then(super::store_layout::enrolled_layout)
+        .map(|layout| layout.data_root);
     match enrolled_data_root {
         Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
         None => crate::storage::default_profile_root()

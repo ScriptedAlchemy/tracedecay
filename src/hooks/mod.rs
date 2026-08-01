@@ -23,6 +23,7 @@ mod kiro;
 pub(crate) mod memory_inject;
 mod post_tool_use;
 mod steering;
+mod store_layout;
 pub mod tool_hints;
 mod v2;
 pub(crate) use v2::HOOK_V2_BOUND_HOSTS;
@@ -71,7 +72,8 @@ pub(crate) use analytics::HookCompletedReadinessDistributions;
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
     mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
-    record_hook_invoked, record_other_hook_invoked, record_workspace_status_analytics,
+    record_hook_invoked, record_hook_invoked_parsed, record_other_hook_invoked,
+    record_workspace_status_analytics,
 };
 
 pub(crate) fn aggregate_hook_completed_readiness(
@@ -674,7 +676,7 @@ fn deduped_project_hint_with_id(
     // those decisions in the user profile so one missing cwd does not turn
     // every prompt/tool event into the same repeated hint.
     let project_path = root
-        .and_then(|root| crate::storage::resolve_layout_for_current_profile(root).ok())
+        .and_then(store_layout::layout)
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
     let path = project_path.or_else(|| {
@@ -790,13 +792,6 @@ fn event_session_id(parsed: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Reads the `cwd` string field from a hook event JSON payload. Shared by the
-/// Kiro and Codex handlers, both of which send the session working directory.
-fn event_cwd(event_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    event_cwd_from_parsed(&parsed)
-}
-
 fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
     let cwd = parsed.get("cwd").and_then(Value::as_str)?;
     let path = Path::new(cwd);
@@ -805,6 +800,55 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
     } else {
         Some(path.to_path_buf())
     }
+}
+
+/// Resolves the tracedecay project root named by a hook event's `cwd`.
+///
+/// Claude, Codex, and Kiro all send the session working directory under the
+/// same key, so this resolver is host-neutral and lives beside the other
+/// event-field readers rather than in any one host's module.
+fn event_project_root(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    crate::config::discover_project_root(&cwd)
+}
+
+/// [`event_project_root`] for callers that hold only the raw event JSON.
+fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    event_project_root(&parsed)
+}
+
+/// The project root of the hook process's own working directory. Used by the
+/// surfaces whose payload carries no `cwd` at all.
+fn process_cwd_project_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    crate::config::discover_project_root(&cwd)
+}
+
+/// Resolves the project root from the event `cwd`, falling back to the hook
+/// process's working directory when the event omits one entirely. A present but
+/// non-project `cwd` still resolves to nothing: the event named a directory, and
+/// silently re-attributing it to wherever the hook happens to run would route the
+/// event into an unrelated project.
+fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
+    match event_cwd_from_parsed(parsed) {
+        Some(cwd) => crate::config::discover_project_root(&cwd),
+        None => process_cwd_project_root(),
+    }
+}
+
+/// Identity-aware [`event_project_root`]: consults the registry so a
+/// global-store-only checkout still resolves. Shared by every host whose session
+/// events carry `cwd`.
+async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    crate::config::discover_project_root_with_identity(&cwd).await
+}
+
+/// [`event_project_root_with_identity`] for callers that hold only the raw JSON.
+async fn event_project_root_with_identity_from_json(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    event_project_root_with_identity(&parsed).await
 }
 
 fn format_tool_hint(hint: &ToolHint) -> String {
