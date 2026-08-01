@@ -14,6 +14,11 @@ pub use tracedecay_dashboard_api::*;
 
 pub(crate) mod assets;
 
+/// Installs root-owned values consumed by the extracted dashboard crate.
+pub(crate) fn register_runtime_ports() {
+    tracedecay_dashboard_api::install_build_version(crate::version::build_version);
+}
+
 /// Embedded single-page-app routes shared by production and integration
 /// servers. Keeping the asset router at the composition root preserves the
 /// root build script's `OUT_DIR` ownership.

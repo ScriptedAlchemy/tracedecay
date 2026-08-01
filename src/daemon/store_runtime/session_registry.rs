@@ -342,6 +342,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         // one place that must supply the installer.
         super::register_registered_schema_installer();
         crate::automation::register_runtime_ports();
+        crate::dashboard::register_runtime_ports();
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
             LocalProfileStoreAuthorityV1::new(

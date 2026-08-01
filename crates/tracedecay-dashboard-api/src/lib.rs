@@ -107,6 +107,7 @@ mod test_support;
 mod token_count;
 mod util;
 mod version;
+pub use version::install_build_version;
 mod work_api;
 
 use std::future::Future;
