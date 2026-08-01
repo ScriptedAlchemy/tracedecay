@@ -495,6 +495,33 @@ mod tests {
         }
     }
 
+    /// Handlers that used to build their own text envelope — `render::finalize`
+    /// then a hand-written `{"content":[{"type":"text",...}]}` — now go through
+    /// `rendered_tool_result`. That is the same envelope for any payload without
+    /// the internal-analytics key, which is every payload those handlers build.
+    #[test]
+    fn rendered_tool_result_matches_a_hand_built_text_envelope() {
+        let value = json!({"passed": 0, "failed": 1, "results": [], "note": "nothing ran"});
+        let touched = vec!["src/a.rs".to_string()];
+
+        for args in [
+            json!({}),
+            json!({"format": "markdown"}),
+            json!({"format": "json"}),
+        ] {
+            let text = render::finalize(None, &args, &value, || render::generic_md(&value));
+            let expected = super::text_tool_result(&text, touched.clone());
+            let actual = generic_tool_result(None, &args, &value, touched.clone());
+
+            assert_eq!(actual.value, expected.value, "payload differs for {args}");
+            assert_eq!(
+                actual.touched_files, expected.touched_files,
+                "touched files differ for {args}"
+            );
+            assert!(actual.internal_analytics().is_none(), "for {args}");
+        }
+    }
+
     #[test]
     fn test_require_node_id_canonical() {
         let args = json!({"node_id": "fn:abc123"});
