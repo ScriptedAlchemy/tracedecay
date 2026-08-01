@@ -1,4 +1,6 @@
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -12,6 +14,9 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 use super::transport::DaemonEndpoint;
+
+#[cfg(windows)]
+mod windows_acl;
 
 const LOCK_FILE: &str = "daemon-authority.lock";
 const RECORD_FILE: &str = "daemon-authority.json";
@@ -79,19 +84,19 @@ impl DaemonAuthority {
         endpoint: &DaemonEndpoint,
         version: &str,
     ) -> Result<Self> {
+        #[cfg(windows)]
+        let _ = secure_existing_profile_root(profile_root)?;
         let profile_root = canonical_identity_path(profile_root)?;
+        #[cfg(windows)]
+        windows_acl::create_private_dir_all(&profile_root)
+            .map_err(|error| config_io("create private", &profile_root, &error))?;
+        #[cfg(not(windows))]
         std::fs::create_dir_all(&profile_root)
             .map_err(|error| config_io("create", &profile_root, &error))?;
         restrict_directory(&profile_root)?;
 
         let lock_path = profile_root.join(LOCK_FILE);
-        let mut lock_options = OpenOptions::new();
-        lock_options.create(true).read(true).write(true);
-        configure_private_create(&mut lock_options, 0o600);
-        let mut lock = lock_options
-            .open(&lock_path)
-            .map_err(|error| config_io("open", &lock_path, &error))?;
-        restrict_file(&lock_path)?;
+        let mut lock = open_private_lock(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
             if !is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
@@ -257,8 +262,27 @@ impl Drop for DaemonAuthority {
 }
 
 pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    #[cfg(windows)]
+    if !secure_existing_profile_root(profile_root)? {
+        return Ok(None);
+    }
     let profile_root = canonical_identity_path(profile_root)?;
+    #[cfg(windows)]
+    match windows_acl::restrict_directory(&profile_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(config_io("restrict", &profile_root, &error)),
+    }
     read_record_if_present(&profile_root.join(RECORD_FILE))
+}
+
+#[cfg(windows)]
+fn secure_existing_profile_root(path: &Path) -> Result<bool> {
+    match windows_acl::restrict_directory(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(config_io("secure existing profile root", path, &error)),
+    }
 }
 
 pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
@@ -326,6 +350,13 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    #[cfg(windows)]
+    let mut file = match windows_acl::open_private_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(config_io("secure before reading", path, &error)),
+    };
+    #[cfg(not(windows))]
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -354,18 +385,33 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
         path,
         &bytes,
         "daemon authority record",
-    )
+    )?;
+    restrict_file(path)
 }
 
-#[cfg(unix)]
-fn configure_private_create(options: &mut OpenOptions, mode: u32) {
-    use std::os::unix::fs::OpenOptionsExt;
+fn open_private_lock(path: &Path) -> Result<File> {
+    #[cfg(windows)]
+    {
+        return windows_acl::open_or_create_private_file(path)
+            .map_err(|error| config_io("open private lock", path, &error));
+    }
 
-    options.mode(mode);
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(path)
+            .map_err(|error| config_io("open", path, &error))?;
+        restrict_file(path)?;
+        Ok(file)
+    }
 }
-
-#[cfg(not(unix))]
-fn configure_private_create(_options: &mut OpenOptions, _mode: u32) {}
 
 #[cfg(unix)]
 fn restrict_directory(path: &Path) -> Result<()> {
@@ -375,7 +421,12 @@ fn restrict_directory(path: &Path) -> Result<()> {
         .map_err(|error| config_io("restrict", path, &error))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn restrict_directory(path: &Path) -> Result<()> {
+    windows_acl::restrict_directory(path).map_err(|error| config_io("restrict", path, &error))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_directory(_path: &Path) -> Result<()> {
     Ok(())
@@ -389,7 +440,12 @@ fn restrict_file(path: &Path) -> Result<()> {
         .map_err(|error| config_io("restrict", path, &error))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn restrict_file(path: &Path) -> Result<()> {
+    windows_acl::restrict_file(path).map_err(|error| config_io("restrict", path, &error))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 #[allow(clippy::unnecessary_wraps)] // Preserve parity with Unix permission enforcement.
 fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
@@ -544,6 +600,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn acl_failure_prevents_authority_record_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(profile.join(LOCK_FILE)).unwrap();
+        let endpoint = test_endpoint(&profile);
+
+        let error = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap_err();
+
+        assert!(error.to_string().contains(LOCK_FILE));
+        assert!(!profile.join(RECORD_FILE).exists());
     }
 
     #[test]
