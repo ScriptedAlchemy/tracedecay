@@ -667,8 +667,7 @@ fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
 #[test]
 fn bare_boolean_flag_at_end_of_args_defaults_to_true() {
     let d = def("context");
-    let parsed =
-        parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap();
+    let parsed = parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap();
     assert_eq!(
         parsed.tool_args,
         json!({ "task": "how", "include_code": true })

@@ -146,7 +146,10 @@ pub(super) fn parse_invocation_with_stdin(
                 // flag's value when it doesn't itself look like a flag.
                 if is_boolean
                     && inline_value.is_none()
-                    && iter.clone().next().is_none_or(|next| next.starts_with("--"))
+                    && iter
+                        .clone()
+                        .next()
+                        .is_none_or(|next| next.starts_with("--"))
                 {
                     merge_value(&mut collected, &key, Value::Bool(true));
                     continue;
