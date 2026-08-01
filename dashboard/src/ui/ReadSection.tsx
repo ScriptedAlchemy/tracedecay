@@ -43,6 +43,36 @@ export type ReadState<T> =
       payload?: T | undefined;
     };
 
+/**
+ * The states a legacy read can be blocked in — the six failure outcomes plus
+ * the two the ladder itself contributes.
+ *
+ * Narrower than `DomainStateKind` on purpose. A surface that words these in its
+ * own terms — the Automations scheduler queues do — can then switch over them
+ * exhaustively and fail to build when the set grows, which is the guarantee the
+ * per-surface `LegacyResult` switches used to hold individually.
+ */
+export type LegacyBlockedState =
+  | 'loading'
+  | 'unknown'
+  | 'offline'
+  | 'unauthorized'
+  | 'denied'
+  | 'error'
+  | 'unsupported_schema'
+  | 'unavailable';
+
+/** A legacy read resolved, with its blocked states narrowed. Assignable to
+ * `ReadState<T>` wherever only the taxonomy matters. */
+export type LegacyReadState<T> =
+  | { kind: 'ready'; value: T }
+  | {
+      kind: 'blocked';
+      state: LegacyBlockedState;
+      detail?: string | undefined;
+      payload?: T | undefined;
+    };
+
 /** The domain state a non-ok legacy read renders as.
  *
  * Exhaustive over the failure outcomes, so a new one added to `LegacyResult`
@@ -51,7 +81,7 @@ export type ReadState<T> =
  * life rendering as a generic error whose only discriminator was status text. */
 function legacyFailureState(
   result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>,
-): DomainStateKind {
+): LegacyBlockedState {
   switch (result.outcome) {
     case 'offline':
       return 'offline';
@@ -82,7 +112,7 @@ function legacyFailureState(
 export function legacyReadState<T>(
   pending: boolean,
   result: LegacyResult<T> | undefined,
-): ReadState<T> {
+): LegacyReadState<T> {
   if (pending) return { kind: 'blocked', state: 'loading' };
   if (!result) return { kind: 'blocked', state: 'unknown' };
   if (result.outcome === 'ok') return { kind: 'ready', value: result.data };
