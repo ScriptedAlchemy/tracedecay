@@ -389,21 +389,6 @@ mod health_delta_tests {
     use super::*;
 
     #[tokio::test]
-    async fn requested_doctor_report_is_typed_unavailable_without_reader() {
-        let mut value = json!({});
-
-        attach_doctor_report(&mut value, None).await;
-
-        assert_eq!(
-            value["doctor_report"],
-            json!({
-                "kind": "unsupported",
-                "table_growth_evidence": [],
-            })
-        );
-    }
-
-    #[tokio::test]
     async fn pinned_health_delta_is_exact_scoped_and_cursor_stable() {
         let _pin = crate::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().expect("temporary project");

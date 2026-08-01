@@ -854,9 +854,7 @@ mod topology_resolution {
     use tracedecay_domain::{ManifestDigest, ProjectId, UserProfileId};
 
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::{
-        ConfigurationLayerV1, registry_default_candidate, resolve_configuration,
-    };
+    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::topology::{
         TopologyConfigurationError, resolved_work_topology_policy,
         safe_default_work_topology_policy,
@@ -1026,12 +1024,22 @@ mod topology_resolution {
         ));
 
         // A mistyped value at the topology key fails closed.
+        let registry = ConfigurationRegistry::core().unwrap();
+        let default_candidate = resolve_configuration(&registry, &[])
+            .unwrap()
+            .settings
+            .get(&topology_key())
+            .unwrap()
+            .candidates
+            .first()
+            .unwrap()
+            .clone();
         let mistyped = ConfigurationSnapshotV1::new(
             BTreeMap::from([(
                 topology_key(),
                 ConfigurationValueV1::Text("permissive".to_owned()),
             )]),
-            BTreeMap::from([(topology_key(), vec![registry_default_candidate().unwrap()])]),
+            BTreeMap::from([(topology_key(), vec![default_candidate])]),
         )
         .unwrap();
         assert!(matches!(
@@ -1040,7 +1048,6 @@ mod topology_resolution {
         ));
 
         // A tampered snapshot identity fails closed before the value is read.
-        let registry = ConfigurationRegistry::core().unwrap();
         let mut snapshot = resolve_configuration(&registry, &[]).unwrap().snapshot;
         snapshot.effective_behavior_digest =
             ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();

@@ -276,3 +276,23 @@ pub(crate) async fn handle_runtime(
         vec![],
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn requested_doctor_report_is_typed_unavailable_without_reader() {
+        let mut value = json!({});
+
+        attach_doctor_report(&mut value, None).await;
+
+        assert_eq!(
+            value["doctor_report"],
+            json!({
+                "kind": "unsupported",
+                "table_growth_evidence": [],
+            })
+        );
+    }
+}
