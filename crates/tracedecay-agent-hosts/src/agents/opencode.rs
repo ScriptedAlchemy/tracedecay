@@ -381,6 +381,20 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 }
 
 /// Returns the path to the global AGENTS.md prompt file.
+///
+/// Resolution depends only on which prompt *file* exists, never on whether the
+/// `~/.config/opencode` directory exists. The directory is created by
+/// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
+/// `skills/`), which a component-set transaction writes between the moment the
+/// registration adapter confirms a revision and the moment it applies. Keying
+/// on the directory therefore moved this path — and with it the hashed
+/// registration path list — mid-transaction, so every apply rechecked against a
+/// different revision and rolled back with `StalePreview`. No managed artifact
+/// ever writes an `AGENTS.md`, so file existence is stable across a deploy.
+///
+/// A user whose rules already live in the legacy `~/AGENTS.md` keeps that file;
+/// everyone else gets the modern config-dir path, whose parent the write path
+/// creates on demand.
 fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
@@ -389,10 +403,11 @@ fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
         return xdg.join("opencode/AGENTS.md");
     }
     let modern = home.join(".config/opencode/AGENTS.md");
-    if modern.exists() || home.join(".config/opencode").exists() {
-        modern
+    let legacy = home.join("AGENTS.md");
+    if !modern.is_file() && legacy.is_file() {
+        legacy
     } else {
-        home.join("AGENTS.md")
+        modern
     }
 }
 

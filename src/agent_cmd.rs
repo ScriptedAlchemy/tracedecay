@@ -4685,44 +4685,57 @@ mod tests {
     /// artifact write that moves that revision makes the adapter's recheck read
     /// TraceDecay's own bytes as third-party drift: every apply then rolls back
     /// with `StalePreview`. Kiro's set owned `settings/mcp.json` through both
-    /// paths and was self-invalidating exactly that way.
+    /// paths; OpenCode resolved its prompt path from a directory its own
+    /// artifacts create. Both were self-invalidating exactly that way, so the
+    /// invariant is checked for every host that ships a canonical set rather
+    /// than for the host that happened to break last.
     #[test]
-    fn kiro_artifact_writes_never_invalidate_the_confirmed_revision() {
+    fn host_artifact_writes_never_invalidate_the_confirmed_revision() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let component_set = canonical_host_component_set("kiro", None, 0)
-            .unwrap()
+        let mut self_invalidating = Vec::new();
+        for agent in [
+            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let lifecycle = tempfile::tempdir().unwrap();
+            let component_set = canonical_host_component_set(agent, None, 0)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{agent} must ship a canonical component set"));
+            let request = component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                .unwrap();
+            let registration = CompatibilityAgentRegistrationDelegate::new(
+                agent,
+                home.path(),
+                lifecycle.path(),
+                request.lifecycle.operation,
+            )
             .unwrap();
-        let request =
-            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
-        let registration = CompatibilityAgentRegistrationDelegate::new(
-            "kiro",
-            home.path(),
-            lifecycle.path(),
-            request.lifecycle.operation,
-        )
-        .unwrap();
-        let confirmed = registration
-            .current_revision(&component_set.component_set, &request)
-            .unwrap();
+            let confirmed = registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap();
 
-        for component in &component_set.component_set.components {
-            for asset in &component.contents {
-                let deployed = home.path().join(&asset.relative_path);
-                std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
-                std::fs::write(&deployed, &asset.bytes).unwrap();
+            for component in &component_set.component_set.components {
+                for asset in &component.contents {
+                    let deployed = home.path().join(&asset.relative_path);
+                    std::fs::create_dir_all(deployed.parent().unwrap()).unwrap();
+                    std::fs::write(&deployed, &asset.bytes).unwrap();
+                }
+            }
+
+            if registration
+                .current_revision(&component_set.component_set, &request)
+                .unwrap()
+                != confirmed
+            {
+                self_invalidating.push(agent);
             }
         }
 
-        assert_eq!(
-            registration
-                .current_revision(&component_set.component_set, &request)
-                .unwrap(),
-            confirmed,
-            "deploying Kiro's own managed artifacts moved the registration revision it \
-             just confirmed"
+        assert!(
+            self_invalidating.is_empty(),
+            "deploying their own managed artifacts moved the registration revision these \
+             hosts just confirmed: {self_invalidating:?}"
         );
     }
 
