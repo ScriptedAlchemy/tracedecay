@@ -42,3 +42,7 @@ test-transport = ["tracedecay-agent-hosts/test-transport"]
 
 [dev-dependencies]
 tempfile = "3"
+# The dashboard lib-test target owns registered-store and engine fixtures.
+# Dev-only feature unification keeps those helpers out of production builds.
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
