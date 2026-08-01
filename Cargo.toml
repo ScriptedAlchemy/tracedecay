@@ -184,13 +184,10 @@ lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
 test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
-<<<<<<< HEAD
     "tracedecay-runtime-core/test-transport",
     "tracedecay-migrate/test-transport",
     "tracedecay-agent-hosts/test-transport",
-=======
     "tracedecay-dashboard-api/test-transport",
->>>>>>> worktree-agent-aecb5073a6fd9c7b1
 ]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
