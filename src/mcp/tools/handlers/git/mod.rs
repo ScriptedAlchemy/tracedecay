@@ -55,6 +55,19 @@ fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &st
         .with_failure_message(message)
 }
 
+/// Typed result returned when a git-dispatched tool exhausts the dispatch
+/// deadline the daemon carried into `dispatch_git_tools`.
+///
+/// Git tree walks, revwalks, diffs, and the branch-add index build are
+/// unbounded on pathological or diverged inputs. When the carried deadline
+/// elapses the caller must receive the same shaped, semantic error every other
+/// git failure surfaces — never a bare hang or a panic.
+pub(crate) fn git_dispatch_deadline_result(cg: &TraceDecay, tool_name: &str) -> ToolResult {
+    let message =
+        format!("git tool '{tool_name}' exceeded its dispatch deadline and was cancelled");
+    git_error_result(cg, &json!({ "tool": tool_name }), "deadline", &message)
+}
+
 fn require_string_array_arg(args: &Value, name: &str) -> Result<Vec<String>> {
     args.get(name)
         .and_then(|v| v.as_array())
