@@ -68,18 +68,6 @@ impl RedundancyPairRow {
 }
 
 impl Database {
-    /// Upsert computed duplicate pairs, replacing any existing row for the
-    /// same `(node_a_id, node_b_id)` key. Returns the number of rows written.
-    ///
-    /// Callers pass pairs in canonical orientation (`a < b`); the primary key
-    /// makes a re-run idempotent. Empty input is a no-op.
-    pub(crate) async fn upsert_redundancy_pairs(
-        &self,
-        pairs: &[RedundancyPairWrite<'_>],
-    ) -> Result<usize> {
-        self.publish_redundancy_cache(&[], pairs).await
-    }
-
     /// Atomically publishes every fingerprint used by a redundancy scan and
     /// the pairs computed from that exact set. CPU parsing and pair scoring
     /// happen before this method acquires the writer lane.

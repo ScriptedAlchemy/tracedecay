@@ -521,47 +521,6 @@ impl super::Database {
         Ok(history)
     }
 
-    pub(crate) async fn resolve_retrieval_anchor(
-        &self,
-        owner: &FactOwnerV1,
-        anchor_id: &RetrievalAnchorId,
-    ) -> Result<Option<RetrievalAnchorRecordV2>> {
-        let serialized_owner = owner_json(owner)?;
-        let connection = self.engine_conn();
-        let mut rows = connection
-            .query(
-                "SELECT anchor.anchor_json
-                 FROM retrieval_anchors AS anchor
-                 WHERE anchor.anchor_id = ?1 AND anchor.owner_json = ?2
-                   AND COALESCE((
-                       SELECT disposition.state
-                       FROM retrieval_anchor_dispositions AS disposition
-                       WHERE disposition.anchor_id = anchor.anchor_id
-                         AND disposition.owner_json = anchor.owner_json
-                       ORDER BY disposition.sequence DESC LIMIT 1
-                   ), 'active') = 'active'",
-                params![anchor_id.as_str(), serialized_owner],
-            )
-            .await
-            .map_err(database_error)?;
-        rows.next()
-            .await
-            .map_err(database_error)?
-            .map(|row| row.get::<String>(0).map_err(database_error))
-            .transpose()?
-            .map(|json| {
-                let record: RetrievalAnchorRecordV2 =
-                    serde_json::from_str(&json).map_err(database_error)?;
-                record.validate().map_err(database_error)?;
-                if record.anchor_id() != anchor_id
-                    || FactOwnerV1::from(record.owner().clone()) != *owner
-                {
-                    return Err(authority_error("retrieval anchor record identity mismatch"));
-                }
-                Ok(record)
-            })
-            .transpose()
-    }
 }
 
 impl RetrievalAnchorDispositionStore for super::Database {
