@@ -8,7 +8,7 @@ pub(crate) async fn handle_files(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    debug_assert!(args.is_object(), "handle_files expects an object argument");
+    require_object_args(&args, "tracedecay_files")?;
     let mut files = cg.get_all_files().await?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
 

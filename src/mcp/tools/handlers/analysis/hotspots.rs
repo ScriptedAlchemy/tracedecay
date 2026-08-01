@@ -12,7 +12,9 @@ pub(crate) async fn handle_hotspots(
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(10, |v| v.min(100) as usize);
-    debug_assert!(limit > 0, "handle_hotspots limit must be positive");
+    // `min(100)` leaves an explicit `"limit": 0` intact, so this is caller
+    // input rather than an invariant.
+    require_positive_limit(limit, "tracedecay_hotspots")?;
 
     let hotspots = cg.get_hotspot_nodes(scope_prefix, limit).await?;
     let mut items: Vec<Value> = Vec::new();

@@ -443,11 +443,10 @@ impl McpServer {
 
             // Drain and write any pending notifications (e.g., version warnings).
             {
-                let notifications: Vec<Value> = self
-                    .pending_notifications
-                    .lock()
-                    .map(|mut p| p.drain(..).collect())
-                    .unwrap_or_default();
+                let notifications: Vec<Value> =
+                    crate::mcp::server::requests::recover_lock(&self.pending_notifications)
+                        .drain(..)
+                        .collect();
                 for notification in notifications {
                     if let Ok(s) = serde_json::to_string(&notification) {
                         match self
