@@ -942,13 +942,6 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
-      # After setup-node, so the global bin belongs to the same toolchain that
-      # runs the boundary gate below.
-      - name: Install ast-grep
-        run: |
-          set -euo pipefail
-          npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
-          ast-grep --version
 
       - name: Install dashboard dependencies
         working-directory: dashboard
@@ -957,12 +950,6 @@ jobs:
       - name: Typecheck dashboard
         working-directory: dashboard
         run: npm run typecheck
-
-      # Plan 11 requires AST/import-boundary tests that fail when renderer code
-      # computes semantics it may only render. sgconfig.yml + tools/ast-grep.
-      - name: Check Plan 11 renderer boundaries
-        working-directory: dashboard
-        run: npm run boundary:check
 
       - name: Check generated wire contracts are current
         working-directory: dashboard

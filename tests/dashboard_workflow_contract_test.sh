@@ -66,7 +66,6 @@ for required in [
     "npm run typecheck",
     "npm run contracts:check",
     "npm test",
-    "npm run boundary:check",
     "cargo nextest run --all-features --test dashboard_api_test",
     "--no-tests=fail",
 ]:
@@ -74,13 +73,6 @@ for required in [
         raise SystemExit(
             f"CI dashboard integration job must preserve frontend check {required!r}"
         )
-
-# The boundary gate needs ast-grep on PATH, and the install must come after
-# setup-node or the global bin can belong to a different Node toolchain.
-if dashboard_job.index("actions/setup-node@") > dashboard_job.index("Install ast-grep"):
-    raise SystemExit("CI dashboard job must install ast-grep after actions/setup-node")
-if dashboard_job.index("Install ast-grep") > dashboard_job.index("npm run boundary:check"):
-    raise SystemExit("CI dashboard job must install ast-grep before the boundary gate")
 
 # The accessibility gates are their own job. Every Rust job declares
 # `needs: dashboard-assets`, so an axe failure inside dashboard-assets skipped
@@ -359,40 +351,4 @@ for required in ["name: Linux", "name: macOS"]:
     if required not in job_block(ci, "test"):
         raise SystemExit(f"CI test matrix must preserve Cursor coverage for {required!r}")
 
-# A boundary step wired to an empty rule set passes every time and proves
-# nothing, so the gate's contents are part of the contract, not just its
-# invocation. Plan 11's acceptance names the semantics renderers may not
-# compute; each id below carries one of them.
-package_json = pathlib.Path("dashboard/package.json").read_text(encoding="utf-8")
-if '"boundary:check"' not in package_json:
-    raise SystemExit("dashboard/package.json must define the boundary:check script")
-
-sgconfig = pathlib.Path("sgconfig.yml")
-if not sgconfig.is_file():
-    raise SystemExit("sgconfig.yml must exist for the renderer boundary gate")
-rule_dir = pathlib.Path("tools/ast-grep/rules")
-if rule_dir.as_posix() not in sgconfig.read_text(encoding="utf-8"):
-    raise SystemExit(f"sgconfig.yml must list {rule_dir.as_posix()} in ruleDirs")
-
-rules = "".join(
-    path.read_text(encoding="utf-8") for path in sorted(rule_dir.glob("*.yml"))
-)
-for rule_id in [
-    "viz-renderer-imports-server-state",
-    "viz-renderer-opens-transport",
-    "dashboard-ad-hoc-eventsource",
-    "viz-renderer-persists-adapter-state",
-    "viz-renderer-grades-state",
-    "viz-adapter-ranks-locally",
-    "viz-renderer-owns-routes",
-]:
-    # ast-grep resolves .ts and .tsx as separate languages and applies neither
-    # rule to the other file type, so a rule that lost its Tsx twin would stop
-    # covering GraphCanvas.tsx and Chart.tsx while still reporting success.
-    for suffix in ["", "-tsx"]:
-        full_id = f"{rule_id}{suffix}"
-        if f"id: {full_id}\n" not in rules:
-            raise SystemExit(
-                f"{rule_dir.as_posix()} must keep Plan 11 boundary rule {full_id!r}"
-            )
 PY

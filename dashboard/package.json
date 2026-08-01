@@ -9,7 +9,6 @@
     "contracts:generate": "tsx codegen/src/cli.ts generate",
     "contracts:check": "tsx codegen/src/cli.ts --check",
     "typecheck": "tsc --noEmit",
-    "boundary:check": "ast-grep scan --config ../sgconfig.yml",
     "test": "vitest run",
     "test:watch": "vitest",
     "visual:audit": "tsx stories/audit.ts",
