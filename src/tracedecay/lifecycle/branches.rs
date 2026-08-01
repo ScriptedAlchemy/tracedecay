@@ -3,7 +3,7 @@
 //! branch, and opening a specific tracked branch's snapshot.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
@@ -151,6 +151,7 @@ impl TraceDecay {
             serving_branch: Some(branch_name.to_owned()),
             fallback_warning: None,
             read_only: false,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -599,6 +600,7 @@ impl TraceDecay {
             serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             fallback_warning: None,
             read_only,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
