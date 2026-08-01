@@ -12,17 +12,19 @@ use super::automation_run_service::{
 use super::memory_api::{default_agent_plan_max_clusters, default_agent_plan_min_confidence};
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use super::util::http_detail;
-use crate::automation::backend::{
+use tracedecay_agent_hosts::automation::backend::{
     AgentTaskKind, agent_task_contract, classify_agent_task_error_message, prompt_version, task_key,
 };
-use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
-use crate::automation::run_ledger::{
+use tracedecay_agent_hosts::automation::config::{
+    AutomationConfig, effective_config, load_project_config,
+};
+use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
     read_published_artifact_manifest, read_run_artifact_payload,
 };
-use crate::sessions::lcm::{LcmGrepSort, LcmScope};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_sessions::runtime::lcm::{LcmGrepSort, LcmScope};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -391,7 +393,7 @@ async fn dashboard_job_skip_reason(
     state: &DashboardState,
     task: AgentTaskKind,
 ) -> Result<Option<&'static str>, String> {
-    use crate::automation::config::{AutomationBackend, AutomationHostMode};
+    use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 
     let config = load_effective_dashboard_config(state).await?;
     if !config.enabled {
@@ -657,7 +659,7 @@ fn dashboard_job_record(
         error,
         error_classification,
         error_retryable: error_classification
-            .map(crate::automation::backend::AgentTaskFailureClass::is_retryable),
+            .map(tracedecay_agent_hosts::automation::backend::AgentTaskFailureClass::is_retryable),
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
         fallback_status,

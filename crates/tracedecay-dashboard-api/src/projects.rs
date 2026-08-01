@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::{DashboardState, build_selected_project_state, config_error};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::ProjectRegistryContext;
 use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_global_db::ProjectRegistryContext;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone)]
 pub struct DashboardRuntime {
@@ -147,8 +147,8 @@ pub(super) struct ProjectContextPayloadV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     is_active: Option<bool>,
     project: Option<PublicCodeProject>,
-    aliases: Vec<crate::global_db::ProjectAliasRecord>,
-    stores: Vec<crate::global_db::ProjectStoreContext>,
+    aliases: Vec<tracedecay_global_db::ProjectAliasRecord>,
+    stores: Vec<tracedecay_global_db::ProjectStoreContext>,
 }
 
 pub async fn list(
@@ -316,7 +316,7 @@ pub async fn context(
 
 #[cfg(test)]
 mod tests {
-    use crate::global_db::{
+    use tracedecay_global_db::{
         CodeProjectRecord, GraphScopeRecord, ProjectRegistryContext, ProjectStoreContext,
         StoreArtifactRecord, StoreInstanceRecord,
     };

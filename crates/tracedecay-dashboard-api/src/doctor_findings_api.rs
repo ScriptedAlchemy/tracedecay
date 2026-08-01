@@ -283,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_is_typed_unsupported_not_empty_or_healthy() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) =
             findings(State(state), Query(DoctorFindingsQueryV1 { family: None })).await;
@@ -303,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_echoes_valid_family_filter() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = findings(
             State(state),
@@ -321,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_rejects_unknown_family_with_error_state() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = findings(
             State(state),
@@ -340,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_preserves_canonical_unknown_entries() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) =
             state_with_inputs(crate::daemon::doctor_kernel::DoctorKernelInputsV1::all_unknown())
                 .await;
@@ -371,7 +371,7 @@ mod tests {
     /// equal the API-owned projection of the very same report.
     #[tokio::test]
     async fn route_envelope_equals_the_api_owned_projection() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let inputs = crate::daemon::doctor_kernel::DoctorKernelInputsV1::all_unknown();
         let report = crate::daemon::doctor_kernel::compose_doctor_report(&context(), &inputs)
             .await
@@ -401,7 +401,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_does_not_invent_an_action_from_a_descriptor() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let mut inputs = crate::daemon::doctor_kernel::DoctorKernelInputsV1::all_unknown();
         inputs.configuration = ConfigurationAuthorityReadV1::Resolved {
             drift: ConfigurationDriftV1::Drifted,
@@ -434,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn findings_route_exposes_an_action_only_from_an_injected_owner_dispatcher() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let mut inputs = crate::daemon::doctor_kernel::DoctorKernelInputsV1::all_unknown();
         inputs.configuration = ConfigurationAuthorityReadV1::Resolved {
             drift: ConfigurationDriftV1::Drifted,

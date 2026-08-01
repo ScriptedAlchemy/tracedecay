@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonQuery, coerce_limit, http_detail};
-use crate::automation::fact_proposals::{
+use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_agent_hosts::automation::fact_proposals::{
     FactProposalRecord, FactProposalState, apply_fact_proposal_with_result, list_fact_proposals,
     load_fact_proposal, reject_fact_proposal,
 };
-use crate::tracedecay::facts::memory_application_for_db;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -124,7 +124,7 @@ pub async fn apply(
     {
         Ok(result) => {
             if result.newly_promoted {
-                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
                     &memory,
                     &state.project_root,
                 )

@@ -5,10 +5,10 @@
 
 use serde_json::{Value, json};
 
-// Similarity primitives live in `crate::memory::similarity` (shared with the
+// Similarity primitives live in `tracedecay_runtime_core::memory::similarity` (shared with the
 // write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
 // behavior and call sites stay identical.
-pub use crate::memory::similarity::{
+pub use tracedecay_runtime_core::memory::similarity::{
     lexical_overlap, phase_cosine_similarity, similarity_classification,
 };
 
@@ -376,8 +376,8 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or("");
-    crate::memory::diff::contains_negation_cue(a_content)
-        || crate::memory::diff::contains_negation_cue(b_content)
+    tracedecay_runtime_core::memory::diff::contains_negation_cue(a_content)
+        || tracedecay_runtime_core::memory::diff::contains_negation_cue(b_content)
 }
 
 /// Propose hard-delete actions for `likely_duplicate` pairs from pre-scored facts.
@@ -515,7 +515,7 @@ fn candidate_confidence(base: f64, fact: &Value) -> f64 {
     let trust = fact
         .get("trust_score")
         .and_then(Value::as_f64)
-        .unwrap_or(crate::memory::trust::DEFAULT_TRUST)
+        .unwrap_or(tracedecay_runtime_core::memory::trust::DEFAULT_TRUST)
         .clamp(0.0, 1.0);
     let access_discount = if fact_i64(fact, "access_count") > 0 {
         0.05
@@ -550,7 +550,8 @@ pub fn propose_hygiene_candidates(
             continue;
         }
         let content = fact.get("content").and_then(Value::as_str).unwrap_or("");
-        if let Some(reason) = crate::memory::hygiene::detect_secret_like(content) {
+        if let Some(reason) = tracedecay_runtime_core::memory::hygiene::detect_secret_like(content)
+        {
             flagged.insert(fact_id);
             secret_like.push(json!({
                 "recommended_op": "delete",
@@ -562,7 +563,9 @@ pub fn propose_hygiene_candidates(
                 "status": "candidate",
                 "tier": "secret_like",
             }));
-        } else if let Some(reason) = crate::memory::hygiene::detect_transient(content) {
+        } else if let Some(reason) =
+            tracedecay_runtime_core::memory::hygiene::detect_transient(content)
+        {
             flagged.insert(fact_id);
             transient.push(json!({
                 "recommended_op": "delete",
@@ -590,8 +593,8 @@ pub fn propose_hygiene_candidates(
         let b = &pair_facts[pair.b];
         let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
         let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
-        if !crate::memory::diff::contains_negation_cue(a_content)
-            && !crate::memory::diff::contains_negation_cue(b_content)
+        if !tracedecay_runtime_core::memory::diff::contains_negation_cue(a_content)
+            && !tracedecay_runtime_core::memory::diff::contains_negation_cue(b_content)
         {
             continue;
         }

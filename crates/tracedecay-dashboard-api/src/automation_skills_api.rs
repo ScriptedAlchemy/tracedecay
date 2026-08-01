@@ -8,20 +8,22 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::agents::{ManagedSkillExportReport, export_managed_skills_to_agent_hosts, home_dir};
-use crate::automation::managed_skills::{
+use tracedecay_agent_hosts::agents::{
+    ManagedSkillExportReport, export_managed_skills_to_agent_hosts, home_dir,
+};
+use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, approve_managed_skill,
     create_managed_skill_draft, discard_pending_managed_skill_update, list_managed_skills,
     load_managed_skill, managed_skill_dir, managed_skill_root, set_managed_skill_pinned,
     set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
 };
-use crate::automation::skill_usage::{
+use tracedecay_agent_hosts::automation::skill_usage::{
     SkillUsageAction, ingest_project_analytics_events, record_skill_usage,
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
     summarize_skill_usage_for,
 };
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
@@ -32,7 +34,9 @@ pub struct ManagedSkillDraftRequest {
     title: String,
     summary: String,
     category: String,
-    #[serde(default = "crate::automation::managed_skills::default_managed_skill_targets")]
+    #[serde(
+        default = "tracedecay_agent_hosts::automation::managed_skills::default_managed_skill_targets"
+    )]
     targets: Vec<SkillInstallTarget>,
     body_markdown: String,
     #[serde(default)]
@@ -249,7 +253,7 @@ async fn export_skills_to_agent_hosts(
         let reports = export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root);
         // Materialize active managed skills as host-loadable SKILL.md files into
         // every detected `.claude`/`.codex` skills directory (project + global).
-        crate::automation::skill_materialization::reconcile_after_activation(
+        tracedecay_agent_hosts::automation::skill_materialization::reconcile_after_activation(
             &profile_root,
             &project_root,
         );
@@ -322,7 +326,7 @@ async fn sync_project_skill_analytics(
 }
 
 fn profile_root_or_error() -> std::result::Result<std::path::PathBuf, JsonError> {
-    crate::storage::default_profile_root().map_err(|err| internal_error(&err))
+    tracedecay_runtime_core::storage::default_profile_root().map_err(|err| internal_error(&err))
 }
 
 fn bad_request(err: &impl ToString) -> JsonError {

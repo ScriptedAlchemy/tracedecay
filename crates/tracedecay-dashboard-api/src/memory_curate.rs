@@ -22,13 +22,13 @@ use super::memory_service::{
 };
 use super::{DashboardState, storage_mode_label, token_count};
 use crate::application::configuration::ProductionUserSettingsDaemonClient;
-use crate::db::Database;
-#[cfg(test)]
-use crate::db::TestDatabaseRuntimeMode;
-use crate::errors::{Result, TraceDecayError};
-use crate::memory::types::{MemoryGroomingOperation, MemoryRepairStats};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_runtime_core::db::Database;
+#[cfg(test)]
+use tracedecay_runtime_core::db::TestDatabaseRuntimeMode;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::memory::types::{MemoryGroomingOperation, MemoryRepairStats};
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
@@ -912,9 +912,11 @@ mod tests {
     async fn preview_is_read_only_while_apply_runs_authoritative_repair() {
         let temp = tempfile::tempdir().unwrap();
         let memory_path = temp.path().join("user-memory.db");
-        let authority =
-            crate::db::DatabaseAuthority::acquire_test(&memory_path, "memory curation test")
-                .unwrap();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &memory_path,
+            "memory curation test",
+        )
+        .unwrap();
         let (db, _) = Database::publish_test_runtime(
             &memory_path,
             &authority,
@@ -925,14 +927,14 @@ mod tests {
         let owner = tracedecay_domain::FactOwnerV1::Profile;
         let memory = crate::application::memory::MemoryApplication::new(
             owner.clone(),
-            crate::store::memory::DatabaseFactStore::new(&db),
+            tracedecay_runtime_core::store::memory::DatabaseFactStore::new(&db),
         )
         .unwrap();
         let seeded = memory
             .add_fact_v1(
-                crate::memory::types::AddFactRequest {
+                tracedecay_runtime_core::memory::types::AddFactRequest {
                     content: "Keep diagnostic previews read only".to_string(),
-                    category: crate::memory::types::MemoryCategory::Decision,
+                    category: tracedecay_runtime_core::memory::types::MemoryCategory::Decision,
                     source: Some("test".to_string()),
                     tags: Vec::new(),
                     entities: Vec::new(),

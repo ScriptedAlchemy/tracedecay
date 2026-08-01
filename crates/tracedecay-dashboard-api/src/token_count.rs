@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::DashboardState;
 use super::util::{qmarks, query_rows};
-use crate::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
@@ -437,9 +437,14 @@ pub fn spawn_warm(state: DashboardState) {
 mod tests {
     use super::*;
 
-    fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+    fn test_conn() -> (
+        tempfile::TempDir,
+        tracedecay_runtime_core::db::engine::TestConnection,
+    ) {
         let dir = tempfile::tempdir().expect("create token-count test directory");
-        let conn = crate::db::engine::TestConnection::open(&dir.path().join("sessions.db"));
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &dir.path().join("sessions.db"),
+        );
         (dir, conn)
     }
 

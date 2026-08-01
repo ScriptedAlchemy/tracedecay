@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use crate::db::engine::{QueryExecutor, Value as DbValue, params, params_from_iter};
+use tracedecay_runtime_core::db::engine::{
+    QueryExecutor, Value as DbValue, params, params_from_iter,
+};
 
 use super::util::{like_pattern, qmarks, query_i64_result, query_rows};
 
@@ -389,10 +391,14 @@ mod tests {
     use super::*;
 
     #[allow(clippy::unwrap_used)]
-    fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+    fn test_conn() -> (
+        tempfile::TempDir,
+        tracedecay_runtime_core::db::engine::TestConnection,
+    ) {
         let directory = tempfile::tempdir().unwrap();
-        let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("graph-queries.db"));
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("graph-queries.db"),
+        );
         (directory, connection)
     }
 

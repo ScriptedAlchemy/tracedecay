@@ -9,14 +9,14 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::http_detail;
-use crate::automation::managed_skills::list_managed_skills;
-use crate::automation::outcomes::{
+use tracedecay_agent_hosts::automation::managed_skills::list_managed_skills;
+use tracedecay_agent_hosts::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
     load_outcomes_snapshot,
 };
-use crate::automation::skill_usage::summarize_skill_usage;
-use crate::errors::{Result, TraceDecayError};
-use crate::tracedecay::current_timestamp;
+use tracedecay_agent_hosts::automation::skill_usage::summarize_skill_usage;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
     match outcomes_payload(&state).await {
@@ -32,7 +32,7 @@ pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<
 
 async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
     let now = current_timestamp();
-    let profile_root = crate::storage::default_profile_root()?;
+    let profile_root = tracedecay_runtime_core::storage::default_profile_root()?;
     let skills = list_managed_skills(&profile_root).await?;
     let summaries = summarize_skill_usage(&profile_root, &skills).await?;
     let skill_outcomes = compute_skill_outcomes(&summaries, now);
