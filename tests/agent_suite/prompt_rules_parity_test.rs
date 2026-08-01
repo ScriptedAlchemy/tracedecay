@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::agents::prompt_rules::cli_fallback_paragraph;
-use tracedecay::agents::{InstallContext, expected_tool_perms, get_integration};
+use tracedecay::agents::{InstallContext, get_integration};
 use tracedecay::config::USER_DATA_DIR_ENV;
 
 use crate::common::{EnvVarGuard, PROCESS_ENV_LOCK};
@@ -66,13 +66,7 @@ fn hosts() -> Vec<HostCase> {
 }
 
 fn install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: true,
-    }
+    crate::agent_test_support::install_ctx(home, true)
 }
 
 /// Pins profile storage into the temp home and clears host-home overrides so
