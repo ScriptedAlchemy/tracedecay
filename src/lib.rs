@@ -124,6 +124,7 @@ mod shell;
 mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;
+pub(crate) mod support;
 pub mod sync;
 pub mod text;
 pub mod timeutil;
