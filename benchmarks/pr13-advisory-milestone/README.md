@@ -1,21 +1,15 @@
 # PR13 advisory direct tests
 
-`workload-v1.json` is a legacy behavioral fixture validated by the checked-in
-Draft-07 `schema-v1.json`. It is not an acceptance packet, gate manifest, CI
-receipt, or pass snapshot. The application four-pillar test owns canonical
-advisory behavior; the root runtime test reads authentic GitHub/CI/proximity
-captures and exercises production typed boundaries without a composite fixture
-loader.
-
-Run static fixture lint:
-
-```sh
-python3 benchmarks/pr13-advisory-milestone/validate_packet.py
-```
+The legacy `workload-v1.json` fixture, its Draft-07 `schema-v1.json`, and the
+`validate_packet.py` linter were retired: they were never an acceptance packet,
+gate manifest, CI receipt, or pass snapshot. The application four-pillar test
+owns canonical advisory behavior; the root runtime test reads authentic
+GitHub/CI/proximity captures and exercises production typed boundaries without
+a composite fixture loader.
 
 Direct product completion requires the named Rust tests and normal CI.
-Runtime JUnit remains a CI artifact; the static fixture validator does not
-aggregate test output or derive acceptance state from checked-in packet fields.
+Runtime JUnit remains a CI artifact; nothing here aggregates test output or
+derives acceptance state from checked-in packet fields.
 
 Pagination/CAS is a product journey covered by a named Rust test; no owner
 receipt or PR-specific evidence artifact is created.

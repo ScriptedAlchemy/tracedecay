@@ -23,15 +23,19 @@ pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 /// schema-defining sources, the template name, the unsafe-fast env toggle
 /// (it changes journal/synchronous file properties), and any
 /// builder-specific fingerprint supplied by the caller (for templates whose
-/// contents also depend on sources outside src/db, such as fixture SQL
-/// defined in a test file).
+/// contents also depend on sources outside `tracedecay-runtime-core`'s `db`
+/// module, such as fixture SQL defined in a test file).
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
     let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).unwrap_or_default();
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in include_bytes!("../../src/db/migrations.rs")
+    for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
         .iter()
-        .chain(include_bytes!("../../src/db/connection.rs"))
-        .chain(include_bytes!("../../src/db/engine/test_support.rs"))
+        .chain(include_bytes!(
+            "../../crates/tracedecay-runtime-core/src/db/connection.rs"
+        ))
+        .chain(include_bytes!(
+            "../../crates/tracedecay-runtime-core/src/db/engine/test_support.rs"
+        ))
         .chain(include_bytes!("../common/mod.rs"))
         .chain(name.as_bytes())
         .chain(unsafe_fast.as_bytes())
@@ -83,7 +87,8 @@ fn template_cache_exists(path: &Path) -> bool {
 /// it first if this machine has no template for the current schema revision.
 ///
 /// `builder_fingerprint` must cover every input to `build` that lives
-/// outside `src/db` — typically `include_bytes!` of the defining test file —
+/// outside the `tracedecay-runtime-core` `db` module — typically
+/// `include_bytes!` of the defining test file —
 /// so that editing the fixture-building code invalidates the cached
 /// template. Pass `&[]` when `build` depends only on the production schema
 /// code that `template_hash` already covers.

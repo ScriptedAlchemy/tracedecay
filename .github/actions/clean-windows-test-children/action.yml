@@ -1,0 +1,35 @@
+name: Clean abandoned Windows test children
+description: >-
+  Stop tracedecay.exe processes launched from this workspace whose parent has
+  already exited, so a leaked daemon cannot hold the runner or the workspace.
+
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      run: |
+        $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+        $all = Get-CimInstance Win32_Process
+        $liveProcessIds = [System.Collections.Generic.HashSet[uint32]]::new()
+        foreach ($process in $all) {
+          [void]$liveProcessIds.Add([uint32]$process.ProcessId)
+        }
+        $stale = foreach ($process in $all) {
+          if ($process.Name -ne "tracedecay.exe") {
+            continue
+          }
+          if (-not $process.CommandLine) {
+            continue
+          }
+          $inCurrentWorkspace = $process.CommandLine.IndexOf($workspace, [StringComparison]::OrdinalIgnoreCase) -ge 0
+          if (-not $inCurrentWorkspace) {
+            continue
+          }
+          if (-not $liveProcessIds.Contains([uint32]$process.ParentProcessId)) {
+            $process
+          }
+        }
+        foreach ($process in $stale) {
+          Write-Host "Stopping abandoned tracedecay child pid=$($process.ProcessId)"
+          Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+        }
