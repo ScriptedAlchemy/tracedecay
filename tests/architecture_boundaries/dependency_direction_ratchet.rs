@@ -124,6 +124,28 @@ fn rust_sources(relative: &str, into: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every top-level entry under `src/` whose name starts with `daemon`.
+///
+/// Naming the roots by prefix rather than listing them keeps a newly added
+/// `src/daemon_*.rs` inside the guard from the moment it lands, instead of
+/// silently sitting outside it until someone remembers to extend a list.
+fn daemon_roots() -> Vec<String> {
+    let mut roots = fs::read_dir(crate_root().join("src"))
+        .expect("read src")
+        .filter_map(|entry| {
+            let name = entry.expect("read src entry").file_name();
+            let name = name.to_string_lossy().into_owned();
+            name.starts_with("daemon").then(|| format!("src/{name}"))
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+    assert!(
+        roots.iter().any(|root| root == "src/daemon.rs"),
+        "expected src/daemon.rs to anchor the daemon-side scan"
+    );
+    roots
+}
+
 /// Root-relative, forward-slash path used as the allowlist key.
 fn allowlist_key(path: &Path) -> String {
     path.strip_prefix(crate_root())
@@ -135,10 +157,10 @@ fn allowlist_key(path: &Path) -> String {
 }
 
 /// Count non-overlapping occurrences of `needle` in every scanned source.
-fn reference_counts(roots: &[&str], needle: &str) -> BTreeMap<String, usize> {
+fn reference_counts<R: AsRef<str>>(roots: &[R], needle: &str) -> BTreeMap<String, usize> {
     let mut sources = Vec::new();
     for root in roots {
-        rust_sources(root, &mut sources);
+        rust_sources(root.as_ref(), &mut sources);
     }
     let mut counts = BTreeMap::new();
     for source in sources {
@@ -195,10 +217,7 @@ fn mcp_does_not_grow_new_references_into_the_daemon() {
 
 #[test]
 fn the_daemon_does_not_grow_new_references_into_mcp() {
-    let counts = reference_counts(
-        &["src/daemon.rs", "src/daemon", "src/daemon_client.rs"],
-        "crate::mcp::",
-    );
+    let counts = reference_counts(&daemon_roots(), "crate::mcp::");
     assert_ratchet(
         &counts,
         DAEMON_TO_MCP_ALLOWLIST,
