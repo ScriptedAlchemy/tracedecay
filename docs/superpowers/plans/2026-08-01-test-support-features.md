@@ -151,10 +151,14 @@ feature that forwarded nothing. Corrected to
 accounts for 14 of the 19 errors that crate lost (`Database::publish_test_runtime`
 and `DatabaseAuthority::acquire_test`).
 
-## Tier 2 — follow-up (NOT in scope here)
+## Tier 2 — follow-up (RESOLVED — see "Tier 2 outcomes" below)
 
 Every remaining error is a **relocation or fixture-ownership** problem, not a
 gate problem. No amount of feature work in the kernel fixes them.
+
+The subsections below are the **original tier-2 inventory**, kept for the
+record. The error counts and file locations they cite are historical and no
+longer describe the tree — read "Tier 2 outcomes" for the current state.
 
 ### 2a. Root-owned test runtimes — owner: composition-root lead
 
@@ -235,6 +239,127 @@ owns `USER_DATA_DIR_ENV` and `user_data_dir()`.
   constants), `runtime/lcm/raw.rs:1131` (`crate::user_config`) — root shims.
 - `crates/tracedecay-agent-hosts/src/agents/cursor.rs:1734` — `AdvertisedToolV1`
   lost its `annotations` field. Unrelated schema drift, 1 error.
+
+## Tier 2 outcomes (2026-08-01)
+
+### Measured effect
+
+`cargo check -p <crate> --all-features --all-targets`, error counts:
+
+| Crate | Tier 1 exit | Tier 2 exit | Delta |
+|---|---:|---:|---:|
+| tracedecay-usecases | 160 | 0 | -160 |
+| tracedecay-global-db | 33 | 0 | -33 |
+| tracedecay-sessions | 29 | 0 | -29 |
+| tracedecay-migrate | 30 | 0 | -30 |
+| tracedecay-agent-hosts | 15 | 0 | -15 |
+| **total** | **267** | **0** | **-267** |
+
+`cargo test -p tracedecay-usecases -p tracedecay-global-db -p tracedecay-sessions
+-p tracedecay-migrate --all-features --no-run` links every test binary, and
+`cargo build --bin tracedecay` stays green.
+
+### What each item actually became
+
+**2d — `PinnedUserDataDir`.** Done as recommended: moved into
+`crates/tracedecay-runtime-core/src/config.rs` (`PinnedUserDataDir`,
+`lock_user_data_dir_test_env`, and the `USER_DATA_DIR_TEST_LOCK` static), each
+under `#[cfg(any(test, feature = "test-helpers"))]`, next to the
+`USER_DATA_DIR_ENV` / `user_data_dir()` it manipulates. Landed in
+`b31c27549 test(runtime-core): expose isolated profile guard`.
+
+**2a — `HostAdmissionTestRuntimeV1` and friends.** The recommendation was
+`tracedecay-sessions::admission`. The delivered cut is **`tracedecay-global-db`**
+(`crates/tracedecay-global-db/src/tests/harness.rs`, ~720 lines, gated by
+`#[cfg(any(test, feature = "test-helpers"))]` on `pub mod tests` in `lib.rs`).
+Evidence for the different home: the runtime's body is defined in terms of
+`RegisteredGlobalDb`, which lives in global-db, and global-db *depends on*
+sessions — putting the runtime in sessions would have inverted that edge.
+Only `HostAdmissionScope`, which is a pure scope enum with no storage
+dependency, stayed in sessions and is re-exported from the harness
+(`pub use tracedecay_sessions::admission::HostAdmissionScope`).
+
+The predicted `crate::daemon` / `crate::mcp` reaches were not port-inverted and
+not carried down: the composition-root-dependent tests were **deleted from
+`tracedecay-usecases` and re-homed in the root crate**, where the concrete
+runtime already lives. `7d2f8006e test(usecases): remove composition-root
+fixtures` removes 6,908 lines, 5,096 of them from
+`crates/tracedecay-usecases/src/host_admission.rs`. So the harness that moved
+down is the storage-only remainder, and the daemon/mcp-coupled half moved up.
+The harness header states the boundary explicitly: "This owns only storage
+registration. Composition-root daemon, transport, migration, and
+host-admission adapters deliberately stay outside it."
+
+**2b — `FixtureGraph` / `GraphRuntimePort`.** Not rebuilt against the trait.
+`FixtureGraph` no longer exists in `tracedecay-usecases`; the `edit` module
+became a directory tree (`a881bd830`) and the port-dependent tests were re-homed
+at the composition root — e.g. the `api_migration_*` planner tests now live in
+`src/tracedecay/edits/api_migration_graph_tests.rs`, driving the real graph
+runtime instead of a double. This is the second option the original 2b text
+allowed ("re-homed at the composition root") and it removes the double rather
+than maintaining it.
+
+**2c — repo-root `#[path]` fixtures.** The migrate half is gone: the three
+`#[path]`-includes of `src/global_db/schema*` no longer exist in
+`crates/tracedecay-migrate/src/consolidate/tests.rs`. The global-db half was
+still reaching out of the crate, so this commit re-homes it:
+`tests/session_suite/lcm_schema/` (`mod.rs`, `lcm_migration.rs`,
+`temporal_catalog.rs`, `temporal_constraints.rs`, `temporal_cursor.rs`) moved to
+`crates/tracedecay-global-db/src/session_temporal/lcm_schema/`, and
+`session_temporal/schema.rs:1906` went from
+`#[path = "../../../../tests/session_suite/lcm_schema/mod.rs"]` to
+`#[path = "lcm_schema/mod.rs"]`. The directory had no other owner —
+`tests/session_suite/main.rs` never declared it, so nothing in the root crate's
+test targets changed. The files' bodies already resolved against global-db
+(`crate::ensure_registered_schema`), so no import edits were needed.
+
+One repo-root `#[path]` reach remains, outside the tier-2 inventory and
+currently green: `crates/tracedecay-rusqlite-runtime/tests/{s5_s10.rs,
+s5_snapshot_restart.rs}` include six files from
+`tests/storage_runtime_rusqlite_suite/`, which no root-crate target declares.
+Same fix applies whenever that crate's owner wants it.
+
+## Tier 3 — the ports are wired only by the root crate
+
+Compiling is not running. With every test target linking, standalone
+`cargo test -p <crate> --all-features` still fails at runtime:
+
+| Crate | passed | failed |
+|---|---:|---:|
+| tracedecay-sessions | 464 | 9 |
+| tracedecay-usecases | 507 | 28 |
+| tracedecay-global-db | 187 | 83 |
+| tracedecay-migrate | 98 | 98 |
+
+The global-db and migrate failures collapse to **one cause**, two installers
+that only the root crate calls:
+
+- `tracedecay_runtime_core::ports::registered_schema::register` —
+  `src/daemon/store_runtime.rs:29`. Without it every shard open fails with
+  "no registered global/session schema installer is registered".
+- `tracedecay_global_db::host_ports::profile_sessions::register` —
+  `src/daemon/store_runtime/session_registry.rs:84`. Without it
+  `RegisteredGlobalDbHarness::open` panics on `UNWIRED_PROFILE_SESSIONS`
+  (`crates/tracedecay-global-db/src/tests/harness.rs:136`).
+
+This is by design so far — the harness comment says "the root opener creates
+the profile identity on its way to the session registry" — but it means the
+relocated suites are only executable from the root crate's test targets. The
+tier-3 decision is whether each crate ships a test-only installer behind
+`test-helpers` (cheap for `registered_schema`, since `ensure_registered_schema`
+is already global-db's own; harder for `profile_sessions`, whose opener is a
+daemon session-registry composition) or whether these suites are simply
+declared root-executed. Do not improvise this: it is a capability-seam
+decision, and `register` is process-global.
+
+The root crate's own `--all-targets` check is also still red (~35 errors) on
+unrelated drift: `StructuredBackfillTestRuntimeV1` /
+`TranscriptFactsBackfillTestRuntimeV1` / `session_temporal_benchmark` missing
+from `tracedecay::sessions`, `SummaryConfig` vs `CodexAppServerSummaryConfig`,
+`&[AnalyticsEventRecord]` vs `&Vec<..>`, `&str` vs `&RequestId`,
+`install_pass_covers_tracked_agents`, and a `common` module in
+`tests/work_route_exposure_conformance.rs`. None of these are gate or
+relocation problems.
 
 ## Verification gate
 
