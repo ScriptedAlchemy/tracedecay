@@ -19,6 +19,10 @@ use super::*;
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
+use crate::mcp::tools::handlers::project_registry::{
+    ProjectRegistryListingCommand, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
+    ProjectRegistryReadPort, list_registered_projects,
+};
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeResponse, LcmDescribeTarget, LcmExpandResponse, LcmExpandTarget,
 };
@@ -1088,19 +1092,127 @@ fn retrieval_command(
     Ok(command)
 }
 
-fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Value {
+/// Maximum registered projects one `project_scope=all_registered` call fans
+/// out over. The registry listing is bounded so a large profile cannot turn
+/// one search into an unbounded number of retrieval calls.
+const MAX_ALL_REGISTERED_PROJECTS: usize = 25;
+
+fn unavailable_all_registered_payload(
+    request: &MessageSearchRequest<'_>,
+    code: &str,
+    message: &str,
+) -> Value {
     let mut payload = base_message_search_payload(request);
-    apply_typed_error(
-        &mut payload,
-        "deferred",
-        "all_registered_deferred_to_pr15",
-        "all_registered session retrieval requires PR15 canonical multi-root scope",
-    );
+    apply_typed_error(&mut payload, "unavailable", code, message);
     payload["project_scope"] = json!("all_registered");
     payload["searched_project_count"] = json!(0);
     payload["skipped_project_count"] = json!(0);
     payload["catch_up_skipped_project_count"] = json!(0);
     payload
+}
+
+/// Runs the parsed request once per registered project and merges the pages.
+///
+/// Every per-project search reuses the same filters, goals, and store scope;
+/// only the project selector changes. A project the retrieval service cannot
+/// serve is counted as skipped rather than failing the whole search.
+async fn all_registered_message_search(
+    project_root: Option<&Path>,
+    request: &MessageSearchRequest<'_>,
+    store_scope: SessionRetrievalStoreScope,
+    service: Option<&dyn SessionRetrievalServicePort>,
+    registry: Option<&dyn ProjectRegistryReadPort>,
+) -> Result<Value> {
+    if registry.is_none() {
+        return Ok(unavailable_all_registered_payload(
+            request,
+            "project_registry_unavailable",
+            "no project registry authority is mounted for this profile",
+        ));
+    }
+    let Some(service) = service else {
+        return Ok(unavailable_all_registered_payload(
+            request,
+            "session_retrieval_service_not_configured",
+            "no session retrieval service is configured for this profile",
+        ));
+    };
+    let listing = list_registered_projects(
+        registry,
+        ProjectRegistryListingCommand {
+            active_project_root: project_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+            scope: ProjectRegistryListingScope::All,
+            limit: MAX_ALL_REGISTERED_PROJECTS,
+        },
+    )
+    .await?;
+    let ProjectRegistryListingOutcome::Listing(listing) = listing else {
+        return Ok(unavailable_all_registered_payload(
+            request,
+            "project_registry_unavailable",
+            "no project registry authority is mounted for this profile",
+        ));
+    };
+
+    let mut merged = base_message_search_payload(request);
+    let mut results: Vec<Value> = Vec::new();
+    let mut searched = 0_usize;
+    let mut skipped = 0_usize;
+    let mut per_project = Vec::with_capacity(listing.projects.len());
+    for project in &listing.projects {
+        let selector = SessionRetrievalProjectSelector {
+            project_id: Some(project.project_id.clone()),
+            project_path: None,
+        };
+        let command = retrieval_command(request, store_scope, Some(selector))?;
+        let outcome = service.execute(command).await;
+        let searchable = matches!(
+            outcome,
+            SessionRetrievalServiceOutcome::Complete { .. }
+                | SessionRetrievalServiceOutcome::CompleteZero { .. }
+                | SessionRetrievalServiceOutcome::Partial { .. }
+                | SessionRetrievalServiceOutcome::Stale { .. }
+        );
+        let payload = render_service_outcome(request, outcome);
+        if searchable {
+            searched += 1;
+            if let Some(page) = payload.get("results").and_then(Value::as_array) {
+                for result in page {
+                    let mut result = result.clone();
+                    if let Some(map) = result.as_object_mut() {
+                        map.insert("project_id".to_string(), json!(project.project_id));
+                        map.insert("project_root".to_string(), json!(project.display_root));
+                    }
+                    results.push(result);
+                }
+            }
+        } else {
+            skipped += 1;
+        }
+        per_project.push(json!({
+            "project_id": project.project_id,
+            "project_root": project.display_root,
+            "status": payload.get("status").cloned().unwrap_or(Value::Null),
+            "outcome": payload.get("outcome").cloned().unwrap_or(Value::Null),
+            "count": payload.get("count").cloned().unwrap_or(json!(0)),
+            "error": payload.get("error").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    results.truncate(request.limit);
+    merged["project_scope"] = json!("all_registered");
+    merged["outcome"] = json!(if results.is_empty() {
+        "complete_zero"
+    } else {
+        "complete"
+    });
+    merged["count"] = json!(results.len());
+    merged["results"] = Value::Array(results);
+    merged["searched_project_count"] = json!(searched);
+    merged["skipped_project_count"] = json!(skipped);
+    merged["catch_up_skipped_project_count"] = json!(0);
+    merged["projects"] = Value::Array(per_project);
+    merged["truncated"] = json!(listing.truncated);
+    Ok(merged)
 }
 
 fn render_temporal_message_search_md(payload: &Value) -> String {
@@ -1162,6 +1274,16 @@ pub(crate) async fn handle_message_search_with_service(
     args: Value,
     service: Option<&dyn SessionRetrievalServicePort>,
 ) -> Result<ToolResult> {
+    handle_message_search_with_registry(project_root, store_scope, args, service, None).await
+}
+
+pub(crate) async fn handle_message_search_with_registry(
+    project_root: Option<&Path>,
+    store_scope: SessionRetrievalStoreScope,
+    args: Value,
+    service: Option<&dyn SessionRetrievalServicePort>,
+    registry: Option<&dyn ProjectRegistryReadPort>,
+) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let project_selector = project_selector(&args)?;
     let has_project_selector = project_selector.is_some();
@@ -1177,7 +1299,9 @@ pub(crate) async fn handle_message_search_with_service(
                 "project_scope cannot be combined with project_id, project_path, or project_selector",
             ));
         }
-        let payload = deferred_all_registered_payload(&request);
+        let payload =
+            all_registered_message_search(project_root, &request, store_scope, service, registry)
+                .await?;
         return Ok(tool_json_with_md(project_root, &args, &payload, || {
             render_temporal_message_search_md(&payload)
         }));
@@ -1224,11 +1348,16 @@ mod cutover_tests {
         SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
         SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
         SessionRetrievalWorkerStatusView, SessionTemporalMetadataView,
-        SessionTemporalWatermarksView, handle_message_search_with_service,
-        render_temporal_message_search_md,
+        SessionTemporalWatermarksView, handle_message_search_with_registry,
+        handle_message_search_with_service, render_temporal_message_search_md,
     };
     use crate::application::session::{
         SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
+    };
+    use crate::mcp::tools::handlers::project_registry::{
+        ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
+        ProjectRegistryListingCommand, ProjectRegistryListingFuture, ProjectRegistryListingOutcome,
+        ProjectRegistryListingView, ProjectRegistryReadPort,
     };
     use tracedecay_temporal_query::ports::{
         TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1,
@@ -1267,6 +1396,67 @@ mod cutover_tests {
                 },
             );
             Box::pin(async move { outcome })
+        }
+    }
+
+    /// Answers one fixed registered-project listing so `all_registered` can be
+    /// asserted without a real registry authority.
+    struct StubProjectRegistry {
+        projects: Vec<crate::project_registry::PublicCodeProject>,
+    }
+
+    impl StubProjectRegistry {
+        fn with_projects(ids: &[&str]) -> Self {
+            Self {
+                projects: ids
+                    .iter()
+                    .map(|id| crate::project_registry::PublicCodeProject {
+                        project_id: (*id).to_string(),
+                        label: (*id).to_string(),
+                        project_root: format!("/registered/{id}"),
+                        display_root: format!("/registered/{id}"),
+                        canonical_root: format!("/registered/{id}"),
+                        git_common_dir: None,
+                        default_branch: None,
+                        created_at: 0,
+                        last_seen_at: 0,
+                        is_active: None,
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl ProjectRegistryReadPort for StubProjectRegistry {
+        fn list(
+            &self,
+            _command: ProjectRegistryListingCommand,
+        ) -> ProjectRegistryListingFuture<'_> {
+            let projects = self.projects.clone();
+            Box::pin(async move {
+                Ok(ProjectRegistryListingOutcome::Listing(
+                    ProjectRegistryListingView {
+                        registry_path: std::path::PathBuf::from("/registry"),
+                        truncated: false,
+                        view: crate::project_registry::ProjectRegistryView {
+                            summary: crate::project_registry::ProjectRegistrySummary {
+                                project_count: projects.len(),
+                                repo_count: projects.len(),
+                                truncated: false,
+                            },
+                            project_tree: Vec::new(),
+                        },
+                        projects,
+                    },
+                ))
+            })
+        }
+
+        fn context(
+            &self,
+            _command: ProjectRegistryContextCommand,
+        ) -> ProjectRegistryContextFuture<'_> {
+            Box::pin(async move { Ok(ProjectRegistryContextOutcome::RegistryUnavailable) })
         }
     }
 
@@ -1708,9 +1898,9 @@ mod cutover_tests {
     }
 
     #[tokio::test]
-    async fn all_registered_is_pr15_deferred_without_registry_or_service_call() {
-        let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Denied);
-        let result = handle_message_search_with_service(
+    async fn all_registered_without_a_registry_reports_the_missing_authority() {
+        let service = RecordingService::default();
+        let result = handle_message_search_with_registry(
             Some(Path::new("/repo")),
             SessionRetrievalStoreScope::Project,
             json!({
@@ -1719,16 +1909,80 @@ mod cutover_tests {
                 "format": "json"
             }),
             Some(&service),
+            None,
         )
         .await
         .unwrap();
         let payload = response_payload(&result);
 
         assert_eq!(service.calls(), 0);
-        assert_eq!(payload["status"], "deferred");
-        assert_eq!(payload["outcome"], "deferred");
+        assert_eq!(payload["status"], "unavailable");
         assert_eq!(payload["project_scope"], "all_registered");
-        assert_eq!(payload["error"]["code"], "all_registered_deferred_to_pr15");
+        assert_eq!(payload["error"]["code"], "project_registry_unavailable");
+        assert_eq!(payload["searched_project_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn all_registered_searches_every_registered_project() {
+        let service = RecordingService::default();
+        let registry = StubProjectRegistry::with_projects(&["project.one", "project.two"]);
+        let result = handle_message_search_with_registry(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json!({
+                "query": "database backup",
+                "project_scope": "all_registered",
+                "format": "json"
+            }),
+            Some(&service),
+            Some(&registry),
+        )
+        .await
+        .unwrap();
+        let payload = response_payload(&result);
+
+        assert_eq!(service.calls(), 2);
+        let selected = service
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|command| {
+                command
+                    .project_selector()
+                    .and_then(|selector| selector.project_id.clone())
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec!["project.one", "project.two"]);
+        assert_eq!(payload["project_scope"], "all_registered");
+        assert_eq!(payload["searched_project_count"], 2);
+        assert_eq!(payload["skipped_project_count"], 0);
+        assert_eq!(payload["projects"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn all_registered_counts_unservable_projects_as_skipped() {
+        let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Denied);
+        let registry = StubProjectRegistry::with_projects(&["project.one", "project.two"]);
+        let result = handle_message_search_with_registry(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json!({
+                "query": "database backup",
+                "project_scope": "all_registered",
+                "format": "json"
+            }),
+            Some(&service),
+            Some(&registry),
+        )
+        .await
+        .unwrap();
+        let payload = response_payload(&result);
+
+        assert_eq!(service.calls(), 2);
+        assert_eq!(payload["searched_project_count"], 0);
+        assert_eq!(payload["skipped_project_count"], 2);
         assert_eq!(payload["results"], json!([]));
     }
 

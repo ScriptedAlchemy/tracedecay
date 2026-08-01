@@ -456,7 +456,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
 }
 
 #[tokio::test]
-async fn multi_root_payloads_refuse_before_runtime_or_projection_dispatch() {
+async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
     let project_root = PathBuf::from("/quarantined-multi-root");
@@ -525,6 +525,9 @@ async fn multi_root_payloads_refuse_before_runtime_or_projection_dispatch() {
         ));
     }
 
+    // `invoke_for_project` owns every multi-root payload and routes it to the
+    // multi-root executor before this service is consulted. Reaching the
+    // per-project dispatch means the request was mis-routed.
     for request in requests {
         let response = service
             .invoke(&registry, Some(&project_root), None, None, request)
@@ -532,7 +535,7 @@ async fn multi_root_payloads_refuse_before_runtime_or_projection_dispatch() {
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::Problem {
-                problem: DaemonInvocationProblem::Unavailable
+                problem: DaemonInvocationProblem::InvalidRequest
             }
         ));
     }

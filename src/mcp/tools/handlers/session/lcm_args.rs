@@ -312,20 +312,37 @@ pub(super) fn string_only_array_arg(args: &Value, name: &str) -> Result<Vec<Stri
         .collect()
 }
 
+/// The summarizer the caller asked for, taken at face value.
+///
+/// An explicit `summarizer: "noop"` used to be silently rewritten to the
+/// auxiliary summarizer under hard compression pressure, which made the tool
+/// do something the caller never requested. The request is now honored and the
+/// pressure is reported through [`summarizer_pressure_advisory`] instead.
 pub(super) fn summarizer_arg(args: &Value) -> Result<LcmSummarizerMode> {
-    let mode = match args.get("summarizer") {
+    match args.get("summarizer") {
         Some(summarizer) => {
             serde_json::from_value(summarizer.clone()).map_err(|err| TraceDecayError::Config {
                 message: format!("invalid summarizer: {err}"),
-            })?
+            })
         }
-        None => LcmSummarizerMode::HermesAuxiliary,
-    };
-    if matches!(mode, LcmSummarizerMode::Noop) && hard_compression_pressure(args)? {
-        Ok(LcmSummarizerMode::HermesAuxiliary)
-    } else {
-        Ok(mode)
+        None => Ok(LcmSummarizerMode::HermesAuxiliary),
     }
+}
+
+/// Typed advisory for an explicit no-op summarizer requested while the session
+/// is already under hard compression pressure. `None` means there is nothing
+/// to advise.
+pub(super) fn summarizer_pressure_advisory(args: &Value) -> Result<Option<Value>> {
+    let mode = summarizer_arg(args)?;
+    if !matches!(mode, LcmSummarizerMode::Noop) || !hard_compression_pressure(args)? {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "code": "noop_summarizer_under_hard_pressure",
+        "message": "summarizer 'noop' was honored while the session is over its compression threshold; no summaries will be produced",
+        "requested_summarizer": "noop",
+        "recommended_summarizer": "hermes_auxiliary",
+    })))
 }
 
 pub(super) fn hard_compression_pressure(args: &Value) -> Result<bool> {
