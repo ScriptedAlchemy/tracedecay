@@ -11,8 +11,7 @@
 //! identifier), but the canonical 5.0 mode passes `GLOBAL_SESSION` so a single
 //! row backs all sessions on the same project.
 //!
-//! The cache lives in the same SQLite database as the code graph and is wiped
-//! by the v8 schema's `sweep` helper after `MAX_AGE_SECS` of inactivity.
+//! The cache lives in the same SQLite database as the code graph.
 
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_json_value;
@@ -25,15 +24,11 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 /// collide with a real session UUID.
 pub const GLOBAL_SESSION: &str = "global";
 
-/// Rows older than this are evicted by the periodic sweep.
-const MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
-
 /// A cached read response.
 #[derive(Debug, Clone)]
 pub struct CachedRead {
     pub mtime_ns: i64,
     pub digest: String,
-    pub body: Vec<u8>,
     pub token_count: u32,
 }
 
@@ -73,7 +68,7 @@ pub(crate) async fn get(
 ) -> Result<Option<CachedRead>> {
     let mut rows = conn
         .query(
-            "SELECT mtime_ns, digest, body, token_count
+            "SELECT mtime_ns, digest, token_count
              FROM read_cache
              WHERE project_id = ?1
                AND session_id = ?2
@@ -108,19 +103,14 @@ pub(crate) async fn get(
         message: format!("read_cache column 1: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
-    let body: Vec<u8> = row.get(2).map_err(|e| TraceDecayError::Database {
+    let token_count: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
         message: format!("read_cache column 2: {e}"),
-        operation: "read_cache::get".to_string(),
-    })?;
-    let token_count: i64 = row.get(3).map_err(|e| TraceDecayError::Database {
-        message: format!("read_cache column 3: {e}"),
         operation: "read_cache::get".to_string(),
     })?;
 
     Ok(Some(CachedRead {
         mtime_ns: cached_mtime,
         digest,
-        body,
         token_count: token_count.max(0) as u32,
     }))
 }
@@ -214,25 +204,6 @@ pub(crate) async fn put_write(db: &Database, write: ReadCacheWrite<'_>) -> Resul
             operation: "read_cache::put".to_owned(),
         })?;
     transaction.commit().await
-}
-
-/// Deletes rows older than [`MAX_AGE_SECS`]. Returns the number of rows
-/// removed. Safe to call from any context.
-pub async fn sweep(db: &Database) -> Result<u64> {
-    let cutoff = unix_seconds() - MAX_AGE_SECS;
-    let transaction = db.begin_write_transaction("read_cache::sweep").await?;
-    let changed = transaction
-        .execute_engine(
-            "DELETE FROM read_cache WHERE created_at < ?1",
-            params![cutoff],
-        )
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("read_cache sweep failed: {error}"),
-            operation: "read_cache::sweep".to_owned(),
-        })?;
-    transaction.commit().await?;
-    Ok(changed)
 }
 
 fn unix_seconds() -> i64 {

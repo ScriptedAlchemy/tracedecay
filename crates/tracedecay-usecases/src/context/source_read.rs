@@ -22,7 +22,6 @@ pub(crate) struct SourceReadRequest<'a> {
 
 pub(crate) struct SourceReadOutput {
     pub file: String,
-    pub mode: ReadMode,
     pub mtime_ns: i64,
     pub digest: String,
     pub token_count: u32,
@@ -78,7 +77,6 @@ pub(crate) async fn read_source(
             context: source_symbol_context(graph, &display_file, mode, line_range, include_symbols)
                 .await?,
             file: display_file,
-            mode,
             mtime_ns: cached.mtime_ns,
             digest: cached.digest,
             token_count: cached.token_count,
@@ -139,7 +137,6 @@ pub(crate) async fn read_source(
     }
     Ok(SourceReadOutput {
         file: display_file,
-        mode,
         mtime_ns,
         digest,
         token_count,

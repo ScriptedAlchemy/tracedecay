@@ -56,13 +56,8 @@ pub use ports::{
     SemanticRuntimeFuture, SemanticRuntimeGenerationInspectorV1, SemanticRuntimeIntegrationPortV1,
     SemanticRuntimeRouteV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
 };
-pub use production::{
-    ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,
-};
-// The only in-crate consumers are the feature-gated scheduler tests, so this
-// test re-export carries the same feature bound.
-#[cfg(all(test, feature = "semantic-fastembed"))]
-pub(crate) use production::current_query_factory;
+#[cfg(feature = "semantic-fastembed")]
+pub use production::current_query_factory;
 pub(crate) use production::project_semantic_generation_pointer;
 pub use production::{
     PreparedSemanticEvaluationGenerationV1, ProductionSemanticRuntimeV1,
@@ -71,6 +66,9 @@ pub use production::{
     project_semantic_application_status, project_semantic_production_runtime,
     project_semantic_source_generation, register_project_semantic_runtime,
     unregister_project_semantic_runtime,
+};
+pub use production::{
+    ProductionProjectSemanticSearchBridgeV1, compose_project_application_semantic_search,
 };
 pub use redundancy::{
     SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
