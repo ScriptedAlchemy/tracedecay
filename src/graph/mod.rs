@@ -13,5 +13,5 @@ pub mod health;
 /// Git integration helpers for churn analysis.
 pub mod git;
 
-pub use queries::{GraphQueryManager, NodeMetrics};
+pub use queries::GraphQueryManager;
 pub use traversal::GraphTraverser;
