@@ -71,6 +71,7 @@ pub mod open_store_holders;
 pub mod os_str_bytes;
 pub mod path_scope;
 pub mod privacy;
+pub mod project_registry;
 pub mod redundancy;
 pub mod runtime_identity;
 pub mod serde_util;

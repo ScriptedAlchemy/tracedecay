@@ -5554,6 +5554,7 @@ dependencies = [
  "tracedecay-migrate",
  "tracedecay-policy",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-parity",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
@@ -5749,6 +5750,44 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-temporal-query",
  "zeroize",
+]
+
+[[package]]
+name = "tracedecay-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "amari-holographic",
+ "bincode",
+ "dirs",
+ "fs2",
+ "fsys",
+ "getrandom 0.2.17",
+ "gix",
+ "hex",
+ "libc",
+ "reflink-copy",
+ "regex",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-capture",
+ "tracedecay-code-extraction",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
+ "tracing",
+ "tree-sitter",
+ "windows-sys 0.61.2",
+ "xattr",
 ]
 
 [[package]]

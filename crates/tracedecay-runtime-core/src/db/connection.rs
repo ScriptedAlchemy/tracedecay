@@ -22,7 +22,9 @@ use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeRequestProbeV1,
 };
 
-use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
+// The daemon registry owns the physical runtime and sits above this
+// kernel; the facade retains it through the `StoreRuntimeSource` port.
+use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
 #[cfg(any(test, feature = "test-transport"))]
 use crate::daemon::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
@@ -685,7 +687,7 @@ impl Database {
     ) -> Result<Self> {
         let writable = access.is_writable();
         let authority = if writable {
-            if !runtime.physical_snapshot().writer_present {
+            if !runtime.writer_present() {
                 return Err(TraceDecayError::Database {
                     message: "registered runtime has no physical writer".to_owned(),
                     operation: "publish database runtime".to_owned(),

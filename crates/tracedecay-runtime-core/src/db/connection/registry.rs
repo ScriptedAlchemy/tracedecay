@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
-use crate::{
-    daemon::store_runtime::registry::StoreRuntimeHandle,
-    db::{DatabaseAuthority, engine::Connection},
-    errors::TraceDecayError,
-};
+use crate::db::{DatabaseAuthority, engine::Connection};
+use crate::errors::TraceDecayError;
+// The daemon registry owns the physical runtime and sits above this
+// kernel; the facade retains it through the `StoreRuntimeSource` port.
+use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
 
 pub(super) struct DatabaseInner {
     /// Reader-only channel exposed through the retained database facade.
@@ -47,13 +47,13 @@ impl DatabaseInner {
             )
         })?;
         if let Some(authority) = authority.as_ref()
-            && runtime.locator().path() != authority.canonical_database_path()
+            && runtime.canonical_path() != authority.canonical_database_path()
         {
             return Err(database_registry_error(
                 "publish canonical database runtime",
                 format!(
                     "registered locator {} does not match retained database authority {}",
-                    runtime.locator().path().display(),
+                    runtime.canonical_path().display(),
                     authority.canonical_database_path().display()
                 ),
             ));
@@ -91,7 +91,7 @@ impl DatabaseInner {
         Ok(Self {
             conn: read_conn,
             write_conn,
-            canonical_path: runtime.locator().path().to_path_buf(),
+            canonical_path: runtime.canonical_path().to_path_buf(),
             _runtime: runtime,
             writable,
             opened_file_identity,
