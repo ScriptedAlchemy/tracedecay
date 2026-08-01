@@ -31,11 +31,27 @@ use crate::dashboard::{
 
 struct DashboardInvocationExecutorAdapter {
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    configuration_batch_contract: tracedecay_application::ResultContractRef,
 }
 
 impl DashboardInvocationExecutorAdapter {
-    fn new(executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>) -> Self {
-        Self { executor }
+    fn new(executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>) -> Result<Self> {
+        let operation =
+            tracedecay_application::configuration_surface_operation("configuration_batch")
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "dashboard configuration batch application contract is invalid: {error}"
+                    ),
+                })?
+                .ok_or_else(|| TraceDecayError::Config {
+                    message:
+                        "dashboard configuration batch application operation is not registered"
+                            .to_owned(),
+                })?;
+        Ok(Self {
+            executor,
+            configuration_batch_contract: operation.result_contract().clone(),
+        })
     }
 }
 
@@ -72,13 +88,14 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         })
     }
 
-    fn apply_configuration_batch<'a>(
-        &'a self,
+    fn apply_configuration_batch(
+        &self,
         request_id: RequestId,
         mutations: Vec<DirectConfigurationMutation>,
         expected_revision: ConfigurationRevisionId,
-    ) -> DashboardConfigurationApplyFuture<'a> {
+    ) -> DashboardConfigurationApplyFuture<'_> {
         let executor = Arc::clone(&self.executor);
+        let configuration_batch_contract = self.configuration_batch_contract.clone();
         let mut direct_mutations = Vec::new();
         for mutation in mutations {
             append_direct_configuration_mutations(mutation, &mut direct_mutations);
@@ -102,7 +119,10 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
             .await
             {
                 Ok(result) => result.result.map(|_| ()),
-                Err(_) => Err(dashboard_configuration_unavailable(error_request_id)),
+                Err(_) => Err(dashboard_configuration_unavailable(
+                    configuration_batch_contract,
+                    error_request_id,
+                )),
             }
         })
     }
@@ -140,12 +160,12 @@ fn append_direct_configuration_mutations(
     }
 }
 
-fn dashboard_configuration_unavailable(request_id: RequestId) -> ApplicationProblemEnvelope {
-    let operation = tracedecay_application::configuration_surface_operation("configuration_batch")
-        .expect("configuration batch application contract is valid")
-        .expect("configuration batch application operation is registered");
+fn dashboard_configuration_unavailable(
+    contract: tracedecay_application::ResultContractRef,
+    request_id: RequestId,
+) -> ApplicationProblemEnvelope {
     ApplicationProblemEnvelope::new(
-        operation.result_contract().clone(),
+        contract,
         request_id,
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.surface.unavailable".to_owned(),
@@ -259,10 +279,12 @@ pub(super) async fn handle_dashboard(
             })?;
             let dashboard_project_graph_resolver = retained_project_graph_resolver
                 .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
-            let application_invocation_executor = application_invocation_executor.map(|executor| {
-                Arc::new(DashboardInvocationExecutorAdapter::new(executor))
-                    as Arc<dyn DashboardApplicationRuntime>
-            });
+            let application_invocation_executor = application_invocation_executor
+                .map(|executor| {
+                    DashboardInvocationExecutorAdapter::new(executor)
+                        .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
+                })
+                .transpose()?;
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
