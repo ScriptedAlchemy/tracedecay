@@ -251,6 +251,62 @@ impl Database {
         }
     }
 
+    /// Returns all outgoing edges for many source nodes in a single query.
+    ///
+    /// Mirrors `get_incoming_edges_bulk` but keys off `source` instead of
+    /// `target`: callers that would otherwise loop `get_outgoing_edges` once
+    /// per source node (e.g. `TraceDecay::get_impls`) can batch them into one
+    /// round-trip.
+    ///
+    /// When `kinds` is empty, all edge kinds are returned.
+    pub async fn get_outgoing_edges_bulk(
+        &self,
+        source_ids: &[String],
+        kinds: &[EdgeKind],
+    ) -> Result<Vec<Edge>> {
+        if source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let source_placeholders: Vec<String> =
+            (1..=source_ids.len()).map(|i| format!("?{i}")).collect();
+        let mut param_values: Vec<Value> = source_ids
+            .iter()
+            .map(|id| Value::Text(id.clone()))
+            .collect();
+
+        let sql = if kinds.is_empty() {
+            format!(
+                "SELECT source, target, kind, line FROM edges WHERE source IN ({})",
+                source_placeholders.join(", ")
+            )
+        } else {
+            let kind_placeholders: Vec<String> = (1..=kinds.len())
+                .map(|i| format!("?{}", source_ids.len() + i))
+                .collect();
+            for k in kinds {
+                param_values.push(Value::Text(k.as_str().to_string()));
+            }
+            format!(
+                "SELECT source, target, kind, line FROM edges \
+                 WHERE source IN ({}) AND kind IN ({})",
+                source_placeholders.join(", "),
+                kind_placeholders.join(", ")
+            )
+        };
+
+        let mut rows = self
+            .engine_conn()
+            .query(&sql, params_from_iter(param_values))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query bulk outgoing edges: {e}"),
+                operation: "get_outgoing_edges_bulk".to_string(),
+            })?;
+
+        collect_rows(&mut rows, row_to_edge, "get_outgoing_edges_bulk").await
+    }
+
     /// Returns all incoming edges for many target nodes in a single query.
     ///
     /// Used by the bulk `callers_for` MCP tool: clients pass a list of item
