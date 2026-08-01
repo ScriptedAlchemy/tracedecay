@@ -18,7 +18,7 @@ use super::{
     ArtifactState, CheckpointWriter, MigrationApplyReport, MigrationArtifact,
     MigrationCleanupSourcesReport, MigrationDestination, MigrationEndpoint, MigrationExportReport,
     MigrationManifest, MigrationPlanOptions, MigrationProtocol, MigrationRollbackReport,
-    MigrationRollbackState, save_manifest as write_checkpoint, validate_migration_id,
+    MigrationRollbackState, save_manifest_with_writer as write_checkpoint, validate_migration_id,
 };
 /// `crate::migrate::manifest::*` used to expose the final-v2 vocabulary
 /// alongside the manifest plan, so this module keeps re-exporting it.
