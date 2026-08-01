@@ -24,8 +24,8 @@ use crate::config::{
     RuntimeConfigurationFuture, RuntimeConfigurationTarget,
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 use super::authorization::PolicyBackedConfigurationMutationAuthorization;
 use super::ephemeral_grants::EphemeralConfigurationGrantAuthority;

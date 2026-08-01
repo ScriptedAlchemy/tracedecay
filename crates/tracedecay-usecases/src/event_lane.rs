@@ -19,7 +19,7 @@ use tracedecay_domain::{
 };
 
 use crate::observability::RegisteredObservabilityPortV1;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 
 const BUS_CAPACITY: usize = 1024;
 const RETAINED_ACTIVITY_CAPACITY: usize = 5_000;

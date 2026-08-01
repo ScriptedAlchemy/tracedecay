@@ -17,7 +17,7 @@ use crate::feedback::observations::{
     FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
     FeedbackSystemMetricUnitV1, Plan26CoverageV1,
 };
-use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
+use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 
 const EVENT_LIMIT: usize = 10_000;
 const OBSERVABILITY_SCAN_PAGE: usize = 64;
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_horizon_scans_past_dense_coarse_boundary_rows() {
-        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "observability-exact-horizon",
         )
         .await;

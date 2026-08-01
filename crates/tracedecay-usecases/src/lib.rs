@@ -4,6 +4,9 @@ pub mod advisory;
 pub mod anchor_resolution;
 pub mod api_migration;
 pub mod code_index;
+// Moved down from the root binary's `src/config/`: see `config/mod.rs` and
+// SEAMS.md — root must delete its copies and re-export from here.
+pub mod config;
 pub mod configuration;
 pub mod context;
 pub mod dashboard_diagnostics;
