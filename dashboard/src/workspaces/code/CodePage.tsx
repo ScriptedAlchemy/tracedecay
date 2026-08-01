@@ -6,7 +6,7 @@ import {
   InspectorPanel,
   KeyValueTree,
 } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';

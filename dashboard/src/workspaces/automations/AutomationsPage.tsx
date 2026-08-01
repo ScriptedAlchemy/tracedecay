@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { CircleCheck, CirclePause, CirclePlay } from 'lucide-react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+import { StatTile } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import { type LegacyResult } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';

@@ -38,7 +38,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 
-import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { buildTraceModel, type NeighborsPayload } from '../../viz/trace/model.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { CallChain } from './CallChain.tsx';
