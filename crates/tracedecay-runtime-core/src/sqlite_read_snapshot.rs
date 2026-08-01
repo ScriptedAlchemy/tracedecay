@@ -622,6 +622,26 @@ pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Re
     Ok(connection)
 }
 
+/// Opens `path` through the canonical immutable read-only URI, for callers that
+/// read a database nothing can be writing.
+///
+/// `immutable=1` promises `SQLite` the family cannot change, so it skips locking
+/// and ignores WAL/SHM sidecars entirely. That promise is the caller's to keep:
+/// use this only for a quiesced file the caller owns, never for a live store.
+///
+/// `SQLITE_OPEN_NO_MUTEX` is sound here for the same reason it is in
+/// [`open_read_only_probe`]: `rusqlite::Connection` is not `Sync`, so the
+/// returned connection stays owned by one thread at a time.
+pub fn open_immutable_read_only(path: &Path) -> io::Result<Connection> {
+    Connection::open_with_flags(
+        immutable_uri(path)?,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)
+}
+
 /// Reads `PRAGMA <pragma>` as a non-negative count, or `None` when the pragma
 /// is unavailable or does not answer with an integer.
 ///
