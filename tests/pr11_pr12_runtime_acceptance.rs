@@ -211,7 +211,6 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     }
 }
 
-#[cfg(unix)]
 fn git(project: &Path, args: &[&str]) {
     let output = std::process::Command::new(common::git_program())
         .current_dir(project)
