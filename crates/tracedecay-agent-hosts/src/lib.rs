@@ -16,6 +16,7 @@
 //! rather than a dependency edge are cataloged in `SEAMS.md`.
 
 pub mod agents;
+pub mod analytics;
 pub mod automation;
 pub mod ports;
 
