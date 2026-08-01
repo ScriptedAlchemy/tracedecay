@@ -14,7 +14,7 @@ use crate::root_seam::db::Database;
 use crate::root_seam::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
 use crate::root_seam::memory::store::MemoryStore;
 
-pub(crate) fn source_integer(columns: &[String], values: &[Value], name: &str) -> Option<i64> {
+pub fn source_integer(columns: &[String], values: &[Value], name: &str) -> Option<i64> {
     let value = values.get(columns.iter().position(|column| column == name)?)?;
     match value {
         Value::Integer(value) => Some(*value),
@@ -773,7 +773,7 @@ where
     Ok(rows_copied)
 }
 
-pub(crate) async fn merge_memory_snapshot<S>(source: &S, target: &Database) -> Result<u64, String>
+pub async fn merge_memory_snapshot<S>(source: &S, target: &Database) -> Result<u64, String>
 where
     S: QueryExecutor + ?Sized,
 {

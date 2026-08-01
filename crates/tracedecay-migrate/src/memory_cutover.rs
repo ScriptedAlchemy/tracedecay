@@ -197,7 +197,7 @@ pub async fn apply(
 /// project-store writers for the duration; source generations are still
 /// verified before the receipt is published, so external or ambiguous changes
 /// fail closed.
-pub(crate) async fn apply_for_retained_project(graph: &TraceDecay) -> Result<MemoryCutoverReport> {
+pub async fn apply_for_retained_project(graph: &TraceDecay) -> Result<MemoryCutoverReport> {
     let options = MemoryCutoverOptions {
         project_root: graph.project_root().to_path_buf(),
         profile_root: graph.retained_profile_root()?,

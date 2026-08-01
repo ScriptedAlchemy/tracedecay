@@ -16,7 +16,7 @@ use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
 use crate::root_seam::sqlite_read_snapshot::{SnapshotConnection, SnapshotDatabase};
 
-pub(crate) async fn verify_source<Q>(source: &Q) -> Result<(), String>
+pub async fn verify_source<Q>(source: &Q) -> Result<(), String>
 where
     Q: QueryExecutor + ?Sized,
 {
@@ -512,7 +512,7 @@ async fn migrate_candidate_snapshot(
     })
 }
 
-pub(crate) async fn migrate_legacy_state_store(
+pub async fn migrate_legacy_state_store(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     profile_dir: &Path,
@@ -581,7 +581,7 @@ pub(crate) async fn migrate_legacy_state_store(
     })
 }
 
-pub(crate) async fn migrate_candidate(
+pub async fn migrate_candidate(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     candidate: &LegacyStoreCandidate,

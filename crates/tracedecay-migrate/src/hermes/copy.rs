@@ -9,15 +9,15 @@ use sha2::{Digest, Sha256};
 
 use crate::root_seam::db::engine::{Executor, QueryExecutor, Value, params, params_from_iter};
 
-pub(crate) const MIGRATION_QUERY_PAGE_ROWS: i64 = 256;
-pub(crate) const MAX_MIGRATION_MATERIALIZED_ROWS: usize = 1_000_000;
+pub const MIGRATION_QUERY_PAGE_ROWS: i64 = 256;
+pub const MAX_MIGRATION_MATERIALIZED_ROWS: usize = 1_000_000;
 const MAX_MIGRATED_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
-pub(crate) fn quote_identifier(identifier: &str) -> String {
+pub fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-pub(crate) fn compatible_columns(
+pub fn compatible_columns(
     source_columns: Vec<String>,
     target_columns: &[String],
     excluded: &[&str],
@@ -40,10 +40,7 @@ pub(crate) fn compatible_columns(
         .collect())
 }
 
-pub(crate) fn ensure_materialized_row_room(
-    current_rows: usize,
-    collection: &str,
-) -> Result<(), String> {
+pub fn ensure_materialized_row_room(current_rows: usize, collection: &str) -> Result<(), String> {
     if current_rows >= MAX_MIGRATION_MATERIALIZED_ROWS {
         Err(format!(
             "source {collection} exceeds the migration materialization ceiling of \
@@ -54,7 +51,7 @@ pub(crate) fn ensure_materialized_row_room(
     }
 }
 
-pub(crate) async fn table_columns<Q>(conn: &Q, table: &str) -> Result<Vec<String>, String>
+pub async fn table_columns<Q>(conn: &Q, table: &str) -> Result<Vec<String>, String>
 where
     Q: QueryExecutor + ?Sized,
 {
@@ -77,7 +74,7 @@ where
     Ok(columns)
 }
 
-pub(crate) async fn count_exact_rows<Q>(
+pub async fn count_exact_rows<Q>(
     target: &Q,
     table: &str,
     columns: &[String],
@@ -111,7 +108,7 @@ where
 
 /// Exact duplicates are explicit idempotent skips. Any uniqueness collision
 /// with different data is an error, never an `INSERT OR IGNORE` data loss.
-pub(crate) async fn insert_row_or_skip_exact<E>(
+pub async fn insert_row_or_skip_exact<E>(
     target: &E,
     table: &str,
     columns: &[String],
@@ -169,7 +166,7 @@ where
         })
 }
 
-pub(crate) async fn copy_table<S, T, F>(
+pub async fn copy_table<S, T, F>(
     source: &S,
     target: &T,
     table: &str,
@@ -248,7 +245,7 @@ where
     Ok(inserted)
 }
 
-pub(crate) fn remap_store_id_columns(
+pub fn remap_store_id_columns(
     columns: &[String],
     values: &mut [Value],
     id_map: &HashMap<i64, i64>,
@@ -269,7 +266,7 @@ pub(crate) fn remap_store_id_columns(
     Ok(())
 }
 
-pub(crate) fn remap_summary_source(
+pub fn remap_summary_source(
     columns: &[String],
     values: &mut [Value],
     id_map: &HashMap<i64, i64>,
@@ -297,7 +294,7 @@ pub(crate) fn remap_summary_source(
     Ok(())
 }
 
-pub(crate) async fn copy_raw_messages<S, T>(
+pub async fn copy_raw_messages<S, T>(
     source: &S,
     target: &T,
 ) -> Result<(u64, HashMap<i64, i64>), String>
@@ -520,7 +517,7 @@ fn copy_file_bounded(
     Ok(hex::encode(hash.finalize()))
 }
 
-pub(crate) async fn copy_external_payload_files<S>(
+pub async fn copy_external_payload_files<S>(
     source: &S,
     source_db_path: &Path,
     target_db_path: &Path,
@@ -635,7 +632,7 @@ where
     Ok(())
 }
 
-pub(crate) fn remove_created_payloads(paths: &[PathBuf]) {
+pub fn remove_created_payloads(paths: &[PathBuf]) {
     for path in paths.iter().rev() {
         let _ = fs::remove_file(path);
     }

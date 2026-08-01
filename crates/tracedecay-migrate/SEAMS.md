@@ -182,7 +182,7 @@ referenced kernel item, i.e. what `root_seam::<module>` must resolve.
 | `sessions::lcm::LCM_SCHEMA_VERSION` | `consolidate/sqlite.rs:865`, `consolidate/sqlite.rs:870`, `consolidate/tests/session_merge.rs:102`, `consolidate/tests/session_merge.rs:135`, `consolidate/tests/session_merge.rs:205`, `hermes.rs:2138`, `hermes/pipeline.rs:343`, `hermes/pipeline.rs:346` |
 | `sessions::lcm::payload::expand_payload` | `consolidate/tests/session_merge.rs:651` |
 | `sessions::lcm::payload::upsert_payload_metadata` | `consolidate/tests/session_merge.rs:593` |
-| `sessions::lcm::payload::validate_payload_ref` | `consolidate/sqlite/verify.rs:656`, `hermes/copy.rs:587` |
+| `sessions::lcm::payload::validate_payload_ref` | `consolidate/sqlite/verify.rs:656`, `hermes/copy.rs:584` |
 | `sessions::lcm::payload::write_external_payload` | `consolidate/tests/session_merge.rs:577` |
 | `sessions::lcm::schema::ensure_lcm_schema_in_transaction` | `consolidate/sqlite.rs:801` |
 | `sessions::lcm::schema::rebuild_raw_fts` | `consolidate/sqlite.rs:736`, `consolidate/sqlite.rs:777` |

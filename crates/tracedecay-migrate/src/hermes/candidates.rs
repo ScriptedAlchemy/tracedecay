@@ -6,16 +6,16 @@ use std::path::{Path, PathBuf};
 use super::resolution::same_path;
 use crate::hermes::{LegacyHermesMigration, LegacyHermesMigrationIssue};
 
-pub(crate) struct LegacyStoreCandidate {
-    pub(crate) profile_dir: PathBuf,
-    pub(crate) source_db: PathBuf,
-    pub(crate) source_sessions_db: Option<PathBuf>,
-    pub(crate) source_memory_db: Option<PathBuf>,
-    pub(crate) legacy_registry_project_id: Option<String>,
+pub struct LegacyStoreCandidate {
+    pub profile_dir: PathBuf,
+    pub source_db: PathBuf,
+    pub source_sessions_db: Option<PathBuf>,
+    pub source_memory_db: Option<PathBuf>,
+    pub legacy_registry_project_id: Option<String>,
 }
 
 impl LegacyStoreCandidate {
-    pub(crate) fn primary_path(&self) -> &Path {
+    pub fn primary_path(&self) -> &Path {
         &self.source_db
     }
 }
@@ -28,7 +28,7 @@ fn same_optional_path(left: Option<&Path>, right: Option<&Path>) -> bool {
     }
 }
 
-pub(crate) fn legacy_profile_dirs_for_homes(hermes_homes: &[PathBuf]) -> Vec<PathBuf> {
+pub fn legacy_profile_dirs_for_homes(hermes_homes: &[PathBuf]) -> Vec<PathBuf> {
     let mut profiles = hermes_homes
         .iter()
         .flat_map(|home| legacy_profile_dirs(home))
@@ -38,7 +38,7 @@ pub(crate) fn legacy_profile_dirs_for_homes(hermes_homes: &[PathBuf]) -> Vec<Pat
     profiles
 }
 
-pub(crate) fn legacy_profile_dirs(hermes_home: &Path) -> Vec<PathBuf> {
+pub fn legacy_profile_dirs(hermes_home: &Path) -> Vec<PathBuf> {
     let mut profiles = vec![hermes_home.to_path_buf()];
     if !hermes_home.is_dir() {
         return profiles;
@@ -58,17 +58,17 @@ pub(crate) fn legacy_profile_dirs(hermes_home: &Path) -> Vec<PathBuf> {
     profiles
 }
 
-pub(crate) enum CandidateOutcome {
+pub enum CandidateOutcome {
     Migrated(LegacyHermesMigration, Option<LegacyHermesMigrationIssue>),
     AlreadyMigrated(LegacyHermesMigration, Option<LegacyHermesMigrationIssue>),
 }
 
-pub(crate) enum CandidateError {
+pub enum CandidateError {
     Unresolved(String),
     Failed(String),
 }
 
-pub(crate) fn legacy_store_candidates(
+pub fn legacy_store_candidates(
     profiles: &[PathBuf],
     tracedecay_profile_root: &Path,
 ) -> Vec<LegacyStoreCandidate> {

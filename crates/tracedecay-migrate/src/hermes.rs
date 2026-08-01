@@ -19,15 +19,15 @@ mod pipeline;
 mod resolution;
 mod session_merge;
 
-pub(crate) use candidates::{
+pub use candidates::{
     CandidateError, CandidateOutcome, legacy_profile_dirs_for_homes, legacy_store_candidates,
 };
-pub(crate) use copy::{
+pub use copy::{
     copy_external_payload_files, copy_raw_messages, copy_table, remap_store_id_columns,
     remap_summary_source, remove_created_payloads,
 };
-pub(crate) use pipeline::{migrate_candidate, migrate_legacy_state_store};
-pub(crate) use resolution::same_path;
+pub use pipeline::{migrate_candidate, migrate_legacy_state_store};
+pub use resolution::same_path;
 
 const LEDGER_DIR: &str = "migration-ledger/hermes-legacy";
 const COPIED_TABLES: &[&str] = &[
