@@ -458,8 +458,7 @@ fn is_filesystem_root(path: &Path) -> bool {
 }
 
 fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDecayError {
-    let message = error.to_string();
-    if message.contains("before deadline") || message.contains("deadline already elapsed") {
+    if tracedecay::daemon::error_message_is_read_deadline(&error.to_string()) {
         tool_timeout_error(tool_name)
     } else {
         error

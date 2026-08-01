@@ -511,13 +511,7 @@ async fn daemon_project_status_with_deadline(
     .await;
     let admitted = match admission {
         Ok(_) => true,
-        Err(error)
-            if error
-                .to_string()
-                .contains(crate::daemon::PROJECT_WARMING_RETRY_HINT) =>
-        {
-            false
-        }
+        Err(error) if crate::daemon::error_message_is_project_warming(&error.to_string()) => false,
         Err(error) => return Err(error),
     };
     if report_admission && admitted {
@@ -771,9 +765,9 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         crate::errors::TraceDecayError::Config { message } => {
             (message.contains("daemon socket") && message.contains("not available"))
                 || message.contains("still warming up")
-                || message.contains("warming in the background")
+                || crate::daemon::error_message_is_project_warming(message)
                 || message.contains("restart grace")
-                || message.contains("timed out during read before deadline")
+                || crate::daemon::error_message_is_read_deadline(message)
                 || message.contains(RUNTIME_TELEMETRY_PENDING)
         }
         crate::errors::TraceDecayError::ProjectRoute { retryable, .. } => *retryable,

@@ -1470,23 +1470,49 @@ fn snapshot_feedback_registration(
         .collect()
 }
 
+/// Re-resolves the registration inventory and pins it to a recorded snapshot.
+/// `inventory_changed` carries the caller's own wording for a stale inventory.
+fn feedback_registration_paths_for_state(
+    home: &Path,
+    integration: &dyn tracedecay::agents::AgentIntegration,
+    registration_files: &[FeedbackRegistrationFileState],
+    inventory_changed: &str,
+) -> tracedecay::errors::Result<Vec<PathBuf>> {
+    let paths = feedback_registration_paths(home, integration);
+    if paths.len() == registration_files.len() {
+        Ok(paths)
+    } else {
+        Err(tracedecay::errors::TraceDecayError::Config {
+            message: inventory_changed.to_string(),
+        })
+    }
+}
+
+fn feedback_registration_path<'a>(
+    paths: &'a [PathBuf],
+    file: &FeedbackRegistrationFileState,
+) -> tracedecay::errors::Result<&'a Path> {
+    paths
+        .get(file.path_index)
+        .map(PathBuf::as_path)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "feedback registration path index is invalid".to_string(),
+        })
+}
+
 fn capture_feedback_applied_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
     registration_files: &mut [FeedbackRegistrationFileState],
 ) -> tracedecay::errors::Result<()> {
-    let paths = feedback_registration_paths(home, integration);
-    if paths.len() != registration_files.len() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "feedback registration inventory changed during apply".to_string(),
-        });
-    }
+    let paths = feedback_registration_paths_for_state(
+        home,
+        integration,
+        registration_files,
+        "feedback registration inventory changed during apply",
+    )?;
     for file in registration_files {
-        let path = paths.get(file.path_index).ok_or_else(|| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: "feedback registration path index is invalid".to_string(),
-            }
-        })?;
+        let path = feedback_registration_path(&paths, file)?;
         if feedback_path_digest(path)? != file.path_digest {
             return Err(tracedecay::errors::TraceDecayError::Config {
                 message: "feedback registration path identity changed during apply".to_string(),
@@ -1502,18 +1528,14 @@ fn validate_feedback_registration_snapshot(
     integration: &dyn tracedecay::agents::AgentIntegration,
     registration_files: &[FeedbackRegistrationFileState],
 ) -> tracedecay::errors::Result<()> {
-    let paths = feedback_registration_paths(home, integration);
-    if paths.len() != registration_files.len() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "feedback registration inventory changed before apply".to_string(),
-        });
-    }
+    let paths = feedback_registration_paths_for_state(
+        home,
+        integration,
+        registration_files,
+        "feedback registration inventory changed before apply",
+    )?;
     for file in registration_files {
-        let path = paths.get(file.path_index).ok_or_else(|| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: "feedback registration path index is invalid".to_string(),
-            }
-        })?;
+        let path = feedback_registration_path(&paths, file)?;
         if feedback_path_digest(path)? != file.path_digest
             || feedback_file_observed_state(path)?
                 != feedback_observed_state_for_contents(
@@ -1539,18 +1561,14 @@ fn validate_feedback_registration_restore(
     effect_started: bool,
     intent_root: Option<&Path>,
 ) -> tracedecay::errors::Result<Vec<PathBuf>> {
-    let paths = feedback_registration_paths(home, integration);
-    if paths.len() != registration_files.len() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "feedback registration inventory no longer matches rollback state".to_string(),
-        });
-    }
+    let paths = feedback_registration_paths_for_state(
+        home,
+        integration,
+        registration_files,
+        "feedback registration inventory no longer matches rollback state",
+    )?;
     for file in registration_files {
-        let path = paths.get(file.path_index).ok_or_else(|| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: "feedback registration path index is invalid".to_string(),
-            }
-        })?;
+        let path = feedback_registration_path(&paths, file)?;
         if feedback_path_digest(path)? != file.path_digest {
             return Err(tracedecay::errors::TraceDecayError::Config {
                 message: "feedback registration path identity no longer matches rollback state"
@@ -2641,26 +2659,26 @@ pub(crate) async fn handle_host_bundle_recovery_command(
     Ok(())
 }
 
+/// Inverse of `integration_id_for_host`, derived from the stock host list so
+/// the two cannot drift apart.
+///
+/// That mapping is many-to-one, so the alias hosts that share an id with a
+/// canonical one are skipped: `cursor` resolves to the desktop host and `cline`
+/// to the single Cline host rather than the family.
 fn host_kind_for_agent(
     agent: &str,
 ) -> tracedecay::errors::Result<tracedecay::agents::host_bundle_v2::HostKindV1> {
     use tracedecay::agents::host_bundle_v2::HostKindV1;
 
-    match agent {
-        "claude" => Ok(HostKindV1::ClaudeCode),
-        "cursor" => Ok(HostKindV1::CursorDesktop),
-        "codex" => Ok(HostKindV1::Codex),
-        "hermes" => Ok(HostKindV1::Hermes),
-        "kiro" => Ok(HostKindV1::Kiro),
-        "cline" => Ok(HostKindV1::Cline),
-        "roo-code" => Ok(HostKindV1::RooCode),
-        "kilo" => Ok(HostKindV1::Kilo),
-        "kimi" => Ok(HostKindV1::KimiCode),
-        "opencode" => Ok(HostKindV1::OpenCode),
-        _ => Err(tracedecay::errors::TraceDecayError::Config {
+    const ALIASED_HOSTS: [HostKindV1; 2] = [HostKindV1::CursorCloud, HostKindV1::ClineFamily];
+
+    tracedecay::agents::host_bundle_v2::stock_host_kinds()
+        .into_iter()
+        .filter(|host| !ALIASED_HOSTS.contains(host))
+        .find(|host| tracedecay::agents::integration_id_for_host(*host) == agent)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
             message: format!("agent {agent:?} has no embedded first-party host component"),
-        }),
-    }
+        })
 }
 
 fn host_bundle_error(
