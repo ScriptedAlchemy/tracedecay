@@ -386,4 +386,11 @@ impl GraphRuntimePort for TraceDecay {
     ) -> GraphFuture<'a, ()> {
         Box::pin(TraceDecay::recover_source_edit_preimages(self, files))
     }
+
+    fn commit_source_edit_postimages<'a>(
+        &'a self,
+        files: &'a [PlannedSourceEditFile],
+    ) -> GraphFuture<'a, ()> {
+        Box::pin(TraceDecay::commit_source_edit_postimages(self, files))
+    }
 }
