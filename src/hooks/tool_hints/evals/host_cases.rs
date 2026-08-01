@@ -1,4 +1,5 @@
-use super::*;
+use super::super::*;
+use super::harness::*;
 
 pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
     vec![
