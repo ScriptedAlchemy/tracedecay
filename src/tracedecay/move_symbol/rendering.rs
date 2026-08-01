@@ -6,7 +6,10 @@
 
 use std::collections::HashSet;
 
-use super::super::edits::{MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff};
+use super::super::edits::{
+    LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
+    classify_leading_line, splice_lines,
+};
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
@@ -61,37 +64,22 @@ pub(super) fn insert_imports(dest_source: &str, imports: &[String]) -> String {
     let lines: Vec<&str> = dest_source.lines().collect();
     let mut idx = 0;
     while idx < lines.len() {
-        let t = lines[idx].trim();
         // Stop before an OUTER doc-comment block (`///` or `/**`): it documents
         // the first item, and inserting a `use` between the doc and its item
-        // detaches the doc. Inner docs (`//!`) and plain comments (`//`) stay in
-        // the header region. Check `///`/`/**` first since `///` also matches the
-        // generic `//` prefix below.
-        if t.starts_with("///") || t.starts_with("/**") {
-            break;
-        }
-        let header = t.is_empty()
-            || t.starts_with("//!")
-            || t.starts_with("//")
-            || t.starts_with("use ")
-            || t.starts_with("pub use ")
-            || t.starts_with("extern crate");
-        if header {
-            idx += 1;
-        } else {
-            break;
+        // detaches the doc. Inner docs (`//!`), plain comments (`//`), blank
+        // lines, and existing imports stay in the header region.
+        match classify_leading_line(lines[idx]) {
+            LeadingKind::OuterDoc => break,
+            LeadingKind::Blank | LeadingKind::InnerDoc | LeadingKind::LineComment => idx += 1,
+            LeadingKind::UseImport => idx += 1,
+            LeadingKind::BlockComment | LeadingKind::Attribute | LeadingKind::Code => break,
         }
     }
-    let mut rebuilt: Vec<String> = lines[..idx].iter().map(|s| (*s).to_string()).collect();
-    for imp in imports {
-        rebuilt.push(imp.clone());
-    }
-    rebuilt.extend(lines[idx..].iter().map(|s| (*s).to_string()));
-    let mut out = rebuilt.join("\n");
-    if dest_source.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+    let mut rebuilt: Vec<&str> = Vec::with_capacity(lines.len() + imports.len());
+    rebuilt.extend_from_slice(&lines[..idx]);
+    rebuilt.extend(imports.iter().map(String::as_str));
+    rebuilt.extend_from_slice(&lines[idx..]);
+    splice_lines(&rebuilt, dest_source.ends_with('\n'))
 }
 
 /// Drops imports already present verbatim in the destination and de-duplicates

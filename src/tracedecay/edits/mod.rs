@@ -76,6 +76,8 @@ pub(in crate::tracedecay) use plan::{
     capture_planned_source_edit, publish_planned_source_edit, validate_planned_source_edit,
 };
 pub(in crate::tracedecay) use preview::{
-    MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
+    LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
+    classify_leading_line, edit_success_message,
 };
+pub(in crate::tracedecay) use primitives::{LeadingBlock, item_line_span, splice_lines};
 pub(in crate::tracedecay) use symbols::resolve_symbol_for_edit;

@@ -1,7 +1,61 @@
 //! Dry-run preview rendering shared by every edit primitive: a bounded
 //! single-hunk diff of the changed region, the success-message wrapper that
-//! marks dry runs, and the leading-doc/attr heuristic `replace_symbol` uses
-//! to decide whether to warn about dropped documentation.
+//! marks dry runs, the leading-doc/attr heuristic `replace_symbol` uses to
+//! decide whether to warn about dropped documentation, and the single line
+//! classifier that heuristic shares with `move_symbol`'s header scanner and
+//! its inner-doc skip loop.
+
+/// What a single source line looks like when scanning a file's leading
+/// region. One classifier shared by every place that used to hand-roll its
+/// own prefix checks: [`leading_doc_or_attr`] (is the first non-blank line
+/// documentation?), `move_symbol`'s import-insertion header scanner (which
+/// leading lines belong to the header vs. the first item), and its `//!`
+/// skip loop (never let a moved span start on an inner module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::tracedecay) enum LeadingKind {
+    /// Empty (after trimming leading whitespace).
+    Blank,
+    /// Inner doc comment (`//!`) — documents the *enclosing* item/module.
+    InnerDoc,
+    /// Outer doc comment (`///` or `/**`) — documents the *next* item.
+    OuterDoc,
+    /// Plain line comment (`//`, but not `///`/`//!`).
+    LineComment,
+    /// Block comment (`/*`, but not `/**`).
+    BlockComment,
+    /// Attribute (`#[` or `#!`).
+    Attribute,
+    /// `use`, `pub use`, or `extern crate`.
+    UseImport,
+    /// Anything else (real code).
+    Code,
+}
+
+/// Classifies `line` (leading-whitespace-insensitive) into the kind of
+/// leading-region content it looks like.
+pub(in crate::tracedecay) fn classify_leading_line(line: &str) -> LeadingKind {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() {
+        LeadingKind::Blank
+    } else if trimmed.starts_with("//!") {
+        LeadingKind::InnerDoc
+    } else if trimmed.starts_with("///") || trimmed.starts_with("/**") {
+        LeadingKind::OuterDoc
+    } else if trimmed.starts_with("//") {
+        LeadingKind::LineComment
+    } else if trimmed.starts_with("/*") {
+        LeadingKind::BlockComment
+    } else if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+        LeadingKind::Attribute
+    } else if trimmed.starts_with("use ")
+        || trimmed.starts_with("pub use ")
+        || trimmed.starts_with("extern crate")
+    {
+        LeadingKind::UseImport
+    } else {
+        LeadingKind::Code
+    }
+}
 
 /// Cheap heuristic: does `source`'s first non-blank line look like a leading
 /// doc-comment (`//`, `///`, `//!`), block comment (`/*`), or attribute
@@ -10,13 +64,17 @@
 pub(in crate::tracedecay) fn leading_doc_or_attr(source: &str) -> bool {
     source
         .lines()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty())
-        .is_some_and(|line| {
-            line.starts_with("//")
-                || line.starts_with("/*")
-                || line.starts_with("#[")
-                || line.starts_with("#!")
+        .map(classify_leading_line)
+        .find(|kind| *kind != LeadingKind::Blank)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                LeadingKind::InnerDoc
+                    | LeadingKind::OuterDoc
+                    | LeadingKind::LineComment
+                    | LeadingKind::BlockComment
+                    | LeadingKind::Attribute
+            )
         })
 }
 
@@ -110,7 +168,47 @@ pub(in crate::tracedecay) fn bounded_region_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{bounded_region_diff, edit_success_message, leading_doc_or_attr};
+    use super::{
+        LeadingKind, bounded_region_diff, classify_leading_line, edit_success_message,
+        leading_doc_or_attr,
+    };
+
+    #[test]
+    fn classify_leading_line_covers_every_kind() {
+        assert_eq!(classify_leading_line(""), LeadingKind::Blank);
+        assert_eq!(classify_leading_line("   \t"), LeadingKind::Blank);
+        assert_eq!(classify_leading_line("//! inner"), LeadingKind::InnerDoc);
+        assert_eq!(classify_leading_line("/// outer"), LeadingKind::OuterDoc);
+        assert_eq!(
+            classify_leading_line("/** block doc */"),
+            LeadingKind::OuterDoc
+        );
+        assert_eq!(classify_leading_line("// plain"), LeadingKind::LineComment);
+        assert_eq!(
+            classify_leading_line("/* block */"),
+            LeadingKind::BlockComment
+        );
+        assert_eq!(classify_leading_line("#[inline]"), LeadingKind::Attribute);
+        assert_eq!(
+            classify_leading_line("#![allow(dead_code)]"),
+            LeadingKind::Attribute
+        );
+        assert_eq!(
+            classify_leading_line("use crate::x;"),
+            LeadingKind::UseImport
+        );
+        assert_eq!(
+            classify_leading_line("pub use crate::x;"),
+            LeadingKind::UseImport
+        );
+        assert_eq!(
+            classify_leading_line("extern crate foo;"),
+            LeadingKind::UseImport
+        );
+        assert_eq!(classify_leading_line("fn f() {}"), LeadingKind::Code);
+        // Leading whitespace never changes the classification.
+        assert_eq!(classify_leading_line("   //! inner"), LeadingKind::InnerDoc);
+    }
 
     #[test]
     fn leading_doc_or_attr_detects_doc_comment() {
