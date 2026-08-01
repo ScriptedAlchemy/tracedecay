@@ -16,7 +16,9 @@ default = []
 # Mirrors the root crate's `token-counting` feature; forwarded by the root.
 token-counting = ["dep:tiktoken-rs"]
 # Test-only transport wiring; mirrors the root crate's `test-transport`.
-test-transport = []
+# Forwards to the kernel so this crate's test targets can reach the hidden
+# `Database::publish_test_runtime` / `DatabaseAuthority::acquire_test` seams.
+test-transport = ["tracedecay-runtime-core/test-transport"]
 
 [dependencies]
 cap-fs-ext = "4.0.2"

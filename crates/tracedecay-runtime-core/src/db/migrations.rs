@@ -356,7 +356,7 @@ pub async fn migrate(database: &crate::db::Database) -> Result<Option<u32>> {
 /// Internal registered-runtime entry point. Public callers migrate the
 /// authority-bound [`crate::db::Database`] facade instead of naming the
 /// private engine connection.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn migrate_connection(conn: &Connection) -> Result<bool> {
     Ok(migrate_inner(conn, false).await?.is_some())
 }
@@ -522,7 +522,7 @@ async fn run_migrations_through(conn: &Transaction, current: u32, target: u32) -
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn migrate_test_connection_to_version(conn: &Connection, target: u32) -> Result<()> {
     if target > LATEST_VERSION {
         return Err(TraceDecayError::Database {

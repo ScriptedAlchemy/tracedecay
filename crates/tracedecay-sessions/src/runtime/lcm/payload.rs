@@ -109,7 +109,7 @@ pub fn write_external_payload_tracked(
     Ok(payload)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn write_external_payload(
     storage_root: &Path,
     provider: &str,
