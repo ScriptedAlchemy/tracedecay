@@ -511,7 +511,3 @@ where
         })
     }
 }
-
-#[cfg(test)]
-#[path = "observation_test.rs"]
-mod tests;

@@ -37,7 +37,7 @@ use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    title_from_messages, TranscriptScopeMatcher,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
@@ -215,14 +215,12 @@ impl KiroSource {
         let Some(location_cwd) = transcript_location_path(path, &self.workspace_storage_dir) else {
             return Ok(None);
         };
-        if let Some(roots) = &self.user_registered_roots {
-            if roots
-                .iter()
-                .any(|root| path_belongs_to_project(&location_cwd, root))
-            {
-                return Ok(None);
-            }
-        } else if !path_belongs_to_project(&location_cwd, project_root) {
+        if !TranscriptScopeMatcher::for_scope(
+            project_root,
+            self.user_registered_roots.as_deref(),
+        )
+        .accepts(Some(&location_cwd))
+        {
             return Ok(None);
         }
 
@@ -285,6 +283,7 @@ fn collect_user_workspace_session_files(
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
+    let scope_matcher = TranscriptScopeMatcher::profile(registered_roots);
     let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
@@ -294,10 +293,7 @@ fn collect_user_workspace_session_files(
             }
             let workspace =
                 decode_kiro_workspace_path(entry.file_name().to_string_lossy().as_ref())?;
-            if registered_roots
-                .iter()
-                .any(|root| path_belongs_to_project(&workspace, root))
-            {
+            if !scope_matcher.accepts(Some(&workspace)) {
                 return None;
             }
             let mtime = entry
@@ -394,6 +390,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
+    let scope_matcher = TranscriptScopeMatcher::project(project_root);
     let mut out = Vec::new();
     let mut matching_workspaces = 0usize;
     for entry in entries.flatten() {
@@ -406,7 +403,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
         else {
             continue;
         };
-        if !path_belongs_to_project(&workspace, project_root) {
+        if !scope_matcher.accepts(Some(&workspace)) {
             continue;
         }
         if matching_workspaces >= MAX_WORKSPACE_DIRS {
@@ -437,6 +434,7 @@ fn collect_agent_storage_files(
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
     };
+    let scope_matcher = TranscriptScopeMatcher::project(project_root);
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -450,7 +448,7 @@ fn collect_agent_storage_files(
         let Some(workspace) = workspace_path_from_hash(workspace_storage_dir, &name) else {
             continue;
         };
-        if !path_belongs_to_project(&workspace, project_root) {
+        if !scope_matcher.accepts(Some(&workspace)) {
             continue;
         }
         let mtime = entry
@@ -496,6 +494,7 @@ fn collect_user_agent_storage_files(
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
     };
+    let scope_matcher = TranscriptScopeMatcher::profile(registered_roots);
     let mut workspace_dirs: Vec<(u64, PathBuf)> = entries
         .flatten()
         .filter_map(|entry| {
@@ -510,10 +509,7 @@ fn collect_user_agent_storage_files(
                 return None;
             }
             let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
-            if registered_roots
-                .iter()
-                .any(|root| path_belongs_to_project(&workspace, root))
-            {
+            if !scope_matcher.accepts(Some(&workspace)) {
                 return None;
             }
             let mtime = entry
