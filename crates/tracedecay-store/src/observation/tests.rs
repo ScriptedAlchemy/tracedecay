@@ -290,3 +290,31 @@ fn alias_collision_is_typed_without_a_partial_commit_receipt() {
             && candidate_anchor_id.as_ref() == second.anchor_id()
     ));
 }
+
+/// The memoized access-policy digest must equal the eager derivation it
+/// replaced, on the cold read that populates the memo and on every warm read
+/// after it, for more than one authority namespace.
+#[test]
+fn memoized_access_policy_digest_equals_eager_derivation() {
+    for authority_namespace in [
+        "memoized-access-policy.alpha.v1",
+        "memoized-access-policy.beta.v1",
+    ] {
+        let expected = PayloadReferenceV1::for_payload(&json!({
+            "domain": "tracedecay.observation-anchor.authorization.v1",
+            "authority": authority_namespace,
+        }))
+        .unwrap()
+        .digest()
+        .as_str()
+        .to_owned();
+        let subject = observation("memo-policy", ObservationScopeV1::Profile);
+
+        for _ in 0..3 {
+            let authorization =
+                build_observation_resolution_authorization_v1(&subject, authority_namespace)
+                    .unwrap();
+            assert_eq!(authorization.access_policy_digest.as_str(), expected);
+        }
+    }
+}
