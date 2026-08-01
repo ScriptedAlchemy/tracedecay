@@ -2996,6 +2996,10 @@ pub(crate) async fn handle_install_command(
 
     let mut installed_names: Vec<String> = Vec::new();
     let mut removed_names: Vec<String> = Vec::new();
+    // Ids this pass actually (re)installed at the current binary version. The
+    // tail uses this to decide whether the pass covered every tracked agent
+    // and may disarm the startup silent reinstall.
+    let mut refreshed_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let project_path = std::env::current_dir().ok();
 
     if let Some(id) = agent {
@@ -3024,6 +3028,7 @@ pub(crate) async fn handle_install_command(
             print_legacy_install_guidance(&id);
         }
         ag.post_install(project_path.as_deref()).await;
+        refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
             let scoped_project_path = validate_codex_automation_project_path()?;
             install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
@@ -3083,6 +3088,7 @@ pub(crate) async fn handle_install_command(
                 print_legacy_install_guidance(id);
             }
             ag.post_install(project_path.as_deref()).await;
+            refreshed_ids.insert(id.clone());
             installed_names.push(ag.name().to_string());
             if !user_cfg.installed_agents.contains(id) {
                 user_cfg.installed_agents.push(id.clone());
@@ -3107,12 +3113,24 @@ pub(crate) async fn handle_install_command(
         }
     }
 
-    user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-    user_cfg
-        .save()
-        .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to save user config: {err}"),
-        })?;
+    // An explicit install pass only refreshes its selection delta, so it may
+    // disarm the startup silent reinstall (`previous_version`) only when every
+    // agent still tracked was (re)installed by this very pass. Anything less
+    // advances `last_installed_version` alone and leaves the arming intact:
+    // after an upgrade, the untouched agents still need the silent refresh.
+    if crate::update_cmd::install_pass_covers_tracked_agents(
+        &user_cfg.installed_agents,
+        &refreshed_ids,
+    ) {
+        crate::update_cmd::record_completed_reinstall_pass(&mut user_cfg)?;
+    } else {
+        user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
+        user_cfg
+            .save()
+            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to save user config: {err}"),
+            })?;
+    }
 
     tracedecay::agents::offer_git_post_commit_hook(&tracedecay_bin);
     Ok(())
@@ -5157,8 +5175,9 @@ mod tests {
             let component_set = canonical_host_component_set(agent, None, 0)
                 .unwrap()
                 .unwrap_or_else(|| panic!("{agent} must ship a canonical component set"));
-            let request = component_set_request(&component_set, HostBundleCliOperation::Install, true)
-                .unwrap();
+            let request =
+                component_set_request(&component_set, HostBundleCliOperation::Install, true)
+                    .unwrap();
             let registration = CompatibilityAgentRegistrationDelegate::new(
                 agent,
                 home.path(),
