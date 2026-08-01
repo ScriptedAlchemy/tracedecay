@@ -164,7 +164,7 @@ impl ProductionDaemon {
             .stderr(Stdio::piped())
             .spawn()
             .expect("daemon should start");
-        let authority = wait_for_authority(&mut daemon, &profile.join("daemon-authority.json"));
+        let authority = wait_for_authority(&mut daemon, &common::daemon_authority_path(&profile));
 
         let context = run_ok(
             isolated(&root, &profile)

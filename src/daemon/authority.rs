@@ -20,6 +20,8 @@ mod windows_acl;
 
 const LOCK_FILE: &str = "daemon-authority.lock";
 const RECORD_FILE: &str = "daemon-authority.json";
+#[cfg(windows)]
+const AUTHORITY_DIRECTORY: &str = "daemon-authority";
 
 fn deserialize_endpoint<'de, D>(deserializer: D) -> std::result::Result<DaemonEndpoint, D::Error>
 where
@@ -85,23 +87,23 @@ impl DaemonAuthority {
         version: &str,
     ) -> Result<Self> {
         #[cfg(windows)]
-        let _ = secure_existing_profile_root(profile_root)?;
+        let _ = validate_existing_profile_root(profile_root)?;
         let profile_root = canonical_identity_path(profile_root)?;
-        #[cfg(windows)]
-        windows_acl::create_private_dir_all(&profile_root)
-            .map_err(|error| config_io("create private", &profile_root, &error))?;
-        #[cfg(not(windows))]
         std::fs::create_dir_all(&profile_root)
             .map_err(|error| config_io("create", &profile_root, &error))?;
-        restrict_directory(&profile_root)?;
+        let authority_root = authority_state_root(&profile_root);
+        #[cfg(windows)]
+        windows_acl::create_private_directory(&authority_root)
+            .map_err(|error| config_io("create private", &authority_root, &error))?;
+        restrict_directory(&authority_root)?;
 
-        let lock_path = profile_root.join(LOCK_FILE);
+        let lock_path = authority_root.join(LOCK_FILE);
         let mut lock = open_private_lock(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
             if !is_lock_contended(&error) {
                 return Err(config_io("lock", &lock_path, &error));
             }
-            let record = read_record_if_present(&profile_root.join(RECORD_FILE))
+            let record = read_record_if_present(&authority_root.join(RECORD_FILE))
                 .ok()
                 .flatten()
                 .map(|record| {
@@ -119,7 +121,7 @@ impl DaemonAuthority {
             });
         }
 
-        let record_path = profile_root.join(RECORD_FILE);
+        let record_path = authority_root.join(RECORD_FILE);
         let prior_record = read_record_if_present(&record_path)?;
         let pinned_identity = match prior_record.as_ref() {
             Some(record) => match (&record.brain_id, &record.profile_id) {
@@ -263,25 +265,37 @@ impl Drop for DaemonAuthority {
 
 pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
     #[cfg(windows)]
-    if !secure_existing_profile_root(profile_root)? {
+    if !validate_existing_profile_root(profile_root)? {
         return Ok(None);
     }
     let profile_root = canonical_identity_path(profile_root)?;
+    let authority_root = authority_state_root(&profile_root);
     #[cfg(windows)]
-    match windows_acl::restrict_directory(&profile_root) {
+    match windows_acl::validate_private_directory(&authority_root) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(config_io("restrict", &profile_root, &error)),
+        Err(error) => return Err(config_io("validate private", &authority_root, &error)),
     }
-    read_record_if_present(&profile_root.join(RECORD_FILE))
+    read_record_if_present(&authority_root.join(RECORD_FILE))
 }
 
 #[cfg(windows)]
-fn secure_existing_profile_root(path: &Path) -> Result<bool> {
-    match windows_acl::restrict_directory(path) {
+fn validate_existing_profile_root(path: &Path) -> Result<bool> {
+    match windows_acl::validate_directory_path(path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(config_io("secure existing profile root", path, &error)),
+        Err(error) => Err(config_io("validate existing profile root", path, &error)),
+    }
+}
+
+fn authority_state_root(profile_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        profile_root.join(AUTHORITY_DIRECTORY)
+    }
+    #[cfg(not(windows))]
+    {
+        profile_root.to_path_buf()
     }
 }
 
@@ -392,7 +406,7 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
 fn open_private_lock(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
-        return windows_acl::open_or_create_private_file(path)
+        return windows_acl::open_or_create_private_lock_file(path)
             .map_err(|error| config_io("open private lock", path, &error));
     }
 
@@ -423,7 +437,8 @@ fn restrict_directory(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn restrict_directory(path: &Path) -> Result<()> {
-    windows_acl::restrict_directory(path).map_err(|error| config_io("restrict", path, &error))
+    windows_acl::validate_private_directory(path)
+        .map_err(|error| config_io("validate private", path, &error))
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -442,7 +457,8 @@ fn restrict_file(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn restrict_file(path: &Path) -> Result<()> {
-    windows_acl::restrict_file(path).map_err(|error| config_io("restrict", path, &error))
+    windows_acl::validate_private_file(path)
+        .map_err(|error| config_io("validate private", path, &error))
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -555,12 +571,14 @@ mod tests {
         let profile = temp.path().join("profile");
         let endpoint = test_endpoint(&profile);
         let first = DaemonAuthority::acquire(&profile, &endpoint, "first").unwrap();
-        let record_path = profile.join(RECORD_FILE);
+        let record_path = first.record_path.clone();
         let live = read_record_if_present(&record_path).unwrap().unwrap();
 
         let contender = DaemonAuthority::acquire(&profile, &endpoint, "contender");
 
-        assert!(contender.is_err());
+        let error = contender.unwrap_err();
+        #[cfg(windows)]
+        assert!(error.to_string().contains("already held"));
         assert_eq!(read_record_if_present(&record_path).unwrap(), Some(live));
         drop(first);
     }
@@ -607,12 +625,40 @@ mod tests {
     fn acl_failure_prevents_authority_record_publication() {
         let temp = tempfile::tempdir().unwrap();
         let profile = temp.path().join("profile");
-        std::fs::create_dir_all(profile.join(LOCK_FILE)).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        let authority_root = authority_state_root(&profile);
+        windows_acl::create_private_directory(&authority_root).unwrap();
+        std::fs::create_dir(authority_root.join(LOCK_FILE)).unwrap();
         let endpoint = test_endpoint(&profile);
 
         let error = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap_err();
 
         assert!(error.to_string().contains(LOCK_FILE));
+        assert!(!authority_root.join(RECORD_FILE).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authority_state_isolated_without_rewriting_profile_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let sentinel = profile.join("unrelated.txt");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        assert!(windows_acl::validate_private_directory(&profile).is_err());
+        let endpoint = test_endpoint(&profile);
+
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        assert!(windows_acl::validate_private_directory(&profile).is_err());
+        let authority_root = authority_state_root(&profile.canonicalize().unwrap());
+        windows_acl::validate_private_directory(&authority_root).unwrap();
+        windows_acl::validate_private_file(&authority.record_path).unwrap();
+        assert_eq!(
+            authority.record_path.parent(),
+            Some(authority_root.as_path())
+        );
         assert!(!profile.join(RECORD_FILE).exists());
     }
 

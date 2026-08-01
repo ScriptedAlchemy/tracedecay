@@ -590,6 +590,19 @@ pub fn daemon_socket_path(home: &Path) -> PathBuf {
     canonical_existing_path(home).join(".tracedecay/daemon.sock")
 }
 
+pub fn daemon_authority_path(profile_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        profile_root
+            .join("daemon-authority")
+            .join("daemon-authority.json")
+    }
+    #[cfg(not(windows))]
+    {
+        profile_root.join("daemon-authority.json")
+    }
+}
+
 pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
     spawn_tracedecay_daemon_with(home, |_| {})
 }
@@ -607,7 +620,7 @@ pub fn spawn_tracedecay_daemon_with(
     std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
     #[cfg(unix)]
     let socket_path = daemon_socket_path(home);
-    let authority_path = profile_root.join("daemon-authority.json");
+    let authority_path = daemon_authority_path(&profile_root);
     #[cfg(not(unix))]
     let portable_daemon_connectable = || {
         std::fs::read(&authority_path)

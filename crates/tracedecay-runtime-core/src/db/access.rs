@@ -610,6 +610,9 @@ pub fn is_isolated_test_path(path: &Path) -> bool {
 /// as dead.
 #[cfg(any(test, feature = "test-transport"))]
 const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
+/// Matches the Windows-only private state directory in `src/daemon/authority.rs`.
+#[cfg(all(windows, any(test, feature = "test-transport")))]
+const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 
 /// Returns true when another process currently holds the profile's exclusive
 /// daemon-authority lock. Used to keep ambient Test opens from mutating a
@@ -617,6 +620,11 @@ const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 /// cfg-gated ambient-Test branch, so the probe carries the same gate.
 #[cfg(any(test, feature = "test-transport"))]
 fn foreign_daemon_authority_held(profile_root: &Path) -> bool {
+    #[cfg(windows)]
+    let lock_path = profile_root
+        .join(DAEMON_AUTHORITY_DIRECTORY)
+        .join(DAEMON_AUTHORITY_LOCK_FILE);
+    #[cfg(not(windows))]
     let lock_path = profile_root.join(DAEMON_AUTHORITY_LOCK_FILE);
     // Probe with a read-only open so a rejected contender mutates zero bytes
     // before exclusive authority is granted.
