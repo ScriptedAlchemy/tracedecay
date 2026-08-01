@@ -214,7 +214,7 @@ impl MigrationManifest {
 /// is published atomically. A missing confirmation token, an unsafe
 /// `migration_id`, or protocol paths that were not derived from the manifest
 /// path are refused before anything is written.
-pub fn save_manifest(
+pub fn save_manifest_with_writer(
     writer: &dyn CheckpointWriter,
     manifest: &MigrationManifest,
 ) -> io::Result<()> {
@@ -564,7 +564,7 @@ mod tests {
         let manifest = manifest_at(dir.path(), "mig-1");
         let writer = RecordingWriter::default();
 
-        save_manifest(&writer, &manifest).expect("save checkpoint");
+        save_manifest_with_writer(&writer, &manifest).expect("save checkpoint");
 
         let calls = writer.calls.borrow().clone();
         assert_eq!(
