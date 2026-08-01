@@ -32,6 +32,8 @@
 //! (`ExecutableBindingV1::request_schema`), so no handwritten payload mirror can
 //! drift from the wire contract.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
