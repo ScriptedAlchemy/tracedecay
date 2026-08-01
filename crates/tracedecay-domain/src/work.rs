@@ -225,11 +225,7 @@ impl WorkEventKind {
                 title,
                 dependencies,
             } => {
-                if title.is_empty()
-                    || title.trim() != title
-                    || title.len() > MAX_WORK_TITLE_BYTES
-                    || title.chars().any(char::is_control)
-                {
+                if !crate::canonical_text::is_canonical_text_within(title, MAX_WORK_TITLE_BYTES) {
                     return Err(WorkContractError::InvalidTitle);
                 }
                 Some(dependencies)
@@ -425,11 +421,7 @@ impl<'de> Deserialize<'de> for WorkProjection {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        if wire.title.is_empty()
-            || wire.title.trim() != wire.title
-            || wire.title.len() > MAX_WORK_TITLE_BYTES
-            || wire.title.chars().any(char::is_control)
-        {
+        if !crate::canonical_text::is_canonical_text_within(&wire.title, MAX_WORK_TITLE_BYTES) {
             return Err(serde::de::Error::custom(WorkContractError::InvalidTitle));
         }
         if wire.dependencies.len() > MAX_WORK_DEPENDENCIES {

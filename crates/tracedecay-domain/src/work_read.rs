@@ -53,11 +53,10 @@ impl WorkProjectionResumeCursorV1 {
         token: impl Into<String>,
     ) -> Result<Self, WorkProjectionReadError> {
         let token = token.into();
-        if token.is_empty()
-            || token.trim() != token
-            || token.len() > MAX_WORK_PROJECTION_CURSOR_BYTES
-            || token.chars().any(char::is_control)
-        {
+        if !crate::canonical_text::is_canonical_text_within(
+            &token,
+            MAX_WORK_PROJECTION_CURSOR_BYTES,
+        ) {
             return Err(WorkProjectionReadError::InvalidCursor);
         }
         Ok(Self {
