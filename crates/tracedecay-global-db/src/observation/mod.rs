@@ -21,7 +21,7 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
-use crate::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use codec::{decode_sequence, storage, storage_message};
 use persist::read_by_observation_id;

@@ -5,7 +5,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
 
-use crate::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use crate::session_temporal_operations::{
     FrozenPublicationReceipt, SANITIZER_VERSION as SUMMARY_PUBLICATION_SANITIZER_VERSION,
     receipt_id as summary_receipt_id,
@@ -71,7 +71,7 @@ fn bounded_row_audit_invariants() -> impl Iterator<Item = &'static Invariant> {
 pub(super) async fn query_has_rows(
     conn: &impl QueryExecutor,
     query: &str,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     // Existence only — but the migration SQL channel materializes a whole
     // result set before handing back the first row, and caps that at
     // MAX_QUERY_ROWS. An audit query matching more violations than the cap
@@ -90,14 +90,14 @@ pub(super) async fn query_has_rows(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
-pub(super) fn authority_violation(message: impl Into<String>) -> crate::errors::TraceDecayError {
+pub(super) fn authority_violation(message: impl Into<String>) -> tracedecay_runtime_core::errors::TraceDecayError {
     global_db_operation_message(OPERATION, message)
 }
 
 pub(super) fn decode_authority_json<T: DeserializeOwned>(
     json: &str,
     authority: &str,
-) -> crate::errors::Result<T> {
+) -> tracedecay_runtime_core::errors::Result<T> {
     serde_json::from_str(json)
         .map_err(|error| authority_violation(format!("invalid {authority}: {error}")))
 }
@@ -105,7 +105,7 @@ pub(super) fn decode_authority_json<T: DeserializeOwned>(
 pub(super) fn encode_authority_json<T: Serialize>(
     value: &T,
     authority: &str,
-) -> crate::errors::Result<String> {
+) -> tracedecay_runtime_core::errors::Result<String> {
     serde_json::to_string(value)
         .map_err(|error| authority_violation(format!("cannot encode {authority}: {error}")))
 }
@@ -113,7 +113,7 @@ pub(super) fn encode_authority_json<T: Serialize>(
 pub(super) async fn validate_receipt_authority_rows(
     conn: &impl QueryExecutor,
     after_rowid: i64,
-) -> crate::errors::Result<(i64, i64)> {
+) -> tracedecay_runtime_core::errors::Result<(i64, i64)> {
     let mut high_water = after_rowid;
     let mut audited = 0;
     loop {
@@ -202,7 +202,7 @@ pub(super) async fn validate_receipt_authority_rows(
 pub(super) async fn validate_observation_authority_rows(
     conn: &impl QueryExecutor,
     after_sequence: i64,
-) -> crate::errors::Result<(i64, i64)> {
+) -> tracedecay_runtime_core::errors::Result<(i64, i64)> {
     let mut high_water = after_sequence;
     let mut audited = 0;
     loop {
@@ -289,7 +289,7 @@ pub(super) async fn validate_observation_authority_rows(
 
 pub(super) async fn validate_source_cursor_authority_rows(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut cursor_rowid = 0;
     let mut advance_rowid = 0;
     loop {
@@ -307,7 +307,7 @@ pub(super) async fn validate_source_cursor_authority_chunk(
     conn: &impl QueryExecutor,
     mut cursor_rowid: i64,
     mut advance_rowid: i64,
-) -> crate::errors::Result<(i64, i64, bool)> {
+) -> tracedecay_runtime_core::errors::Result<(i64, i64, bool)> {
     let mut rows = conn
         .query(
             "SELECT rowid, source_json, scope_json, cursor_json FROM source_cursors
@@ -438,7 +438,7 @@ pub(super) async fn validate_source_cursor_authority_chunk(
 
 pub(super) async fn validate_mutable_invariant_rows(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     for invariant in bounded_row_audit_invariants() {
         if let Some(query) = invariant.audit_query
             && query_has_rows(conn, query).await?
@@ -862,7 +862,7 @@ mod tests {
             validate_observation_authority_rows, validate_receipt_authority_rows,
             validate_source_cursor_authority_rows,
         };
-        use crate::db::engine::{Executor, params};
+        use tracedecay_runtime_core::db::engine::{Executor, params};
 
         /// The digest column is what payload lookups key on. A row whose
         /// column names one payload while its JSON names another resolves to

@@ -1,9 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::application::session::compatibility::{
+use tracedecay_sessions::compatibility::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
     ObservationProjection, ProjectedObservation, ProjectionPersistOutcome,

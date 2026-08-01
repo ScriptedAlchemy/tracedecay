@@ -6,7 +6,7 @@
 //! authority tables, and a repair that fails partway leaves the triggers
 //! standing rather than a live user store with its integrity guards stripped.
 
-use crate::db::engine::QueryExecutor;
+use tracedecay_runtime_core::db::engine::QueryExecutor;
 use crate::tests::harness::RegisteredGlobalDbHarness;
 use crate::{connection_table_exists, repair_session_temporal_store};
 
@@ -16,7 +16,7 @@ async fn trigger_exists(conn: &impl QueryExecutor, name: &str) -> bool {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
-            crate::db::engine::params![name],
+            tracedecay_runtime_core::db::engine::params![name],
         )
         .await
         .expect("inspect trigger catalog");

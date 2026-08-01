@@ -12,8 +12,8 @@ use tracedecay_store::{
 };
 
 #[cfg(test)]
-use crate::db::engine::{Connection, Transaction, TransactionBehavior};
-use crate::db::engine::{Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params};
+use tracedecay_runtime_core::db::engine::{Connection, Transaction, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params};
 use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
 
 /// Async canonical-store adapter for PR11 transaction state.
@@ -39,7 +39,7 @@ enum GitIndexWriteTransaction<'db> {
 }
 
 impl QueryExecutor for GitIndexWriteTransaction<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -52,7 +52,7 @@ impl QueryExecutor for GitIndexWriteTransaction<'_> {
 }
 
 impl Executor for GitIndexWriteTransaction<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
@@ -63,7 +63,7 @@ impl Executor for GitIndexWriteTransaction<'_> {
         }
     }
 
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.execute_batch(sql).await,
             #[cfg(test)]
@@ -73,7 +73,7 @@ impl Executor for GitIndexWriteTransaction<'_> {
 }
 
 impl GitIndexWriteTransaction<'_> {
-    async fn commit(self) -> crate::db::engine::Result<()> {
+    async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.commit().await,
             #[cfg(test)]
@@ -81,7 +81,7 @@ impl GitIndexWriteTransaction<'_> {
         }
     }
 
-    async fn rollback(self) -> crate::db::engine::Result<()> {
+    async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.rollback().await,
             #[cfg(test)]

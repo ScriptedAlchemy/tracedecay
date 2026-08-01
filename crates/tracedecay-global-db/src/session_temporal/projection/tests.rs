@@ -24,7 +24,7 @@ use super::materialize::*;
 use crate::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
-use crate::db::engine::{Executor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
 use crate::store::session::GlobalDbSessionTemporalStore;
 
 fn fixture_session(value: &str) -> SessionId {

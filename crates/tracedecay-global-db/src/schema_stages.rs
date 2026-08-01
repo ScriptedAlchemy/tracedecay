@@ -10,7 +10,7 @@ use super::{
     ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
     observation_projection, project_registry, session_temporal,
 };
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 
@@ -221,7 +221,7 @@ const TRANSCRIPT_SCHEMA: &str = "
 
 /// Installs and migrates the global/session schema through the exact
 /// registered runtime connection. No database path is resolved or reopened.
-pub async fn ensure_registered_schema(conn: &Connection) -> crate::errors::Result<()> {
+pub async fn ensure_registered_schema(conn: &Connection) -> tracedecay_runtime_core::errors::Result<()> {
     let convergence = ensure_registered_schema_for_admission(conn).await?;
     converge_registered_schema(conn, convergence).await
 }
@@ -237,7 +237,7 @@ pub struct RegisteredSchemaConvergence {
 /// resumable so daemon admission never waits for whole-store scans.
 pub async fn ensure_registered_schema_for_admission(
     conn: &Connection,
-) -> crate::errors::Result<RegisteredSchemaConvergence> {
+) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
@@ -305,27 +305,27 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize observation projection", error)
             })?;
-        crate::db::install_external_source_schema(
+        tracedecay_runtime_core::db::install_external_source_schema(
             &transaction,
             "initialize registered external source state",
         )
         .await?;
         ensure_authority_invariant_schema(&transaction).await?;
 
-        crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
+        tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
             .await
             .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
-        crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(
+        tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_schema_in_transaction(
             &transaction,
         )
         .await
         .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
-        crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
+        tracedecay_sessions::runtime::workflow_index::ensure_workflow_index_schema(&transaction)
             .await
             .map_err(|error| {
                 global_db_operation_error("initialize workflow index schema", error)
             })?;
-        crate::errors::Result::Ok(())
+        tracedecay_runtime_core::errors::Result::Ok(())
     }
     .await;
 
@@ -362,7 +362,7 @@ pub async fn ensure_registered_schema_for_admission(
 pub async fn converge_registered_schema(
     conn: &Connection,
     convergence: RegisteredSchemaConvergence,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     observation_projection::converge_v4_projection_anchor_bindings(conn)
         .await
         .map_err(|error| {
@@ -392,7 +392,7 @@ pub async fn converge_registered_schema(
     ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
 }
 
-async fn table_exists(conn: &impl QueryExecutor, table: &str) -> crate::errors::Result<bool> {
+async fn table_exists(conn: &impl QueryExecutor, table: &str) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
@@ -408,20 +408,20 @@ async fn table_exists(conn: &impl QueryExecutor, table: &str) -> crate::errors::
 
 pub async fn validate_observation_authority_connection(
     conn: &impl QueryExecutor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
 }
 
 pub async fn begin_observation_authority_canonical_repair(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     suspend_immutability_for_canonical_repair(conn).await
 }
 
 pub async fn finish_observation_authority_canonical_repair(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     restore_immutability_after_canonical_repair(conn).await
 }
 
@@ -430,7 +430,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::ensure_registered_schema;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     #[tokio::test]
     async fn late_audit_failure_preserves_completed_idempotent_repairs() {
