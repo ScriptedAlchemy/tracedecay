@@ -11,8 +11,8 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, next_daemon_response_line,
-    write_daemon_preamble,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, connect_to_current_daemon_within,
+    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{
@@ -27,13 +27,6 @@ use crate::mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransport
 #[cfg(unix)]
 use crate::mcp::{ErrorCode, JsonRpcResponse};
 use crate::mcp::{JsonRpcRequest, StdioTransport};
-
-// A cold project open (create/migrate DBs, config runtime, first index) takes
-// ~2.5s release / ~3.3s debug even for a tiny repo, so a 2s grace abandoned
-// legitimate opens just before they completed. The warming loop still exits
-// immediately on a real failure.
-const PROJECT_WARMING_RETRY_GRACE: Duration = Duration::from_secs(15);
-const PROJECT_WARMING_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Decides at `tracedecay serve` startup whether to proxy to the daemon.
 ///
@@ -224,7 +217,7 @@ async fn proxy_host_input_to_daemon(
         }
 
         let result = {
-            let daemon_request = send_daemon_request_line_with_project_warming_retry(
+            let daemon_request = send_daemon_request_line_with_project_open_retry(
                 socket_path,
                 &routed_handshake,
                 &line,
@@ -433,31 +426,16 @@ fn responses_are_project_open_retryable(responses: &[String]) -> bool {
         && serde_json::from_str::<serde_json::Value>(&responses[0])
             .ok()
             .and_then(|response| response.get("error").cloned())
-            .is_some_and(|error| {
-                let warming = error
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|message| message.contains(PROJECT_WARMING_RETRY_HINT));
-                let capacity = error
-                    .pointer("/data/kind")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|kind| {
-                        matches!(
-                            kind,
-                            "project_open_task_capacity_reached"
-                                | "project_server_capacity_reached"
-                        )
-                    });
-                warming || capacity
-            })
+            .as_ref()
+            .is_some_and(json_rpc_error_is_project_open_retryable)
 }
 
-async fn send_daemon_request_line_with_project_warming_retry(
+async fn send_daemon_request_line_with_project_open_retry(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     line: &str,
 ) -> Result<Vec<String>> {
-    let deadline = Instant::now() + PROJECT_WARMING_RETRY_GRACE;
+    let deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
     let mut responses = send_daemon_request_line(socket_path, handshake, line).await?;
     while responses_are_project_open_retryable(&responses) {
         let Some(remaining) = deadline
@@ -466,7 +444,7 @@ async fn send_daemon_request_line_with_project_warming_retry(
         else {
             break;
         };
-        tokio::time::sleep(remaining.min(PROJECT_WARMING_RETRY_INTERVAL)).await;
+        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
         responses = send_daemon_request_line(socket_path, handshake, line).await?;
     }
     Ok(responses)
@@ -660,7 +638,7 @@ async fn proxy_one_request(
         return Ok(());
     }
     for response in
-        send_daemon_request_line_with_project_warming_retry(socket_path, handshake, line).await?
+        send_daemon_request_line_with_project_open_retry(socket_path, handshake, line).await?
     {
         transport.write_line(&response).await?;
         if !response.ends_with('\n') {
