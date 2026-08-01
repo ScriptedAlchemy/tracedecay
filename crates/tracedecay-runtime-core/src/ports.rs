@@ -85,12 +85,6 @@ pub mod registered_schema {
         let _ = INSTALLER.set(installer);
     }
 
-    /// Whether an installer has been registered yet.
-    #[must_use]
-    pub(crate) fn is_registered() -> bool {
-        INSTALLER.get().is_some()
-    }
-
     /// Installs the registered global/session schema through `connection`.
     ///
     /// # Errors
