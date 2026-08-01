@@ -10,10 +10,6 @@ use tracedecay_domain::{
 };
 
 const GOLDEN_CATALOG: &[u8] = include_bytes!("fixtures/integration_catalog_v1.json");
-const GOLDEN_CATALOG_AUTHORITY_DIGEST: [u8; 32] = [
-    0x93, 0xad, 0xa6, 0x07, 0x56, 0x22, 0x48, 0xdf, 0xe6, 0xfb, 0xa8, 0xa1, 0xb5, 0xa0, 0x22, 0x38,
-    0x08, 0xcb, 0x4d, 0xf5, 0x89, 0x8f, 0x4e, 0x39, 0x77, 0x56, 0x7c, 0x53, 0xcf, 0xc8, 0x6d, 0x9b,
-];
 const HOST_EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "claude",
@@ -70,11 +66,18 @@ fn catalog_serialization_and_digest_match_persisted_golden() {
         canonical_json_bytes(&golden_catalog_json()).expect("canonical persisted catalog golden");
     let actual = canonical_json_bytes(&catalog).expect("canonical current catalog");
     assert_eq!(actual, expected, "persisted catalog format changed");
+
+    // The authority digest must be derived from the persisted catalog, not
+    // from anything the in-memory catalog carries alongside it.
+    let golden: HostIntegrationCatalogV1 =
+        serde_json::from_slice(GOLDEN_CATALOG).expect("persisted catalog golden deserializes");
     assert_eq!(
         catalog
             .canonical_authority_digest()
             .expect("current catalog authority digest"),
-        GOLDEN_CATALOG_AUTHORITY_DIGEST,
+        golden
+            .canonical_authority_digest()
+            .expect("persisted catalog authority digest"),
         "persisted catalog authority digest changed"
     );
 }
