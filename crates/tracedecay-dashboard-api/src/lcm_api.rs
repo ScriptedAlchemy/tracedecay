@@ -31,8 +31,8 @@ use super::util::{JsonPath, JsonQuery, coerce_limit};
 use crate::request_identity::{
     GlobalOpaqueIdentityKind, RequestIdentityError, mint_global_opaque_id,
 };
-use crate::sessions::lcm::{LcmGcConfig, query};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_sessions::runtime::lcm::{LcmGcConfig, query};
 
 type LcmResponse = (StatusCode, Json<Value>);
 type LcmResult = Result<LcmResponse, LcmResponse>;

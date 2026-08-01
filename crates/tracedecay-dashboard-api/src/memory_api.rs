@@ -599,7 +599,12 @@ pub async fn curation_runs(
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 50, 200) as usize;
-    match crate::automation::run_ledger::load_run_records(&state.dashboard_root, limit).await {
+    match tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+        &state.dashboard_root,
+        limit,
+    )
+    .await
+    {
         Ok(records) => {
             let count = records.len();
             Json(json!({
@@ -634,7 +639,7 @@ pub async fn fact_proposals(
         Ok(memory) => memory,
         Err(err) => return fact_proposal_error(&err),
     };
-    match crate::automation::fact_proposals::list_fact_proposals(
+    match tracedecay_agent_hosts::automation::fact_proposals::list_fact_proposals(
         &memory,
         &state.dashboard_root,
         proposal_state,
@@ -671,7 +676,7 @@ pub async fn fact_proposal_apply(
         Ok(memory) => memory,
         Err(err) => return fact_proposal_error(&err),
     };
-    match crate::automation::fact_proposals::apply_fact_proposal_with_result(
+    match tracedecay_agent_hosts::automation::fact_proposals::apply_fact_proposal_with_result(
         &memory,
         &state.dashboard_root,
         &proposal_id,
@@ -681,7 +686,7 @@ pub async fn fact_proposal_apply(
     {
         Ok(result) => {
             if result.newly_promoted {
-                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
                     &memory,
                     &state.project_root,
                 )
@@ -712,7 +717,7 @@ pub async fn fact_proposal_reject(
         Ok(memory) => memory,
         Err(err) => return fact_proposal_error(&err),
     };
-    match crate::automation::fact_proposals::reject_fact_proposal(
+    match tracedecay_agent_hosts::automation::fact_proposals::reject_fact_proposal(
         &memory,
         &state.dashboard_root,
         &proposal_id,
@@ -734,8 +739,8 @@ pub async fn fact_proposal_reject(
 
 fn parse_fact_proposal_state(
     state: Option<&str>,
-) -> Result<Option<crate::automation::fact_proposals::FactProposalState>, String> {
-    use crate::automation::fact_proposals::FactProposalState;
+) -> Result<Option<tracedecay_agent_hosts::automation::fact_proposals::FactProposalState>, String> {
+    use tracedecay_agent_hosts::automation::fact_proposals::FactProposalState;
 
     let Some(state) = state else {
         return Ok(None);
@@ -788,7 +793,7 @@ pub async fn curate_apply(
 
     let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
     if let Ok(application) = memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
-        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+        tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
             &application,
             &state.project_root,
         )
@@ -817,7 +822,7 @@ mod tests {
     fn fact_proposal_state_filter_accepts_applying() {
         assert_eq!(
             parse_fact_proposal_state(Some("applying")).unwrap(),
-            Some(crate::automation::fact_proposals::FactProposalState::Applying)
+            Some(tracedecay_agent_hosts::automation::fact_proposals::FactProposalState::Applying)
         );
     }
 }

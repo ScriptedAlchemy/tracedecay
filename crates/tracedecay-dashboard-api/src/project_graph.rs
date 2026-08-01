@@ -24,7 +24,7 @@ pub type RetainedProjectGraphFuture = std::pin::Pin<
 
 #[derive(Clone)]
 pub struct RetainedProjectGraphRequest {
-    pub owner: Option<crate::global_db::ProjectRegistryContext>,
+    pub owner: Option<tracedecay_global_db::ProjectRegistryContext>,
     pub registered_root: PathBuf,
     pub requested_worktree_root: PathBuf,
     pub requested_git_common_dir: Option<PathBuf>,
@@ -33,7 +33,7 @@ pub struct RetainedProjectGraphRequest {
 
 impl RetainedProjectGraphRequest {
     pub fn for_registered_project(
-        owner: crate::global_db::ProjectRegistryContext,
+        owner: tracedecay_global_db::ProjectRegistryContext,
         requested_worktree_root: PathBuf,
     ) -> Self {
         Self {

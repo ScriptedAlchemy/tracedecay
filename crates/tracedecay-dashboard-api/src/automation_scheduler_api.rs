@@ -9,18 +9,20 @@ use serde_json::Value;
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::automation::backend::{AgentTaskKind, task_key};
-use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
-use crate::automation::run_ledger::{AutomationRunLedgerRecord, load_run_records};
-use crate::automation::scheduler::{
+use crate::user_config::UserConfig;
+use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_agent_hosts::automation::config::{
+    AutomationConfig, effective_config, load_project_config,
+};
+use tracedecay_agent_hosts::automation::run_ledger::{AutomationRunLedgerRecord, load_run_records};
+use tracedecay_agent_hosts::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
-use crate::automation::staged_notice::{
+use tracedecay_agent_hosts::automation::staged_notice::{
     AutomationPendingCounts, PendingReviewCount, count_pending_fact_proposals,
     count_pending_managed_skills,
 };
-use crate::user_config::UserConfig;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonError>;
@@ -149,9 +151,11 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         scheduler_tick_secs: effective.scheduler_tick_secs,
         now,
         last_session_activity: activity.last_activity_secs,
-        project_config_path: crate::automation::config::project_config_path(&state.dashboard_root)
-            .display()
-            .to_string(),
+        project_config_path: tracedecay_agent_hosts::automation::config::project_config_path(
+            &state.dashboard_root,
+        )
+        .display()
+        .to_string(),
         control_path: scheduler_control_path(&state.dashboard_root)
             .display()
             .to_string(),
@@ -237,7 +241,9 @@ fn task_status(
     task: AgentTaskKind,
 ) -> AutomationTaskStatusV1 {
     let decision = if paused {
-        crate::automation::scheduler::AutomationScheduleDecision::skipped("scheduler_paused")
+        tracedecay_agent_hosts::automation::scheduler::AutomationScheduleDecision::skipped(
+            "scheduler_paused",
+        )
     } else {
         schedule_decision(config, task, records, activity, now)
     };
@@ -245,7 +251,8 @@ fn task_status(
         .iter()
         .filter(|record| {
             record.task == task
-                && record.trigger == crate::automation::run_ledger::AutomationTrigger::Scheduler
+                && record.trigger
+                    == tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler
         })
         .max_by_key(|record| record.completed_at.parse::<i64>().ok().unwrap_or(0));
     AutomationTaskStatusV1 {
@@ -263,10 +270,12 @@ fn scheduler_status_label(config: &AutomationConfig, paused: bool) -> &'static s
     if !config.enabled {
         return "automation_disabled";
     }
-    if config.host_mode == crate::automation::config::AutomationHostMode::DelegatedHost {
+    if config.host_mode
+        == tracedecay_agent_hosts::automation::config::AutomationHostMode::DelegatedHost
+    {
         return "delegated_host";
     }
-    if config.backend == crate::automation::config::AutomationBackend::Disabled {
+    if config.backend == tracedecay_agent_hosts::automation::config::AutomationBackend::Disabled {
         return "backend_disabled";
     }
     "configured"
