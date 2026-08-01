@@ -28,9 +28,10 @@ $script:taskRoot = $script:scheduler.GetFolder("\")
 $testRoot = [System.IO.Directory]::CreateDirectory(
     (Join-Path $env:RUNNER_TEMP ("tracedecay-service-e2e-" + [guid]::NewGuid().ToString("N")))
 ).FullName
-$dataDir = [System.IO.Directory]::CreateDirectory(
+$script:nativeDataDir = [System.IO.Directory]::CreateDirectory(
     (Join-Path $testRoot "native-profile")
 ).FullName
+$dataDir = $script:nativeDataDir
 $previousDataDir = [Environment]::GetEnvironmentVariable("TRACEDECAY_DATA_DIR", "Process")
 $previousPath = $env:PATH
 $createdByRun = $false
@@ -314,6 +315,28 @@ function Get-Sha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
+function Add-TestBinaryOverlay {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Marker
+    )
+
+    $payload = [Text.Encoding]::UTF8.GetBytes("`nTraceDecay-Scoop-E2E:$Marker`n")
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Append,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $stream.Write($payload, 0, $payload.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function New-ScoopPackageContext {
     param(
         [Parameter(Mandatory = $true)][string]$PackageId,
@@ -331,12 +354,14 @@ function New-ScoopPackageContext {
     $newExecutable = Join-Path $newDirectory "tracedecay.exe"
     Copy-Item -LiteralPath $script:traceDecaySourcePath -Destination $oldExecutable
     Copy-Item -LiteralPath $script:traceDecaySourcePath -Destination $newExecutable
-    Assert-Equal -Actual (Get-Sha256 -Path $oldExecutable) `
-        -Expected (Get-Sha256 -Path $script:traceDecaySourcePath) `
-        -Description "$PackageId staged old binary SHA-256"
-    Assert-Equal -Actual (Get-Sha256 -Path $newExecutable) `
-        -Expected (Get-Sha256 -Path $script:traceDecaySourcePath) `
-        -Description "$PackageId staged new binary SHA-256"
+    Add-TestBinaryOverlay -Path $oldExecutable -Marker "$PackageId-old"
+    Add-TestBinaryOverlay -Path $newExecutable -Marker "$PackageId-new"
+    $sourceHash = Get-Sha256 -Path $script:traceDecaySourcePath
+    $oldHash = Get-Sha256 -Path $oldExecutable
+    $newHash = Get-Sha256 -Path $newExecutable
+    if ($oldHash -eq $sourceHash -or $newHash -eq $sourceHash -or $oldHash -eq $newHash) {
+        throw "$PackageId staged binaries do not have distinct SHA-256 identities"
+    }
 
     $runtimeDirectory = Join-Path $env:LOCALAPPDATA "TraceDecay\service\$PackageId"
     return [pscustomobject]@{
@@ -346,6 +371,7 @@ function New-ScoopPackageContext {
         OldExecutable = $oldExecutable
         NewExecutable = $newExecutable
         RuntimeDirectory = $runtimeDirectory
+        RuntimeDirectoryPreexisting = (Test-Path -LiteralPath $runtimeDirectory)
         RuntimeExecutable = Join-Path $runtimeDirectory "tracedecay.exe"
         StateFile = Join-Path $runtimeDirectory "scoop-state.json"
         RetainedStateFile = Join-Path $runtimeDirectory "scoop-state.retained-e2e.json"
@@ -632,6 +658,95 @@ function Assert-ScoopPackageAbsent {
         }
     }
     Assert-ServiceObservation -ExpectedState "Missing" -Connectable $false
+}
+
+function Assert-CleanupTaskOwnedByTest {
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][string]$TaskPath
+    )
+
+    $definition = $Task.Definition
+    if (
+        $definition.Principal.UserId -ne $script:userSid -or
+        $definition.Actions.Count -ne 1
+    ) {
+        throw "refusing to delete unauthenticated cleanup task '$TaskPath'"
+    }
+    $arguments = [string]$definition.Actions.Item(1).Arguments
+    $ownedProfiles = @($script:nativeDataDir) + @(
+        $script:packageContexts | ForEach-Object { $_.ProfileRoot }
+    )
+    $owned = $ownedProfiles | Where-Object {
+        $arguments -ceq ('daemon run --profile-root "{0}"' -f $_)
+    }
+    if (@($owned).Count -ne 1) {
+        throw "refusing to delete cleanup task '$TaskPath' with foreign profile arguments"
+    }
+}
+
+function Assert-CleanupMarkerOwnedByTest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Context
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "refusing to delete reparse-point Scoop marker '$Path'"
+    }
+    $marker = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if (
+        $marker.schema -ne "tracedecay.scoop-service-state.v1" -or
+        $marker.package_id -ne $Context.PackageId -or
+        $marker.user_sid -ne $script:userSid
+    ) {
+        throw "refusing to delete unauthenticated Scoop marker '$Path'"
+    }
+    Assert-PathEqual -Actual $marker.profile_root -Expected $Context.ProfileRoot `
+        -Description "cleanup marker profile"
+}
+
+function Remove-TestOwnedScoopArtifacts {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    if (-not (Test-Path -LiteralPath $Context.RuntimeDirectory)) {
+        return
+    }
+    $directory = Get-Item -LiteralPath $Context.RuntimeDirectory -Force
+    if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "refusing to clean reparse-point Scoop runtime '$($Context.RuntimeDirectory)'"
+    }
+
+    if (Test-Path -LiteralPath $Context.RuntimeExecutable) {
+        $runtime = Get-Item -LiteralPath $Context.RuntimeExecutable -Force
+        if (($runtime.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to delete reparse-point runtime '$($Context.RuntimeExecutable)'"
+        }
+        $runtimeHash = Get-Sha256 -Path $Context.RuntimeExecutable
+        $ownedHashes = @(
+            Get-Sha256 -Path $Context.OldExecutable
+            Get-Sha256 -Path $Context.NewExecutable
+        )
+        if ($runtimeHash -notin $ownedHashes) {
+            throw "refusing to delete foreign Scoop runtime '$($Context.RuntimeExecutable)'"
+        }
+        Remove-Item -LiteralPath $Context.RuntimeExecutable -Force
+    }
+    foreach ($markerPath in @($Context.StateFile, $Context.RetainedStateFile)) {
+        if (Test-Path -LiteralPath $markerPath) {
+            Assert-CleanupMarkerOwnedByTest -Path $markerPath -Context $Context
+            Remove-Item -LiteralPath $markerPath -Force
+        }
+    }
+
+    $remaining = @(Get-ChildItem -LiteralPath $Context.RuntimeDirectory -Force)
+    if ($remaining.Count -ne 0) {
+        throw "refusing to recursively delete unexpected Scoop runtime artifacts"
+    }
+    if (-not $Context.RuntimeDirectoryPreexisting) {
+        Remove-Item -LiteralPath $Context.RuntimeDirectory -Force
+    }
 }
 
 try {
@@ -929,6 +1044,7 @@ finally {
             $taskPath = "\$taskName"
             $task = Get-TaskAtPathOrNull -TaskPath $taskPath
             if ($null -ne $task) {
+                Assert-CleanupTaskOwnedByTest -Task $task -TaskPath $taskPath
                 try {
                     $task.Stop(0)
                 }
@@ -944,9 +1060,7 @@ finally {
         $taskProvenRemoved = $true
 
         foreach ($context in $script:packageContexts) {
-            if (Test-Path -LiteralPath $context.RuntimeDirectory) {
-                Remove-Item -LiteralPath $context.RuntimeDirectory -Recurse -Force
-            }
+            Remove-TestOwnedScoopArtifacts -Context $context
         }
     }
     catch {
