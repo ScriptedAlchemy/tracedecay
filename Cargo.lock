@@ -5611,6 +5611,7 @@ dependencies = [
  "tracedecay-host-integration",
  "tracedecay-lsp",
  "tracedecay-runtime-core",
+ "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
