@@ -50,28 +50,111 @@ pub mod branch_admin_recovery {
 ///
 /// `db::connection` publishes a `Database` facade over a runtime the daemon
 /// registry already opened; the registry itself (`daemon::store_runtime`) sits
-/// above the kernel because it depends on `db::DatabaseAuthority`. The concrete
-/// handle is therefore retained opaquely: the kernel only needs it to stay
-/// alive for as long as the facade does, and to answer the few identity
+/// above the kernel because it depends on `db::DatabaseAuthority`, which is a
+/// kernel type. The concrete handle is therefore retained opaquely: the kernel
+/// keeps it alive for as long as the facade lives and asks it only the
 /// questions below.
 ///
 /// The root crate implements this for
-/// `daemon::store_runtime::registry::StoreRuntimeHandle`.
+/// `daemon::store_runtime::registry::StoreRuntimeHandle`. Registry-side
+/// failures are surfaced as strings because every kernel call site only
+/// `Debug`-formats them into a `TraceDecayError::Database`.
 pub trait StoreRuntimeSource: std::fmt::Debug + Send + Sync + 'static {
     /// Descriptor-derived identity of the file this runtime attached to.
     fn opened_file_identity(&self) -> Option<u64>;
 
-    /// Canonical path of the attached database.
-    fn canonical_path(&self) -> std::path::PathBuf;
+    /// Canonical path of the attached database (`locator().path()`).
+    fn canonical_path(&self) -> &std::path::Path;
+
+    /// Verified locator this attachment was published against
+    /// (`locator().verified()`).
+    fn verified_locator(&self) -> &tracedecay_store::VerifiedStoreLocatorV1;
+
+    /// Typed shard binding this attachment serves.
+    fn binding(&self) -> &tracedecay_store::StoreRuntimeBindingV1;
 
     /// Whether schema migrations already ran for this attachment.
     fn schema_migrated(&self) -> bool;
+
+    /// Whether the physical attachment currently holds a writer
+    /// (`physical_snapshot().writer_present`).
+    fn writer_present(&self) -> bool;
 
     /// Re-verifies that the attachment still refers to the file it opened.
     ///
     /// `operation` names the caller's intent for the error message.
     fn validate_registered_read(&self, operation: &'static str) -> Result<(), String>;
+
+    /// Read-only SQL handle for the retained attachment.
+    fn telemetry_read_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String>;
+
+    /// Write-authorized SQL handle for the retained attachment.
+    fn authorized_migration_sql_handle(
+        &self,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String>;
+
+    /// Originating database authority retained when this runtime was
+    /// published writable.
+    fn database_authority(
+        &self,
+        operation: &'static str,
+    ) -> Result<crate::db::DatabaseAuthority, String>;
+
+    /// Samples `(page_count, freelist_count, page_size)` for store-size
+    /// telemetry, waiting at most `reader_wait` for a reader slot.
+    fn storage_page_counts(
+        &self,
+        reader_wait: std::time::Duration,
+    ) -> Result<(u64, u64, u64), String>;
+
+    /// Runs a bounded incremental vacuum through the canonical writer lane.
+    fn run_bounded_incremental_compaction<'a>(
+        &'a self,
+        max_pages: u64,
+        authority: crate::db::DatabaseAuthority,
+    ) -> StoreRuntimeFuture<'a, Result<(), String>>;
+
+    /// Runs a WAL checkpoint through the canonical writer lane.
+    fn run_checkpoint<'a>(
+        &'a self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: crate::db::DatabaseAuthority,
+    ) -> StoreRuntimeFuture<'a, Result<tracedecay_rusqlite_runtime::CheckpointOutcome, String>>;
+
+    /// Copies one transactionally consistent snapshot to `destination`.
+    fn snapshot_to<'a>(
+        &'a self,
+        destination: std::path::PathBuf,
+        authority: crate::db::DatabaseAuthority,
+    ) -> StoreRuntimeFuture<'a, Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, String>>;
+
+    /// Submits an authorized typed runtime write.
+    fn dispatch_submit_authorized<'a>(
+        &'a self,
+        request: tracedecay_store::RuntimeSubmitRequestV1,
+        probe: std::sync::Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+        authority: crate::db::DatabaseAuthority,
+    ) -> StoreRuntimeFuture<'a, Result<tracedecay_store::RuntimeSubmitOutcomeV1, String>>;
+
+    /// Dispatches a typed runtime read.
+    fn dispatch_read(
+        &self,
+        request: tracedecay_store::RuntimeReadRequestV1,
+        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
+    ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, String>;
+
+    /// Stable identity of the underlying physical runtime, so two facades can
+    /// be compared for attachment sharing without exposing the runtime type.
+    fn runtime_identity(&self) -> usize;
 }
+
+/// Boxed future returned by the asynchronous [`StoreRuntimeSource`] methods.
+/// The port is a trait object, so it cannot use `async fn` directly.
+pub type StoreRuntimeFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// Shared handle to a daemon-owned store runtime.
 pub type StoreRuntimeSourceHandle = std::sync::Arc<dyn StoreRuntimeSource>;
