@@ -37,6 +37,7 @@ $previousPath = $env:PATH
 $createdByRun = $false
 $script:cleanupTaskNames = @()
 $script:packageContexts = @()
+$script:ownedForeignTaskXml = $null
 $primaryError = $null
 $cleanupError = $null
 
@@ -625,6 +626,7 @@ function Register-ForeignScoopTask {
         $Snapshot.Sddl
     )
     if ($null -ne $registered) {
+        $script:ownedForeignTaskXml = [string]$registered.Xml
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($registered)
     }
 }
@@ -673,15 +675,37 @@ function Assert-CleanupTaskOwnedByTest {
     ) {
         throw "refusing to delete unauthenticated cleanup task '$TaskPath'"
     }
+    Assert-TaskSddl -Task $Task
+    $action = $definition.Actions.Item(1)
     $arguments = [string]$definition.Actions.Item(1).Arguments
-    $ownedProfiles = @($script:nativeDataDir) + @(
-        $script:packageContexts | ForEach-Object { $_.ProfileRoot }
+    $owned = (
+        $TaskPath -ceq "\TraceDecay Daemon ($($script:userSid))" -and
+        $arguments -ceq ('daemon run --profile-root "{0}"' -f $script:nativeDataDir) -and
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$action.Path),
+            [IO.Path]::GetFullPath($script:traceDecaySourcePath),
+            [StringComparison]::OrdinalIgnoreCase
+        )
     )
-    $owned = $ownedProfiles | Where-Object {
-        $arguments -ceq ('daemon run --profile-root "{0}"' -f $_)
+    foreach ($context in $script:packageContexts) {
+        if (
+            $TaskPath -ceq $Context.TaskPath -and
+            $arguments -ceq ('daemon run --profile-root "{0}"' -f $Context.ProfileRoot) -and
+            [string]::Equals(
+                [IO.Path]::GetFullPath([string]$action.Path),
+                [IO.Path]::GetFullPath($Context.RuntimeExecutable),
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            $owned = $true
+            break
+        }
     }
-    if (@($owned).Count -ne 1) {
-        throw "refusing to delete cleanup task '$TaskPath' with foreign profile arguments"
+    if (-not $owned -and $null -ne $script:ownedForeignTaskXml) {
+        $owned = ([string]$Task.Xml -ceq $script:ownedForeignTaskXml)
+    }
+    if (-not $owned) {
+        throw "refusing to delete cleanup task '$TaskPath' with foreign action or profile"
     }
 }
 
