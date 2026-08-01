@@ -3,7 +3,7 @@
 use super::*;
 
 /// Diff two git refs and return changed file paths with coarse status.
-fn git_diff_file_changes(
+pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
     from_ref: &str,
     to_ref: &str,
@@ -112,7 +112,7 @@ fn git_diff_file_changes(
 /// from the head. This matches `git diff base...head`; comparing the two tip
 /// trees directly would incorrectly report unrelated files added to an
 /// advanced default branch as deletions in the PR.
-fn git_pr_comparison(
+pub(super) fn git_pr_comparison(
     project_root: &std::path::Path,
     base_ref: &str,
     head_ref: &str,
@@ -144,12 +144,12 @@ fn git_pr_comparison(
     })
 }
 
-fn default_pr_base_ref(project_root: &std::path::Path) -> String {
+pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
     crate::branch::detect_default_branch(project_root).unwrap_or_else(|| "main".to_string())
 }
 
 /// Returns file paths changed in the working tree (unstaged + staged, or staged-only).
-fn git_changed_files(
+pub(super) fn git_changed_files(
     project_root: &std::path::Path,
     staged_only: bool,
 ) -> std::result::Result<Vec<String>, String> {
@@ -228,7 +228,7 @@ fn git_changed_files(
 }
 
 /// Returns the last N commit subjects from HEAD.
-fn git_recent_commits(
+pub(super) fn git_recent_commits(
     project_root: &std::path::Path,
     count: usize,
 ) -> std::result::Result<Vec<String>, String> {
@@ -335,7 +335,10 @@ fn git_commit_log(
 /// (the path-based check). A `src/foo.rs` with a `#[cfg(test)] mod tests`
 /// at the bottom still has role "source".
 #[allow(clippy::ptr_arg)]
-fn classify_file_role(path: &str, _files_with_inline_tests: &HashSet<String>) -> &'static str {
+pub(super) fn classify_file_role(
+    path: &str,
+    _files_with_inline_tests: &HashSet<String>,
+) -> &'static str {
     if crate::tracedecay::is_test_file(path) {
         return "test";
     }

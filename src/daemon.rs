@@ -347,6 +347,8 @@ pub(crate) use crate::daemon_contract::{
 #[cfg(all(unix, test))]
 use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
+#[cfg(unix)]
+use bootstrap::set_owner_only_permissions;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,

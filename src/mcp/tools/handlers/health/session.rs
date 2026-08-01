@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
+pub(super) fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
     [
         ("acyclicity", snap.acyclicity),
         ("depth", snap.depth),

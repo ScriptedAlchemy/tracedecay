@@ -1,5 +1,6 @@
 //! Scoped health deltas: the observability cursor, the persisted watermark point, and the dimension-by-dimension comparison against it.
 
+use super::session::session_dimension_values;
 use super::*;
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;

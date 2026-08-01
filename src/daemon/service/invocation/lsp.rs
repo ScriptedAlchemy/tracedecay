@@ -1,6 +1,7 @@
 //! LSP session lifecycle: registered-owner lookup, session admission, frame relay, and expiry.
 
 use super::*;
+use tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS;
 
 impl DaemonInvocationService {
     /// Returns the retained semantic scheduling handle for `project_root`,

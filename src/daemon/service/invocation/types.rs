@@ -115,7 +115,7 @@ type Pr13HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
 type Pr13HookOrchestrationRegistry =
     StdMutex<BTreeMap<Pr13HookOrchestrationRegistryKey, Weak<dyn Pr13HookOrchestrationPortV1>>>;
 
-fn pr13_hook_orchestration_registry() -> &'static Pr13HookOrchestrationRegistry {
+pub(super) fn pr13_hook_orchestration_registry() -> &'static Pr13HookOrchestrationRegistry {
     static REGISTRY: OnceLock<Pr13HookOrchestrationRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }

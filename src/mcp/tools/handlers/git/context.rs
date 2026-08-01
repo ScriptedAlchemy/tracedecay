@@ -1,5 +1,9 @@
 //! `tracedecay_diff_context`, `tracedecay_changelog`, `tracedecay_commit_context`, and `tracedecay_pr_context`.
 
+use super::shell::{
+    classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
+    git_pr_comparison, git_recent_commits,
+};
 use super::*;
 
 /// Handles `tracedecay_diff_context` tool calls.
