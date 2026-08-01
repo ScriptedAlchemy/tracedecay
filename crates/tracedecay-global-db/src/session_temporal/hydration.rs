@@ -662,17 +662,28 @@ async fn resolve_occurrence(
                 )));
             }
         };
-    if envelope
+    // Bind the occurrence's message_id to a canonical projection output of this
+    // digest-verified observation. `derive_canonical_projection` derives the
+    // message id from the tool-dispatch identity, else the envelope's
+    // relations.message_id, else its stable record id — so an occurrence whose
+    // id legitimately falls back to the stable record id has no
+    // relations.message_id at all. Verifying the binding through the projection
+    // (rather than the single relations.message_id field) accepts every message
+    // the projection legitimately produced while still refusing an occurrence
+    // whose message_id does not correspond to this envelope. The relations
+    // fast-path preserves prior acceptance for messages the envelope names
+    // directly even when the projection re-keys them (derived/tool outputs).
+    let canonical_message =
+        canonical_projected_message(&observation, &message_id, projection_output_ordinal);
+    let relations_bind = envelope
         .relations()
         .message_id()
-        .is_none_or(|candidate| candidate.as_str() != message_id)
-    {
+        .is_some_and(|candidate| candidate.as_str() == message_id);
+    if !relations_bind && canonical_message.is_none() {
         return Ok(Some(HydrationResolution::Unavailable(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
-    let canonical_message =
-        canonical_projected_message(&observation, &message_id, projection_output_ordinal);
     if let Some(message) = canonical_message
         .as_ref()
         .filter(|message| !message.text.is_empty())
@@ -1295,6 +1306,83 @@ mod tests {
             .expect("active generation");
         }
 
+        /// Seed a single-session occurrence whose `message_id` is supplied by
+        /// the caller, so a reproduction can key the row on the stable record id
+        /// exactly as `derive_canonical_projection` does when the envelope omits
+        /// `relations.message_id`.
+        async fn seed_session_occurrence_for_test(
+            &self,
+            provider: &str,
+            session_id: &str,
+            observation: &DurableObservationV1,
+            anchor: &RetrievalAnchorRecord,
+            message_id: &str,
+            canonical_payload: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            let writer = database
+                .writer_connection()
+                .expect("registered profile writer");
+            Executor::execute(
+                &writer,
+                "INSERT INTO sessions (
+                    provider, session_id, project_key, project_path
+                 ) VALUES (?1, ?2, 'user', '/session-occurrence-test')",
+                params![provider, session_id],
+            )
+            .await
+            .expect("session owner");
+            self.activate_temporal_generation_for_hydration_test(session_id)
+                .await;
+            Executor::execute(
+                &writer,
+                "INSERT INTO session_occurrences (
+                    session_id, generation, occurrence_id, source_observation_id,
+                    projection_output_ordinal, retrieval_anchor_id, message_id,
+                    role, knowledge_at, valid_time_json, evidence_json,
+                    snippet_text, index_text
+                 ) VALUES (
+                    ?1, 1, 'occurrence-1', ?2, 0, ?3, ?4,
+                    'assistant', 1, '{\"kind\":\"unknown\"}', '{}', ?5, ?5
+                 )",
+                params![
+                    session_id,
+                    observation.observation_id().as_str(),
+                    anchor.anchor_id().as_str(),
+                    message_id,
+                    canonical_payload
+                ],
+            )
+            .await
+            .expect("occurrence");
+        }
+
+        /// Rewrite the seeded occurrence's `message_id` to a value that
+        /// corresponds to no projection output of its observation, exercising the
+        /// genuine `UnverifiableLegacy` refusal path.
+        async fn corrupt_hydration_occurrence_message_id_for_test(
+            &self,
+            session_id: &str,
+            message_id: &str,
+        ) {
+            let database = self
+                .registered_database(HostAdmissionScope::Profile)
+                .expect("registered profile database");
+            Executor::execute(
+                &database
+                    .writer_connection()
+                    .expect("registered profile writer"),
+                "UPDATE session_occurrences
+                 SET message_id = ?2
+                 WHERE session_id = ?1 AND generation = 1 AND occurrence_id = 'occurrence-1'",
+                params![session_id, message_id],
+            )
+            .await
+            .expect("corrupt occurrence message id");
+        }
+
         async fn seed_root_hydration_fixture_for_test(
             &self,
             provider: &str,
@@ -1839,6 +1927,58 @@ mod tests {
         .expect("observation")
     }
 
+    /// Build an observation whose canonical envelope carries no
+    /// `relations.message_id`. `derive_canonical_projection` then keys the
+    /// projected message on the stable record id, so the persisted occurrence's
+    /// `message_id` equals the record id — the exact shape that previously
+    /// tripped the hydration `UnverifiableLegacy` misclassification.
+    fn observation_without_relation_message_id(
+        ordinal: u64,
+        session_id: &str,
+    ) -> DurableObservationV1 {
+        let session_id = SessionId::new(session_id).expect("session");
+        let provider = ProviderId::new("provider-1").expect("provider");
+        let source =
+            ObservationSourceIdentityV1::for_provider(provider.clone(), session_id.clone())
+                .expect("source");
+        let range = ObservationSourceRangeV1::new(ordinal, ordinal + 1).expect("source range");
+        let record_id = ObservationId::new(format!("record-{ordinal}")).expect("record");
+        // No `.with_message_id(...)`: the projection must fall back to the
+        // stable record id when deriving the occurrence's message_id.
+        let relations = CanonicalObservationRelationsV1::new(session_id);
+        let envelope = CanonicalObservationEnvelopeV1::new(
+            provider,
+            "message",
+            record_id.clone(),
+            relations,
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!({"text": format!("payload-{ordinal}")}),
+                model: None,
+                timestamp: Some(ordinal as i64),
+            }],
+            CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range),
+        )
+        .expect("envelope");
+        let payload = serde_json::to_value(envelope).expect("payload");
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).expect("source generation"),
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .expect("identity");
+        DurableObservationV1::new(
+            identity,
+            receipt(&format!("receipt-{ordinal}"), &payload),
+            RetentionClass::new("retention.snapshot-test").expect("retention"),
+            payload,
+        )
+        .expect("observation")
+    }
+
     fn checked_in_goal_observation() -> DurableObservationV1 {
         let record_id = ObservationId::new("record.goal.fixture").expect("record");
         let encoded = include_str!(
@@ -1892,6 +2032,41 @@ mod tests {
         assert_eq!(message.source_offset, Some(0));
     }
 
+    /// Pure-projection proof for the `resolve_occurrence` fix: when the
+    /// canonical envelope omits `relations.message_id`, the projection keys the
+    /// occurrence on the stable record id. The pre-fix gate
+    /// (`relations().message_id().is_none_or(..)`) therefore misclassified every
+    /// such occurrence as `UnverifiableLegacy`, dropping real matches. The fix
+    /// binds through `canonical_projected_message` instead, which resolves the
+    /// stable-record-id key yet still returns `None` for a message_id the
+    /// projection never produced — so acceptance widens only to
+    /// projection-verified bindings.
+    #[test]
+    fn stable_record_id_binds_projection_when_relations_message_id_absent() {
+        let observation = observation_without_relation_message_id(1, "session-1");
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
+        assert!(
+            envelope.relations().message_id().is_none(),
+            "fixture must omit relations.message_id so the pre-fix gate rejected it"
+        );
+        let record_message_id = envelope.stable_record_id().as_str().to_string();
+
+        // Accepted direction: the stable-record-id key binds to a projection
+        // output, which is exactly the signal the fix now trusts.
+        let bound = canonical_projected_message(&observation, &record_message_id, 0)
+            .expect("stable-record-id message must bind to a projection output");
+        assert_eq!(bound.text, "payload-1");
+        assert_eq!(bound.message_id, record_message_id);
+
+        // Refused direction: a message_id that no projection output produces has
+        // no binding, so the fix still returns UnverifiableLegacy for it.
+        assert!(
+            canonical_projected_message(&observation, "does-not-project", 0).is_none(),
+            "an unprojected message_id must not bind, preserving the legacy refusal"
+        );
+    }
+
     async fn persist_anchor(
         runtime: &HostAdmissionTestRuntimeV1,
         ordinal: u64,
@@ -1905,6 +2080,14 @@ mod tests {
         session_id: &str,
     ) -> (DurableObservationV1, RetrievalAnchorRecord) {
         let observation = observation_for_session(ordinal, session_id);
+        Box::pin(persist_observation(runtime, observation, ordinal)).await
+    }
+
+    async fn persist_observation(
+        runtime: &HostAdmissionTestRuntimeV1,
+        observation: DurableObservationV1,
+        ordinal: u64,
+    ) -> (DurableObservationV1, RetrievalAnchorRecord) {
         let identity = observation.identity();
         let next_cursor = ObservationSourceCursorV1::for_ordering(
             observation.source().clone(),
@@ -2187,6 +2370,81 @@ mod tests {
             Err(HydrationError::Unavailable)
         );
         assert!(denied_output.is_empty());
+    }
+
+    /// Regression: an occurrence whose `message_id` was projected from the
+    /// stable record id (because the canonical envelope carries no
+    /// `relations.message_id`) must hydrate. Before the fix, `resolve_occurrence`
+    /// rejected every such occurrence as `UnverifiableLegacy` — the defect that
+    /// dropped real `lcm_grep`/`lcm_expand` matches into
+    /// `omissions: reason=unverifiable_legacy`.
+    #[tokio::test]
+    async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let observation = observation_without_relation_message_id(1, "session-1");
+        let (observation, anchor) = Box::pin(persist_observation(&runtime, observation, 1)).await;
+        let provider = observation.source().provider().as_str().to_string();
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
+        assert!(
+            envelope.relations().message_id().is_none(),
+            "fixture must omit relations.message_id so the projection falls back to the record id"
+        );
+        let record_message_id = envelope.stable_record_id().as_str().to_string();
+        let canonical_payload = "payload-1";
+        runtime
+            .seed_session_occurrence_for_test(
+                &provider,
+                "session-1",
+                &observation,
+                &anchor,
+                &record_message_id,
+                canonical_payload,
+            )
+            .await;
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        // Live direction: the stable-record-id-keyed occurrence must resolve.
+        assert_eq!(
+            adapter.authorize(&snapshot, anchor.anchor_id()).await,
+            Ok(HydrationAuthorization::Authorized)
+        );
+        let mut output = Vec::new();
+        adapter
+            .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 7, &mut |chunk| {
+                output.extend_from_slice(chunk);
+                Ok(())
+            })
+            .await
+            .expect("stable-record-id occurrence hydration");
+        assert_eq!(output, canonical_payload.as_bytes());
+
+        // Negative direction: an occurrence whose message_id corresponds to no
+        // projection output of its digest-verified observation must still be
+        // refused, proving the fix binds through the projection rather than
+        // widening acceptance for unverifiable rows.
+        drop(read);
+        runtime
+            .corrupt_hydration_occurrence_message_id_for_test("session-1", "does-not-project")
+            .await;
+        let corrupted = runtime.hydration_read_for_test().await;
+        let corrupted_adapter = corrupted.adapter();
+        let authorization = corrupted_adapter
+            .authorize(&snapshot, anchor.anchor_id())
+            .await;
+        assert!(
+            matches!(
+                authorization,
+                Ok(HydrationAuthorization::Denied(ref denial))
+                    if denial.state() == HydrationStateV1::UnverifiableLegacy
+            ),
+            "{authorization:?}"
+        );
     }
 
     #[test]
