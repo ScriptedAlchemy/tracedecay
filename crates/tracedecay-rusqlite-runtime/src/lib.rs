@@ -9,6 +9,8 @@ pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_health_reader,
     open_immutable_reader,
 };
+mod content_digest;
+pub use content_digest::{CanonicalContentDigestError, canonical_session_domain_content_sha256};
 pub mod graph;
 mod ledger;
 pub mod maintenance;
