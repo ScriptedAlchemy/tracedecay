@@ -25,6 +25,13 @@ pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::{git_query, graph, request_identity, user_config};
 pub mod tracedecay;
+// Crate-root re-exports the composition root reaches through its
+// `crate::dashboard::*` shim: the application-surface injection contract and
+// the dashboard-facing project runtime trait.
+pub use application_surface::{
+    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyFuture,
+};
+pub use tracedecay::DashboardProjectRuntime;
 
 mod accounting;
 pub mod analytics_api;
@@ -120,7 +127,6 @@ use tower::ServiceExt;
 
 use tracedecay_api::WorkOperation;
 
-use crate::application_surface::DashboardApplicationRuntime;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::backend;
