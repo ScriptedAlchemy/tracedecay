@@ -4,3 +4,4 @@
 mod graph;
 mod search;
 mod source;
+mod traits;
