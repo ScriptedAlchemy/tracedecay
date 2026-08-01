@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::path_safety::canonicalize_existing_prefix;
 use tracedecay_runtime_core::storage::PROFILE_IDENTITY_FILENAME;
 
 const PROFILE_IDENTITY_SCHEMA_VERSION: u32 = 1;
@@ -157,6 +158,15 @@ fn random_identity(prefix: &str) -> Result<String> {
     Ok(format!("{prefix}.{}", hex::encode(bytes)))
 }
 
+/// Absolutizes `path` and canonicalizes through its deepest existing
+/// ancestor.
+///
+/// Known divergence, deliberately preserved: the daemon's identically-named
+/// resolver additionally applies
+/// [`tracedecay_runtime_core::path_safety::collapse_relative_components`] to
+/// the result. This one must not — the identity strings it produces are
+/// already written into migrated profile records, and collapsing `.`/`..`
+/// here would rewrite them. Only the canonicalization algorithm is shared.
 fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -165,29 +175,9 @@ fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
             .map_err(|error| profile_identity_io("resolve", path, &error))?
             .join(path)
     };
-    if let Ok(canonical) = absolute.canonicalize() {
-        return Ok(canonical);
-    }
-    let mut suffix = Vec::new();
-    let mut existing = absolute.as_path();
-    while !existing.exists() {
-        let Some(name) = existing.file_name() else {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to resolve identity path '{}'", path.display()),
-            });
-        };
-        suffix.push(name.to_os_string());
-        existing = existing.parent().ok_or_else(|| TraceDecayError::Config {
-            message: format!("failed to resolve identity path '{}'", path.display()),
-        })?;
-    }
-    let mut canonical = existing
-        .canonicalize()
-        .map_err(|error| profile_identity_io("canonicalize", existing, &error))?;
-    for component in suffix.iter().rev() {
-        canonical.push(component);
-    }
-    Ok(canonical)
+    canonicalize_existing_prefix(&absolute).ok_or_else(|| TraceDecayError::Config {
+        message: format!("failed to resolve identity path '{}'", path.display()),
+    })
 }
 
 fn invalid_identity(path: &Path, field: &str, error: impl std::fmt::Display) -> TraceDecayError {

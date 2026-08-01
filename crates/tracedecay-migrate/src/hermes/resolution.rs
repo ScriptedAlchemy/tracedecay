@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use super::copy::{MIGRATION_QUERY_PAGE_ROWS, ensure_materialized_row_room, table_columns};
 use crate::root_seam::global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::path_safety::{
+    canonicalize_existing_prefix, canonicalize_path_or_existing_parent,
+};
 
 pub struct ResolvedTargetProject {
     pub root: PathBuf,
@@ -13,27 +16,12 @@ pub struct ResolvedTargetProject {
     pub user_scope: bool,
 }
 
+/// Compares two paths after canonicalizing the deepest existing ancestor and
+/// reattaching any missing tail. This preserves OS aliases such as macOS
+/// `/var` -> `/private/var` even after the final project directory was moved
+/// or a symlink alias was removed.
 pub fn same_path(left: &Path, right: &Path) -> bool {
-    canonicalize_with_missing_tail(left).unwrap_or_else(|| left.to_path_buf())
-        == canonicalize_with_missing_tail(right).unwrap_or_else(|| right.to_path_buf())
-}
-
-/// Canonicalizes the deepest existing ancestor and reattaches a missing tail.
-/// This preserves OS aliases such as macOS `/var` -> `/private/var` even after
-/// the final project directory was moved or a symlink alias was removed.
-fn canonicalize_with_missing_tail(path: &Path) -> Option<PathBuf> {
-    let mut ancestor = path;
-    let mut tail = Vec::new();
-    loop {
-        if let Ok(mut canonical) = ancestor.canonicalize() {
-            for component in tail.iter().rev() {
-                canonical.push(component);
-            }
-            return Some(canonical);
-        }
-        tail.push(ancestor.file_name()?.to_os_string());
-        ancestor = ancestor.parent()?;
-    }
+    canonicalize_path_or_existing_parent(left) == canonicalize_path_or_existing_parent(right)
 }
 
 fn real_project_root(
@@ -127,7 +115,7 @@ async fn resolve_project_candidate(
         return Ok(None);
     }
 
-    let canonical_candidate = canonicalize_with_missing_tail(candidate);
+    let canonical_candidate = canonicalize_existing_prefix(candidate);
     let context = if let Some(registry) = registry {
         let direct = registry
             .project_registry_context_by_alias(candidate)

@@ -1,6 +1,6 @@
 mod canonical;
 
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 pub use canonical::{normalize, stable_record_id};
 
@@ -25,15 +25,4 @@ pub fn observation_source_id(native_transcript_id: &[u8]) -> String {
         "{OBSERVATION_SOURCE_ID_PREFIX}-{}",
         canonical_framed_sha256(OBSERVATION_SOURCE_ID_DOMAIN, &[native_transcript_id])
     )
-}
-
-fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((domain.len() as u64).to_be_bytes());
-    hasher.update(domain);
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    hex::encode(hasher.finalize())
 }
