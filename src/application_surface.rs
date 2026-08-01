@@ -84,15 +84,15 @@ use crate::catalog_composition::{
     ApplicationCatalogComposition, CatalogCompositionError, build_application_catalog_snapshot,
     compose_application_catalog_with,
 };
-use crate::daemon::work_runtime::WorkAttemptInvocationV1;
-use crate::daemon::{
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkflowApplicationInvocationV1,
-    WorkflowApplicationOutcomeV1,
-};
 use crate::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
+};
+use crate::daemon_contract::WorkAttemptInvocationV1;
+use crate::daemon_contract::{
+    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkflowApplicationInvocationV1,
+    WorkflowApplicationOutcomeV1,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -1201,13 +1201,14 @@ async fn invoke_multi_root_operation(
                     "The multi-root application request is invalid",
                 );
             };
-            let invocation = crate::daemon::DaemonInvocationRequest::multi_root_scope_set_read(
-                request_id.as_str(),
-                request,
-                observed_at,
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
+            let invocation =
+                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
+                    request_id.as_str(),
+                    request,
+                    observed_at,
+                    controls.deadline.clone(),
+                    controls.cancellation.context(),
+                );
             invoke_multi_root_http::<Option<tracedecay_application::AuthorizedScopeSet>>(
                 executor,
                 operation,
@@ -1215,7 +1216,7 @@ async fn invoke_multi_root_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetRead {
+                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetRead {
                         scope,
                         outcome,
                     } => Some((scope, outcome)),
@@ -1233,7 +1234,7 @@ async fn invoke_multi_root_operation(
                 );
             };
             let invocation =
-                crate::daemon::DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
                     request_id.as_str(),
                     request,
                     observed_at,
@@ -1247,7 +1248,7 @@ async fn invoke_multi_root_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
+                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
                         scope,
                         outcome,
                     } => Some((scope, outcome)),
@@ -1264,7 +1265,7 @@ async fn invoke_multi_root_operation(
                     "The multi-root application request is invalid",
                 );
             };
-            let invocation = crate::daemon::DaemonInvocationRequest::multi_root_execute(
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::multi_root_execute(
                 request_id.as_str(),
                 request,
                 observed_at,
@@ -1280,7 +1281,7 @@ async fn invoke_multi_root_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::MultiRootQueryPage {
+                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootQueryPage {
                         scope,
                         outcome,
                     } => Some((scope, outcome)),
@@ -1297,9 +1298,9 @@ async fn invoke_multi_root_http<T>(
     operation: MultiRootHttpOperation,
     request_id: RequestId,
     controls: HttpApplicationControls,
-    invocation: crate::daemon::DaemonInvocationRequest,
+    invocation: crate::daemon_contract::DaemonInvocationRequest,
     select_outcome: fn(
-        crate::daemon::DaemonInvocationOutcome,
+        crate::daemon_contract::DaemonInvocationOutcome,
     ) -> Option<(
         tracedecay_application::ResolvedScope,
         tracedecay_application::ApplicationOutcome<T>,
@@ -1368,7 +1369,7 @@ where
         )
         .await;
     let outcome = match response {
-        Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) => outcome,
+        Ok(crate::daemon_contract::DaemonInvocationResponse { outcome, .. }) => outcome,
         Err(_) => {
             return work_adapter_unavailable(
                 request_id,
@@ -1377,10 +1378,10 @@ where
             );
         }
     };
-    if let crate::daemon::DaemonInvocationOutcome::Problem { problem } = outcome {
+    if let crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } = outcome {
         let problem = match problem {
-            crate::daemon::DaemonInvocationProblem::InvalidRequest
-            | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+            crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+            | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                 ApplicationProblem::InvalidRequest {
                     diagnostic: SafeDiagnostic {
                         code: "multi_root.invalid_request".to_owned(),
@@ -1390,10 +1391,10 @@ where
                     legal_actions: vec![LegalAction::CorrectRequest],
                 }
             }
-            crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
             }
-            crate::daemon::DaemonInvocationProblem::Unavailable => {
+            crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 ApplicationProblem::unavailable(SafeDiagnostic {
                     code: "multi_root.unavailable".to_owned(),
                     message: "The multi-root authority is unavailable".to_owned(),
@@ -1526,7 +1527,7 @@ async fn invoke_workflow_operation(
             let Ok(decoded) = serde_json::from_value::<WorkflowFanOutRequestV1>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon::DaemonInvocationRequest::workflow_application(
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::workflow_application(
                 request_id.as_str(),
                 WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(decoded)),
                 crate::daemon_client::invocation_now_micros(),
@@ -1540,7 +1541,7 @@ async fn invoke_workflow_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::WorkflowApplication {
+                    crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
                         scope,
                         outcome:
                             WorkflowApplicationOutcomeV1::ExecuteFanOut(
@@ -1583,7 +1584,7 @@ async fn invoke_work_operation(
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
                 return tracedecay_api::work_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon::DaemonInvocationRequest::work_application(
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_application(
                 request_id.as_str(),
                 WorkApplicationInvocationV1::$variant(decoded),
                 crate::daemon_client::invocation_now_micros(),
@@ -1597,7 +1598,7 @@ async fn invoke_work_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::WorkApplication {
+                    crate::daemon_contract::DaemonInvocationOutcome::WorkApplication {
                         scope,
                         outcome: WorkApplicationOutcomeV1::$variant(outcome),
                     } => Some((scope, outcome)),
@@ -1613,7 +1614,7 @@ async fn invoke_work_operation(
             let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
                 return tracedecay_api::work_invalid_request_response(request_id);
             };
-            let invocation = crate::daemon::DaemonInvocationRequest::work_attempt(
+            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_attempt(
                 request_id.as_str(),
                 WorkAttemptInvocationV1::$variant(decoded.into()),
                 crate::daemon_client::invocation_now_micros(),
@@ -1627,9 +1628,10 @@ async fn invoke_work_operation(
                 controls,
                 invocation,
                 |outcome| match outcome {
-                    crate::daemon::DaemonInvocationOutcome::WorkAttempt { scope, outcome } => {
-                        Some((scope, *outcome))
-                    }
+                    crate::daemon_contract::DaemonInvocationOutcome::WorkAttempt {
+                        scope,
+                        outcome,
+                    } => Some((scope, *outcome)),
                     _ => None,
                 },
             )
@@ -1763,9 +1765,9 @@ async fn invoke_registered_http<T, O>(
     operation: O,
     request_id: RequestId,
     controls: HttpApplicationControls,
-    invocation: crate::daemon::DaemonInvocationRequest,
+    invocation: crate::daemon_contract::DaemonInvocationRequest,
     select_outcome: fn(
-        crate::daemon::DaemonInvocationOutcome,
+        crate::daemon_contract::DaemonInvocationOutcome,
     ) -> Option<(
         tracedecay_application::ResolvedScope,
         tracedecay_application::ApplicationOutcome<T>,
@@ -1836,11 +1838,13 @@ where
         .invoke_controlled(invocation, controls.deadline, controls.cancellation, policy)
         .await;
     let problem = match response {
-        Ok(crate::daemon::DaemonInvocationResponse { outcome, .. }) => match outcome {
-            crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => problem,
-            crate::daemon::DaemonInvocationOutcome::Problem { problem } => match problem {
-                crate::daemon::DaemonInvocationProblem::InvalidRequest
-                | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+        Ok(crate::daemon_contract::DaemonInvocationResponse { outcome, .. }) => match outcome {
+            crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+                problem
+            }
+            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => match problem {
+                crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+                | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                     ApplicationProblem::InvalidRequest {
                         diagnostic: SafeDiagnostic {
                             code: "work.invalid_request".to_owned(),
@@ -1850,10 +1854,10 @@ where
                         legal_actions: vec![LegalAction::CorrectRequest],
                     }
                 }
-                crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
                 }
-                crate::daemon::DaemonInvocationProblem::Unavailable => {
+                crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: "work.unavailable".to_owned(),
                         message: "The Work application runtime is unavailable".to_owned(),
@@ -3722,7 +3726,7 @@ pub async fn execute_application_surface(
     }
     let request = match invocation.request {
         ApplicationSurfaceRequest::GitRead(request) => {
-            crate::daemon::DaemonInvocationRequest::git_read(
+            crate::daemon_contract::DaemonInvocationRequest::git_read(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3732,7 +3736,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::GitPreview(request) => {
-            crate::daemon::DaemonInvocationRequest::git_preview(
+            crate::daemon_contract::DaemonInvocationRequest::git_preview(
                 request_id.as_str(),
                 request,
                 observed_at,
@@ -3741,7 +3745,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::GitApply(request) => {
-            crate::daemon::DaemonInvocationRequest::git_apply(
+            crate::daemon_contract::DaemonInvocationRequest::git_apply(
                 request_id.as_str(),
                 request,
                 observed_at,
@@ -3750,7 +3754,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::Feedback(request) => {
-            crate::daemon::DaemonInvocationRequest::feedback(
+            crate::daemon_contract::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
                 operation,
                 request.request_handle,
@@ -3760,7 +3764,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request) => {
-            crate::daemon::DaemonInvocationRequest::feedback_advisory_cycle(
+            crate::daemon_contract::DaemonInvocationRequest::feedback_advisory_cycle(
                 request_id.as_str(),
                 request.document_uri,
                 observed_at,
@@ -3769,7 +3773,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::FeedbackImpact(request) => {
-            crate::daemon::DaemonInvocationRequest::feedback(
+            crate::daemon_contract::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
                 ApplicationSurfaceOperation::FeedbackImpact,
                 request.request_handle,
@@ -3779,7 +3783,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::AffectedTests(request) => {
-            crate::daemon::DaemonInvocationRequest::feedback(
+            crate::daemon_contract::DaemonInvocationRequest::feedback(
                 request_id.as_str(),
                 ApplicationSurfaceOperation::AffectedTests,
                 request.request_handle,
@@ -3789,7 +3793,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::TestResults(_) => {
-            crate::daemon::DaemonInvocationRequest::primitive(
+            crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
                 operation,
                 crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults(
@@ -3801,7 +3805,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::CallableCode(request) => {
-            crate::daemon::DaemonInvocationRequest::callable_code(
+            crate::daemon_contract::DaemonInvocationRequest::callable_code(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3812,7 +3816,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::PrimitiveCode(request) => {
-            crate::daemon::DaemonInvocationRequest::primitive_code(
+            crate::daemon_contract::DaemonInvocationRequest::primitive_code(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3823,7 +3827,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::Primitive(request) => {
-            crate::daemon::DaemonInvocationRequest::primitive(
+            crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3833,7 +3837,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::Configuration(request) => {
-            crate::daemon::DaemonInvocationRequest::configuration(
+            crate::daemon_contract::DaemonInvocationRequest::configuration(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3843,7 +3847,7 @@ pub async fn execute_application_surface(
             )
         }
         ApplicationSurfaceRequest::ContextScout(request) => {
-            crate::daemon::DaemonInvocationRequest::context_scout(
+            crate::daemon_contract::DaemonInvocationRequest::context_scout(
                 request_id.as_str(),
                 operation,
                 request,
@@ -3951,7 +3955,7 @@ pub async fn execute_application_surface(
         }
     };
     let result = match response.outcome {
-        crate::daemon::DaemonInvocationOutcome::GitRead { scope, result } => {
+        crate::daemon_contract::DaemonInvocationOutcome::GitRead { scope, result } => {
             Ok(ApplicationEnvelope::evidence(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3959,7 +3963,7 @@ pub async fn execute_application_surface(
                 result.into_application(),
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::GitPreview { scope, preview } => {
+        crate::daemon_contract::DaemonInvocationOutcome::GitPreview { scope, preview } => {
             Ok(ApplicationEnvelope::preview(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3967,7 +3971,7 @@ pub async fn execute_application_surface(
                 preview.into_application_result()?,
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::GitApply { scope, effect } => {
+        crate::daemon_contract::DaemonInvocationOutcome::GitApply { scope, effect } => {
             Ok(ApplicationEnvelope::effect(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3975,8 +3979,8 @@ pub async fn execute_application_surface(
                 effect.into_application_result()?,
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::Feedback { scope, result }
-        | crate::daemon::DaemonInvocationOutcome::Primitive { scope, result } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result }
+        | crate::daemon_contract::DaemonInvocationOutcome::Primitive { scope, result } => {
             Ok(ApplicationEnvelope::evidence(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3984,7 +3988,7 @@ pub async fn execute_application_surface(
                 result.into_application(),
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::CallableCode { scope, result } => {
+        crate::daemon_contract::DaemonInvocationOutcome::CallableCode { scope, result } => {
             Ok(ApplicationEnvelope::evidence(
                 result_contract.clone(),
                 request_id.clone(),
@@ -3992,7 +3996,7 @@ pub async fn execute_application_surface(
                 result.into_application(),
             ))
         }
-        crate::daemon::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
             Ok(ApplicationEnvelope {
                 contract: result_contract.clone(),
                 request_id: request_id.clone(),
@@ -4000,7 +4004,7 @@ pub async fn execute_application_surface(
                 outcome,
             })
         }
-        crate::daemon::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
+        crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
             Ok(ApplicationEnvelope {
                 contract: result_contract.clone(),
                 request_id: request_id.clone(),
@@ -4008,10 +4012,10 @@ pub async fn execute_application_surface(
                 outcome,
             })
         }
-        crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
+        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
             ApplicationProblemEnvelope::new(result_contract.clone(), request_id.clone(), problem),
         ),
-        crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
             Err(ApplicationProblemEnvelope::new(
                 result_contract.clone(),
                 request_id.clone(),
@@ -4737,11 +4741,11 @@ fn current_micros() -> Result<UtcMicros, ApplicationSurfaceAdapterError> {
 }
 
 fn invocation_problem(
-    problem: crate::daemon::DaemonInvocationProblem,
+    problem: crate::daemon_contract::DaemonInvocationProblem,
 ) -> Result<ApplicationProblem, ApplicationSurfaceAdapterError> {
     Ok(match problem {
-        crate::daemon::DaemonInvocationProblem::InvalidRequest
-        | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+        crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+        | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
             ApplicationProblem::InvalidRequest {
                 diagnostic: SafeDiagnostic::new(
                     "application.surface.invalid_request",
@@ -4751,10 +4755,10 @@ fn invocation_problem(
                 legal_actions: Vec::new(),
             }
         }
-        crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+        crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        crate::daemon::DaemonInvocationProblem::Unavailable => {
+        crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.unavailable",
                 "The application service for this operation is unavailable",

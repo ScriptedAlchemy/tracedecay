@@ -1150,21 +1150,29 @@ fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask
 }
 
 pub(crate) mod transport;
+#[cfg(test)]
+pub(crate) use crate::daemon_contract::{
+    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationProblem,
+};
+/// The wire contract now lives in `crate::daemon_contract`, outside this module
+/// tree. Daemon-internal call sites keep naming it through `crate::daemon::` so
+/// the move stayed mechanical; new callers should depend on the contract module
+/// directly rather than widening this re-export.
+pub(crate) use crate::daemon_contract::{
+    DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
+    parse_daemon_invocation_request,
+};
 pub(crate) use service::invocation::{
-    BoundedPr13HookOrchestratorV1, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
-    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationOutcome, DaemonInvocationProblem,
-    DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
-    DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
+    BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,
+    DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
+    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
+    DaemonInvocationService, DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
     Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
-    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
-    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
-    parse_daemon_invocation_request,
+    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
+    daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
