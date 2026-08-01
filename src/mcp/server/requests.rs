@@ -101,6 +101,27 @@ fn is_source_edit_tool(tool_name: &str) -> bool {
     )
 }
 
+/// Reads that walk a git tree or the whole code graph, and so must not run
+/// without a horizon.
+///
+/// The catalog-owned git reads are recognised by their surface operation; every
+/// other git-walking tool is recognised through the canonical MCP binding table
+/// rather than a second hand-maintained name list, so a newly bound git tool
+/// inherits the bound instead of silently running unbounded.
+fn is_controlled_read_tool(tool_name: &str) -> bool {
+    matches!(
+        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name),
+        Some(
+            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+                | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+                | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+                | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+                | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+        )
+    ) || crate::mcp::tools::handlers::tool_dispatches_git_reads(tool_name)
+        || tool_name == "tracedecay_search"
+}
+
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || is_source_edit_tool(tool_name)
@@ -1145,16 +1166,7 @@ impl McpServer {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
         let source_edit = is_source_edit_tool(tool_name);
-        let controlled_read = matches!(
-            application_surface,
-            Some(
-                crate::application_surface::ApplicationSurfaceOperation::GitStatus
-                    | crate::application_surface::ApplicationSurfaceOperation::GitDiff
-                    | crate::application_surface::ApplicationSurfaceOperation::GitHistory
-                    | crate::application_surface::ApplicationSurfaceOperation::GitBlame
-                    | crate::application_surface::ApplicationSurfaceOperation::GitHunks
-            )
-        ) || tool_name == "tracedecay_search";
+        let controlled_read = is_controlled_read_tool(tool_name);
         let request_id = tool_supports_live_cancellation(tool_name)
             .then(|| application_surface_request_id(id, memory_request_scope))
             .flatten()
@@ -1830,16 +1842,7 @@ mod git_read_control_tests {
                 application_surface.is_some(),
                 "Git reads must enter the catalog-owned application surface",
             );
-            let controlled_read = matches!(
-                application_surface,
-                Some(
-                    crate::application_surface::ApplicationSurfaceOperation::GitStatus
-                        | crate::application_surface::ApplicationSurfaceOperation::GitDiff
-                        | crate::application_surface::ApplicationSurfaceOperation::GitHistory
-                        | crate::application_surface::ApplicationSurfaceOperation::GitBlame
-                        | crate::application_surface::ApplicationSurfaceOperation::GitHunks
-                )
-            );
+            let controlled_read = is_controlled_read_tool(tool_name);
             assert!(controlled_read);
             assert_eq!(
                 dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
@@ -1880,5 +1883,63 @@ mod git_read_control_tests {
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }
         assert!(!registry.lock().expect("registry").contains_key(&request_id));
+    }
+
+    /// These tools walk git trees but are not application-surface operations
+    /// and are not source edits, so the horizon predicate used to return `None`
+    /// for them: they dispatched with no deadline at all while the cheaper
+    /// `tracedecay_git_status` was bounded at thirty seconds.
+    #[test]
+    fn git_reading_tools_receive_a_bounded_deadline() {
+        for tool_name in [
+            "tracedecay_admin_branch_add",
+            "tracedecay_affected",
+            "tracedecay_diff_context",
+            "tracedecay_changelog",
+            "tracedecay_commit_context",
+            "tracedecay_pr_context",
+            "tracedecay_branch_search",
+            "tracedecay_branch_diff",
+            "tracedecay_branch_list",
+        ] {
+            assert!(
+                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
+                    .is_none(),
+                "{tool_name} is not an application-surface operation, so only the \
+                 git-dispatch predicate can bound it",
+            );
+            assert!(!is_source_edit_tool(tool_name));
+            assert!(
+                is_controlled_read_tool(tool_name),
+                "{tool_name} walks a git tree and must be a controlled read",
+            );
+            assert_eq!(
+                dispatch_deadline_horizon_micros(
+                    false,
+                    is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
+                ),
+                Some(30_000_000),
+                "{tool_name} must dispatch with a bounded horizon",
+            );
+        }
+    }
+
+    /// The horizon predicate reads the canonical binding table, so it must not
+    /// sweep in reads from other dispatch families.
+    #[test]
+    fn non_git_reads_stay_outside_the_controlled_read_horizon() {
+        for tool_name in [
+            "tracedecay_outline",
+            "tracedecay_body",
+            "tracedecay_dead_code",
+            "tracedecay_health",
+            "tracedecay_context",
+        ] {
+            assert!(
+                !is_controlled_read_tool(tool_name),
+                "{tool_name} is not a git-walking read",
+            );
+        }
+        assert!(is_controlled_read_tool("tracedecay_search"));
     }
 }
