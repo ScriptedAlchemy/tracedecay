@@ -18,7 +18,7 @@ use super::skill_usage::{
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::ToolFamilySignal;
 use crate::errors::Result;
-use crate::sessions::lcm::LcmGrepHit;
+use crate::ports::session_evidence::LcmGrepHit;
 
 mod consolidation;
 

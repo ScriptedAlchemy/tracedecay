@@ -23,8 +23,10 @@
 //! `SEAMS.md` next to this crate's manifest tracks which registration sites
 //! the landing still owes.
 
+pub mod codex_app_server;
 pub mod configuration;
 pub mod context;
 pub mod hook_runtime;
 pub mod mcp_tools;
 pub mod pricing;
+pub mod session_evidence;
