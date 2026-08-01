@@ -8,13 +8,13 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy)]
-pub(crate) struct FileInformation {
+pub struct FileInformation {
     pub volume_serial_number: u32,
     pub file_index: u64,
     pub number_of_links: u32,
 }
 
-pub(crate) fn information(file: &File) -> io::Result<FileInformation> {
+pub fn information(file: &File) -> io::Result<FileInformation> {
     let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
     // SAFETY: `file` owns a valid Windows file handle, and `information` points
     // to writable memory sized for the API's complete output structure.
