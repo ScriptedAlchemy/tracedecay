@@ -71,7 +71,6 @@ pub mod dashboard;
 #[path = "../build-support/dashboard_cache.rs"]
 mod dashboard_build_cache;
 #[cfg(test)]
-mod dashboard_diagnostics;
 pub mod db;
 mod dependency_imports;
 pub mod derive_table;
