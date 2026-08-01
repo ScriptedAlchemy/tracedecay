@@ -14,7 +14,7 @@
 //! Plan 38 §3 makes these gain "generation-scoped retention tied to anchor
 //! dispositions — superseded and deleted dispositions release their storage."
 //! This module is the retention pass that does exactly that, mirroring the
-//! sibling LCM slice ([`crate::sessions::lcm::retention`]): a bounded,
+//! sibling LCM slice ([`tracedecay_sessions::runtime::lcm::retention`]): a bounded,
 //! DryRun/Apply, before/after-measured engine.
 //!
 //! # The disposition ledger is the governing authority
@@ -78,10 +78,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, Value, params,
 };
-use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
@@ -520,7 +520,7 @@ impl RetentionQueryExecutor<'_> {
         &self,
         sql: &str,
         params: Params,
-    ) -> crate::db::engine::Result<crate::db::engine::Rows> {
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows> {
         match self {
             Self::Connection(connection) => connection.query(sql, params).await,
             Self::Transaction(transaction) => transaction.query(sql, params).await,

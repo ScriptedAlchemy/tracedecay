@@ -11,7 +11,7 @@ async fn table_exists(db: &RegisteredGlobalDb, table: &str) -> bool {
     let mut rows = snapshot
         .query(
             "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-            crate::db::engine::params![table],
+            tracedecay_runtime_core::db::engine::params![table],
         )
         .await
         .unwrap();
@@ -53,7 +53,7 @@ async fn registered_mount_publishes_complete_migrated_schema() {
         let mut rows = snapshot
             .query(
                 "SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2",
-                crate::db::engine::params![table, column],
+                tracedecay_runtime_core::db::engine::params![table, column],
             )
             .await
             .unwrap();
@@ -157,12 +157,12 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
             .await
             .unwrap();
         let mut payload_rollback =
-            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+            tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 &task_storage_root,
             );
-        let payload = crate::sessions::lcm::payload::write_external_payload_tracked(
+        let payload = tracedecay_sessions::runtime::lcm::payload::write_external_payload_tracked(
             &task_storage_root,
-            crate::sessions::lcm::payload::ExternalPayloadWrite {
+            tracedecay_sessions::runtime::lcm::payload::ExternalPayloadWrite {
                 provider: "codex",
                 session_id: "cancelled-transaction",
                 message_id: "cancelled-message",
@@ -178,14 +178,14 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
     });
 
     let payload_ref = created_rx.await.expect("payload creation signal");
-    let payload_path = crate::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
+    let payload_path = tracedecay_sessions::runtime::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     assert!(payload_path.is_file());
 
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(
             "SELECT 1 FROM sessions WHERE provider = ?1 AND session_id = ?2",
-            crate::db::engine::params!["codex", "cancelled-transaction"],
+            tracedecay_runtime_core::db::engine::params!["codex", "cancelled-transaction"],
         )
         .await
         .expect("retained read must not join the uncommitted transaction");
@@ -248,14 +248,14 @@ async fn cancelled_authoritative_transaction_isolated_from_reads_and_cleans_payl
 async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let harness = RegisteredGlobalDbHarness::open("cancelled-lcm-lifecycle").await;
     let db = Arc::clone(&harness.registered);
-    let update = crate::sessions::lcm::LcmLifecycleUpdate {
+    let update = tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate {
         provider: "cursor".to_string(),
         conversation_id: "cancelled-lifecycle".to_string(),
         current_session_id: "cancelled-lifecycle".to_string(),
         current_frontier_store_id: None,
         last_finalized_session_id: None,
         last_finalized_frontier_store_id: None,
-        maintenance_debt: vec![crate::sessions::lcm::LcmMaintenanceDebt::RawBacklog {
+        maintenance_debt: vec![tracedecay_sessions::runtime::lcm::LcmMaintenanceDebt::RawBacklog {
             from_store_id: 1,
             to_store_id: 2,
         }],
@@ -265,7 +265,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     let task_update = update.clone();
     let task = tokio::spawn(async move {
         let transaction = task_db.begin_write_transaction().await.unwrap();
-        crate::sessions::lcm::compression::update_lifecycle(&transaction, task_update)
+        tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, task_update)
             .await
             .unwrap();
         written_tx.send(()).unwrap();
@@ -275,7 +275,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     written_rx.await.expect("lifecycle write signal");
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        crate::sessions::lcm::compression::lifecycle_state(
+        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
             &snapshot,
             "cursor",
             "cancelled-lifecycle",
@@ -290,7 +290,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     assert!(task.await.unwrap_err().is_cancelled());
     let snapshot = db.read_snapshot().await.unwrap();
     assert!(
-        crate::sessions::lcm::compression::lifecycle_state(
+        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
             &snapshot,
             "cursor",
             "cancelled-lifecycle",
@@ -302,7 +302,7 @@ async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
     drop(snapshot);
 
     let transaction = db.begin_write_transaction().await.unwrap();
-    let state = crate::sessions::lcm::compression::update_lifecycle(&transaction, update.clone())
+    let state = tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update.clone())
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -742,7 +742,7 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
                 .unwrap()
                 .execute(
                     "INSERT INTO writer_fairness(label) VALUES (?1)",
-                    crate::db::engine::params![label],
+                    tracedecay_runtime_core::db::engine::params![label],
                 )
                 .await
         }));
@@ -770,13 +770,13 @@ async fn queued_registered_writes_preserve_fifo_fairness() {
 #[tokio::test]
 async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
     async fn read_tokens(
-        connection: &impl crate::db::engine::QueryExecutor,
+        connection: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
         project_key: &str,
     ) -> i64 {
         let mut rows = connection
             .query(
                 "SELECT tokens_saved FROM projects WHERE path = ?1",
-                crate::db::engine::params![project_key],
+                tracedecay_runtime_core::db::engine::params![project_key],
             )
             .await
             .unwrap();
@@ -791,7 +791,7 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
         .unwrap()
         .execute(
             "INSERT INTO projects(path, tokens_saved) VALUES (?1, 1)",
-            crate::db::engine::params![project_key.as_str()],
+            tracedecay_runtime_core::db::engine::params![project_key.as_str()],
         )
         .await
         .unwrap();
@@ -803,7 +803,7 @@ async fn deferred_read_snapshot_observes_old_or_new_never_partial() {
         .unwrap()
         .execute(
             "UPDATE projects SET tokens_saved = 2 WHERE path = ?1",
-            crate::db::engine::params![project_key.as_str()],
+            tracedecay_runtime_core::db::engine::params![project_key.as_str()],
         )
         .await
         .unwrap();

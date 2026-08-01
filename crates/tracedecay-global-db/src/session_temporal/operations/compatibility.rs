@@ -1,6 +1,6 @@
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
-use crate::application::session::lcm::contracts::{LcmError, LcmSourceRef};
+use tracedecay_sessions::lcm::contracts::{LcmError, LcmSourceRef};
 
 use super::CanonicalPublicationManifest;
 

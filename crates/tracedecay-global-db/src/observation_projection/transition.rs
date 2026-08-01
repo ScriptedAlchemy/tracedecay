@@ -4,7 +4,7 @@ use tracedecay_store::{
     SessionMessageProjection, SessionMessageRecord, WorkflowFactProjection, WorkflowFactRecord,
 };
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::state::{
     has_other_projector_output_owner, protected_message_rows_compatible, same_projection_lineage,

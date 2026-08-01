@@ -1,4 +1,4 @@
-use crate::db::engine::{Connection, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Connection, TestConnection, params};
 
 use super::*;
 // `super::*` re-exports the crate's one-argument `errors::Result` alias; the
@@ -240,14 +240,14 @@ async fn authority_loss_before_commit_rolls_back_observation_release() -> Result
     seed_evidence(&conn, "anchor-revoked", GEN, 4096).await?;
     set_disposition(&conn, "anchor-revoked", "deleted", NOW - 90 * DAY, None).await?;
     let scope = std::sync::Mutex::new(Some(
-        crate::db::enter_daemon_database_scope(
+        tracedecay_runtime_core::db::enter_daemon_database_scope(
             temp.path(),
             1,
             "observation-retention-revocation-test",
         )
         .map_err(|error| error.to_string())?,
     ));
-    let authority = crate::db::DatabaseAuthority::for_runtime(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
         &temp.path().join("sessions.db"),
         "observation retention revocation test",
     )

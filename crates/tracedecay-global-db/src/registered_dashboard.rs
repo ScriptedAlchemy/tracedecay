@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::db::engine::{ReadSnapshot, Row, Value};
-use crate::errors::TraceDecayError;
+use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value};
+use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
@@ -99,7 +99,7 @@ impl RegisteredGlobalDb {
                          WHERE project_id > ?1
                          ORDER BY project_id
                          LIMIT ?2",
-                        crate::db::engine::params![after_project_id, limit],
+                        tracedecay_runtime_core::db::engine::params![after_project_id, limit],
                     )
                     .await
             }
@@ -161,7 +161,7 @@ impl RegisteredGlobalDb {
                         git_remote_url, default_branch, created_at, last_seen_at
                  FROM code_projects
                  WHERE project_id = ?1",
-                crate::db::engine::params![project_id],
+                tracedecay_runtime_core::db::engine::params![project_id],
             )
             .await
             .map_err(|error| dashboard_error("read project registry context", error))?;
@@ -202,7 +202,7 @@ impl RegisteredGlobalDb {
                  FROM store_instances
                  WHERE project_id = ?1
                  ORDER BY store_id",
-                crate::db::engine::params![project_id],
+                tracedecay_runtime_core::db::engine::params![project_id],
             )
             .await
             .map_err(|error| dashboard_error("list project store instances", error))?;
@@ -248,7 +248,7 @@ impl RegisteredGlobalDb {
                 "registered relink target is no longer live",
             ));
         }
-        let manifest_path = data_root.join(crate::storage::STORE_MANIFEST_FILENAME);
+        let manifest_path = data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
         let original_manifest_bytes =
             std::fs::read(&manifest_path).map_err(|error| TraceDecayError::Config {
                 message: format!(
@@ -263,7 +263,7 @@ impl RegisteredGlobalDb {
             ));
         }
         let original_manifest =
-            serde_json::from_slice::<crate::storage::StoreManifest>(&original_manifest_bytes)
+            serde_json::from_slice::<tracedecay_runtime_core::storage::StoreManifest>(&original_manifest_bytes)
                 .map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "failed to parse store manifest '{}': {error}",
@@ -336,7 +336,7 @@ impl RegisteredGlobalDb {
             .execute(
                 "DELETE FROM store_instances
                  WHERE store_id = ?1 AND project_id = ?2",
-                crate::db::engine::params![store_id, source_project_id],
+                tracedecay_runtime_core::db::engine::params![store_id, source_project_id],
             )
             .await
             .map_err(|error| dashboard_error("remove prior orphan store identity", error))?;
@@ -356,7 +356,7 @@ impl RegisteredGlobalDb {
                     store_id, project_id, store_kind, storage_mode, store_relpath,
                     manifest_relpath, created_at, last_verified_at, last_write_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     store.store_id,
                     target_project_id.as_str(),
                     store.store_kind,
@@ -377,7 +377,7 @@ impl RegisteredGlobalDb {
                         graph_scope_id, project_id, store_id, branch_name, db_relpath,
                         parent_scope_id, last_synced_at, writable
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    crate::db::engine::params![
+                    tracedecay_runtime_core::db::engine::params![
                         scope.graph_scope_id,
                         target_project_id.as_str(),
                         scope.store_id,
@@ -397,7 +397,7 @@ impl RegisteredGlobalDb {
                     "INSERT INTO store_artifacts (
                         store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    crate::db::engine::params![
+                    tracedecay_runtime_core::db::engine::params![
                         artifact.store_id,
                         artifact.artifact_kind,
                         artifact.relpath,
@@ -416,7 +416,7 @@ impl RegisteredGlobalDb {
                    AND NOT EXISTS (
                        SELECT 1 FROM store_instances WHERE project_id = ?1
                    )",
-                crate::db::engine::params![source_project_id],
+                tracedecay_runtime_core::db::engine::params![source_project_id],
             )
             .await
             .map_err(|error| dashboard_error("retire empty orphan project identity", error))?;
@@ -451,7 +451,7 @@ impl RegisteredGlobalDb {
                 }
             })?;
         if let Err(error) =
-            crate::storage::write_store_manifest_to_path(&manifest_path, &relinked_manifest)
+            tracedecay_runtime_core::storage::write_store_manifest_to_path(&manifest_path, &relinked_manifest)
         {
             transaction.rollback().await.map_err(|rollback_error| {
                 dashboard_message(
@@ -465,7 +465,7 @@ impl RegisteredGlobalDb {
         if let Err(error) = transaction.commit().await {
             return match std::fs::read(&manifest_path) {
                 Ok(current) if current == relinked_manifest_bytes.as_bytes() => {
-                    match crate::storage::write_store_manifest_to_path(
+                    match tracedecay_runtime_core::storage::write_store_manifest_to_path(
                         &manifest_path,
                         &original_manifest,
                     ) {
@@ -517,7 +517,7 @@ async fn resolve_exact_project_at_root(
                     AND project_aliases.last_seen_at = code_projects.last_seen_at
                 )
              ORDER BY code_projects.project_id",
-            crate::db::engine::params![root, alias],
+            tracedecay_runtime_core::db::engine::params![root, alias],
         )
         .await
         .map_err(|error| dashboard_error("resolve orphan relink target", error))?;
@@ -556,7 +556,7 @@ async fn load_exact_store(
                     manifest_relpath, created_at, last_verified_at, last_write_at
              FROM store_instances
              WHERE project_id = ?1 AND store_id = ?2",
-            crate::db::engine::params![project_id, store_id],
+            tracedecay_runtime_core::db::engine::params![project_id, store_id],
         )
         .await
         .map_err(|error| dashboard_error("read exact orphan store instance", error))?;
@@ -583,7 +583,7 @@ async fn load_store_graph_scopes(
              FROM graph_scopes
              WHERE store_id = ?1
              ORDER BY graph_scope_id",
-            crate::db::engine::params![store_id],
+            tracedecay_runtime_core::db::engine::params![store_id],
         )
         .await
         .map_err(|error| dashboard_error("read orphan store graph scopes", error))?;
@@ -611,7 +611,7 @@ async fn load_store_artifacts(
              FROM store_artifacts
              WHERE store_id = ?1
              ORDER BY artifact_kind, relpath",
-            crate::db::engine::params![store_id],
+            tracedecay_runtime_core::db::engine::params![store_id],
         )
         .await
         .map_err(|error| dashboard_error("read orphan store artifacts", error))?;
@@ -777,7 +777,7 @@ async fn query_ids(
     sql_template: &str,
     ids: &[String],
     operation: &'static str,
-) -> Result<crate::db::engine::Rows> {
+) -> Result<tracedecay_runtime_core::db::engine::Rows> {
     let sql = sql_template.replace("{}", &vec!["?"; ids.len()].join(","));
     let params = ids.iter().cloned().map(Value::Text).collect::<Vec<_>>();
     snapshot

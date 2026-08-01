@@ -1,4 +1,4 @@
-use crate::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::Executor;
 use crate::global_db_operation_error;
 
 /// Adds the durable, project-local authority for PR11 index transactions.
@@ -9,7 +9,7 @@ use crate::global_db_operation_error;
 /// deleted, so recovery evidence survives restart.
 pub async fn ensure_git_index_transaction_schema(
     connection: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS git_index_preview_commitments (

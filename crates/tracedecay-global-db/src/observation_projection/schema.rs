@@ -1,6 +1,6 @@
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 
-use crate::db::engine::{Connection, Error, Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Connection, Error, Executor, QueryExecutor, params};
 
 const PROJECTION_ANCHOR_BACKFILL_PAGE_ROWS: i64 = 256;
 const LEGACY_PROJECTION_PROVENANCE_TABLE_SQL: &str =
@@ -1088,12 +1088,12 @@ async fn has_output_ordinal(conn: &impl QueryExecutor) -> Result<bool, Error> {
 mod tests {
     use tempfile::TempDir;
 
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
     use crate::ensure_registered_schema;
 
     async fn open_registered_schema(
         path: &std::path::Path,
-    ) -> crate::errors::Result<TestConnection> {
+    ) -> tracedecay_runtime_core::errors::Result<TestConnection> {
         let conn = TestConnection::open(path);
         ensure_registered_schema(&conn).await?;
         Ok(conn)
@@ -1260,7 +1260,7 @@ mod tests {
         .unwrap();
 
         let transaction = conn
-            .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+            .transaction_with_behavior(tracedecay_runtime_core::db::engine::TransactionBehavior::Immediate)
             .await
             .unwrap();
         super::ensure_observation_projection_schema(&transaction)

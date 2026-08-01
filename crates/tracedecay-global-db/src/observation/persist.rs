@@ -4,7 +4,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{ObservationCommitReceipt, ObservationStoreError, ObservationStoreResult};
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::codec::{
     decode, decode_repository_provenance_attachment, decode_sequence, encode, encode_json_string,

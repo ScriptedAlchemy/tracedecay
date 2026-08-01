@@ -50,8 +50,8 @@ use crate::application::configuration::{
 use crate::config::registry::ConfigurationRegistry;
 use crate::config::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 #[cfg(test)]
-use crate::db::engine::{Connection, TestConnection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use crate::RegisteredGlobalDb;
 
 mod audit;
@@ -67,7 +67,7 @@ pub enum ConfigurationStorageError {
     #[error("configuration schema error: {0}")]
     Schema(#[from] ConfigurationSchemaError),
     #[error("configuration storage error: {0}")]
-    Sql(#[from] crate::db::engine::Error),
+    Sql(#[from] tracedecay_runtime_core::db::engine::Error),
     #[error("configuration storage encoded invalid data: {0}")]
     Encoding(String),
 }
@@ -2737,7 +2737,7 @@ fn complete_snapshot_for_current_registry(
             );
         }
     }
-    let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY)
+    let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY)
         .map_err(ConfigurationError::validation)?;
     if let Some(ConfigurationValueV1::Text(encoded)) = effective_values.get_mut(&semantic_key)
         && let Some(repaired) = repair_pre_digest_semantic_configuration(encoded)?
@@ -4247,10 +4247,10 @@ mod tests {
     fn forward_repair_disables_pre_digest_semantics_without_changing_install_intent() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let legacy = serde_json::json!({
-            "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+            "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
             "auto_download": true,
             "active_profile": {
                 "profile_id": "profile.semantic.legacy.v1",
@@ -4258,7 +4258,7 @@ mod tests {
                 "artifact_path": legacy_artifact_path
             },
             "rollback_profile": null,
-            "resources": crate::config::SemanticResourceCeilings::default()
+            "resources": tracedecay_semantic::SemanticResourceCeilings::default()
         });
         let mut effective_values = current.effective_values;
         let provenance = current.provenance;
@@ -4289,12 +4289,12 @@ mod tests {
         semantic.validate().unwrap();
         assert_eq!(
             semantic.selected_model.as_deref(),
-            Some(crate::config::DEFAULT_FASTEMBED_MODEL_ID)
+            Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
         );
         assert!(semantic.auto_download);
         assert_eq!(
             semantic.resources,
-            crate::config::SemanticResourceCeilings::default()
+            tracedecay_semantic::SemanticResourceCeilings::default()
         );
         assert!(semantic.active_profile.is_none());
         assert!(semantic.rollback_profile.is_none());
@@ -4304,21 +4304,21 @@ mod tests {
     fn forward_repair_rejects_unrecognized_semantic_configuration() {
         let registry = ConfigurationRegistry::core().unwrap();
         let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-        let semantic_key = SettingKey::new(crate::config::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
+        let semantic_key = SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
         let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
         let mut effective_values = current.effective_values;
         effective_values.insert(
             semantic_key,
             ConfigurationValueV1::Text(
                 serde_json::json!({
-                    "selected_model": crate::config::DEFAULT_FASTEMBED_MODEL_ID,
+                    "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
                     "active_profile": {
                         "profile_id": "profile.semantic.legacy.v1",
                         "artifact_digest": "a".repeat(64),
                         "artifact_path": legacy_artifact_path
                     },
                     "rollback_profile": null,
-                    "resources": crate::config::SemanticResourceCeilings::default(),
+                    "resources": tracedecay_semantic::SemanticResourceCeilings::default(),
                     "x": true
                 })
                 .to_string(),

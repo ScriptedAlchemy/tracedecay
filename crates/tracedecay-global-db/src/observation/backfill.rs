@@ -17,7 +17,7 @@ use tracedecay_store::{
     build_observation_retrieval_anchor_v2,
 };
 
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::persist::persist_observation_retrieval_anchor;
@@ -62,7 +62,7 @@ pub(super) enum BackfillPageOutcome {
 /// after a single marker probe.
 pub async fn converge_observation_repository_provenance(
     conn: &Connection,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     if migration_recorded(conn, OBSERVATION_PROVENANCE_SCHEMA_MIGRATION).await? {
         return Ok(());
     }
@@ -78,7 +78,7 @@ pub async fn converge_observation_repository_provenance(
 /// committed pages, under the same constraints as the provenance pass above.
 pub async fn converge_observation_retrieval_anchors(
     conn: &Connection,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     if migration_recorded(conn, OBSERVATION_ANCHOR_SCHEMA_MIGRATION).await? {
         return Ok(());
     }
@@ -89,7 +89,7 @@ pub async fn converge_observation_retrieval_anchors(
     }
 }
 
-fn default_availability_json() -> crate::errors::Result<String> {
+fn default_availability_json() -> tracedecay_runtime_core::errors::Result<String> {
     serde_json::to_string(
         RepositoryProvenanceAttachmentV1::new(EvidenceAvailabilityV1::Unknown, None)
             .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?
@@ -101,7 +101,7 @@ fn default_availability_json() -> crate::errors::Result<String> {
 pub(super) async fn backfill_page(
     conn: &Connection,
     availability_json: &str,
-) -> crate::errors::Result<BackfillPageOutcome> {
+) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
@@ -117,7 +117,7 @@ pub(super) async fn backfill_page(
 async fn backfill_page_transaction(
     transaction: &impl Executor,
     availability_json: &str,
-) -> crate::errors::Result<BackfillPageOutcome> {
+) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
     if migration_recorded(transaction, OBSERVATION_PROVENANCE_SCHEMA_MIGRATION).await? {
         return Ok(BackfillPageOutcome::Completed);
     }
@@ -173,7 +173,7 @@ async fn backfill_page_transaction(
     Ok(BackfillPageOutcome::Advanced)
 }
 
-async fn anchor_backfill_page(conn: &Connection) -> crate::errors::Result<BackfillPageOutcome> {
+async fn anchor_backfill_page(conn: &Connection) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
@@ -188,7 +188,7 @@ async fn anchor_backfill_page(conn: &Connection) -> crate::errors::Result<Backfi
 
 async fn anchor_backfill_page_transaction(
     transaction: &(impl Executor + Sync),
-) -> crate::errors::Result<BackfillPageOutcome> {
+) -> tracedecay_runtime_core::errors::Result<BackfillPageOutcome> {
     if migration_recorded(transaction, OBSERVATION_ANCHOR_SCHEMA_MIGRATION).await? {
         return Ok(BackfillPageOutcome::Completed);
     }
@@ -250,7 +250,7 @@ async fn attach_legacy_observation_anchor(
     observation_json: &str,
     receipt_id: &str,
     receipt_json: Option<&str>,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let receipt_json = receipt_json.ok_or_else(|| {
         global_db_operation_message(
             OBSERVATION_SCHEMA_OPERATION,
@@ -304,7 +304,7 @@ async fn read_page_upper_bound(
     conn: &impl QueryExecutor,
     backfilled_through: i64,
     page_size: i64,
-) -> crate::errors::Result<Option<i64>> {
+) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
     let mut rows = conn
         .query(
             "SELECT MAX(sequence) FROM (
@@ -331,7 +331,7 @@ async fn read_page_upper_bound(
 async fn record_completion(
     conn: &impl Executor,
     migration: &'static str,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO global_schema_migrations(migration) VALUES (?1)",
         params![migration],
@@ -344,7 +344,7 @@ async fn record_completion(
 async fn read_backfill_watermark(
     conn: &impl QueryExecutor,
     migration: &'static str,
-) -> crate::errors::Result<i64> {
+) -> tracedecay_runtime_core::errors::Result<i64> {
     let mut rows = conn
         .query(
             "SELECT backfilled_through FROM observation_backfill_watermarks
@@ -369,7 +369,7 @@ async fn advance_backfill_watermark(
     migration: &'static str,
     previous: i64,
     next: i64,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let changed = conn
         .execute(
             "INSERT INTO observation_backfill_watermarks (migration, backfilled_through)
@@ -392,7 +392,7 @@ async fn advance_backfill_watermark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     /// Seeds `observations` rows with raw `SQLite` before the runtime writer
     /// attaches. Row-at-a-time inserts through the writer actor cost seconds

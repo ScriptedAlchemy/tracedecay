@@ -3,8 +3,8 @@ use std::{error::Error, fmt::Write as _};
 use serde_json::Value as JsonValue;
 
 use super::{ParseOffset, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, TranscriptBatch};
-use crate::db::engine::{Executor, QueryExecutor, Row, params};
-use crate::sessions::{
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionRecord,
     lcm::{LcmSourceRef, LcmSummaryNodeDraft},
 };
@@ -396,7 +396,7 @@ impl RegisteredGlobalDb {
         &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
-        payload_rollback: &mut crate::sessions::lcm::payload::PayloadFileRollback,
+        payload_rollback: &mut tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback,
     ) -> Result<(), TranscriptPersistenceError> {
         let mut canonical_message = message.clone();
         canonical_message.timestamp = Self::normalize_session_message_timestamp(message.timestamp);
@@ -404,7 +404,7 @@ impl RegisteredGlobalDb {
             .db_path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let raw = crate::sessions::lcm::raw::upsert_raw_message_with_payload_tracked(
+        let raw = tracedecay_sessions::runtime::lcm::raw::upsert_raw_message_with_payload_tracked(
             conn,
             storage_root,
             &canonical_message,
@@ -488,7 +488,7 @@ impl RegisteredGlobalDb {
         };
         let publisher =
             crate::session_temporal_operations::GlobalDbLcmSummaryPublication::new(conn);
-        crate::sessions::lcm::dag::insert_summary_node(&publisher, draft)
+        tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft)
             .await
             .map(|_| ())
             .map_err(|error| {
@@ -713,8 +713,8 @@ impl RegisteredGlobalDb {
     pub async fn persist_transcript_batch_with_git_evidence_result(
         &self,
         batch: &TranscriptBatch,
-        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
-        span_observations: &[crate::sessions::git_correlation::SpanObservation],
+        commit_records: &[tracedecay_sessions::runtime::git_correlation::CommitSessionRecord],
+        span_observations: &[tracedecay_sessions::runtime::git_correlation::SpanObservation],
         parse_offset_path: &str,
         expected_offset: ParseOffset,
         parse_offset: ParseOffset,
@@ -754,8 +754,8 @@ impl RegisteredGlobalDb {
     async fn upsert_transcript_batches_inner(
         &self,
         batches: &[TranscriptBatch],
-        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
-        span_observations: &[crate::sessions::git_correlation::SpanObservation],
+        commit_records: &[tracedecay_sessions::runtime::git_correlation::CommitSessionRecord],
+        span_observations: &[tracedecay_sessions::runtime::git_correlation::SpanObservation],
         parse_offset_path: &str,
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
@@ -766,7 +766,7 @@ impl RegisteredGlobalDb {
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
         let mut payload_rollback =
-            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+            tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
                 storage_root,
             );
 
@@ -793,7 +793,7 @@ impl RegisteredGlobalDb {
                         }
                         TranscriptWritePolicy::ProjectionOnly => {
                             let text =
-                                crate::application::session::compatibility::derived_text_for_index(
+                                tracedecay_sessions::compatibility::derived_text_for_index(
                                     &message.text,
                                 );
                             if !Self::upsert_session_message_projection(
@@ -814,17 +814,17 @@ impl RegisteredGlobalDb {
                 }
             }
             for record in commit_records {
-                crate::sessions::git_correlation::upsert_commit_session(&transaction, record)
+                tracedecay_sessions::runtime::git_correlation::upsert_commit_session(&transaction, record)
                     .await
                     .map_err(|error| {
                         TranscriptPersistenceError::storage("upsert commit evidence", error)
                     })?;
             }
             for observation in span_observations {
-                crate::sessions::git_correlation::record_span_observation_in_transaction(
+                tracedecay_sessions::runtime::git_correlation::record_span_observation_in_transaction(
                     &transaction,
                     observation,
-                    crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+                    tracedecay_sessions::runtime::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
                 )
                 .await
                 .map_err(|error| {
