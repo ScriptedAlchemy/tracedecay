@@ -21,6 +21,7 @@ use super::status::feedback_history_repair_payload;
 use super::{
     TargetMemoryDb, config_error, memory_application, memory_application_error,
     memory_operation_context, open_target_memory_db, refresh_target_memory_digest,
+    with_memory_deadline,
 };
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
@@ -44,16 +45,23 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let action = required_str(&args, "action")?;
+    let action = required_str(&args, "action")?.to_owned();
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
-    if FactStoreAction::parse(action).is_some_and(FactStoreAction::writes) && cross_project_selector
+    if FactStoreAction::parse(&action).is_some_and(FactStoreAction::writes) && cross_project_selector
     {
         return Err(config_error(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
     }
-    let target_memory = open_target_memory_db(cg, &args, global_db).await?;
-    handle_fact_store_for_target(args, cross_project_selector, target_memory).await
+    // Bound the store-touching work (open + dispatch, including the add-path
+    // holographic encode, the serialized write, and any digest refresh) so a
+    // contended or starved operation degrades to a typed deadline problem
+    // instead of pinning the MCP transport open indefinitely.
+    with_memory_deadline(&format!("fact_store {action}"), async move {
+        let target_memory = open_target_memory_db(cg, &args, global_db).await?;
+        handle_fact_store_for_target(args, cross_project_selector, target_memory).await
+    })
+    .await
 }
 
 pub(super) async fn handle_fact_store_for_target(
