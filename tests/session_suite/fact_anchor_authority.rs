@@ -31,9 +31,11 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_store::FactStoreError;
 use tracedecay_store::{
     CurrentFactsQuery, FactCommitConflict, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
-    FactStore, FactStoreError, FactWriteBatch, RetrievalAnchorQuery, StoredFactV1,
+    FactStore, FactWriteBatch, RetrievalAnchorQuery, StoredFactV1,
 };
 
 fn profile_owner() -> FactOwnerV1 {
