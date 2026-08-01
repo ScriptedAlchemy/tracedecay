@@ -1985,11 +1985,13 @@ async fn dispatch_doctor_owner_operation(
             }
         }
         (DoctorRemediationTargetV1::StorageRetentionCollect, false) => {
-            let global = owners
-                .registry
-                .global_retention_report(&owners.global_retention, now_secs())
-                .await
-                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let global = crate::retention::global_retention_report(
+                owners.registry.as_ref(),
+                &owners.global_retention,
+                now_secs(),
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
             let profile =
                 run_doctor_session_retention(owners, owners.profile_sessions.as_ref(), false)
                     .await?;
@@ -2002,11 +2004,13 @@ async fn dispatch_doctor_owner_operation(
             )?);
         }
         (DoctorRemediationTargetV1::StorageRetentionCollect, true) => {
-            let global = owners
-                .registry
-                .prune_global_retention(&owners.global_retention, now_secs())
-                .await
-                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let global = crate::retention::prune_global_retention(
+                owners.registry.as_ref(),
+                &owners.global_retention,
+                now_secs(),
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
             let profile =
                 run_doctor_session_retention(owners, owners.profile_sessions.as_ref(), true)
                     .await?;
@@ -2322,13 +2326,11 @@ async fn run_doctor_session_retention(
     use crate::dashboard::DoctorRemediationDispatchErrorV1;
     let now = now_secs();
     let global = if apply {
-        database
-            .prune_global_retention(&owners.global_retention, now)
+        crate::retention::prune_global_retention(database, &owners.global_retention, now)
             .await
             .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?
     } else {
-        database
-            .global_retention_report(&owners.global_retention, now)
+        crate::retention::global_retention_report(database, &owners.global_retention, now)
             .await
             .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?
     };

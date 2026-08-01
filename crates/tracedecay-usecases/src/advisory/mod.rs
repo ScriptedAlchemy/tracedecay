@@ -86,7 +86,7 @@ pub use host_delivery::{
     Pr13AdvisoryRunErrorV1, Pr13AdvisoryRunResultV1, mount_pr13_advisory_host_delivery,
     new_pr13_advisory_hook_delivery_port, register_pr13_advisory_daemon_startup,
 };
-pub(crate) use host_delivery::{
+pub use host_delivery::{
     acknowledge_pr13_advisory_hook_notice, peek_pr13_advisory_hook_notice,
     register_pr13_advisory_hook_notice_queue,
 };

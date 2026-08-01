@@ -50,9 +50,8 @@ use tracedecay_application::{
     WorkProjectionSnapshotRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
 };
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
-    ProtectedChange, RollbackModeV1, SettingKey,
+    ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
+    ConfigurationValueV1, CredentialKindV1, CredentialReferenceId, RollbackModeV1, SettingKey,
 };
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
@@ -64,6 +63,9 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
     IdentifierError, ProfileId, RouteExposureV1, SchemaId, SurfaceOperationName, UseCaseId,
+};
+pub use tracedecay_usecases::application_surface::{
+    ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
 };
 
 use crate::application::feedback::observations::{
@@ -796,22 +798,6 @@ pub struct ConfigurationWriteCredentialSurfaceRequest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationObservedStateSurfaceRequest {}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationProtectedPreviewSurfaceRequest {
-    pub change: ProtectedChange,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigurationProtectedApplySurfaceRequest {
-    pub plan_id: ChangePlanId,
-    pub expected_base_revision_id: ConfigurationRevisionId,
-    pub operation_digest: ManifestDigest,
-    pub idempotency_key: ConfigurationIdempotencyKey,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

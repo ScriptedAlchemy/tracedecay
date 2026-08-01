@@ -122,10 +122,11 @@ pub(super) async fn run_startup_session_catch_up(
         return None;
     };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
+    let project_authority = crate::store::GlobalDbSessionIngestAuthority::new(registered.as_ref());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
-        registered.as_ref(),
+        &project_authority,
         project_root,
         project_id,
         None,
@@ -143,11 +144,15 @@ pub(super) async fn run_startup_session_catch_up(
         (user_session_db, registered_user_session_db, registry_db)
     {
         if let Some(profile_root) = user_db.db_path().parent() {
+            let user_authority =
+                crate::store::GlobalDbSessionIngestAuthority::new(user_registered.as_ref());
+            let registry_authority =
+                crate::store::GlobalDbSessionIngestAuthority::new(registry_db.as_ref());
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
                 profile_identity.brain_id(),
                 profile_identity.profile_id(),
-                user_registered.as_ref(),
-                registry_db.as_ref(),
+                &user_authority,
+                &registry_authority,
                 profile_root,
                 cancellation,
             )

@@ -480,7 +480,7 @@ impl DaemonSessionRetrievalService {
         let capability = CapabilityDigest::new(capability);
         let policy = PolicyDigest::new(policy);
         let configuration = ConfigurationDigest::new(configuration);
-        let cancellation = CancellationToken::for_application_request(&request_id);
+        let cancellation = CancellationToken::for_application_request(request_id.as_str());
         let budgets = RequestBudgets::new(
             MESSAGE_SEARCH_MAX_RESULTS,
             MESSAGE_SEARCH_MAX_BYTES,

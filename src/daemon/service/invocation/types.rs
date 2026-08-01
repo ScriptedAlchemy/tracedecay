@@ -198,7 +198,7 @@ pub(in crate::daemon::service) struct UnavailableFeedbackCycleRuntimeV1 {
 }
 
 impl UnavailableFeedbackCycleRuntimeV1 {
-    pub(super) fn new(
+    pub(in crate::daemon::service) fn new(
         project_id: ProjectId,
         observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
     ) -> Self {
@@ -229,13 +229,13 @@ impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
 }
 
 impl SwitchableFeedbackCycleRuntimeV1 {
-    pub(super) fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
+    pub(in crate::daemon::service) fn new(current: Arc<dyn FeedbackCycleRuntimePort>) -> Self {
         Self {
             current: RwLock::new(current),
         }
     }
 
-    pub(super) fn replace(
+    pub(in crate::daemon::service) fn replace(
         &self,
         current: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), LspRuntimeFailure> {
@@ -264,19 +264,20 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 /// Retained daemon state for the typed LSP invocation operations.
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
-    database: Arc<crate::global_db::RegisteredGlobalDb>,
-    runtime: Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
-    actor: ActorId,
-    grant: CapabilityGrantSnapshot,
-    authority_digest: ManifestDigest,
-    policy_digest: ManifestDigest,
-    configuration_digest: ManifestDigest,
+    pub(super) database: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub(super) runtime:
+        Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
+    pub(super) actor: ActorId,
+    pub(super) grant: CapabilityGrantSnapshot,
+    pub(super) authority_digest: ManifestDigest,
+    pub(super) policy_digest: ManifestDigest,
+    pub(super) configuration_digest: ManifestDigest,
 }
 
 impl RegisteredWorkRuntime {
     /// Takes the provider runtime out for shutdown, dropping the rest of the
     /// registration with it.
-    pub(super) fn into_runtime(
+    pub(in crate::daemon::service) fn into_runtime(
         self,
     ) -> Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>> {
         self.runtime
@@ -284,24 +285,24 @@ impl RegisteredWorkRuntime {
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {
-    project_id: ProjectId,
-    runtime: Arc<Pr12FeedbackRuntime>,
+    pub(super) project_id: ProjectId,
+    pub(super) runtime: Arc<Pr12FeedbackRuntime>,
 }
 
 impl RegisteredFeedbackRuntime {
-    pub(super) fn project_id(&self) -> &ProjectId {
+    pub(in crate::daemon::service) fn project_id(&self) -> &ProjectId {
         &self.project_id
     }
 
-    pub(super) fn runtime(&self) -> Arc<Pr12FeedbackRuntime> {
+    pub(in crate::daemon::service) fn runtime(&self) -> Arc<Pr12FeedbackRuntime> {
         Arc::clone(&self.runtime)
     }
 
-    pub(super) fn invocation_owner(&self) -> DaemonFeedbackInvocationOwner {
+    pub(in crate::daemon::service) fn invocation_owner(&self) -> DaemonFeedbackInvocationOwner {
         DaemonFeedbackInvocationOwner::new(self.project_id.clone(), self.runtime.owner())
     }
 
-    pub(super) fn source_observation_port(
+    pub(in crate::daemon::service) fn source_observation_port(
         &self,
     ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
         self.runtime.source_observation_port()
@@ -310,22 +311,22 @@ impl RegisteredFeedbackRuntime {
 
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredCallableCodeRuntime {
-    scope: ResolvedScope,
-    authorization: DaemonCallableCodeAuthorizationSource,
+    pub(super) scope: ResolvedScope,
+    pub(super) authorization: DaemonCallableCodeAuthorizationSource,
 }
 
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredConfigurationRuntime {
-    runtime: Arc<ProjectConfigurationRuntime>,
-    scope: ResolvedScope,
-    actor: ActorId,
-    grants: DaemonConfigurationGrantAuthority,
-    semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
+    pub(super) runtime: Arc<ProjectConfigurationRuntime>,
+    pub(super) scope: ResolvedScope,
+    pub(super) actor: ActorId,
+    pub(super) grants: DaemonConfigurationGrantAuthority,
+    pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
 }
 
 pub(super) struct RuntimeLspSession {
-    expires_at_ms: u64,
-    actor: RuntimeLspActor,
+    pub(super) expires_at_ms: u64,
+    pub(super) actor: RuntimeLspActor,
 }
 
 impl Drop for RuntimeLspSession {
@@ -342,16 +343,16 @@ pub(super) type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
 pub(crate) struct DaemonLspInvocationOwner {
-    factory: Arc<DaemonLspSessionFactory>,
-    scope_grant: Option<CapabilityGrantSnapshot>,
-    scope_set_storage:
+    pub(super) factory: Arc<DaemonLspSessionFactory>,
+    pub(super) scope_grant: Option<CapabilityGrantSnapshot>,
+    pub(super) scope_set_storage:
         Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
 }
 
 #[derive(Clone)]
 pub(super) struct AuthorizedDaemonLspWorkspace {
-    scope_set: AuthorizedScopeSet,
-    factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
+    pub(super) scope_set: AuthorizedScopeSet,
+    pub(super) factories: Vec<(AdmittedRoot, Arc<DaemonLspSessionFactory>)>,
 }
 
 impl DaemonLspInvocationOwner {

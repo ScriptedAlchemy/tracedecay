@@ -30,7 +30,7 @@ use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use super::{GitHubReadOnlyTransport, GitHubRestDescriptorV1, context_allows_feedback_operation};
 
-pub(crate) use access::ConfiguredGitHubSourceAccessAuthorityV1;
+pub use access::ConfiguredGitHubSourceAccessAuthorityV1;
 pub use anchors::{
     GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyEvidenceV1, GitHubReviewBodyReadOutcomeV1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
@@ -41,7 +41,7 @@ pub use decoder::{
     GitHubOfficialResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
     MAX_GITHUB_REVIEW_BODY_BYTES_V1,
 };
-pub(crate) use discovery::{
+pub use discovery::{
     GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
     discover_exact_commit_pull_request_v1,
 };
@@ -63,7 +63,7 @@ pub use network::{
     unregister_github_read_only_credential_authority_v1,
     unregister_profile_github_read_only_credential_authority_v1,
 };
-pub(crate) use network::{
+pub use network::{
     ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
     mount_profile_github_read_only_credential_authority_v1,
     register_profile_github_public_repository_v1,
@@ -1255,7 +1255,6 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
@@ -1267,6 +1266,7 @@ mod tests {
         ActorId, CommitId, ManifestDigest, ProjectId, ProviderId, RefId, RepositoryId, UtcMicros,
         WorktreeId,
     };
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;

@@ -29,9 +29,7 @@ use tracedecay_domain::feedback::{
 use crate::configuration::ConfigurationControlStore;
 use crate::context::MonotonicDeadline;
 use crate::feedback::concrete::{ConcretePr12FeedbackOwner, ProjectFeedbackStore};
-use crate::feedback::cycle_runtime::{
-    Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntime,
-};
+use crate::feedback::cycle_runtime::{Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntime};
 use crate::feedback::observations::{
     Plan26AdvisoryProviderV1, Plan26CiProviderV1, Plan26CoverageV1,
     Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,

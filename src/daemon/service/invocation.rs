@@ -126,7 +126,6 @@ use crate::application::feedback::{
 };
 use crate::application::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
-    production_semantic_authorities,
 };
 use crate::application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
@@ -166,6 +165,7 @@ pub(crate) use crate::daemon_contract::{
 // names directly now that request construction lives with the contract.
 use crate::db::Database;
 use crate::errors::TraceDecayError;
+use crate::production_semantic_authorities;
 use crate::request_identity::{
     GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
     mint_global_opaque_id,

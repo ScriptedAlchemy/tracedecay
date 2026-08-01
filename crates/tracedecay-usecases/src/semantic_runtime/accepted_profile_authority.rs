@@ -8,8 +8,8 @@ use super::SemanticRuntimeFuture;
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalRuntimeCompatibilityV1,
 };
-use tracedecay_runtime_core::db::engine::params;
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::params;
 use tracedecay_search_eval::DirectEvaluationReportV1;
 
 const SCHEMA: &str = r"

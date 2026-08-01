@@ -607,7 +607,9 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
     }
 }
 
-pub(super) fn invocation_is_git_operation(operation: service::invocation::DaemonInvocationOperation) -> bool {
+pub(super) fn invocation_is_git_operation(
+    operation: service::invocation::DaemonInvocationOperation,
+) -> bool {
     matches!(
         operation,
         service::invocation::DaemonInvocationOperation::GitStatus

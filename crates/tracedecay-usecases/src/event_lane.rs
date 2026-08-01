@@ -216,7 +216,7 @@ pub fn subscribe() -> Option<broadcast::Receiver<ActivityRecordV1>> {
     Some(live_bus().subscribe())
 }
 
-pub(crate) async fn publish(
+pub async fn publish(
     db: &RegisteredGlobalDb,
     family: ActivityFamilyV1,
     project_root: &Path,

@@ -89,7 +89,7 @@ pub mod extraction_worker;
 pub mod git;
 mod git_index_transactions;
 pub mod git_intelligence;
-pub mod git_query;
+pub use tracedecay_usecases::git_query;
 pub mod global_db;
 pub mod graph;
 pub mod hooks;

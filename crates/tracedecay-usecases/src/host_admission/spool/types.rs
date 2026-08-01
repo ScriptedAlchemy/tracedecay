@@ -11,7 +11,7 @@ pub(crate) enum SpoolIntegrity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TerminalReason {
+pub enum TerminalReason {
     MalformedPayload,
     StaleBranchAuthorization,
 }
@@ -88,16 +88,16 @@ impl SpoolError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SpoolRecord {
-    pub(crate) seq: u64,
-    pub(crate) source: String,
-    pub(crate) payload: Vec<u8>,
+pub struct SpoolRecord {
+    pub seq: u64,
+    pub source: String,
+    pub payload: Vec<u8>,
     pub(crate) file_offset: u64,
     pub(crate) framed_len: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SpoolOpenReport {
+pub struct SpoolOpenReport {
     pub(crate) pending_records: usize,
     pub(crate) truncated_partial_tail_bytes: u64,
     pub(crate) integrity: SpoolIntegrity,

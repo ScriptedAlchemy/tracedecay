@@ -311,6 +311,35 @@ where
     Ok(reports)
 }
 
+/// Reports global-database retention eligibility without committing any
+/// mutation.
+pub async fn global_retention_report(
+    database: &crate::global_db::RegisteredGlobalDb,
+    config: &RetentionConfig,
+    now_secs: i64,
+) -> Result<Vec<RetentionTableReport>> {
+    let transaction = database.begin_write_transaction().await?;
+    let report =
+        prune_global_tables(&transaction, config, RetentionMode::DryRun, now_secs).await;
+    match transaction.rollback().await {
+        Ok(()) => report,
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Applies global-database retention in one registered write transaction.
+pub async fn prune_global_retention(
+    database: &crate::global_db::RegisteredGlobalDb,
+    config: &RetentionConfig,
+    now_secs: i64,
+) -> Result<Vec<RetentionTableReport>> {
+    let transaction = database.begin_write_transaction().await?;
+    let reports =
+        prune_global_tables(&transaction, config, RetentionMode::Apply, now_secs).await?;
+    transaction.commit().await?;
+    Ok(reports)
+}
+
 fn retention_error(table: &str, op: &str, err: &crate::db::engine::Error) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!("retention {op} on '{table}' failed: {err}"),

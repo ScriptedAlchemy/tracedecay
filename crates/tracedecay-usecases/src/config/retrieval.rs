@@ -318,7 +318,7 @@ impl AcceptedRetrievalProfileV1 {
         &self.diversity
     }
 
-    pub(crate) fn rerank(&self) -> Option<&RerankPolicy> {
+    pub fn rerank(&self) -> Option<&RerankPolicy> {
         self.rerank.as_ref()
     }
 

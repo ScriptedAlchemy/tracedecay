@@ -23,9 +23,9 @@ use super::{
     GitHubProviderLifecycleV1, GitHubReviewAnchorSeedV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
+use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
-use tracedecay_application::git::{GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1};
 // SEAM: the native `git` spawn adapter is still root-owned
 // (`src/git_intelligence.rs`). See `SEAMS.md`.
 use crate::git_intelligence::NativeGitIntelligence;
@@ -1079,7 +1079,8 @@ mod tests {
         let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
         let provider_body_digest =
             ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
-        let retained_body = tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body).unwrap();
+        let retained_body =
+            tracedecay_runtime_core::privacy::sanitize_provider_metadata_text(body).unwrap();
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
             author_node_id: "BOT_kgDOC98s_g".to_owned(),

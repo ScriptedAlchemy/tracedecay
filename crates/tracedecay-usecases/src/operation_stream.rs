@@ -124,7 +124,7 @@ pub type OperationEvent = StreamEvent<OperationEventItem>;
 
 static OPERATION_EVENTS: OnceLock<OperationEventAuthority> = OnceLock::new();
 
-pub(crate) fn operation_event_authority() -> OperationEventAuthority {
+pub fn operation_event_authority() -> OperationEventAuthority {
     OPERATION_EVENTS
         .get_or_init(OperationEventAuthority::default)
         .clone()
@@ -697,7 +697,7 @@ impl OperationEventAuthority {
     /// an operation. The active-project identity is supplied by the
     /// authenticated HTTP mount; client paths and scope payloads are never
     /// accepted.
-    pub(crate) async fn resolve_request_context(
+    pub async fn resolve_request_context(
         &self,
         operation_id: &OperationId,
         active_project_id: &ProjectId,
@@ -723,7 +723,7 @@ impl OperationEventAuthority {
     /// Daemon invocation admission resolves authority from the retained
     /// operation and only revalidates a caller-carried exact scope.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn resolve_invocation_context(
+    pub async fn resolve_invocation_context(
         &self,
         operation_id: &OperationId,
         target: &InvocationTarget,
@@ -898,7 +898,7 @@ impl OperationEventAuthority {
     /// Starts one trusted project-local managed test run. The caller is the
     /// already-routed project workflow handler, so the retained authorization
     /// key is the canonical admitted root URI rather than client payload.
-    pub(crate) async fn begin_managed_test_run(
+    pub async fn begin_managed_test_run(
         &self,
         root_uri: String,
         request_id: RequestId,
@@ -1430,7 +1430,7 @@ impl OperationEmitter {
         }
     }
 
-    pub(crate) async fn request_managed_test_cancellation(
+    pub async fn request_managed_test_cancellation(
         &self,
     ) -> Result<OperationCancelOutcome, OperationEventError> {
         let OperationAuthorization::ProjectRoot { root_uri, .. } = &self.binding.authorization

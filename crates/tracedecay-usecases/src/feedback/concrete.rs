@@ -1149,7 +1149,7 @@ impl ProjectFeedbackStore {
     /// Latest validated durable publication visible in the exact admitted
     /// project/repository/worktree/ref scope. Doctor consumes this mounted read
     /// store; it does not scan provider-local state or mutable paths.
-    pub(crate) async fn doctor_latest_publication(
+    pub async fn doctor_latest_publication(
         &self,
         context: &RequestContext,
     ) -> Result<Option<FeedbackCompletedPublicationV1>, Pr12FeedbackRuntimeError> {
@@ -1355,7 +1355,7 @@ impl ProjectFeedbackStore {
 /// Read the canonical durable Plan-26 observation projection from an already
 /// admitted project database. Doctor uses this same projection rather than
 /// deriving a second telemetry model.
-pub(crate) async fn plan26_feedback_observation_read_model(
+pub async fn plan26_feedback_observation_read_model(
     database: &Database,
 ) -> Result<FeedbackObservationReadModelV1, Pr12FeedbackRuntimeError> {
     let ledger = match database

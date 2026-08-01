@@ -17,10 +17,10 @@ use tracedecay_application::retrieval::grep_analysis::{
     RedundancyAuthorityV1,
 };
 
-use tracedecay_code_index::ast_grep_search::search_tree_scoped_with_cancel;
 use crate::graph::health::{dependency_depth, depth_score};
 use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
+use tracedecay_code_index::ast_grep_search::search_tree_scoped_with_cancel;
 use tracedecay_runtime_core::types::NodeKind;
 
 macro_rules! graph_authority {

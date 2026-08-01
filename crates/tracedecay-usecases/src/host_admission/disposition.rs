@@ -29,7 +29,7 @@ impl HostAdmissionStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HostAdmissionDispositionClass {
+pub enum HostAdmissionDispositionClass {
     Application,
     Transport,
     Timeout,
@@ -47,16 +47,16 @@ impl HostAdmissionDispositionClass {
 /// Status and class remain typed internally; wire strings exist only while
 /// parsing or serializing JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct HostAdmissionTelemetryDisposition {
-    pub(crate) status: HostAdmissionStatus,
-    pub(crate) retryable: Option<bool>,
+pub struct HostAdmissionTelemetryDisposition {
+    pub status: HostAdmissionStatus,
+    pub retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reason_code: Option<String>,
-    pub(crate) class: HostAdmissionDispositionClass,
+    pub reason_code: Option<String>,
+    pub class: HostAdmissionDispositionClass,
 }
 
 impl HostAdmissionTelemetryDisposition {
-    pub(crate) fn from_daemon_wire(value: &Value) -> Option<Self> {
+    pub fn from_daemon_wire(value: &Value) -> Option<Self> {
         let status = value
             .get("status")
             .and_then(Value::as_str)
@@ -69,7 +69,7 @@ impl HostAdmissionTelemetryDisposition {
         Some(Self::from_parts(status, Some(retryable), reason_code))
     }
 
-    pub(crate) fn from_telemetry_wire(value: Option<&Value>) -> (Self, bool) {
+    pub fn from_telemetry_wire(value: Option<&Value>) -> (Self, bool) {
         let raw_status = value
             .and_then(|value| value.get("status"))
             .and_then(Value::as_str);
@@ -99,7 +99,7 @@ impl HostAdmissionTelemetryDisposition {
         (disposition, folded)
     }
 
-    pub(crate) fn timeout(reason_code: &'static str) -> Self {
+    pub fn timeout(reason_code: &'static str) -> Self {
         Self::from_parts(
             HostAdmissionStatus::Degraded,
             Some(true),
@@ -107,7 +107,7 @@ impl HostAdmissionTelemetryDisposition {
         )
     }
 
-    pub(crate) fn unknown(reason_code: &'static str) -> Self {
+    pub fn unknown(reason_code: &'static str) -> Self {
         Self::from_parts(
             HostAdmissionStatus::Unknown,
             Some(false),
@@ -115,7 +115,7 @@ impl HostAdmissionTelemetryDisposition {
         )
     }
 
-    pub(crate) fn daemon_unavailable() -> Self {
+    pub fn daemon_unavailable() -> Self {
         Self::from_parts(
             HostAdmissionStatus::Unavailable,
             Some(true),
@@ -123,7 +123,7 @@ impl HostAdmissionTelemetryDisposition {
         )
     }
 
-    pub(crate) fn from_hook_runtime_error(reason_code: &str, retryable: bool) -> Self {
+    pub fn from_hook_runtime_error(reason_code: &str, retryable: bool) -> Self {
         let status = if is_timeout_reason_code(reason_code) {
             HostAdmissionStatus::Degraded
         } else if is_transport_reason_code(reason_code) {
@@ -142,7 +142,7 @@ impl HostAdmissionTelemetryDisposition {
         )
     }
 
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         status: HostAdmissionStatus,
         retryable: Option<bool>,
         reason_code: Option<String>,

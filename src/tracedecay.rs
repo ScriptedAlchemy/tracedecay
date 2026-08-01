@@ -24,6 +24,7 @@ mod indexing;
 mod lifecycle;
 mod locking;
 mod move_symbol;
+mod project_runtime_port;
 mod queries;
 mod scan;
 
@@ -61,7 +62,7 @@ pub struct TraceDecay {
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
     standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
@@ -106,7 +107,7 @@ impl TraceDecay {
     }
 
     #[doc(hidden)]
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     pub fn test_runtime_for_test(
         &self,
     ) -> Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {

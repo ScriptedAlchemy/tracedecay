@@ -6,10 +6,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracedecay_hooks::HookFeedbackDeliveryPortV1;
 
-use tracedecay_runtime_core::db::Database;
+use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
-use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::production_proximity_evidence_authority_v1;

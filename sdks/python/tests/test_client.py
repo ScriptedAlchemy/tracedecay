@@ -169,12 +169,35 @@ class ClientTest(unittest.TestCase):
         server_names = set(SERVER_OPERATIONS)
         available_operations = set(WORK_OPERATIONS)
         unavailable_operations = set(UNAVAILABLE_OPERATIONS)
+        schema_unavailable_operations = {
+            operation
+            for operation, reason in UNAVAILABLE_OPERATIONS.items()
+            if reason == "schema_unavailable"
+        }
+        route_unavailable_operations = {
+            operation
+            for operation, reason in UNAVAILABLE_OPERATIONS.items()
+            if reason == "route_unavailable"
+        }
 
         self.assertTrue(unavailable_operations)
-        self.assertEqual(server_names, available_operations | unavailable_operations)
+        self.assertEqual(
+            server_names, available_operations | schema_unavailable_operations
+        )
         self.assertFalse(available_operations & unavailable_operations)
-        self.assertTrue(
-            all(value == "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values())
+        self.assertEqual(
+            route_unavailable_operations,
+            {
+                "workflow_activate_definition",
+                "workflow_handoff_issue",
+                "workflow_handoff_redeem",
+                "workflow_register_definition",
+            },
+        )
+        self.assertFalse(server_names & route_unavailable_operations)
+        self.assertEqual(
+            unavailable_operations,
+            schema_unavailable_operations | route_unavailable_operations,
         )
         self.assertFalse(hasattr(self.client(), "call"))
         for operation in (

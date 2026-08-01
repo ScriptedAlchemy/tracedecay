@@ -126,7 +126,7 @@ impl GitHubReadOnlyCredentialSecretV1 {
         Zeroizing::new(format!("Bearer {}", self.0.as_str()))
     }
 
-    pub(crate) fn from_zeroizing(value: Zeroizing<String>) -> Option<Self> {
+    pub fn from_zeroizing(value: Zeroizing<String>) -> Option<Self> {
         (!value.is_empty()
             && value.len() <= 4096
             && !value
@@ -291,7 +291,7 @@ pub fn register_profile_github_read_only_credential_authority_v1(
     true
 }
 
-pub(crate) fn register_profile_github_public_repository_v1(
+pub fn register_profile_github_public_repository_v1(
     profile_id: UserProfileId,
     repository_owner: impl Into<String>,
     repository_name: impl Into<String>,
@@ -315,7 +315,7 @@ pub(crate) fn register_profile_github_public_repository_v1(
     true
 }
 
-pub(crate) fn unregister_profile_github_public_repository_v1(
+pub fn unregister_profile_github_public_repository_v1(
     profile_id: &UserProfileId,
     repository_owner: &str,
     repository_name: &str,
@@ -383,7 +383,7 @@ pub enum ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
 ///
 /// Wrong-profile and missing configuration never fall back to another
 /// process-local authority. Conflicting live application mounts fail closed.
-pub(crate) fn mount_profile_github_read_only_credential_authority_v1(
+pub fn mount_profile_github_read_only_credential_authority_v1(
     profile_id: &UserProfileId,
     repository_owner: &str,
     repository_name: &str,
@@ -428,7 +428,7 @@ pub(crate) fn mount_profile_github_read_only_credential_authority_v1(
 
 /// Revokes the mounted application credential for one exact profile and
 /// repository without removing the injected profile authority.
-pub(crate) fn unmount_profile_github_read_only_credential_authority_v1(
+pub fn unmount_profile_github_read_only_credential_authority_v1(
     profile_id: &UserProfileId,
     repository_owner: &str,
     repository_name: &str,
@@ -486,13 +486,13 @@ pub fn unregister_github_read_only_credential_authority_v1(
     true
 }
 
-pub(crate) enum RegisteredGitHubReadOnlyCredentialV1 {
+pub enum RegisteredGitHubReadOnlyCredentialV1 {
     Verified(GitHubReadOnlyCredentialV1),
     Missing,
     Rejected,
 }
 
-pub(crate) fn resolve_registered_github_read_only_credential_v1(
+pub fn resolve_registered_github_read_only_credential_v1(
     repository_owner: &str,
     repository_name: &str,
 ) -> RegisteredGitHubReadOnlyCredentialV1 {
@@ -605,7 +605,7 @@ impl GitHubReadOnlyCredentialV1 {
         }
     }
 
-    pub(crate) fn permits(&self, permission: GitHubReadPermissionV1) -> bool {
+    pub fn permits(&self, permission: GitHubReadPermissionV1) -> bool {
         !matches!(
             self.authorization_for_stored_repository(permission),
             GitHubCredentialAuthorizationV1::Denied

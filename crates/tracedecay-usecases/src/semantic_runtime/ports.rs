@@ -10,13 +10,13 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 
-use crate::configuration::{
-    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
-};
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditEventV1, RetrievalProfileAuditOperationV1,
     RetrievalProfileCasV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
     SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
+};
+use crate::configuration::{
+    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
 };
 
 const SEMANTIC_ACTIVATION_RECEIPT_DIGEST_DOMAIN_V1: &str =

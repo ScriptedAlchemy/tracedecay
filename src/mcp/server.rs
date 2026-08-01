@@ -176,16 +176,35 @@ pub(crate) struct SourceEditReconciliationInvocationV1 {
 pub(crate) type SourceEditReconciliationExecutor =
     Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
-/// Type-erased read bridge to a graph already mounted by the daemon. Project
-/// selectors must not reconstruct graph ownership from registry paths.
-///
-/// The contract is owned by `tracedecay-dashboard-api` (its sole consumer is
-/// dashboard project selection, which holds it as an injected field); the MCP
-/// server and the daemon supply the implementation. These aliases keep the
-/// historical `crate::mcp::server::…` paths resolving.
-pub(crate) use tracedecay_dashboard_api::project_graph::{
-    RetainedProjectGraphFuture, RetainedProjectGraphRequest, RetainedProjectGraphResolver,
-};
+/// Concrete read bridge to a graph already mounted by the daemon. MCP project
+/// selectors retain the root graph type because routed handlers require the
+/// complete [`TraceDecay`] runtime.
+pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
+pub(crate) type RetainedProjectGraphFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<Arc<TraceDecay>>>> + Send + 'static>,
+>;
+pub(crate) type RetainedProjectGraphResolver =
+    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
+
+/// Dashboard admission erases the concrete graph only at its consumer
+/// boundary.
+pub(crate) type DashboardRetainedProjectGraphResolver =
+    tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver;
+
+pub(crate) fn dashboard_retained_project_graph_resolver(
+    resolver: RetainedProjectGraphResolver,
+) -> DashboardRetainedProjectGraphResolver {
+    Arc::new(move |request| {
+        let resolver = Arc::clone(&resolver);
+        Box::pin(async move {
+            resolver(request).await.map(|graph| {
+                graph.map(|graph| {
+                    graph as Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime>
+                })
+            })
+        })
+    })
+}
 
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
@@ -289,7 +308,7 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     _host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
@@ -485,7 +504,7 @@ impl McpServer {
         self.project_session_retrieval_service.is_some()
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn host_admission_test_runtime_for_test(
         &self,
@@ -493,7 +512,7 @@ impl McpServer {
         self._host_admission_test_runtime.as_deref()
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
@@ -511,7 +530,7 @@ impl McpServer {
     /// test runtime is scoped to a single project, so a cross-project fixture
     /// has to open each additional graph through its own scoped runtime and
     /// hand the result in here.
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn new_with_retained_test_graphs_for_test(
         cg: TraceDecay,
@@ -559,7 +578,7 @@ impl McpServer {
     /// hook notification fail closed as `project_registry_route_unavailable`
     /// before it ever reaches the spool, which is a fixture gap rather than
     /// the daemon's behaviour.
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
@@ -688,7 +707,7 @@ impl McpServer {
             project_routes,
             application_invocation_executor,
             project_server_live,
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             host_admission_test_runtime,
         } = context;
         #[cfg(test)]
@@ -894,7 +913,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: project_routes,

@@ -24,7 +24,7 @@ pub fn replay_backoff(attempt: u32, shift_cap: u32) -> Duration {
 }
 
 /// How a worker should proceed after one replay pass.
-pub(crate) enum ReplayPassDecision {
+pub enum ReplayPassDecision {
     /// The spool shrank and more work remains — yield and re-run immediately.
     ProgressPending,
     /// No progress but the outcome is retryable — apply bounded backoff.
@@ -36,7 +36,7 @@ pub(crate) enum ReplayPassDecision {
 }
 
 /// Classify one replay pass from its pending-count delta and outcome.
-pub(crate) fn classify_replay_pass(
+pub fn classify_replay_pass(
     pending_before: usize,
     pending_after: usize,
     outcome: &HostAdmissionOutcome,

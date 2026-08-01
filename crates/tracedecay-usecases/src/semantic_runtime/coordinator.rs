@@ -11,11 +11,11 @@ use super::{
     SemanticRuntimeFuture, SemanticRuntimeIntegrationPortV1, SemanticRuntimeOwnerV1,
     SemanticRuntimeStatusV1,
 };
-use crate::configuration::{ConfigurationCurrentStateV1, DirectConfigurationMutation};
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
     RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
+use crate::configuration::{ConfigurationCurrentStateV1, DirectConfigurationMutation};
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
 type ProductionOwner = SemanticRuntimeOwnerV1<

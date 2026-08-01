@@ -55,8 +55,8 @@ use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunStaleReason, OperationEventAuthority,
 };
-use tracedecay_runtime_core::db::Database;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 const MAX_OPERATION_PARAMETERS_BYTES: usize = 1_048_576;
 const MAX_OPERATION_OUTPUT_BYTES: usize = 1_048_576;
