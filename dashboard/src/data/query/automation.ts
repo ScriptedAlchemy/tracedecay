@@ -16,9 +16,10 @@
  * last real reading on screen and reports the failure beside it.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { z } from 'zod';
 
 import { fetchLegacyWrite, type LegacyWriteResult } from './legacy.ts';
-import { legacyQueryKey } from './useLegacy.ts';
+import { legacyQueryKey, useLegacy } from './useLegacy.ts';
 import {
   scopeKey,
   scopeWritable,
@@ -149,4 +150,168 @@ export function useSchedulerControl() {
     },
   });
   return { ...mutation, writability };
+}
+
+/* ---- the three list routes ---------------------------------------------- */
+
+/**
+ * The list bodies, as the handlers that serve them actually emit them.
+ *
+ * Every field below is required because the route makes it unconditional:
+ * `automation_jobs_api::list` answers `{jobs, count}`, `automation_skills_api::
+ * list` answers `{…, count, skills, …}`, and `automation_fact_proposals_api::
+ * list` answers `{proposals, count, limit, error}` — each built by a `json!`
+ * literal with no conditional key.
+ *
+ * That requiredness is load-bearing rather than pedantic. These schemas used to
+ * make the collection optional (`skills?`, plus an `items?` alternative that no
+ * handler has ever sent), and an optional array resolved through `?? []` into a
+ * rendered "no managed skills". A store the daemon could not read, a renamed
+ * field, a proxy's substituted body — all of them parsed clean and printed as a
+ * queue that had been checked and found empty. Required fields route those
+ * bodies to `unsupported_schema` in `fetchLegacy` instead, which is what
+ * `LegacyBoundary` renders as a state rather than as content.
+ *
+ * They live here, beside the fetchers, rather than on the page that draws them:
+ * a wire contract is what the daemon sends, and a surface that owned its own
+ * copy of one would be the second authority on a shape it does not serve.
+ */
+const JobsPayloadSchema = z
+  .object({
+    jobs: z.array(
+      z
+        .object({
+          id: z.string(),
+          name: z.string(),
+          schedule: z.string().nullable().optional(),
+          enabled: z.boolean(),
+          interval_secs: z.number().nullable().optional(),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+  })
+  .passthrough();
+
+/** `ManagedSkill` (managed_skill_model.rs): `metadata.id`, `.title` and
+ * `.state` are plain required fields on the struct, so they are read directly
+ * rather than through the chain of `?? skill['name'] ?? index` fallbacks this
+ * card used to carry — every one of which described a payload no route sends,
+ * and the last of which printed an array index as if it were a skill. */
+const SkillsPayloadSchema = z
+  .object({
+    skills: z.array(
+      z
+        .object({
+          metadata: z
+            .object({ id: z.string(), title: z.string(), state: z.string() })
+            .passthrough(),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+  })
+  .passthrough();
+
+/** `FactProposalRecord` (fact_proposals.rs). `add_fact_request` is the one
+ * optional member — it carries `skip_serializing_if = "Option::is_none"`, so a
+ * record without one omits the key and genuinely has no fact text to show. */
+const FactProposalsPayloadSchema = z
+  .object({
+    proposals: z.array(
+      z
+        .object({
+          proposal_id: z.string(),
+          state: z.string(),
+          add_fact_request: z.object({ content: z.string() }).passthrough().optional(),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+    limit: z.number(),
+    error: z.string(),
+  })
+  .passthrough();
+
+export type JobRow = z.infer<typeof JobsPayloadSchema>['jobs'][number];
+export type SkillRow = z.infer<typeof SkillsPayloadSchema>['skills'][number];
+export type ProposalRow = z.infer<typeof FactProposalsPayloadSchema>['proposals'][number];
+
+export function useAutomationJobs() {
+  return useLegacy(['automation', 'jobs'], '/api/automation/jobs', JobsPayloadSchema);
+}
+
+export function useAutomationSkills() {
+  return useLegacy(['automation', 'skills'], '/api/automation/skills', SkillsPayloadSchema);
+}
+
+export function useAutomationProposals() {
+  return useLegacy(
+    ['automation', 'fact-proposals'],
+    '/api/automation/fact-proposals',
+    FactProposalsPayloadSchema,
+  );
+}
+
+/** Rows, plus whether they are the whole collection the handler named. */
+export type ListReading<Row> =
+  | { complete: true; rows: readonly Row[] }
+  | { complete: false; rows: readonly Row[]; reason: string };
+
+/**
+ * Checks a list body against the tally the same handler computed for it.
+ *
+ * Each of these routes derives `count` from the very vector it serializes as
+ * the list, so a body where the two disagree did not reach this browser as the
+ * handler wrote it — a truncating proxy, a partial response, a different build.
+ * The rows are still shown, because they are real rows; what changes is that
+ * they stop being presented as the complete collection. Rendering the array
+ * alone would turn a truncated read into a confident inventory, which is the
+ * same falsehood as an unread queue rendering as an empty one.
+ */
+export function tallied<Row>(
+  rows: readonly Row[],
+  count: number,
+  noun: string,
+): ListReading<Row> {
+  if (rows.length === count) return { complete: true, rows };
+  return {
+    complete: false,
+    rows,
+    reason: `the daemon counted ${count} ${noun} and sent ${rows.length}, so this list is not the whole set`,
+  };
+}
+
+/**
+ * The same check for the proposal list, which additionally has a cap.
+ *
+ * `automation_fact_proposals_api::list` runs its query under
+ * `coerce_limit(params.limit, 50, 200)`, and this page sends no `limit`, so it
+ * reads the default page of 50. A response holding exactly its own limit is
+ * therefore a page, not a total — the same distinction the Agents workspace
+ * draws around its analytics cap.
+ */
+export function talliedProposals(
+  rows: readonly ProposalRow[],
+  count: number,
+  limit: number,
+): ListReading<ProposalRow> {
+  const coherent = tallied(rows, count, 'fact proposals');
+  if (!coherent.complete) return coherent;
+  if (count < limit) return coherent;
+  if (count > limit) {
+    // The query cannot return more rows than the cap it ran under, so this is
+    // the same class of incoherent body as a mismatched tally and must not be
+    // described as a full page — it would understate what arrived.
+    return {
+      complete: false,
+      rows,
+      reason: `the daemon sent ${count} proposals under a request cap of ${limit}, so this body is not this route's answer`,
+    };
+  }
+  return {
+    complete: false,
+    rows,
+    reason: `this is the first ${limit} proposals, the request cap, so there may be more`,
+  };
 }

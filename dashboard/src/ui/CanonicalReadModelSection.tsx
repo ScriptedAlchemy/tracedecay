@@ -19,7 +19,8 @@ import type { MetricValueV1 } from '../contracts/wire.ts';
 import { fetchEnvelope } from '../data/query/envelope.ts';
 import type { WireSchema } from '../data/query/wireSchema.ts';
 import { scopeKey, scopedUrl, useScope } from '../data/scope/store.ts';
-import { EnvelopeSection, EnvelopeTruth, OmissionReasons } from './EnvelopeTruth.tsx';
+import { EnvelopeTruth, OmissionReasons } from './EnvelopeTruth.tsx';
+import { EnvelopeSection } from './ReadSection.tsx';
 import { MetricGroups } from './MetricPlate.tsx';
 import { cn } from './cn';
 

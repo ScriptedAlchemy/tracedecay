@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';

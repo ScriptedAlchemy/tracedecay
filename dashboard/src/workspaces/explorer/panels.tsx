@@ -117,23 +117,17 @@ export function PlannerRunPanel({
   onCancel?: (() => void) | undefined;
 }) {
   if (!run) {
-    const state =
+    // One reading of the result, not two: the state and its detail were each
+    // asking whether this was a transport failure, and the state arm carried a
+    // ternary whose branches were the same value.
+    const blocked =
       result?.outcome === 'transport'
-        ? result.state === 'offline'
-          ? 'offline'
-          : result.state
-        : 'loading';
+        ? { kind: result.state, detail: result.detail ?? 'planner response unavailable' }
+        : { kind: 'loading' as const, detail: 'admitting the source plan' };
     return (
       <section className="flex flex-col gap-2" aria-live="polite">
         <MetaLabel>Coordinator run</MetaLabel>
-        <StateChip
-          kind={state}
-          detail={
-            result?.outcome === 'transport'
-              ? (result.detail ?? 'planner response unavailable')
-              : 'admitting the source plan'
-          }
-        />
+        <StateChip kind={blocked.kind} detail={blocked.detail} />
       </section>
     );
   }
