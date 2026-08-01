@@ -668,11 +668,7 @@ fn validate_labels(values: &[String], field: &'static str) -> Result<(), DomainE
         return Err(DomainError::NonCanonical { field });
     }
     for value in values {
-        if value.is_empty()
-            || value.len() > MAX_FACT_LABEL_BYTES
-            || value.trim() != value
-            || value.chars().any(char::is_control)
-        {
+        if !crate::canonical_text::is_canonical_text_within(value, MAX_FACT_LABEL_BYTES) {
             return Err(DomainError::NonCanonical { field });
         }
     }

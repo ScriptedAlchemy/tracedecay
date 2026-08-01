@@ -7,18 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::DomainError;
 
-pub(crate) fn validate_canonical_string(
-    value: &str,
-    field: &'static str,
-) -> Result<(), DomainError> {
-    if value.is_empty() {
-        return Err(DomainError::Empty { field });
-    }
-    if value.trim() != value || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+pub(crate) use crate::canonical_text::validate_canonical_string;
 
 macro_rules! string_id {
     ($($name:ident),+ $(,)?) => {$(

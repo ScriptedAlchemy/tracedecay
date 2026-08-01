@@ -361,15 +361,7 @@ impl ConfigurationMutationGrantReceiptV1 {
     }
 }
 
-fn validate_canonical_label(value: &str, field: &'static str) -> Result<(), DomainError> {
-    if value.is_empty() {
-        return Err(DomainError::Empty { field });
-    }
-    if value.trim() != value || value.len() > 512 || value.chars().any(char::is_control) {
-        return Err(DomainError::NonCanonical { field });
-    }
-    Ok(())
-}
+use crate::canonical_text::validate_canonical_string as validate_canonical_label;
 
 fn validate_setting_key(value: &str) -> Result<(), DomainError> {
     validate_canonical_label(value, "configuration setting key")?;

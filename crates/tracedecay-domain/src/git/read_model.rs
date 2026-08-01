@@ -321,7 +321,7 @@ pub(super) fn validate_path_label(value: &str, field: &'static str) -> Result<()
     if value.is_empty() {
         return Err(DomainError::Empty { field });
     }
-    if value.trim() != value || value.chars().any(char::is_control) {
+    if !crate::canonical_text::is_canonical_text(value) {
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())
