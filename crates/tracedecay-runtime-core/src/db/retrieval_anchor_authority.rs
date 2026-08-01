@@ -1,3 +1,4 @@
+#[cfg(test)]
 use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, UtcMicros};
 use tracedecay_store::{
@@ -18,6 +19,7 @@ impl From<RetrievalAnchorStoreError> for TraceDecayError {
     }
 }
 
+#[cfg(test)]
 fn validate_label(value: &str, field: &str) -> Result<()> {
     if !is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
         return Err(authority_error(format!("{field} is not canonical")));
@@ -184,6 +186,7 @@ where
     Ok(derivatives)
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_anchor_derivative(
     connection: &(impl QueryExecutor + Sync),
     owner: &FactOwnerV1,
@@ -475,6 +478,7 @@ impl super::Database {
         resolve_anchor_derivatives(&connection, owner, anchor_id).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn resolve_retrieval_anchor_derivative(
         &self,
         owner: &FactOwnerV1,

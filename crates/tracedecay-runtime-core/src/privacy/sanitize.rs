@@ -99,6 +99,7 @@ impl ClaudeSanitizerPolicyV1 {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn with_sensitive_keys(
         mut self,
         keys: impl IntoIterator<Item = impl AsRef<str>>,
