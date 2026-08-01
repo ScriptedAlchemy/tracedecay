@@ -36,7 +36,7 @@ use tracedecay_runtime_core::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
 use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
-use crate::root_seam::tracedecay::TraceDecayOpenOptions;
+use tracedecay_runtime_core::tracedecay::TraceDecayOpenOptions;
 
 mod configuration;
 mod external_source;

@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::root_seam::branch_meta;
+use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use crate::root_seam::global_db::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
@@ -774,7 +774,7 @@ where
     E: Executor + ?Sized,
 {
     let mut applied = RegistryReconstructionApplyReport::default();
-    let now = crate::root_seam::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     for plan in &report.plans {
         if plan.status != RegistryReconstructionStatus::Eligible {
             continue;

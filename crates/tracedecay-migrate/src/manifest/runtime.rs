@@ -195,7 +195,7 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
         let report = reconstruct_registry_from_store_manifest(
             path,
             &profile_root,
-            crate::root_seam::tracedecay::current_timestamp(),
+            tracedecay_runtime_core::tracedecay::current_timestamp(),
         );
         registry_reconstruction.plans.extend(report.plans);
         registry_reconstruction.issues.extend(report.issues);

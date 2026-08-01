@@ -217,7 +217,7 @@ async fn resolve_target_layout(
     let production_profile = tracedecay_runtime_core::storage::default_profile_root()
         .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
     let layout = if production_profile {
-        crate::root_seam::tracedecay::TraceDecay::resolve_store_layout_for_identity(
+        tracedecay_runtime_core::tracedecay::TraceDecay::resolve_store_layout_for_identity(
             &target_project.root,
         )
         .await
