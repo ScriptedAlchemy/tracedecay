@@ -1,10 +1,11 @@
 use super::{
-    AnalyticsAction, CommandFamily, Commands, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
-    MAX_BLOCKING_THREADS, PackageHookAction, PostUpdateMode, ScoopPackageHookAction,
-    SilentReinstallAction, StderrTracingDefault, async_worker_threads, is_extract_worker,
-    is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
-    validate_host_bundle_options,
+    AnalyticsAction, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
+    DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
+    MAX_BLOCKING_THREADS, PackageHookAction, PostUpdateMode, RAYON_NUM_THREADS_ENV,
+    ScoopPackageHookAction, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
+    daemon_cpu_threads_from, is_daemon_run, is_extract_worker, is_local_install_command,
+    should_skip_agent_install_maintenance, should_skip_startup_maintenance,
+    silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
 };
 use std::path::PathBuf;
 use tracedecay::user_config::UserConfig;
@@ -62,6 +63,49 @@ fn async_runtime_bounds_parallel_allocators() {
     assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
     assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
     assert_eq!(MAX_BLOCKING_THREADS, 32);
+}
+
+#[test]
+fn daemon_cpu_pool_is_bounded_by_default_and_operator_tunable() {
+    assert_eq!(
+        daemon_cpu_threads_from(96, None).unwrap(),
+        DEFAULT_MAX_DAEMON_CPU_THREADS
+    );
+    assert_eq!(daemon_cpu_threads_from(8, None).unwrap(), 8);
+    assert_eq!(
+        daemon_cpu_threads_from(96, Some((DAEMON_CPU_THREADS_ENV, "32"))).unwrap(),
+        32
+    );
+    assert_eq!(
+        daemon_cpu_threads_from(96, Some((RAYON_NUM_THREADS_ENV, "24"))).unwrap(),
+        24
+    );
+    assert_eq!(
+        daemon_cpu_threads_from(96, Some((RAYON_NUM_THREADS_ENV, "0"))).unwrap(),
+        DEFAULT_MAX_DAEMON_CPU_THREADS
+    );
+    assert_eq!(
+        daemon_cpu_threads_from(96, Some((RAYON_NUM_THREADS_ENV, "invalid"))).unwrap(),
+        DEFAULT_MAX_DAEMON_CPU_THREADS
+    );
+    assert!(
+        daemon_cpu_threads_from(96, Some((DAEMON_CPU_THREADS_ENV, "0")))
+            .unwrap_err()
+            .contains(DAEMON_CPU_THREADS_ENV)
+    );
+}
+
+#[test]
+fn only_foreground_daemon_installs_the_global_cpu_pool() {
+    let daemon = Commands::Daemon {
+        action: DaemonAction::Run {
+            socket: None,
+            profile_root: None,
+        },
+    };
+    assert!(is_daemon_run(Some(&daemon)));
+    assert!(!is_daemon_run(Some(&Commands::Monitor)));
+    assert!(!is_daemon_run(None));
 }
 
 #[test]
