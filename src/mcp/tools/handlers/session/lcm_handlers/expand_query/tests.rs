@@ -1,25 +1,14 @@
 use std::path::Path;
-use std::sync::Mutex;
 
-use tempfile::TempDir;
-use tracedecay_domain::{
-    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
-    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
-};
+use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId};
+use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 
 use super::super::super::*;
 use super::super::test_support::*;
 use super::*;
-use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
-use crate::mcp::tools::handlers::session::message_search::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-};
-use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
+use crate::application::session::SessionRetrievalScope;
+use crate::mcp::tools::handlers::session::message_search::LcmExpandServiceOutcome;
+use crate::sessions::lcm::{LcmContentRange, LcmExpandResponse};
 
 #[tokio::test]
 async fn malformed_expand_query_selectors_never_call_the_service() {

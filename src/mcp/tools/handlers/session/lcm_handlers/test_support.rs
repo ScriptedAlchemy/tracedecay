@@ -1,11 +1,9 @@
-use std::path::Path;
 use std::sync::Mutex;
 
-use tempfile::TempDir;
+use serde_json::Value;
 use tracedecay_domain::{
-    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
-    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
+    RetrievalAnchorId, SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
+    SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use super::super::message_search::{
@@ -15,9 +13,9 @@ use super::super::message_search::{
     SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
     SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
-use super::*;
-use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
-use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
+use crate::application::session::SessionDataFreshness;
+use crate::mcp::tools::ToolResult;
+use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 
 pub(super) struct RecordingService {
     commands: Mutex<Vec<SessionRetrievalCommand>>,
