@@ -82,10 +82,7 @@ pub struct LocalProjectEnrollmentAuthorityV1 {
 }
 
 impl LocalProjectEnrollmentAuthorityV1 {
-    pub fn new(
-        project_id: ProjectId,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
-    ) -> Self {
+    pub fn new(project_id: ProjectId, enrollment_roots: impl IntoIterator<Item = PathBuf>) -> Self {
         let mut enrollment_roots = enrollment_roots.into_iter().collect::<Vec<_>>();
         enrollment_roots.sort();
         enrollment_roots.dedup();
@@ -358,7 +355,8 @@ impl LocalStoreRuntimeResolverV1 {
             }
             StoreShardScopeV1::ProfileSessions => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root.join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME),
+                    &canonical_profile_root
+                        .join(crate::store_runtime::profile_paths::USER_SESSIONS_DB_FILENAME),
                     &canonical_profile_root,
                 )?;
                 verified_locator(

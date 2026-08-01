@@ -288,6 +288,12 @@ impl DaemonSessionRuntimeRegistryV1 {
     }
 
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+        // The kernel's registry initialises profile- and session-scoped shards
+        // through a fail-closed port, because the registered schema lives in
+        // `tracedecay-global-db` (which depends on the kernel transitively).
+        // This is the sole constructor of the production registry, so it is the
+        // one place that must supply the installer.
+        super::register_registered_schema_installer();
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
             LocalProfileStoreAuthorityV1::new(
@@ -405,7 +411,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         )
         .await?;
         let database =
-            Arc::new(Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await?);
+            Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::migrate(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
@@ -605,7 +611,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         )
         .await?;
         let database =
-            Arc::new(Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await?);
+            Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::migrate(database.as_ref()).await?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
@@ -649,7 +655,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project memory store read-only",
         )
         .await?;
-        Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadOnly).await
+        Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
     }
 
     pub(crate) async fn code_graph(
@@ -764,7 +770,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 matches!(access, DatabaseAccessMode::ReadWrite),
             )
             .await?;
-        Database::publish_runtime(Arc::new(runtime), access).await
+        Database::publish_runtime(runtime, access).await
     }
 
     /// Mounts the mutable graph for an exact named Git ref in this worktree.
@@ -855,7 +861,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 matches!(access, DatabaseAccessMode::ReadWrite),
             )
             .await?;
-        Database::publish_runtime(Arc::new(runtime), access).await
+        Database::publish_runtime(runtime, access).await
     }
 
     /// Mounts an immutable graph generation for cross-branch comparison. A
@@ -888,7 +894,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let runtime = self
             .code_graph(shard_id, database_path, database_authority)
             .await?;
-        Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadOnly).await
+        Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
     }
 }
 

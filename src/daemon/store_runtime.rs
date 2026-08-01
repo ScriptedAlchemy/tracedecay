@@ -17,6 +17,20 @@ pub(crate) use tracedecay_runtime_core::store_runtime::*;
 
 pub(crate) mod session_registry;
 
+/// Installs the root-owned registered global/session schema installer into the
+/// kernel's store-runtime registry.
+///
+/// The schema lives in `tracedecay-global-db`, which already depends on
+/// `tracedecay-migrate`, which depends on the kernel — so the kernel reaches it
+/// through `tracedecay_runtime_core::ports::registered_schema` instead. The
+/// port fails closed, so every path that can initialise a profile- or
+/// session-scoped shard must call this first. Idempotent.
+pub(crate) fn register_registered_schema_installer() {
+    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
+        Box::pin(crate::global_db::ensure_registered_schema(connection))
+    });
+}
+
 #[cfg(test)]
 mod profile_paths_parity {
     /// The kernel restates the user-session filename because it cannot depend

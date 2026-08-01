@@ -255,10 +255,7 @@ impl ShardRuntime {
         self.lock_state().maintenance_state
     }
 
-    pub fn transition(
-        &self,
-        to: RuntimeMaintenanceStateV1,
-    ) -> Result<(), ShardRuntimeError> {
+    pub fn transition(&self, to: RuntimeMaintenanceStateV1) -> Result<(), ShardRuntimeError> {
         let mut state = self.lock_state();
         state.prune_expired_runtime_leases(utc_now());
         let from = state.maintenance_state;
@@ -358,10 +355,7 @@ impl ShardRuntime {
         self.lock_state().health_snapshot(&self.binding, now)
     }
 
-    pub fn eviction_eligibility(
-        &self,
-        required_idle: Duration,
-    ) -> ShardRuntimeEvictionEligibility {
+    pub fn eviction_eligibility(&self, required_idle: Duration) -> ShardRuntimeEvictionEligibility {
         self.observe_at(Instant::now(), required_idle, utc_now())
             .eviction
     }

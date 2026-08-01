@@ -29,9 +29,7 @@ fn has_canonical_sha256_suffix(value: &str, prefix: &str) -> bool {
 /// Replaces credential-shaped structural identifiers with a stable,
 /// versioned digest. Public identifiers and values already protected by this
 /// version are preserved byte-for-byte.
-pub fn protect_sensitive_structural_id(
-    value: &str,
-) -> Result<String, StructuralIdProtectionError> {
+pub fn protect_sensitive_structural_id(value: &str) -> Result<String, StructuralIdProtectionError> {
     if is_already_protected_structural_id(value) {
         return Ok(value.to_owned());
     }

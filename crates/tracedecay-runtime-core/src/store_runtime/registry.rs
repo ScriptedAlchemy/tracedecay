@@ -37,9 +37,7 @@ use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 
 #[cfg(test)]
 pub use attachment::EmptyPhysicalRuntimeAttachment;
-pub use attachment::{
-    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime,
-};
+pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime};
 pub use capacity::{
     DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES, StoreRuntimeRegistryConfig,
 };
@@ -834,10 +832,7 @@ impl StoreRuntimeRegistry {
     ///
     /// This does not revalidate or expose its retained writer authority. Any
     /// later write still enters the ordinary actor-time authority gates.
-    pub fn retained_runtime_for_read(
-        &self,
-        key: &StoreRuntimeKey,
-    ) -> Option<StoreRuntimeHandle> {
+    pub fn retained_runtime_for_read(&self, key: &StoreRuntimeKey) -> Option<StoreRuntimeHandle> {
         let state = self.lock_state();
         match state.entries.get(key) {
             Some(RegistryEntry::Ready(ready)) => Some(ready.handle.clone()),

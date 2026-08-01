@@ -40,9 +40,7 @@ impl<'a> MemoryStore<'a> {
         }
     }
 
-    pub const fn new_engine_transaction(
-        transaction: &'a crate::db::engine::Transaction,
-    ) -> Self {
+    pub const fn new_engine_transaction(transaction: &'a crate::db::engine::Transaction) -> Self {
         Self {
             conn: MemoryConnection::runtime_transaction(transaction),
             encoder: HolographicEncoder::new(),
