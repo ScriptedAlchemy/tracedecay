@@ -109,16 +109,27 @@ impl TraceDecay {
         .await
     }
 
-    /// Recompute the on-disk path to the `SQLite` DB this instance is
-    /// serving. Useful for diagnostics (e.g. WAL/SHM size sampling) —
-    /// returns the same path that `Database::open` was called with.
+    /// On-disk path to the `SQLite` DB this instance is serving. Useful for
+    /// diagnostics (e.g. WAL/SHM size sampling) — returns the same path that
+    /// `Database::open` was called with.
+    ///
+    /// The inputs (`project_root`, `store_layout.data_root`, and
+    /// `serving_branch`) are immutable for the lifetime of a `TraceDecay`
+    /// instance — branch changes are served by a freshly constructed
+    /// instance rather than mutating an existing one — so the resolved path
+    /// is memoized in `db_path_cache` after the first call instead of
+    /// re-reading and re-parsing branch metadata from disk on every call.
     pub fn db_path(&self) -> PathBuf {
-        let (path, _, _) = Self::resolve_db_for_branch(
-            &self.project_root,
-            &self.store_layout.data_root,
-            self.serving_branch.as_deref(),
-        );
-        path
+        self.db_path_cache
+            .get_or_init(|| {
+                let (path, _, _) = Self::resolve_db_for_branch(
+                    &self.project_root,
+                    &self.store_layout.data_root,
+                    self.serving_branch.as_deref(),
+                );
+                path
+            })
+            .clone()
     }
 
     pub fn store_layout(&self) -> &StoreLayout {
