@@ -1155,6 +1155,20 @@ impl Database {
         })
     }
 
+    /// Whether this owner has no V1 legacy memory at all, so the cutover
+    /// ladder would only manufacture an all-zero backfill row and a receipt
+    /// for a migration that never happened.
+    pub async fn memory_v2_cutover_is_vacuous(
+        &self,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+    ) -> Result<bool> {
+        let writer = self
+            .writer_connection("probe memory v2 legacy cutover source")
+            .await?;
+        memory_v2::memory_v2_cutover_is_vacuous(&writer.conn, owner, source_store_id).await
+    }
+
     pub async fn load_or_capture_memory_v2_frontiers(
         &self,
         owner: &FactOwnerV1,

@@ -30,7 +30,11 @@ pub(crate) struct RuntimeEvidenceAssemblyStore {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum EvidenceAssemblyAnchorResolutionV1 {
     Resolved {
-        record: tracedecay_domain::RetrievalAnchorRecordV3,
+        /// Both persisted anchor generations resolve. The store is mid-cutover:
+        /// the observation and repository-provenance writers still commit V2
+        /// records, so narrowing this to V3 would report a live anchor as
+        /// `Unavailable` — a falsified absence, not a real one.
+        record: tracedecay_store::StoredRetrievalAnchorRecordV1,
         derivatives: Vec<tracedecay_store::RetrievalAnchorDerivativeV1>,
     },
     Tombstone(tracedecay_store::RetrievalAnchorTombstoneV1),
@@ -284,21 +288,18 @@ async fn resolve_anchor_snapshot(
         }
     }
 
-    let stored: tracedecay_store::StoredRetrievalAnchorRecordV1 =
+    let record: tracedecay_store::StoredRetrievalAnchorRecordV1 =
         serde_json::from_str(&anchor_json)
             .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
-    stored
+    record
         .validate()
         .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
-    if stored.anchor_id() != anchor_id
-        || stored.owner() != owner.clone()
-        || stored.projection_generation().as_str() != projection_generation
+    if record.anchor_id() != anchor_id
+        || record.owner() != owner.clone()
+        || record.projection_generation().as_str() != projection_generation
     {
         return Err(tracedecay_store::EvidenceAssemblyStoreError::Unavailable);
     }
-    let tracedecay_store::StoredRetrievalAnchorRecordV1::V3(record) = stored else {
-        return Ok(EvidenceAssemblyAnchorResolutionV1::Unavailable);
-    };
 
     let mut rows = snapshot
         .query(
