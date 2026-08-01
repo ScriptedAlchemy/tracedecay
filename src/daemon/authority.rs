@@ -406,8 +406,8 @@ fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
 fn open_private_lock(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
-        return windows_acl::open_or_create_private_lock_file(path)
-            .map_err(|error| config_io("open private lock", path, &error));
+        windows_acl::open_or_create_private_lock_file(path)
+            .map_err(|error| config_io("open private lock", path, &error))
     }
 
     #[cfg(not(windows))]

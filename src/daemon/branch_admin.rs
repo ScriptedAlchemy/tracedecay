@@ -336,6 +336,7 @@ impl StoreAdministration {
         self.project_routes.clone()
     }
 
+    #[cfg(unix)]
     pub(super) async fn for_retained_project_graph(
         graph: &crate::tracedecay::TraceDecay,
     ) -> Result<Self> {

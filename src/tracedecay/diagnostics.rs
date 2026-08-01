@@ -140,10 +140,12 @@ impl TraceDecay {
         self.open_options.clone()
     }
 
+    #[cfg(unix)]
     pub(crate) fn retained_profile_root(&self) -> Result<PathBuf> {
         self.open_options.resolved_profile_root()
     }
 
+    #[cfg(unix)]
     pub(crate) fn retained_store_runtime_registry(
         &self,
     ) -> std::sync::Arc<

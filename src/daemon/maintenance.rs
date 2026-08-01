@@ -143,6 +143,7 @@ impl MaintenanceCoordinator {
         coordinator
     }
 
+    #[cfg(any(unix, test))]
     pub(super) fn wake(&self) {
         self.wake.notify_one();
     }

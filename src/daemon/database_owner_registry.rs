@@ -39,6 +39,7 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
 }
 
 impl<Server> DatabaseOwnerRegistry<Server> {
+    #[cfg(any(unix, test))]
     pub(super) fn get(&self, key: &ProjectServerKey) -> Option<&Server> {
         self.servers.get(key).map(|entry| &entry.server)
     }
@@ -304,6 +305,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         self.servers.values().map(|entry| &entry.server)
     }
 
+    #[cfg(any(unix, test))]
     pub(super) fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
         self.servers.keys()
     }

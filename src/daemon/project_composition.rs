@@ -91,9 +91,11 @@ impl ProductionProjectCompositionRuntime {
 }
 
 pub(super) struct ProductionProjectComposition {
+    #[cfg(any(unix, test))]
     pub(super) key: ProjectServerKey,
     pub(super) canonical_project_path: PathBuf,
     pub(super) server: Arc<crate::mcp::McpServer>,
+    #[cfg(any(unix, test))]
     pub(super) inserted: bool,
     #[cfg(any(test, feature = "test-transport"))]
     pub(super) semantic_auto_download_enabled: Option<bool>,
@@ -136,9 +138,11 @@ pub(super) async fn production_project_server(
             .map(|(key, server)| (key.clone(), Arc::clone(server)))
     } {
         return Ok(ProductionProjectComposition {
+            #[cfg(any(unix, test))]
             key: server.0,
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
+            #[cfg(any(unix, test))]
             inserted: false,
             #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
@@ -158,9 +162,11 @@ pub(super) async fn production_project_server(
             .map(|(key, server)| (key.clone(), Arc::clone(server)))
     } {
         return Ok(ProductionProjectComposition {
+            #[cfg(any(unix, test))]
             key: server.0,
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
+            #[cfg(any(unix, test))]
             inserted: false,
             #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: None,
@@ -264,9 +270,11 @@ pub(super) async fn production_project_server(
     };
     if let Some(existing) = existing {
         return Ok(ProductionProjectComposition {
+            #[cfg(any(unix, test))]
             key,
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: existing,
+            #[cfg(any(unix, test))]
             inserted: false,
             #[cfg(any(test, feature = "test-transport"))]
             semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
@@ -1062,9 +1070,11 @@ pub(super) async fn production_project_server(
         }
     }
     Ok(ProductionProjectComposition {
+        #[cfg(any(unix, test))]
         key,
         canonical_project_path: canonical_project_path.to_path_buf(),
         server: resolved,
+        #[cfg(any(unix, test))]
         inserted,
         #[cfg(any(test, feature = "test-transport"))]
         semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
