@@ -1502,7 +1502,9 @@ async fn fact_feedback_on_nonexistent_fact_id_fails_fast_like_get() {
     );
     let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("not found") || message.contains("missing") || message.contains("unavailable"),
+        message.contains("not found")
+            || message.contains("missing")
+            || message.contains("unavailable"),
         "error should clearly report the fact as absent: {message}"
     );
 }
