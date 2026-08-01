@@ -157,7 +157,7 @@ pub(super) async fn assert_executable_union_witness() {
         (
             applied
                 .destination_data_root
-                .join(crate::root_seam::config::DB_FILENAME),
+                .join(tracedecay_runtime_core::config::DB_FILENAME),
             "graph",
         ),
         (
@@ -317,7 +317,7 @@ async fn final_verification_rejects_missing_external_source_state() {
     .unwrap_err();
     let destination_graph = report
         .destination_data_root
-        .join(crate::root_seam::config::DB_FILENAME);
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
     delete_external_source_state(&destination_graph, "binding.graph.verification").await;
 
     let error = apply(&options, &report.confirmation_token)

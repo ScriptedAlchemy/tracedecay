@@ -6,9 +6,9 @@ use std::path::Path;
 
 use super::*;
 
-use crate::root_seam::config::TRACEDECAY_DIR;
-use crate::root_seam::errors::Result;
 use crate::root_seam::global_db;
+use tracedecay_runtime_core::config::TRACEDECAY_DIR;
+use tracedecay_runtime_core::errors::Result;
 
 pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<MigrationInventory> {
     let profile_root = options
@@ -16,12 +16,12 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
         .as_deref()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .map_or_else(crate::root_seam::storage::default_profile_root, Ok)?;
-    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        .map_or_else(tracedecay_runtime_core::storage::default_profile_root, Ok)?;
+    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "migration inventory",
     )?;
-    let _database_scope = crate::root_seam::db::enter_maintenance_database_scope(
+    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
         &lifecycle,
         &profile_root,
         "migration inventory",
@@ -56,7 +56,7 @@ pub async fn build_inventory_for_daemon(
         .as_deref()
         .is_some_and(|path| path != global_db.db_path())
     {
-        return Err(crate::root_seam::errors::TraceDecayError::Config {
+        return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
             message: "daemon migration inventory cannot inspect a different profile database"
                 .to_string(),
         });
@@ -158,7 +158,7 @@ async fn build_inventory_in_scope(
                 db.try_resolve_project_store_record_by_alias(&root)
                     .await?
                     .and_then(|store| {
-                        crate::root_seam::storage::classify_registry_storage(
+                        tracedecay_runtime_core::storage::classify_registry_storage(
                             &root,
                             profile_root,
                             &store,
@@ -166,7 +166,7 @@ async fn build_inventory_in_scope(
                     })
                     .map(|location| location.data_root)
             } else if let Some(profile_root) = profile_root {
-                crate::root_seam::storage::resolve_layout(&root, profile_root)
+                tracedecay_runtime_core::storage::resolve_layout(&root, profile_root)
                     .ok()
                     .map(|layout| layout.data_root)
             } else {

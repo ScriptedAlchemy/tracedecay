@@ -2,7 +2,7 @@
 //! and message-family materialization consolidation tests.
 
 use super::*;
-use crate::root_seam::db::engine::DatabaseAttachmentExecutor;
+use tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor;
 
 async fn session_runtime(fixture: &Fixture, project_id: &str) -> HostAdmissionTestRuntimeV1 {
     let runtime =
@@ -250,7 +250,7 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
 
     let graph_path = report
         .destination_data_root
-        .join(crate::root_seam::config::DB_FILENAME);
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
     // Deliberately corrupt the frozen result outside the product writer. The
     // writer must continue rejecting the foreign-key bypass this fixture needs.
     let fixture_db = rusqlite::Connection::open(&graph_path).unwrap();

@@ -16,10 +16,10 @@ use crate::root_seam::daemon::store_runtime::registry::{
     StoreRuntimeRegistryConfig, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-use crate::root_seam::db::{
+use tracedecay_runtime_core::db::{
     Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope,
 };
-use crate::root_seam::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -213,7 +213,7 @@ impl ConsolidationRuntimeOwnerV1 {
     pub(super) async fn new(
         profile_root: &Path,
         root: &Path,
-        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+        lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -395,21 +395,22 @@ impl ConsolidationRuntimeOwnerV1 {
                 "mounted consolidation artifact identity differs from its ledger record",
             ));
         }
-        let database = match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
-        {
-            Ok(database) => database,
-            Err(error) => {
-                if let Err(failure) = self.registry.close_exact(&binding, &authority).await {
+        let database =
+            match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
+            {
+                Ok(database) => database,
+                Err(error) => {
+                    if let Err(failure) = self.registry.close_exact(&binding, &authority).await {
+                        self.active_artifact.store(false, Ordering::Release);
+                        return Err(registry_error(
+                            "close unpublished consolidation database facade",
+                            failure,
+                        ));
+                    }
                     self.active_artifact.store(false, Ordering::Release);
-                    return Err(registry_error(
-                        "close unpublished consolidation database facade",
-                        failure,
-                    ));
+                    return Err(error);
                 }
-                self.active_artifact.store(false, Ordering::Release);
-                return Err(error);
-            }
-        };
+            };
         Ok(MountedConsolidationArtifactV1 {
             registry: self.registry.clone(),
             active_artifact: Arc::clone(&self.active_artifact),
@@ -578,7 +579,7 @@ pub(super) struct FrozenInputRuntimeSetV1 {
 impl FrozenInputRuntimeSetV1 {
     pub(super) async fn acquire(
         profile_root: &Path,
-        lifecycle: &crate::root_seam::lifecycle_lease::LifecycleLease,
+        lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
         maintenance: &MaintenanceDatabaseScope<'_>,
         profile_shard: StoreShardIdV1,
         records: &[ConsolidationArtifactRecordV1],
@@ -753,19 +754,20 @@ impl FrozenInputRuntimeSetV1 {
                 "frozen input runtime identity differs from its exact record",
             ));
         }
-        let database = match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
-        {
-            Ok(database) => database,
-            Err(error) => {
-                self.registry
-                    .close_exact(&binding, &authority)
-                    .await
-                    .map_err(|failure| {
-                        registry_error("close unpublished frozen input runtime", failure)
-                    })?;
-                return Err(error);
-            }
-        };
+        let database =
+            match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
+            {
+                Ok(database) => database,
+                Err(error) => {
+                    self.registry
+                        .close_exact(&binding, &authority)
+                        .await
+                        .map_err(|failure| {
+                            registry_error("close unpublished frozen input runtime", failure)
+                        })?;
+                    return Err(error);
+                }
+            };
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -942,7 +944,7 @@ fn validate_relative_locator(locator: &Path) -> Result<()> {
 }
 
 fn current_file_identity(path: &Path) -> Result<u64> {
-    crate::root_seam::db::sqlite_generation_identity(path).map_err(|_| {
+    tracedecay_runtime_core::db::sqlite_generation_identity(path).map_err(|_| {
         runtime_error(format!(
             "could not verify consolidation artifact file identity '{}'",
             path.display()

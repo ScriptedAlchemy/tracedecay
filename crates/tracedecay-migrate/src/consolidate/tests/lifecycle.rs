@@ -145,7 +145,7 @@ async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
         file_digest(&source.graph_db_path).unwrap(),
         source_graph_before
     );
-    let default_branch = crate::root_seam::branch::detect_default_branch(&fixture.project)
+    let default_branch = tracedecay_runtime_core::branch::detect_default_branch(&fixture.project)
         .unwrap_or_else(|| "main".to_string());
     let preserved_name = format!("consolidated/{}/{}", fixture.source_id, default_branch);
     let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
@@ -198,7 +198,8 @@ async fn legacy_single_db_retry_after_destination_publish_is_deterministic() {
 
     assert_eq!(applied.state, ConsolidationState::Applied);
     let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
-    let default_branch = crate::root_seam::branch::detect_default_branch(&fixture.project).unwrap();
+    let default_branch =
+        tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
     let preserved = &destination_meta.branches
         [&format!("consolidated/{}/{}", fixture.source_id, default_branch)];
     assert_eq!(preserved.created_at, "0");
@@ -221,7 +222,8 @@ async fn target_legacy_single_db_metadata_is_synthesized_without_input_mutation(
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
     assert!(!target.branch_meta_path.exists());
     let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
-    let default_branch = crate::root_seam::branch::detect_default_branch(&fixture.project).unwrap();
+    let default_branch =
+        tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
     assert_eq!(destination_meta.default_branch, default_branch);
     assert_eq!(destination_meta.branches[&default_branch].created_at, "0");
     assert_eq!(
@@ -350,9 +352,9 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
     )
     .unwrap();
     let input_database_digests = [
-        source_root.join(crate::root_seam::config::DB_FILENAME),
+        source_root.join(tracedecay_runtime_core::config::DB_FILENAME),
         source_root.join(storage::SESSIONS_DB_FILENAME),
-        target_root.join(crate::root_seam::config::DB_FILENAME),
+        target_root.join(tracedecay_runtime_core::config::DB_FILENAME),
         target_root.join(storage::SESSIONS_DB_FILENAME),
     ]
     .map(|path| (path.clone(), file_digest(&path).unwrap()));
@@ -399,7 +401,7 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
 
     let graph = applied
         .destination_data_root
-        .join(crate::root_seam::config::DB_FILENAME);
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
     let sessions = applied
         .destination_data_root
         .join(storage::SESSIONS_DB_FILENAME);
@@ -552,7 +554,7 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
     let destination = applied
         .destination_data_root
-        .join(crate::root_seam::config::DB_FILENAME);
+        .join(tracedecay_runtime_core::config::DB_FILENAME);
     assert_eq!(database_page_size(&destination).await, 4096);
     let _session_runtime = HostAdmissionTestRuntimeV1::project(
         &fixture.profile,
@@ -1112,7 +1114,7 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
         )) && applied.destination_data_root.join(db_file).is_file()
     }));
 
-    let gc = crate::root_seam::branch::gc_dead_branch_stores(
+    let gc = tracedecay_runtime_core::branch::gc_dead_branch_stores(
         &fixture.project,
         &applied.destination_data_root,
         0,
