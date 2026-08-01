@@ -3,7 +3,7 @@ use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::Database;
 use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
-use super::sql::{collect_rowid_pages_with, collect_rows, path_prefix_like_value};
+use super::sql::{collect_rowid_pages, collect_rowid_pages_with, collect_rows, path_prefix_like_value};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -1060,4 +1060,242 @@ impl Database {
         });
         Ok(nodes)
     }
+
+    // ---------------------------------------------------------------------
+    // Whole-graph aggregates for health/gini reports.
+    //
+    // These fold the node/edge tables inside `SQLite` (`GROUP BY`) so the
+    // reports never materialize `Vec<Node>` / `Vec<Edge>` copies of a real
+    // project's whole graph in the MCP process. Every method returns one row
+    // per file (or per cross-file file pair), which callers then filter by
+    // path scope in Rust. That group-then-filter order is byte-identical to
+    // filtering nodes before folding, because every node in a file shares
+    // that file's `file_path`, so a scope predicate keyed on `file_path`
+    // partitions whole groups and never splits a per-file sum.
+    // ---------------------------------------------------------------------
+
+    /// Per-file sum of the raw complexity metric
+    /// (`branches + loops + returns + max_nesting`).
+    ///
+    /// Returns one `(file_path, sum)` row per file holding at least one node.
+    /// The columns are `INTEGER NOT NULL DEFAULT 0`, so the `SUM` is an exact
+    /// integer and the `as f64` widening is lossless for any real project
+    /// (well under 2^53), matching an incremental `f64` fold byte-for-byte.
+    pub async fn complexity_sum_by_file(&self) -> Result<Vec<(String, f64)>> {
+        self.file_metric_sums(
+            "SELECT file_path, \
+             CAST(SUM(branches + loops + returns + max_nesting) AS INTEGER) \
+             FROM nodes GROUP BY file_path",
+            "complexity_sum_by_file",
+        )
+        .await
+    }
+
+    /// Per-file sum of node line spans (`end_line - start_line + 1`, floored at
+    /// 1 line). Mirrors the `end_line.saturating_sub(start_line) + 1` fold.
+    pub async fn line_span_sum_by_file(&self) -> Result<Vec<(String, f64)>> {
+        self.file_metric_sums(
+            "SELECT file_path, \
+             CAST(SUM(MAX(end_line - start_line, 0) + 1) AS INTEGER) \
+             FROM nodes GROUP BY file_path",
+            "line_span_sum_by_file",
+        )
+        .await
+    }
+
+    /// Shared driver for `SELECT file_path, <int sum> FROM nodes GROUP BY
+    /// file_path` queries. The grouped result is one row per file (a few
+    /// thousand at most), so it is read in a single query without paging.
+    async fn file_metric_sums(&self, sql: &str, op: &str) -> Result<Vec<(String, f64)>> {
+        let mut rows = self
+            .engine_conn()
+            .query(sql, ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query per-file metric sums: {e}"),
+                operation: op.to_string(),
+            })?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read per-file metric row: {e}"),
+            operation: op.to_string(),
+        })? {
+            let file: String = row.get(0).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read file_path: {e}"),
+                operation: op.to_string(),
+            })?;
+            let total: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read metric sum: {e}"),
+                operation: op.to_string(),
+            })?;
+            items.push((file, total as f64));
+        }
+        Ok(items)
+    }
+
+    /// Per-function/method raw complexity, projected as `(file_path, name,
+    /// branches + loops + returns + max_nesting)`. Used by the symbol-scope
+    /// gini metric. Read through `rowid` keyset pages because the number of
+    /// function/method nodes on a real project exceeds what the runtime will
+    /// materialize for a single query.
+    pub async fn symbol_complexity(&self) -> Result<Vec<(String, String, f64)>> {
+        let rows: Vec<(String, String, i64)> = collect_rowid_pages(
+            &self.engine_conn(),
+            "SELECT file_path, name, (branches + loops + returns + max_nesting), rowid \
+             FROM nodes \
+             WHERE kind IN ('function', 'method') AND rowid > ?1 \
+             ORDER BY rowid LIMIT ?2",
+            3,
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?)),
+            "symbol_complexity",
+        )
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(file, name, value)| (file, name, value as f64))
+            .collect())
+    }
+
+    /// The distinct set of file paths holding at least one node. Bounded by the
+    /// file count (a few thousand), so it is read in a single query.
+    pub async fn distinct_node_file_paths(&self) -> Result<Vec<String>> {
+        let mut rows = self
+            .engine_conn()
+            .query("SELECT DISTINCT file_path FROM nodes", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query distinct node file paths: {e}"),
+                operation: "distinct_node_file_paths".to_string(),
+            })?;
+        collect_rows(
+            &mut rows,
+            |row| row.get::<String>(0),
+            "distinct_node_file_paths",
+        )
+        .await
+    }
+
+    /// Cross-file directed edge counts as `(src_file, tgt_file, count)`, one row
+    /// per distinct ordered file pair connected by at least one edge whose
+    /// endpoints live in different files. Every edge references real nodes
+    /// (foreign key), so the inner join counts exactly the edges an
+    /// all-edges fold would visit.
+    ///
+    /// Read through keyset pages on `(src_file, tgt_file)` — the same transport
+    /// pattern as `build_file_adjacency` — because the distinct pair set can
+    /// exceed the runtime's single-query materialization limit. The pair key is
+    /// the `GROUP BY` key, so a page boundary never splits a group.
+    pub async fn cross_file_edge_pair_counts(&self) -> Result<Vec<(String, String, u64)>> {
+        const PAGE_ROWS: i64 = 2_000;
+        let sql = "SELECT n1.file_path AS src, n2.file_path AS tgt, COUNT(*) AS cnt \
+                   FROM edges e \
+                   JOIN nodes n1 ON e.source = n1.id \
+                   JOIN nodes n2 ON e.target = n2.id \
+                   WHERE n1.file_path != n2.file_path \
+                   AND (n1.file_path > ?1 OR (n1.file_path = ?1 AND n2.file_path > ?2)) \
+                   GROUP BY n1.file_path, n2.file_path \
+                   ORDER BY src, tgt \
+                   LIMIT ?3";
+        let mut items = Vec::new();
+        let mut cursor = (String::new(), String::new());
+        loop {
+            let mut rows = self
+                .engine_conn()
+                .query(sql, (cursor.0.clone(), cursor.1.clone(), PAGE_ROWS))
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query cross-file edge pair counts: {e}"),
+                    operation: "cross_file_edge_pair_counts".to_string(),
+                })?;
+            let mut page_rows = 0_i64;
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read edge pair row: {e}"),
+                operation: "cross_file_edge_pair_counts".to_string(),
+            })? {
+                let src: String = row.get(0).unwrap_or_default();
+                let tgt: String = row.get(1).unwrap_or_default();
+                let cnt: u64 = row.get(2).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read edge pair count: {e}"),
+                    operation: "cross_file_edge_pair_counts".to_string(),
+                })?;
+                cursor = (src.clone(), tgt.clone());
+                page_rows += 1;
+                items.push((src, tgt, cnt));
+            }
+            drop(rows);
+            if page_rows < PAGE_ROWS {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// Per-file health aggregates folded in one `GROUP BY` scan: the weighted
+    /// complexity sum (`branches*2 + loops*2 + max_nesting*3 + line_span`), the
+    /// function/method count, and the count of function/method nodes carrying a
+    /// `skip-test-coverage` docstring marker. Replaces a whole-table
+    /// `get_all_nodes` fold plus a separate skip-marker scan in the health
+    /// snapshot. One row per file holding at least one node.
+    pub async fn health_file_aggregates(&self) -> Result<Vec<HealthFileAggregate>> {
+        let sql = "SELECT file_path, \
+                   CAST(SUM(branches * 2 + loops * 2 + max_nesting * 3 \
+                            + (MAX(end_line - start_line, 0) + 1)) AS INTEGER) AS complexity, \
+                   SUM(CASE WHEN kind IN ('function', 'method') THEN 1 ELSE 0 END) AS fns, \
+                   SUM(CASE WHEN kind IN ('function', 'method') \
+                             AND docstring LIKE '%skip-test-coverage%' \
+                            THEN 1 ELSE 0 END) AS skipped \
+                   FROM nodes GROUP BY file_path";
+        let op = "health_file_aggregates";
+        let mut rows = self
+            .engine_conn()
+            .query(sql, ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query health file aggregates: {e}"),
+                operation: op.to_string(),
+            })?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read health aggregate row: {e}"),
+            operation: op.to_string(),
+        })? {
+            let file_path: String = row.get(0).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read file_path: {e}"),
+                operation: op.to_string(),
+            })?;
+            let complexity: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read complexity sum: {e}"),
+                operation: op.to_string(),
+            })?;
+            let fns: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read function/method count: {e}"),
+                operation: op.to_string(),
+            })?;
+            let skipped: i64 = row.get(3).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read skip-coverage count: {e}"),
+                operation: op.to_string(),
+            })?;
+            items.push(HealthFileAggregate {
+                file_path,
+                complexity: complexity as f64,
+                function_methods: fns.max(0) as usize,
+                skipped_function_methods: skipped.max(0) as usize,
+            });
+        }
+        Ok(items)
+    }
+}
+
+/// One file's health aggregates, folded in `Database::health_file_aggregates`.
+#[derive(Debug, Clone)]
+pub struct HealthFileAggregate {
+    /// The file these aggregates are scoped to.
+    pub file_path: String,
+    /// Weighted complexity sum over the file's nodes.
+    pub complexity: f64,
+    /// Number of `function`/`method` nodes in the file.
+    pub function_methods: usize,
+    /// Number of `function`/`method` nodes whose docstring carries the
+    /// `skip-test-coverage` marker.
+    pub skipped_function_methods: usize,
 }
