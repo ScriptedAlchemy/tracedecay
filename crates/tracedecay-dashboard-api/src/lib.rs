@@ -89,7 +89,7 @@ mod memory_api;
 pub mod memory_curate;
 mod memory_service;
 pub mod project_graph;
-mod project_registry;
+pub mod project_registry;
 mod projects;
 mod read_model;
 mod savings_api;
