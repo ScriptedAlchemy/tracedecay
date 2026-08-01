@@ -413,7 +413,7 @@ async fn graph_reader_selector_rejects_ambiguous_project_basename() {
         None,
         None,
         ToolCallRegistryOptions {
-            global_db: Some(registry.database.as_ref()),
+            global_db: Some(registry.database()),
             ..Default::default()
         },
     )

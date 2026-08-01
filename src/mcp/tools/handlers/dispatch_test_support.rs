@@ -37,6 +37,10 @@ impl SelectorRegistry {
             _scope: scope,
         }
     }
+
+    pub(super) fn database(&self) -> &Arc<RegisteredGlobalDb> {
+        &self.database
+    }
 }
 
 pub(super) fn selector_options(
@@ -54,7 +58,7 @@ pub(super) fn selector_options(
         Box::pin(async move { Ok(graph) })
     });
     ToolCallRegistryOptions {
-        global_db: Some(registry.database.as_ref()),
+        global_db: Some(registry.database()),
         retained_project_graph_resolver: Some(resolver),
         ..Default::default()
     }

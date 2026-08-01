@@ -269,7 +269,7 @@ mod tests {
 
         let path = std::path::PathBuf::from(OsString::from_vec(b"session-\xff.jsonl".to_vec()));
         assert_eq!(
-            GlobalDbTranscriptStore::path_text(&path),
+            GlobalDbTranscriptStore::<&RegisteredGlobalDb>::path_text(&path),
             path.to_string_lossy()
         );
     }
