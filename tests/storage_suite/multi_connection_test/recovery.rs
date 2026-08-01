@@ -10,6 +10,7 @@ async fn killed_writer_fixture() {
     );
     let ready_path =
         PathBuf::from(std::env::var_os("TRACEDECAY_FIXTURE_READY").expect("fixture ready path"));
+    common::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(&db_path, "killed writer fixture")
         .expect("acquire fixture database authority");
     let (db, _) = Database::publish_test_runtime(

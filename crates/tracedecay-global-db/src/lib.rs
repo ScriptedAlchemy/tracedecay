@@ -33,6 +33,27 @@ mod registered_sessions;
 pub mod schema_contract;
 pub mod schema_stages;
 pub use schema_stages::ensure_registered_schema;
+
+/// Installs the canonical registered global/session schema installer into the
+/// kernel's fail-closed [`tracedecay_runtime_core::ports::registered_schema`]
+/// port for dependent test builds.
+///
+/// The kernel opens a profile- or session-scoped shard through that port when a
+/// fixture calls `Database::publish_test_runtime`, but the real schema
+/// ([`ensure_registered_schema`]) lives here in `tracedecay-global-db`, above
+/// the kernel. Production wires the same installer through
+/// `tracedecay-migrate`/the daemon; this helper lets the root crate's
+/// integration suites (and this crate's own tests) register the identical real
+/// schema without reaching into daemon internals. Idempotent — the port keeps
+/// the first registration. Gated behind `test-helpers`, so no production build
+/// gains a registrar and the port stays fail-closed when nothing registers.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn register_test_schema_installer() {
+    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
+        Box::pin(ensure_registered_schema(connection))
+    });
+}
+
 pub mod session_temporal;
 pub use session_temporal::operations as session_temporal_operations;
 mod transcript;
