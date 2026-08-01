@@ -793,6 +793,7 @@ pub(super) async fn production_project_server(
                 };
                 let code_index_invocation = invocation.clone();
                 let code_index_project_id = code_search_project_id.clone();
+                let code_index_scope = code_search_scope.clone();
                 let code_index_project = canonical_project_path.to_path_buf();
                 let code_index_semantic_runtime = semantic_runtime.clone();
                 let code_index_semantic_lifecycle = semantic_lifecycle.clone();
@@ -806,6 +807,9 @@ pub(super) async fn production_project_server(
                         return;
                     }
                     let started = Instant::now();
+                    let mut code_index_publications = code_index_invocation
+                        .code_index_schedulers
+                        .subscribe_generation_publications();
                     let outcome = code_index_invocation
                         .mount_code_index(
                             code_index_project_id,
@@ -817,6 +821,64 @@ pub(super) async fn production_project_server(
                             Some(code_index_semantic_resources),
                         )
                         .await;
+                    let generation_ready = if outcome.is_ok() {
+                        if code_index_invocation
+                            .code_index_schedulers
+                            .latest_generation_id(&code_index_project)
+                            .await
+                            .is_some()
+                        {
+                            true
+                        } else {
+                            loop {
+                                if !code_index_route_registered.load(Ordering::Acquire) {
+                                    break false;
+                                }
+                                tokio::select! {
+                                    _ = code_index_cancellation.cancelled() => break false,
+                                    publication = code_index_publications.recv() => match publication {
+                                        Ok(publication)
+                                            if publication.project_root == code_index_project =>
+                                        {
+                                            break true;
+                                        }
+                                        Ok(_) => {}
+                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                            if code_index_invocation
+                                                .code_index_schedulers
+                                                .latest_generation_id(&code_index_project)
+                                                .await
+                                                .is_some()
+                                            {
+                                                break true;
+                                            }
+                                        }
+                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                            break false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    let query_authority_outcome =
+                        if generation_ready
+                            && !code_index_cancellation.is_cancelled()
+                            && code_index_route_registered.load(Ordering::Acquire)
+                        {
+                            Some(
+                                code_index_invocation
+                                    .mount_query_authority_for_project(
+                                        &code_index_project,
+                                        &code_index_scope,
+                                    )
+                                    .await,
+                            )
+                        } else {
+                            None
+                        };
                     let mut fields = vec![
                         ("project", code_index_project.display().to_string()),
                         ("elapsed_ms", started.elapsed().as_millis().to_string()),
@@ -827,6 +889,16 @@ pub(super) async fn production_project_server(
                             fields.push(("phase", "code_index_mount_degraded".to_owned()));
                             fields.push(("error", error.to_string()));
                         }
+                    }
+                    match query_authority_outcome {
+                        Some(Ok(())) => {
+                            fields.push(("query_authority", "mounted".to_owned()));
+                        }
+                        Some(Err(error)) => {
+                            fields.push(("query_authority", "unavailable".to_owned()));
+                            fields.push(("query_authority_error", error.to_string()));
+                        }
+                        None => {}
                     }
                     log_daemon_event("project_open_phase", &fields);
                 });

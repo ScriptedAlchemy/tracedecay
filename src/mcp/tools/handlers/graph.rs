@@ -150,6 +150,21 @@ fn generic_tool_result(
     support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
 }
 
+async fn unique_graph_node_id_for_search_display(
+    cg: &TraceDecay,
+    display: &crate::mcp::server::CodeIndexSearchDisplayV1,
+) -> Option<String> {
+    let nodes = cg
+        .get_nodes_by_qualified_name(&display.qualified_name)
+        .await
+        .ok()?;
+    let mut matches = nodes
+        .into_iter()
+        .filter(|node| node.kind.as_str() == display.kind.as_str());
+    let node = matches.next()?;
+    matches.next().is_none().then_some(node.id)
+}
+
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -226,8 +241,10 @@ async fn legacy_search_fallback(
     let results = legacy_results
         .into_iter()
         .map(|result| {
+            let node_id = result.node.id;
             json!({
-                "id": result.node.id,
+                "id": node_id.clone(),
+                "node_id": node_id,
                 "name": result.node.name,
                 "kind": result.node.kind.as_str(),
                 "file": result.node.file_path,
@@ -289,6 +306,7 @@ pub(super) async fn handle_search(
 
     let semantic_mode = semantic_search_mode(&args)?;
     let cursor = retrieval_cursor(&args)?;
+    let include_graph_node_ids = render::wants_json(&args);
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
@@ -328,23 +346,24 @@ pub(super) async fn handle_search(
     .await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let results = complete
-                .ordered_candidates
-                .iter()
-                .map(|ranked| {
-                    let mut result = json!(ranked);
-                    if let Some(display) =
-                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
+            let mut results = Vec::with_capacity(complete.ordered_candidates.len());
+            for ranked in &complete.ordered_candidates {
+                let mut result = json!(ranked);
+                if let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) {
+                    result["display"] = json!({
+                        "name": display.name,
+                        "qualified_name": display.qualified_name,
+                        "kind": display.kind,
+                    });
+                    if include_graph_node_ids
+                        && let Some(node_id) =
+                            unique_graph_node_id_for_search_display(cg, display).await
                     {
-                        result["display"] = json!({
-                            "name": display.name,
-                            "qualified_name": display.qualified_name,
-                            "kind": display.kind,
-                        });
+                        result["node_id"] = json!(node_id);
                     }
-                    result
-                })
-                .collect::<Vec<_>>();
+                }
+                results.push(result);
+            }
             let result_count = results.len();
             let mut output = json!({
                 "results": results,
