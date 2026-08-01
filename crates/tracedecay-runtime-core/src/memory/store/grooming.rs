@@ -327,8 +327,9 @@ impl MemoryStore<'_> {
                     "every grooming operation requires evidence_fact_ids",
                 ));
             }
+            let existing_evidence = self.facts_exist(evidence).await?;
             for fact_id in evidence {
-                if self.get_fact(*fact_id).await?.is_none() {
+                if !existing_evidence.contains(fact_id) {
                     return Err(db_message(
                         "apply_grooming_batch",
                         format!("evidence fact {fact_id} does not exist"),
@@ -501,11 +502,16 @@ impl MemoryStore<'_> {
         let fact_ids = self
             .fact_ids_for_entity(entity_id, "mark_entity_fact_banks_dirty")
             .await?;
-        for fact_id in fact_ids {
-            if invalidate {
+        if invalidate {
+            for fact_id in fact_ids {
                 self.invalidate_fact_vector_and_mark_dirty(fact_id).await?;
-            } else if let Some(fact) = self.get_fact(fact_id).await? {
-                self.mark_fact_banks_dirty(fact.category).await?;
+            }
+        } else {
+            let categories = self.fact_categories(&fact_ids).await?;
+            for fact_id in fact_ids {
+                if let Some(category) = categories.get(&fact_id) {
+                    self.mark_fact_banks_dirty(*category).await?;
+                }
             }
         }
         Ok(())
@@ -545,7 +551,8 @@ impl MemoryStore<'_> {
     }
 
     async fn invalidate_fact_vector_and_mark_dirty(&self, fact_id: i64) -> Result<()> {
-        if let Some(fact) = self.get_fact(fact_id).await? {
+        let categories = self.fact_categories(&[fact_id]).await?;
+        if let Some(category) = categories.get(&fact_id) {
             self.conn
                 .execute(
                     "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
@@ -553,7 +560,7 @@ impl MemoryStore<'_> {
                 )
                 .await
                 .map_err(|e| db_error("invalidate_fact_vector", e))?;
-            self.mark_fact_banks_dirty(fact.category).await?;
+            self.mark_fact_banks_dirty(*category).await?;
         }
         Ok(())
     }

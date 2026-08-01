@@ -464,6 +464,7 @@ impl MemoryStore<'_> {
         })?;
 
         let mut seen = BTreeSet::new();
+        let existing_losers = self.facts_exist(&loser_ids).await?;
         for loser_id in &loser_ids {
             if *loser_id == winner_id {
                 return Err(db_message(
@@ -477,7 +478,7 @@ impl MemoryStore<'_> {
                     format!("duplicate loser fact {loser_id}"),
                 ));
             }
-            if self.get_fact(*loser_id).await?.is_none() {
+            if !existing_losers.contains(loser_id) {
                 return Err(db_message(
                     "merge_facts",
                     format!("loser fact {loser_id} not found"),
