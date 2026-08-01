@@ -7,6 +7,10 @@
 # scripts/mcp-conformance-smoke.sh it does NOT redirect HOME/XDG into a temp
 # dir — the whole point is to observe the daemon the operator actually uses.
 #
+# For "did serving get slower", use scripts/perf-gate.sh instead: it indexes
+# this repo into a throwaway profile, starts its own daemon, drives concurrent
+# readers, and reports percentiles against explicit budgets.
+#
 # It is strictly read-only:
 #   - the suite handshakes with allow_init=false, so it never creates a store;
 #   - only read tools are dispatched (no fact_store, no edits, no init, no
