@@ -64,6 +64,7 @@ pub mod config;
 pub mod context;
 pub mod daemon;
 pub mod daemon_client;
+pub mod daemon_contract;
 pub mod dashboard;
 #[cfg(test)]
 #[path = "../build-support/dashboard_cache.rs"]

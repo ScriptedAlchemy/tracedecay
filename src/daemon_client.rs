@@ -420,16 +420,19 @@ pub type DaemonInvocationExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = T> 
 /// Request correlation is already present on `DaemonInvocationRequest`; effect
 /// idempotency remains owned by each operation payload and is never reminted
 /// by this transport boundary.
+///
+/// The port is stated purely in terms of `crate::daemon_contract`, so
+/// implementing or calling it does not drag in the daemon's service internals.
 pub trait DaemonInvocationExecutor: ApplicationInvocationExecutor + Send + Sync {
     fn invoke_controlled(
         &self,
-        request: crate::daemon::DaemonInvocationRequest,
+        request: crate::daemon_contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
     ) -> DaemonInvocationExecutorFuture<
         '_,
-        Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError>,
+        Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
     >;
 
     fn observe_plan26_feedback(
@@ -480,8 +483,8 @@ impl DaemonInvocationClient {
 
     pub(crate) async fn invoke(
         &self,
-        request: crate::daemon::DaemonInvocationRequest,
-    ) -> crate::errors::Result<crate::daemon::DaemonInvocationResponse> {
+        request: crate::daemon_contract::DaemonInvocationRequest,
+    ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
         let request_id = request.request_id.clone();
         let request_label = request.operation().as_str();
         let mut state = self.state.lock().await;
@@ -520,12 +523,12 @@ impl DaemonInvocationClient {
                     ),
                 });
             };
-            let response: crate::daemon::DaemonInvocationResponse =
+            let response: crate::daemon_contract::DaemonInvocationResponse =
                 serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
                     message: "daemon returned an invalid invocation response".to_owned(),
                 })?;
-            if response.protocol != crate::daemon::DAEMON_INVOCATION_PROTOCOL
-                || response.revision != crate::daemon::DAEMON_INVOCATION_REVISION
+            if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
+                || response.revision != crate::daemon_contract::DAEMON_INVOCATION_REVISION
                 || response.request_id != request_id
             {
                 return Err(crate::errors::TraceDecayError::Config {
@@ -553,7 +556,7 @@ impl DaemonInvocationClient {
             })?;
         let response = self
             .invoke(
-                crate::daemon::DaemonInvocationRequest::feedback_observation(
+                crate::daemon_contract::DaemonInvocationRequest::feedback_observation(
                     request_id.as_str(),
                     subject_digest,
                     observed_at,
@@ -563,7 +566,7 @@ impl DaemonInvocationClient {
             .await?;
         if matches!(
             response.outcome,
-            crate::daemon::DaemonInvocationOutcome::ObservationAccepted
+            crate::daemon_contract::DaemonInvocationOutcome::ObservationAccepted
         ) {
             Ok(())
         } else {
@@ -585,14 +588,14 @@ impl DaemonInvocationClient {
             })?;
         let response = self
             .invoke(
-                crate::daemon::DaemonInvocationRequest::semantic_evaluate_and_publish(
+                crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                     request_id.as_str(),
                     candidate,
                 ),
             )
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
+            crate::daemon_contract::DaemonInvocationOutcome::SemanticEvaluatedProfilePublished {
                 scope,
                 profile_digest,
                 report_digest,
@@ -607,7 +610,7 @@ impl DaemonInvocationClient {
                 source_generation: source_generation.as_str().to_owned(),
                 snapshot_digest: snapshot_digest.as_str().to_owned(),
             }),
-            crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+            crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
                 Err(crate::errors::TraceDecayError::Config {
                     message: format!("semantic evaluation publication rejected: {problem:?}"),
                 })
@@ -620,11 +623,11 @@ impl DaemonInvocationClient {
 
     pub(crate) async fn invoke_controlled(
         &self,
-        request: crate::daemon::DaemonInvocationRequest,
+        request: crate::daemon_contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
-    ) -> Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError> {
+    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError> {
         if cancellation.is_cancelled() {
             return Err(DaemonInvocationError::Cancelled {
                 stage: CancellationStage::BeforeAdmission,
@@ -679,13 +682,13 @@ impl DaemonInvocationClient {
 impl DaemonInvocationExecutor for DaemonInvocationClient {
     fn invoke_controlled(
         &self,
-        request: crate::daemon::DaemonInvocationRequest,
+        request: crate::daemon_contract::DaemonInvocationRequest,
         deadline: Deadline,
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
     ) -> DaemonInvocationExecutorFuture<
         '_,
-        Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError>,
+        Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>,
     > {
         Box::pin(DaemonInvocationClient::invoke_controlled(
             self,
@@ -752,7 +755,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                             crate::application_surface::ApplicationSurfaceRequest::Configuration(
                                 request,
                             ),
-                        ) => crate::daemon::DaemonInvocationRequest::configuration(
+                        ) => crate::daemon_contract::DaemonInvocationRequest::configuration(
                             request_id.as_str(),
                             operation,
                             request,
@@ -766,7 +769,7 @@ impl ApplicationInvocationExecutor for DaemonInvocationClient {
                             crate::application_surface::ApplicationSurfaceRequest::Feedback(
                                 request,
                             ),
-                        ) => crate::daemon::DaemonInvocationRequest::feedback(
+                        ) => crate::daemon_contract::DaemonInvocationRequest::feedback(
                             request_id.as_str(),
                             operation,
                             request.request_handle,
@@ -832,10 +835,10 @@ pub(crate) fn map_invocation_error(error: DaemonInvocationError) -> InvocationEr
 pub(crate) fn application_response(
     request_id: RequestId,
     result_contract: tracedecay_application::ResultContractRef,
-    outcome: crate::daemon::DaemonInvocationOutcome,
+    outcome: crate::daemon_contract::DaemonInvocationOutcome,
 ) -> Result<ApplicationResponse, InvocationError> {
     let envelope = match outcome {
-        crate::daemon::DaemonInvocationOutcome::Feedback { scope, result } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Feedback { scope, result } => {
             ApplicationEnvelope::evidence(
                 result_contract,
                 request_id,
@@ -843,7 +846,7 @@ pub(crate) fn application_response(
                 result.into_application(),
             )
         }
-        crate::daemon::DaemonInvocationOutcome::Configuration { scope, outcome } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
             ApplicationEnvelope {
                 contract: result_contract,
                 request_id,
@@ -851,19 +854,21 @@ pub(crate) fn application_response(
                 outcome,
             }
         }
-        crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
             return Err(invocation_error_from_problem(&problem));
         }
-        crate::daemon::DaemonInvocationOutcome::Problem { problem } => {
+        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
             return Err(match problem {
-                crate::daemon::DaemonInvocationProblem::InvalidRequest
-                | crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+                crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+                | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                     InvocationError::InvalidRequest
                 }
-                crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     InvocationError::Denied
                 }
-                crate::daemon::DaemonInvocationProblem::Unavailable => InvocationError::Unavailable,
+                crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
+                    InvocationError::Unavailable
+                }
             });
         }
         _ => return Err(InvocationError::Unavailable),
@@ -916,7 +921,7 @@ pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
 /// closed invocation operation; no method exposes a generic local socket.
 pub struct DaemonLspSessionClient {
     invocation: DaemonInvocationClient,
-    session: crate::daemon::DaemonLspSessionAccess,
+    session: crate::daemon_contract::DaemonLspSessionAccess,
     scope_set_id: Option<tracedecay_domain::ScopeSetId>,
     scope_set_digest: Option<tracedecay_domain::ManifestDigest>,
     next_request: ConnectionLocalRequestSequence,
@@ -931,14 +936,14 @@ impl DaemonLspSessionClient {
         workspace_folders: Vec<String>,
     ) -> crate::errors::Result<Self> {
         let response = invocation
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_open(
+            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_open(
                 "lsp.1",
                 client_revision,
                 requested_root_uri,
                 workspace_folders,
             ))
             .await?;
-        let crate::daemon::DaemonInvocationOutcome::LspOpened {
+        let crate::daemon_contract::DaemonInvocationOutcome::LspOpened {
             session,
             scope_set_id,
             scope_set_digest,
@@ -968,14 +973,14 @@ impl DaemonLspSessionClient {
     pub async fn try_send_client_frame(&mut self, frame: &str) -> crate::errors::Result<FrameSend> {
         let request_id = self.next_request_id()?;
         let response = self
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_frame(
+            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_frame(
                 request_id,
                 self.session.clone(),
                 frame,
             ))
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspFrameAccepted {
+            crate::daemon_contract::DaemonInvocationOutcome::LspFrameAccepted {
                 backpressured,
                 closed,
             } => Ok(if closed {
@@ -992,13 +997,13 @@ impl DaemonLspSessionClient {
     pub async fn poll_daemon_frame(&mut self) -> crate::errors::Result<FramePoll> {
         let request_id = self.next_request_id()?;
         let response = self
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_poll(
+            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_poll(
                 request_id,
                 self.session.clone(),
             ))
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspFrame { frame, closed } => {
+            crate::daemon_contract::DaemonInvocationOutcome::LspFrame { frame, closed } => {
                 Ok(match (frame, closed) {
                     (Some(frame), _) => FramePoll::Frame(frame.into_bytes()),
                     (None, true) => FramePoll::Closed,
@@ -1012,13 +1017,15 @@ impl DaemonLspSessionClient {
     pub async fn acknowledge_daemon_frame(&mut self) -> crate::errors::Result<()> {
         let request_id = self.next_request_id()?;
         let response = self
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_acknowledge(
-                request_id,
-                self.session.clone(),
-            ))
+            .invoke(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_acknowledge(
+                    request_id,
+                    self.session.clone(),
+                ),
+            )
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspAcknowledged { .. } => Ok(()),
+            crate::daemon_contract::DaemonInvocationOutcome::LspAcknowledged { .. } => Ok(()),
             outcome => Err(invocation_outcome_error(outcome)),
         }
     }
@@ -1026,13 +1033,15 @@ impl DaemonLspSessionClient {
     pub async fn reconnect(&mut self) -> crate::errors::Result<()> {
         let request_id = self.next_request_id()?;
         let response = self
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_reconnect(
-                request_id,
-                self.session.clone(),
-            ))
+            .invoke(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_reconnect(
+                    request_id,
+                    self.session.clone(),
+                ),
+            )
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspReconnected { session } => {
+            crate::daemon_contract::DaemonInvocationOutcome::LspReconnected { session } => {
                 self.session = session;
                 Ok(())
             }
@@ -1043,13 +1052,13 @@ impl DaemonLspSessionClient {
     pub async fn detach(&mut self) -> crate::errors::Result<()> {
         let request_id = self.next_request_id()?;
         let response = self
-            .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
+            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
                 request_id,
                 self.session.clone(),
             ))
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspDetached => {
+            crate::daemon_contract::DaemonInvocationOutcome::LspDetached => {
                 self.detached = true;
                 Ok(())
             }
@@ -1059,8 +1068,8 @@ impl DaemonLspSessionClient {
 
     async fn invoke(
         &self,
-        request: crate::daemon::DaemonInvocationRequest,
-    ) -> crate::errors::Result<crate::daemon::DaemonInvocationResponse> {
+        request: crate::daemon_contract::DaemonInvocationRequest,
+    ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
         self.invocation.invoke(request).await
     }
 
@@ -1088,7 +1097,7 @@ impl Drop for DaemonLspSessionClient {
         };
         runtime.spawn(async move {
             let _ = invocation
-                .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
+                .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
                     request_id, session,
                 ))
                 .await;
@@ -1097,20 +1106,20 @@ impl Drop for DaemonLspSessionClient {
 }
 
 fn invocation_outcome_error(
-    outcome: crate::daemon::DaemonInvocationOutcome,
+    outcome: crate::daemon_contract::DaemonInvocationOutcome,
 ) -> crate::errors::TraceDecayError {
     let message = match outcome {
-        crate::daemon::DaemonInvocationOutcome::Problem { problem } => match problem {
-            crate::daemon::DaemonInvocationProblem::InvalidRequest => {
+        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => match problem {
+            crate::daemon_contract::DaemonInvocationProblem::InvalidRequest => {
                 "daemon rejected the invocation input"
             }
-            crate::daemon::DaemonInvocationProblem::UnsupportedRevision => {
+            crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
                 "daemon does not support this invocation revision"
             }
-            crate::daemon::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+            crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                 "daemon invocation was not found or is not authorized"
             }
-            crate::daemon::DaemonInvocationProblem::Unavailable => {
+            crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
                 "daemon invocation authority is unavailable"
             }
         },
