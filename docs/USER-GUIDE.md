@@ -485,7 +485,9 @@ tracedecay daemon install-service
 tracedecay daemon status
 ```
 
-On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. Remove it with:
+On Linux this installs a systemd user service. On macOS this installs a LaunchAgent at `~/Library/LaunchAgents/com.tracedecay.daemon.plist`. On Windows this registers a least-privilege, per-user Task Scheduler task that starts at logon. The task name and ACL are scoped to the current Windows SID, and the daemon endpoint is an authenticated loopback connection discovered from the selected profile.
+
+Use `tracedecay daemon start`, `stop`, or `restart` for explicit lifecycle control. Remove the service with:
 
 ```bash
 tracedecay daemon uninstall-service
