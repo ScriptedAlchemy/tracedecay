@@ -29,6 +29,10 @@ export const AcceptTaskCommandSchema = z.object({
 });
 export type AcceptTaskCommand = z.infer<typeof AcceptTaskCommandSchema>;
 
+/** Strongly typed canonical identity: `AccessRuleId`. */
+export const AccessRuleIdSchema = z.string();
+export type AccessRuleId = z.infer<typeof AccessRuleIdSchema>;
+
 /** Strongly typed canonical identity: `ActorId`. */
 export const ActorIdSchema = z.string();
 export type ActorId = z.infer<typeof ActorIdSchema>;
@@ -85,7 +89,7 @@ export const AuthorityRefSchema = z.discriminatedUnion("kind", [z.object({
   id: z.lazy(() => ProjectIdSchema),
   kind: z.literal("project"),
 }), z.object({
-  id: z.string(),
+  id: z.lazy(() => UserProfileIdSchema),
   kind: z.literal("projectless_hermes"),
 })]);
 export type AuthorityRef = z.infer<typeof AuthorityRefSchema>;
@@ -270,6 +274,10 @@ export type CanonicalGitRefPrefix = z.infer<typeof CanonicalGitRefPrefixSchema>;
 export const CapabilityIdSchema = z.string();
 export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 
+/** Strongly typed canonical identity: `ChangePlanId`. */
+export const ChangePlanIdSchema = z.string();
+export type ChangePlanId = z.infer<typeof ChangePlanIdSchema>;
+
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
@@ -292,19 +300,27 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
 });
 export type CodeIndexWorktreeFreshnessV1 = z.infer<typeof CodeIndexWorktreeFreshnessV1Schema>;
 
+/** Strongly typed canonical identity: `ConfigurationIdempotencyKey`. */
+export const ConfigurationIdempotencyKeySchema = z.string();
+export type ConfigurationIdempotencyKey = z.infer<typeof ConfigurationIdempotencyKeySchema>;
+
 export const ConfigurationProtectedApplySurfaceRequestSchema = z.object({
-  expected_base_revision_id: z.string(),
-  idempotency_key: z.string(),
+  expected_base_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
+  idempotency_key: z.lazy(() => ConfigurationIdempotencyKeySchema),
   operation_digest: z.lazy(() => ManifestDigestSchema),
-  plan_id: z.string(),
+  plan_id: z.lazy(() => ChangePlanIdSchema),
 });
 export type ConfigurationProtectedApplySurfaceRequest = z.infer<typeof ConfigurationProtectedApplySurfaceRequestSchema>;
 
 export const ConfigurationProtectedPreviewSurfaceRequestSchema = z.object({
   change: z.lazy(() => ProtectedChangeSchema),
-  expected_revision: z.string(),
+  expected_revision: z.lazy(() => ConfigurationRevisionIdSchema),
 });
 export type ConfigurationProtectedPreviewSurfaceRequest = z.infer<typeof ConfigurationProtectedPreviewSurfaceRequestSchema>;
+
+/** Strongly typed canonical identity: `ConfigurationRevisionId`. */
+export const ConfigurationRevisionIdSchema = z.string();
+export type ConfigurationRevisionId = z.infer<typeof ConfigurationRevisionIdSchema>;
 
 export const CostsReadModelV1Schema = z.object({
   authorized_scope_ref: z.string(),
@@ -2207,7 +2223,7 @@ export const ProtectedChangeSchema = z.discriminatedUnion("kind", [z.object({
 }), z.object({
   kind: z.literal("remove_access_rule"),
   value: z.object({
-  rule_id: z.string(),
+  rule_id: z.lazy(() => AccessRuleIdSchema),
 }),
 }), z.object({
   kind: z.literal("replace_work_topology_policy"),
@@ -2215,7 +2231,7 @@ export const ProtectedChangeSchema = z.discriminatedUnion("kind", [z.object({
 }), z.object({
   kind: z.literal("unbind_source"),
   value: z.object({
-  binding_id: z.string(),
+  binding_id: z.lazy(() => SourceBindingIdSchema),
 }),
 }), z.object({
   kind: z.literal("upsert_access_rule"),
@@ -2511,7 +2527,7 @@ export const ScopeAccessRuleSchema = z.object({
   capabilities: z.array(z.lazy(() => CapabilityIdSchema)),
   effect: z.lazy(() => RuleEffectSchema),
   expires_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-  rule_id: z.string(),
+  rule_id: z.lazy(() => AccessRuleIdSchema),
   subject: z.lazy(() => ScopeAccessSubjectV1Schema),
 });
 export type ScopeAccessRule = z.infer<typeof ScopeAccessRuleSchema>;
@@ -2591,7 +2607,7 @@ export type ScopeSetRevision = z.infer<typeof ScopeSetRevisionSchema>;
 locator digest, and the pre-resolved authority reference. */
 export const ScopeSourceBindingSchema = z.object({
   authority: z.lazy(() => AuthorityRefSchema),
-  binding_id: z.string(),
+  binding_id: z.lazy(() => SourceBindingIdSchema),
   source_kind: z.lazy(() => SourceKindV1Schema),
   source_locator_digest: z.lazy(() => LocatorDigestSchema),
 });
@@ -2639,6 +2655,10 @@ export const SignificantTableGrowthSampleV1Schema = z.object({
   table: z.string(),
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
+
+/** Strongly typed canonical identity: `SourceBindingId`. */
+export const SourceBindingIdSchema = z.string();
+export type SourceBindingId = z.infer<typeof SourceBindingIdSchema>;
 
 export const SourceKindV1Schema = z.enum(["claude", "codex", "cursor", "git_hub", "hermes", "kiro"]);
 export type SourceKindV1 = z.infer<typeof SourceKindV1Schema>;
@@ -3118,6 +3138,10 @@ export type TurnsSummaryV1 = z.infer<typeof TurnsSummaryV1Schema>;
 /** Stable, canonical catalog identity for `UseCaseId`. */
 export const UseCaseIdSchema = z.string();
 export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
+
+/** Strongly typed canonical identity: `UserProfileId`. */
+export const UserProfileIdSchema = z.string();
+export type UserProfileId = z.infer<typeof UserProfileIdSchema>;
 
 /** Profile-scoped settings patch accepted by `PATCH /api/settings/user`. */
 export const UserSettingsPatchSchema = z.object({
