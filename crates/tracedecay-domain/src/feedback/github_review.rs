@@ -19,51 +19,17 @@ use crate::research::{
 
 use super::FeedbackScopeV1;
 
-macro_rules! github_review_id {
-    ($name:ident, $field:literal) => {
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
-                let value = value.into();
-                super::validate_label(&value, $field)?;
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn validate(&self) -> Result<(), DomainError> {
-                super::validate_label(&self.0, $field)
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    };
-}
-
-github_review_id!(GitHubPullRequestIdV1, "github pull request id");
-github_review_id!(GitHubReviewIdV1, "github review id");
-github_review_id!(GitHubReviewThreadIdV1, "github review thread id");
-github_review_id!(GitHubReviewCommentIdV1, "github review comment id");
-github_review_id!(GitHubReviewEtagV1, "github review etag");
-github_review_id!(GitHubReviewCursorV1, "github review cursor");
+crate::canonical_text::validated_string_newtype!(
+    plain,
+    DomainError,
+    super::validate_label;
+    GitHubPullRequestIdV1 => "github pull request id",
+    GitHubReviewIdV1 => "github review id",
+    GitHubReviewThreadIdV1 => "github review thread id",
+    GitHubReviewCommentIdV1 => "github review comment id",
+    GitHubReviewEtagV1 => "github review etag",
+    GitHubReviewCursorV1 => "github review cursor",
+);
 
 /// Closed allowlist for the review-ingress connector. REST variants denote
 /// exactly one HTTP `GET`; the GraphQL variant denotes a normalized `query`

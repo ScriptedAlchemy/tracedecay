@@ -50,7 +50,7 @@ fn validate_revision(value: &str, field: &'static str) -> Result<(), DomainError
     if value.is_empty() {
         return Err(DomainError::Empty { field });
     }
-    if value.trim() != value || value.chars().any(char::is_control) {
+    if !crate::canonical_text::is_canonical_text(value) {
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())

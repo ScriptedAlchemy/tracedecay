@@ -1,4 +1,5 @@
 use serde_json::Value;
+use tracedecay_domain::canonical_text::is_canonical_text_within;
 use tracedecay_domain::{
     DomainError, FactCategoryV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1,
@@ -61,11 +62,7 @@ fn validate_compatibility_entity(value: &str) -> FactStoreResult<()> {
 }
 
 fn validate_compatibility_text(value: &str, field: &'static str) -> FactStoreResult<()> {
-    if value.trim().is_empty()
-        || value.trim() != value
-        || value.len() > MAX_COMPATIBILITY_SEARCH_BYTES
-        || value.chars().any(char::is_control)
-    {
+    if !is_canonical_text_within(value, MAX_COMPATIBILITY_SEARCH_BYTES) {
         return Err(FactStoreError::Contract(DomainError::NonCanonical {
             field,
         }));

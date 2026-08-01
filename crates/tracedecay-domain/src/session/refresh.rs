@@ -157,12 +157,12 @@ impl<'de> Deserialize<'de> for SessionRefreshKeyV1 {
 }
 
 fn canonical_component(value: String, field: &'static str) -> Result<String, SessionContractError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(SessionContractError::InvalidIdentity { field });
+    if crate::canonical_text::is_canonical_text_within(
+        &value,
+        crate::canonical_text::CANONICAL_TEXT_MAX_BYTES,
+    ) {
+        Ok(value)
+    } else {
+        Err(SessionContractError::InvalidIdentity { field })
     }
-    Ok(value)
 }

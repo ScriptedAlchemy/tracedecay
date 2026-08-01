@@ -100,11 +100,10 @@ macro_rules! session_string_id {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, SessionContractError> {
                 let value = value.into();
-                if value.is_empty()
-                    || value.trim() != value
-                    || value.len() > 512
-                    || value.chars().any(char::is_control)
-                {
+                if !$crate::canonical_text::is_canonical_text_within(
+                    &value,
+                    $crate::canonical_text::CANONICAL_TEXT_MAX_BYTES,
+                ) {
                     return Err(SessionContractError::InvalidIdentity {
                         field: stringify!($name),
                     });
@@ -165,12 +164,7 @@ impl MessageOccurrenceIdV1 {
 
     pub fn new(value: impl Into<String>) -> Result<Self, SessionContractError> {
         let value = value.into();
-        let valid = value.strip_prefix("sha256:").is_some_and(|encoded| {
-            encoded.len() == 64
-                && encoded
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        });
+        let valid = crate::canonical_text::is_tagged_lowercase_hex(&value, "sha256:", 64);
         if !valid {
             return Err(SessionContractError::InvalidIdentity {
                 field: "MessageOccurrenceIdV1",

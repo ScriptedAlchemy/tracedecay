@@ -18,16 +18,7 @@ const FEEDBACK_PACKET_ID_DOMAIN: &str = "tracedecay.feedback.packet.v1";
 pub struct FeedbackPacketId(String);
 
 fn validate_feedback_packet_id(value: &str) -> Result<(), DomainError> {
-    if value.is_empty()
-        || value.trim() != value
-        || value.len() > 512
-        || value.chars().any(char::is_control)
-    {
-        return Err(DomainError::NonCanonical {
-            field: "feedback packet id",
-        });
-    }
-    Ok(())
+    crate::canonical_text::validate_canonical_identity(value, "feedback packet id")
 }
 
 impl FeedbackPacketId {
