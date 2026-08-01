@@ -37,6 +37,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest, ExactLaneRetriever,
 };
@@ -173,9 +174,9 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(in crate::daemon) async fn semantic_mcp_abstention(
         &self,
         project_root: &Path,
-    ) -> crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+    ) -> code_search::CodeIndexSemanticAbstentionV1 {
         let Some(latest) = self.latest_complete_fresh(project_root).await else {
-            return crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+            return code_search::CodeIndexSemanticAbstentionV1 {
                 code_generation: None,
                 reason: "code_index_unavailable",
             };
@@ -193,7 +194,7 @@ impl CodeIndexSchedulerRegistryV1 {
             &code_generation,
             status.as_ref().map(|status| &status.state),
         );
-        crate::mcp::server::CodeIndexSemanticAbstentionV1 {
+        code_search::CodeIndexSemanticAbstentionV1 {
             code_generation: code_generation_display,
             reason,
         }

@@ -18,6 +18,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace, LspSessionRegistry};
+use tracedecay_query::code_search;
 
 use crate::application::context::CancellationToken;
 use crate::application_surface::ApplicationSurfaceOperation;
@@ -221,9 +222,7 @@ struct McpSemanticExecutionControlV1 {
 }
 
 impl McpSemanticExecutionControlV1 {
-    fn request_termination(
-        &self,
-    ) -> Option<crate::mcp::server::CodeIndexSearchUnavailableReasonV1> {
+    fn request_termination(&self) -> Option<code_search::CodeIndexSearchUnavailableReasonV1> {
         mcp_search_request_termination(
             self.deadline.as_ref(),
             self.cancellation.as_ref(),
@@ -236,39 +235,37 @@ fn mcp_search_request_termination(
     deadline: Option<&tracedecay_application::Deadline>,
     cancellation: Option<&tracedecay_application::CancellationSignal>,
     now_micros: i64,
-) -> Option<crate::mcp::server::CodeIndexSearchUnavailableReasonV1> {
+) -> Option<code_search::CodeIndexSearchUnavailableReasonV1> {
     if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
-        return Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Cancelled);
+        return Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled);
     }
     deadline
         .is_some_and(|deadline| now_micros >= deadline.expires_at.0)
-        .then_some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::TimedOut)
+        .then_some(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
 }
 
 /// Builds the `Unavailable` search outcome, optionally naming the code
 /// generation the caller had already resolved.
 fn code_index_search_unavailable_for_generation(
     code_generation: Option<String>,
-    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+    reason: code_search::CodeIndexSearchUnavailableReasonV1,
     semantic_reason: &'static str,
-) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
-    crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-        crate::mcp::server::CodeIndexSearchUnavailableV1 {
-            code_generation,
-            reason,
-            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
-                reason: semantic_reason,
-            },
+) -> code_search::CodeIndexSearchOutcomeV1 {
+    code_search::CodeIndexSearchOutcomeV1::Unavailable(code_search::CodeIndexSearchUnavailableV1 {
+        code_generation,
+        reason,
+        semantic: code_search::CodeIndexSemanticStatusV1::Unavailable {
+            reason: semantic_reason,
         },
-    )
+    })
 }
 
 /// [`code_index_search_unavailable_for_generation`] for the paths that fail
 /// before any generation is known.
 fn code_index_search_unavailable(
-    reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1,
+    reason: code_search::CodeIndexSearchUnavailableReasonV1,
     semantic_reason: &'static str,
-) -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+) -> code_search::CodeIndexSearchOutcomeV1 {
     code_index_search_unavailable_for_generation(None, reason, semantic_reason)
 }
 
@@ -279,7 +276,7 @@ fn search_terminated(
     control: &McpSemanticExecutionControlV1,
     admission_provider: &query_mcp_admission::QueryMcpReadAdmissionProviderV1,
     code_generation: Option<&str>,
-) -> Option<crate::mcp::server::CodeIndexSearchOutcomeV1> {
+) -> Option<code_search::CodeIndexSearchOutcomeV1> {
     if let Some(reason) = control.request_termination() {
         return Some(code_index_search_unavailable_for_generation(
             code_generation.map(str::to_owned),
@@ -290,15 +287,15 @@ fn search_terminated(
     (!admission_provider.route_is_registered()).then(|| {
         code_index_search_unavailable_for_generation(
             code_generation.map(str::to_owned),
-            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
             "route_revoked",
         )
     })
 }
 
-fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV1 {
+fn code_index_scope_unavailable() -> code_search::CodeIndexSearchOutcomeV1 {
     code_index_search_unavailable(
-        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
         "scope_unavailable",
     )
 }
@@ -327,9 +324,8 @@ impl<A, P, H> CodeIndexSearchHydrationSourceV1<A, P, H> {
 }
 
 impl<A, P, H>
-    tracedecay_query::retrieval::hydrate::LateHydrationSource<
-        crate::mcp::server::CodeIndexSearchDisplayV1,
-    > for CodeIndexSearchHydrationSourceV1<A, P, H>
+    tracedecay_query::retrieval::hydrate::LateHydrationSource<code_search::CodeIndexSearchDisplayV1>
+    for CodeIndexSearchHydrationSourceV1<A, P, H>
 where
     A: FnMut(
         &tracedecay_domain::RetrievalRequest,
@@ -345,7 +341,7 @@ where
         &tracedecay_domain::RankedCandidate,
         &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
     ) -> tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1<
-        crate::mcp::server::CodeIndexSearchDisplayV1,
+        code_search::CodeIndexSearchDisplayV1,
     >,
 {
     fn authorize(
@@ -383,7 +379,7 @@ where
         candidate: &tracedecay_domain::RankedCandidate,
         permit: &tracedecay_query::retrieval::hydrate::HydrationWorkPermitV1,
     ) -> tracedecay_query::retrieval::hydrate::HydrationReadOutcomeV1<
-        crate::mcp::server::CodeIndexSearchDisplayV1,
+        code_search::CodeIndexSearchDisplayV1,
     > {
         use tracedecay_query::retrieval::hydrate::{
             HydrationAuthorizationV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
@@ -407,7 +403,7 @@ fn code_index_search_display_binding(
     candidate: &tracedecay_domain::RankedCandidate,
 ) -> std::result::Result<
     (
-        crate::mcp::server::CodeIndexSearchDisplayV1,
+        code_search::CodeIndexSearchDisplayV1,
         tracedecay_domain::OccurrenceProvenance,
     ),
     tracedecay_query::retrieval::hydrate::HydrationUnavailableV1,
@@ -466,7 +462,7 @@ fn code_index_search_display_binding(
                                     == tracedecay_domain::SnapshotFileDispositionV1::Present
                         })
                         .ok_or(HydrationUnavailableV1::Invalid)?;
-                    crate::mcp::server::CodeIndexSearchDisplayV1 {
+                    code_search::CodeIndexSearchDisplayV1 {
                         name: file
                             .logical_path
                             .rsplit('/')
@@ -503,8 +499,8 @@ fn code_index_search_display_binding(
 
 fn code_index_symbol_display(
     symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
-) -> crate::mcp::server::CodeIndexSearchDisplayV1 {
-    crate::mcp::server::CodeIndexSearchDisplayV1 {
+) -> code_search::CodeIndexSearchDisplayV1 {
+    code_search::CodeIndexSearchDisplayV1 {
         name: symbol
             .qualified_name
             .rsplit("::")
@@ -517,7 +513,7 @@ fn code_index_symbol_display(
 }
 
 fn code_index_search_display_bytes(
-    display: &crate::mcp::server::CodeIndexSearchDisplayV1,
+    display: &code_search::CodeIndexSearchDisplayV1,
 ) -> std::result::Result<u64, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {
     serde_json::to_vec(&(
         display.name.as_str(),
@@ -557,7 +553,7 @@ fn code_index_search_executor(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_id: tracedecay_domain::ProjectId,
     admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
-) -> crate::mcp::server::CodeIndexSearchExecutor {
+) -> code_search::CodeIndexSearchExecutor {
     let execution_admission = Arc::new(tokio::sync::Semaphore::new(
         MAX_CONCURRENT_CODE_INDEX_SEARCHES,
     ));
@@ -578,7 +574,7 @@ fn code_index_search_executor(
                 Ok(admission) => admission,
                 Err(error) => {
                     return code_index_search_unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
                 }
@@ -588,7 +584,7 @@ fn code_index_search_executor(
                 Ok(authority) => authority,
                 Err(error) => {
                     return code_index_search_unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
                 }
@@ -634,7 +630,7 @@ fn code_index_search_executor(
                 },
                 _ => {
                     return code_index_search_unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                        code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
                         "invalid_request",
                     );
                 }
@@ -644,10 +640,10 @@ fn code_index_search_executor(
             let deadline = request.deadline;
             let cancellation = request.cancellation;
             let semantic_mode = match mode {
-                crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed => {
+                code_search::CodeIndexSearchModeV1::FallbackAllowed => {
                     tracedecay_query::retrieval::semantic::SemanticQueryModeV1::FallbackAllowed
                 }
-                crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic => {
+                code_search::CodeIndexSearchModeV1::StrictSemantic => {
                     tracedecay_query::retrieval::semantic::SemanticQueryModeV1::StrictSemantic
                 }
             };
@@ -664,7 +660,7 @@ fn code_index_search_executor(
                 Ok(permit) => permit,
                 Err(_) => {
                     return code_index_search_unavailable(
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
+                        code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable,
                         "search_capacity_unavailable",
                     );
                 }
@@ -701,7 +697,7 @@ fn code_index_search_executor(
                         result = &mut execution => match result {
                             Ok(result) => break result,
                             Err(_) => return code_index_search_unavailable(
-                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                                code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                                 "search_task_failed",
                             ),
                         },
@@ -736,7 +732,7 @@ fn code_index_search_executor(
                     {
                         return code_index_search_unavailable_for_generation(
                             Some(generation.as_str().to_owned()),
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
+                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
                             code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
                                 abstention,
                             ),
@@ -747,24 +743,24 @@ fn code_index_search_executor(
                         QuerySearchExecutionErrorV1::AuthorityUnavailable
                         | QuerySearchExecutionErrorV1::Authority(
                             tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
-                        ) => crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        ) => code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         QuerySearchExecutionErrorV1::GenerationUnavailable => {
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
                         }
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => {
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::InvalidRequest
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
                         }
                         QuerySearchExecutionErrorV1::Retrieval(_)
                         | QuerySearchExecutionErrorV1::Authority(_) => {
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal
                         }
                         },
                         QuerySemanticSearchExecutionErrorV1::Semantic(_) => {
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal
                         }
                         QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
-                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
+                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
                         }
                     };
                     return code_index_search_unavailable(reason, "semantic_unavailable");
@@ -777,25 +773,23 @@ fn code_index_search_executor(
             ) {
                 return outcome;
             }
-            let terminal_scope = match project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            ) {
-                Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
-                _ => {
-                    return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        "scope_changed_before_publication",
-                    );
-                }
-            };
+            let terminal_scope =
+                match project_open_owners::resolved_scope_for_project(&project_root, &project_id) {
+                    Ok(terminal_scope) if terminal_scope == scope => terminal_scope,
+                    _ => {
+                        return code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            "scope_changed_before_publication",
+                        );
+                    }
+                };
             let terminal_admission = match admission_provider.admit_current(&terminal_scope) {
                 Ok(admission) => admission,
                 Err(error) => {
                     return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
                 }
@@ -808,7 +802,7 @@ fn code_index_search_executor(
             {
                 return code_index_search_unavailable_for_generation(
                     Some(executed.query.generation.as_str().to_owned()),
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                     "authorization_changed_before_publication",
                 );
             }
@@ -817,7 +811,7 @@ fn code_index_search_executor(
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented(
                     augmented,
                 ) => (
-                    crate::mcp::server::CodeIndexSemanticStatusV1::Complete,
+                    code_search::CodeIndexSemanticStatusV1::Complete,
                     augmented.composition.ranked_candidates.clone(),
                     augmented.cursor.clone(),
                     Some(&augmented.hydration_budget),
@@ -826,7 +820,7 @@ fn code_index_search_executor(
                     abstention,
                     fallback,
                 } => (
-                    crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                    code_search::CodeIndexSemanticStatusV1::Unavailable {
                         reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
                             abstention,
                         ),
@@ -842,7 +836,7 @@ fn code_index_search_executor(
             else {
                 return code_index_search_unavailable_for_generation(
                     Some(executed.query.generation.as_str().to_owned()),
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                     "generation_changed_before_hydration",
                 );
             };
@@ -962,7 +956,7 @@ fn code_index_search_executor(
                     );
                     return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                         "late_hydration_failed",
                     );
                 }
@@ -1006,29 +1000,29 @@ fn code_index_search_executor(
             if !admission_provider.route_is_registered() {
                 return code_index_search_unavailable_for_generation(
                     Some(executed.query.generation.as_str().to_owned()),
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                     "route_revoked_before_publication",
                 );
             }
-            let publication_scope = match project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            ) {
-                Ok(publication_scope) if publication_scope == terminal_scope => publication_scope,
-                _ => {
-                    return code_index_search_unavailable_for_generation(
-                        Some(executed.query.generation.as_str().to_owned()),
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        "scope_changed_during_publication",
-                    );
-                }
-            };
+            let publication_scope =
+                match project_open_owners::resolved_scope_for_project(&project_root, &project_id) {
+                    Ok(publication_scope) if publication_scope == terminal_scope => {
+                        publication_scope
+                    }
+                    _ => {
+                        return code_index_search_unavailable_for_generation(
+                            Some(executed.query.generation.as_str().to_owned()),
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            "scope_changed_during_publication",
+                        );
+                    }
+                };
             let publication_admission = match admission_provider.admit_current(&publication_scope) {
                 Ok(admission) => admission,
                 Err(error) => {
                     return code_index_search_unavailable_for_generation(
                         Some(executed.query.generation.as_str().to_owned()),
-                        crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                         error.reason(),
                     );
                 }
@@ -1041,12 +1035,12 @@ fn code_index_search_executor(
             {
                 return code_index_search_unavailable_for_generation(
                     Some(executed.query.generation.as_str().to_owned()),
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                     "authorization_changed_during_publication",
                 );
             }
-            crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(
-                crate::mcp::server::CodeIndexSearchCompletedV1 {
+            code_search::CodeIndexSearchOutcomeV1::Complete(
+                code_search::CodeIndexSearchCompletedV1 {
                     code_generation: executed.query.generation.as_str().to_owned(),
                     ordered_candidates,
                     query_fallback: executed.query.authorized.fallback,
