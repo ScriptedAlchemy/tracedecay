@@ -1,5 +1,8 @@
 //! Dashboard endpoints for project and user settings.
 
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
 use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
@@ -195,6 +198,25 @@ struct PrAutoTrackEntryV1 {
     branch: String,
     pr: u64,
     head_branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardPrAutoTrackEntryV1 {
+    pub branch: String,
+    pub pr: u64,
+    pub head_branch: String,
+}
+
+pub trait DashboardPrAutoTrackReadPort: Send + Sync {
+    fn managed_summary(&self, store_root: &Path) -> Vec<DashboardPrAutoTrackEntryV1>;
+}
+
+static PR_AUTOTRACK_READ_PORT: OnceLock<Arc<dyn DashboardPrAutoTrackReadPort>> = OnceLock::new();
+
+pub fn install_dashboard_pr_autotrack_read_port(
+    port: Arc<dyn DashboardPrAutoTrackReadPort>,
+) -> Result<(), Arc<dyn DashboardPrAutoTrackReadPort>> {
+    PR_AUTOTRACK_READ_PORT.set(port)
 }
 
 pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
@@ -476,25 +498,20 @@ fn automation_settings_payload(
 /// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
 /// feature has tracked nothing yet.
 fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
-    #[cfg(unix)]
-    {
-        let tracked = crate::daemon::pr_autotrack::managed_summary(&state.store_root)
-            .into_iter()
-            .map(|entry| PrAutoTrackEntryV1 {
-                branch: entry.branch,
-                pr: entry.pr,
-                head_branch: entry.head_branch,
-            })
-            .collect();
-        PrAutoTrackPayloadV1 { tracked }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = state;
-        PrAutoTrackPayloadV1 {
-            tracked: Vec::new(),
-        }
-    }
+    let tracked = PR_AUTOTRACK_READ_PORT
+        .get()
+        .map(|port| {
+            port.managed_summary(&state.store_root)
+                .into_iter()
+                .map(|entry| PrAutoTrackEntryV1 {
+                    branch: entry.branch,
+                    pr: entry.pr,
+                    head_branch: entry.head_branch,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    PrAutoTrackPayloadV1 { tracked }
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {

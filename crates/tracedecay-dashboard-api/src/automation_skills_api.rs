@@ -23,6 +23,7 @@ use tracedecay_agent_hosts::automation::skill_usage::{
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
     summarize_skill_usage_for,
 };
+use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -314,10 +315,14 @@ async fn sync_project_skill_analytics(
     profile_root: &std::path::Path,
     state: &DashboardState,
 ) -> std::result::Result<(), JsonError> {
+    let analytics_db = state
+        .savings_db
+        .as_deref()
+        .map(|database| database as &dyn AutomationSessionStore);
     ingest_project_analytics_events(
         profile_root,
         &state.project_root,
-        state.savings_db.as_deref(),
+        analytics_db,
         SKILL_ANALYTICS_IMPORT_LIMIT,
     )
     .await

@@ -53,7 +53,8 @@ pub fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestD
     })
 }
 
-type DashboardDiagnosticsResultV1<T> = std::result::Result<T, DashboardDiagnosticsErrorV1>;
+pub type DashboardDiagnosticsResultV1<T> =
+    std::result::Result<T, DashboardDiagnosticsErrorV1>;
 
 pub fn diagnostic_broker(
     project_root: PathBuf,
@@ -123,7 +124,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         }
     }
 
-    pub(crate) async fn overview(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+    pub async fn overview(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
         let snapshot = self.snapshot().await?;
         self.maybe_spawn_idle_backfill(&snapshot);
         Ok(snapshot)
@@ -141,7 +142,7 @@ impl DashboardDiagnosticsAuthorityV1 {
     /// lock. Splitting them — reading the settings, editing them, then writing
     /// the result back — is what let a second writer land between the two and
     /// be overwritten while both callers were told they had succeeded.
-    pub(crate) async fn update_settings(
+    pub async fn update_settings(
         &self,
         expected_revision: &ManifestDigest,
         patch: impl FnOnce(&mut CodeDiagnosticsSettings),
@@ -168,7 +169,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         self.snapshot().await
     }
 
-    pub(crate) async fn refresh_all(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
+    pub async fn refresh_all(&self) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
         let languages = self.refreshable_languages().await?;
         for language in languages {
             self.refresh_one_reconciled(&language).await?;
@@ -176,7 +177,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         self.snapshot().await
     }
 
-    pub(crate) async fn refresh_language(
+    pub async fn refresh_language(
         &self,
         language: &str,
     ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
