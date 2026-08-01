@@ -565,10 +565,10 @@ impl ExactAdmissionProof {
             });
         }
         if self.normalization_steps.iter().any(|step| {
-            step.is_empty()
-                || step.trim() != step
-                || step.len() > 512
-                || step.chars().any(char::is_control)
+            !crate::canonical_text::is_canonical_text_within(
+                step,
+                crate::canonical_text::CANONICAL_TEXT_MAX_BYTES,
+            )
         }) {
             return Err(RetrievalContractError::InvalidIdentity {
                 field: "exact admission normalization step",
