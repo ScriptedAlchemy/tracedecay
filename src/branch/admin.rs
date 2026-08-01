@@ -556,45 +556,14 @@ pub(super) fn ensure_no_pending_branch_admin_recovery(
     transaction::ensure_no_pending_recovery(tracedecay_dir)
 }
 
-/// Blocking-with-timeout variant of [`super::try_acquire_branch_add_lock`] for
-/// synchronous callers. Retries a briefly-contended lock (a concurrent branch
-/// add is only holding it for the duration of a DB clone) before giving up.
-pub(super) fn acquire_branch_add_lock_blocking(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    acquire_branch_add_lock_blocking_with(tracedecay_dir, super::try_acquire_branch_add_lock)
-}
-
-fn acquire_branch_add_lock_blocking_raw(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    acquire_branch_add_lock_blocking_with(tracedecay_dir, super::try_acquire_branch_add_lock_raw)
-}
-
-fn acquire_branch_add_lock_blocking_with(
-    tracedecay_dir: &Path,
-    acquire: fn(&Path) -> crate::errors::Result<std::fs::File>,
-) -> crate::errors::Result<std::fs::File> {
-    let mut last_contention = None;
-    for _ in 0..super::BRANCH_LOCK_RETRY_ATTEMPTS {
-        match acquire(tracedecay_dir) {
-            Ok(lock) => return Ok(lock),
-            Err(error @ crate::errors::TraceDecayError::SyncLock { .. }) => {
-                last_contention = Some(error);
-                std::thread::sleep(super::BRANCH_LOCK_RETRY_INTERVAL);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(
-        last_contention.unwrap_or_else(|| crate::errors::TraceDecayError::SyncLock {
-            message: format!(
-                "timed out waiting for branch metadata lock at {}",
-                tracedecay_dir.join(".branch-add.lock").display()
-            ),
-        }),
-    )
-}
+// The lock primitives themselves moved into
+// `tracedecay_runtime_core::branch` with `branch_meta`; only the
+// pending-recovery gate stayed behind, and it reaches the kernel through
+// `tracedecay_runtime_core::ports::branch_admin_recovery`.
+use super::{
+    acquire_branch_add_lock_blocking_raw,
+    acquire_branch_lock_blocking as acquire_branch_add_lock_blocking,
+};
 
 fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
     let mut wal = db_path.to_path_buf();

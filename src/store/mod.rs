@@ -13,7 +13,10 @@ use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
 pub mod git_correlation;
 pub mod global_db;
-pub mod memory;
+/// The fact store moved into `tracedecay_runtime_core::store::memory` with the
+/// database engine it is built on; the adapters in this module stayed because
+/// they borrow `global_db`/`sessions` types that sit above the kernel.
+pub use tracedecay_runtime_core::store::memory;
 pub mod observation;
 pub mod session;
 pub(crate) mod vector_generations;

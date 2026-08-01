@@ -1,23 +1,7 @@
-pub(crate) fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    scope_prefix.is_none_or(|prefix| {
-        let with_slash = if prefix.ends_with('/') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}/")
-        };
-        path.starts_with(&with_slash) || path == prefix
-    })
-}
+//! Root shim for the kernel `path_scope` module.
+//!
+//! The implementation moved to `tracedecay_runtime_core::path_scope` in the one-shot
+//! crate split. This glob keeps every historical `crate::path_scope::…` path resolving
+//! from the root crate.
 
-#[cfg(test)]
-mod tests {
-    use super::path_matches_scope;
-
-    #[test]
-    fn scope_prefix_matches_exact_file_or_descendant() {
-        assert!(path_matches_scope("src/lib.rs", Some("src")));
-        assert!(path_matches_scope("src", Some("src")));
-        assert!(!path_matches_scope("src2/lib.rs", Some("src")));
-        assert!(path_matches_scope("src/lib.rs", None));
-    }
-}
+pub use tracedecay_runtime_core::path_scope::*;

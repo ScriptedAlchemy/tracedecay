@@ -14,6 +14,7 @@ members = [
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
+    "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",
     "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
@@ -178,7 +179,10 @@ lang-fsharp = ["tracedecay-code-index/lang-fsharp"]
 lang-quint = ["tracedecay-code-index/lang-quint"]
 lang-toml = ["tracedecay-code-index/lang-toml"]
 lang-lean = ["tracedecay-code-index/lang-lean"]
-test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
+test-transport = [
+    "tracedecay-rusqlite-runtime/test-transport",
+    "tracedecay-runtime-core/test-transport",
+]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
 # it and are link-checked separately.
@@ -239,6 +243,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }

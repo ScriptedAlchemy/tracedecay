@@ -101,7 +101,7 @@ impl RuntimeEvidenceAssemblyStore {
 
         let anchor_owner = tracedecay_store::RetrievalAnchorOwnerV1::V3(owner.owner.clone());
         let database =
-            Database::publish_runtime(self.runtime.clone(), DatabaseAccessMode::ReadOnly)
+            Database::publish_runtime(Arc::new(self.runtime.clone()), DatabaseAccessMode::ReadOnly)
                 .await
                 .map_err(|_| tracedecay_store::EvidenceAssemblyStoreError::Unavailable)?;
         if database.canonical_database_path() != self.authority.canonical_database_path() {
