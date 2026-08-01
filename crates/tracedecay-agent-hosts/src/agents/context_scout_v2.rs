@@ -12,10 +12,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::o200k_base_singleton;
 use tracedecay_domain::UtcMicros;
+use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 
 use crate::ports::context::{CancellationToken, MonotonicDeadline};
 
@@ -1123,6 +1125,26 @@ pub struct ContextScoutDeliveryReceiptV1 {
     pub envelope_id: [u8; 16],
     pub delivered_at: UtcMicros,
     pub outcome: ContextScoutOutcomeV1,
+}
+
+impl HookScopedFeedbackV1 for ContextScoutDeliveryReceiptV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        self.receipt_id != [0; 16]
+            && self.envelope_id != [0; 16]
+            && self.delivered_at.0 > 0
+            && self.receipt_id
+                == context_scout_delivery_receipt_id(envelope.event_id, self.envelope_id)
+    }
+}
+
+pub fn context_scout_delivery_receipt_id(event_id: [u8; 16], envelope_id: [u8; 16]) -> [u8; 16] {
+    let mut material = [0; 32];
+    material[..16].copy_from_slice(&event_id);
+    material[16..].copy_from_slice(&envelope_id);
+    let digest = Sha256::digest(material);
+    let mut output = [0; 16];
+    output.copy_from_slice(&digest[..16]);
+    output
 }
 
 pub fn validate_context_scout_delivery_receipt(

@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::{ApplicationContractError, RequestContext, ResolvedScope};
 use tracedecay_domain::feedback::{
@@ -15,8 +16,9 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{CodeGenerationId, DomainError, ManifestDigest};
 use tracedecay_hooks::{
-    HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1,
-    HookFeedbackRollbackSwitchV1, HookRuntimeErrorV1, deliver_feedback_with_rollback,
+    HookEventEnvelopeV2, HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1,
+    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookRuntimeErrorV1,
+    HookScopedFeedbackV1, deliver_feedback_with_rollback,
 };
 use tracedecay_lsp::DaemonLspProviderBundle;
 
@@ -67,6 +69,23 @@ impl Pr13AdvisoryHookLookupNoticeV1 {
             })?;
         Ok(())
     }
+}
+
+impl HookScopedFeedbackV1 for Pr13AdvisoryHookLookupNoticeV1 {
+    fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        self.validate().is_ok()
+            && domain_hash16(self.scope.project_id.as_str(), "project") == envelope.project_id
+            && domain_hash16(self.scope.repository_id.as_str(), "repository")
+                == envelope.repository_id
+            && domain_hash16(self.scope.worktree_id.as_str(), "worktree") == envelope.worktree_id
+    }
+}
+
+fn domain_hash16(value: &str, domain: &str) -> [u8; 16] {
+    let digest = Sha256::digest(format!("{domain}:{value}").as_bytes());
+    let mut output = [0; 16];
+    output.copy_from_slice(&digest[..16]);
+    output
 }
 
 pub type Pr13AdvisoryHookNoticeSinkV1 =
@@ -148,7 +167,7 @@ fn registered_hook_notice_queues() -> &'static Pr13AdvisoryHookNoticeQueuesLockV
     QUEUES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-pub(crate) fn register_pr13_advisory_hook_notice_queue(
+pub fn register_pr13_advisory_hook_notice_queue(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
     queue: &Arc<Pr13AdvisoryHookNoticeQueueV1>,
