@@ -792,13 +792,6 @@ fn event_session_id(parsed: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Reads the `cwd` string field from a hook event JSON payload. Shared by the
-/// Kiro and Codex handlers, both of which send the session working directory.
-fn event_cwd(event_json: &str) -> Option<PathBuf> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    event_cwd_from_parsed(&parsed)
-}
-
 fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
     let cwd = parsed.get("cwd").and_then(Value::as_str)?;
     let path = Path::new(cwd);
