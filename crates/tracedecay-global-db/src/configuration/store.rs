@@ -4192,8 +4192,8 @@ impl ConfigurationMigrationStore for GlobalDbConfigurationControlStore<'_> {
 mod tests {
     use super::*;
     use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-    use super::registry::ConfigurationRegistry;
-    use super::resolver::resolve_configuration;
+    use crate::configuration::registry::ConfigurationRegistry;
+    use crate::configuration::resolver::resolve_configuration;
     use tracedecay_domain::configuration::{
         AccessRuleId, AuthorityRef, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
         ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,

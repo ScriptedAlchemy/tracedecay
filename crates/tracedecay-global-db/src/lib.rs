@@ -16,6 +16,7 @@ use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 pub mod configuration;
 mod git_index_transactions;
+pub mod host_ports;
 pub mod observation;
 mod observation_projection;
 pub use observation_projection::{
