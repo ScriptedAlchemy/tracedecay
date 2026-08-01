@@ -15,6 +15,24 @@ use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_store::StoreShardScopeV1;
 
+#[path = "host_admission/accounting_test_support.rs"]
+mod accounting_test_support;
+#[path = "host_admission/lcm_api_test_support.rs"]
+mod lcm_api_test_support;
+#[path = "host_admission/lcm_fixture_test_support.rs"]
+mod lcm_fixture_test_support;
+#[path = "host_admission/profile_registry_test_support.rs"]
+mod profile_registry_test_support;
+#[path = "host_admission/session_test_support.rs"]
+mod session_test_support;
+
+#[doc(hidden)]
+pub use lcm_fixture_test_support::{
+    LcmExternalPayloadManifestTestRecord, LcmLineageCountsForTest, LcmLineageFaultForTest,
+};
+#[doc(hidden)]
+pub use profile_registry_test_support::HostAdmissionDatabaseIdentityV1;
+
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTemporalFixtureCountV1 {
