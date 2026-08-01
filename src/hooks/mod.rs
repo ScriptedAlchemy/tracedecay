@@ -45,8 +45,7 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_decision,
-    cursor_after_file_edit_rel_paths, cursor_before_submit_prompt_json,
+    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_rel_paths,
     cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
     cursor_should_run_sync, evaluate_cursor_after_file_edit, evaluate_cursor_post_tool_use,
     evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
@@ -59,9 +58,7 @@ pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
-pub use post_tool_use::{
-    CLAUDE_POST_TOOL_USE_EDIT_TOOLS, CLAUDE_POST_TOOL_USE_SHELL_TOOLS, claude_post_tool_use_matcher,
-};
+pub use post_tool_use::claude_post_tool_use_matcher;
 pub use steering::{
     CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
     build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
@@ -663,57 +660,26 @@ fn deduped_project_hint_with_id(
         return Some(hint);
     };
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
-    match dedupe.decide(&session_id, hint.category) {
-        tool_hints::HintDecision::Emit => {
-            let _ = dedupe.save(&path);
-            record_hint_analytics(
-                root,
-                "hint_emitted",
-                agent,
-                Some(&session_id),
-                hint_id,
-                &hint,
-            );
-            Some(hint)
-        }
-        tool_hints::HintDecision::Escalate => {
-            let _ = dedupe.save(&path);
-            let escalated = hint.escalated();
-            record_hint_analytics(
-                root,
-                "hint_escalated",
-                agent,
-                Some(&session_id),
-                hint_id,
-                &escalated,
-            );
-            Some(escalated)
-        }
-        tool_hints::HintDecision::SuppressedBudget => {
-            let _ = dedupe.save(&path);
-            record_hint_analytics(
-                root,
-                "suppressed_budget",
-                agent,
-                Some(&session_id),
-                hint_id,
-                &hint,
-            );
-            None
-        }
-        tool_hints::HintDecision::SuppressedDuplicate => {
-            let _ = dedupe.save(&path);
-            record_hint_analytics(
-                root,
-                "suppressed_duplicate",
-                agent,
-                Some(&session_id),
-                hint_id,
-                &hint,
-            );
-            None
-        }
-    }
+    let decision = dedupe.decide(&session_id, hint.category);
+    // Every decision — including the suppressed ones — advances the persisted
+    // budget, so the save is unconditional.
+    let _ = dedupe.save(&path);
+
+    // A suppressed decision still records the hint as it stood; only the
+    // escalation path reports the escalated wording.
+    let (event, reported) = match decision {
+        tool_hints::HintDecision::Emit => ("hint_emitted", hint),
+        tool_hints::HintDecision::Escalate => ("hint_escalated", hint.escalated()),
+        tool_hints::HintDecision::SuppressedBudget => ("suppressed_budget", hint),
+        tool_hints::HintDecision::SuppressedDuplicate => ("suppressed_duplicate", hint),
+    };
+    record_hint_analytics(root, event, agent, Some(&session_id), hint_id, &reported);
+
+    matches!(
+        decision,
+        tool_hints::HintDecision::Emit | tool_hints::HintDecision::Escalate
+    )
+    .then_some(reported)
 }
 
 fn nearest_project_like_root(start: &Path) -> Option<PathBuf> {
