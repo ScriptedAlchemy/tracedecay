@@ -28,7 +28,7 @@ const ACTIVITY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ActivityFamilyV1 {
+pub enum ActivityFamilyV1 {
     Hook,
     SessionIngest,
     CodeIndex,
@@ -37,7 +37,7 @@ pub(crate) enum ActivityFamilyV1 {
 }
 
 impl ActivityFamilyV1 {
-    pub(crate) const fn stream_name(self) -> &'static str {
+    pub const fn stream_name(self) -> &'static str {
         match self {
             Self::Hook => "hook_activity",
             Self::SessionIngest => "session_ingest",
@@ -79,43 +79,43 @@ impl ActivityFamilyV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ActivityPulseV1 {
-    pub(crate) family: ActivityFamilyV1,
+pub struct ActivityPulseV1 {
+    pub family: ActivityFamilyV1,
     /// Live-only routing hint. It is deliberately absent from the retained
     /// observation payload; replay resolves through the typed project id.
-    pub(crate) project_root: PathBuf,
-    pub(crate) project_id: Option<String>,
-    pub(crate) units: u64,
-    pub(crate) detail: Option<String>,
+    pub project_root: PathBuf,
+    pub project_id: Option<String>,
+    pub units: u64,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ActivityRecordV1 {
-    pub(crate) schema_version: u32,
-    pub(crate) run_id: String,
-    pub(crate) producer_sequence: u64,
-    pub(crate) observation_time_micros: i64,
-    pub(crate) retained_from_sequence: u64,
+pub struct ActivityRecordV1 {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub producer_sequence: u64,
+    pub observation_time_micros: i64,
+    pub retained_from_sequence: u64,
     /// Proven lower bound. Zero does not claim complete retention; consumers
     /// must also inspect `resume_gap`.
-    pub(crate) dropped_events: u64,
-    pub(crate) pulse: ActivityPulseV1,
+    pub dropped_events: u64,
+    pub pulse: ActivityPulseV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ActivityFrontierV1 {
-    pub(crate) run_id: String,
-    pub(crate) next_sequence: u64,
-    pub(crate) retained_from_sequence: u64,
-    pub(crate) dropped_events: u64,
-    pub(crate) watermark: String,
+pub struct ActivityFrontierV1 {
+    pub run_id: String,
+    pub next_sequence: u64,
+    pub retained_from_sequence: u64,
+    pub dropped_events: u64,
+    pub watermark: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ActivityReplayV1 {
-    pub(crate) records: Vec<ActivityRecordV1>,
-    pub(crate) frontier: ActivityFrontierV1,
-    pub(crate) resume_gap: bool,
+pub struct ActivityReplayV1 {
+    pub records: Vec<ActivityRecordV1>,
+    pub frontier: ActivityFrontierV1,
+    pub resume_gap: bool,
 }
 
 fn live_bus() -> &'static broadcast::Sender<ActivityRecordV1> {
@@ -264,7 +264,7 @@ pub(crate) async fn publish(
     let _ = live_bus().send(record);
 }
 
-pub(crate) async fn replay_after(
+pub async fn replay_after(
     db: &RegisteredGlobalDb,
     project_id: &str,
     after: Option<u64>,
