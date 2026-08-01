@@ -12,8 +12,7 @@ use tracedecay_hooks::{
     HookGuidanceStateV1, HookHostV1, HookImmediateAdmissionV1, HookRuntimeControlV1,
     HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, HookSynchronousDeadlineV1,
     HookTransportDispositionV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
-    SpoolAppendOutcomeV1, admit_async_exact_scope, decode_bound_native_hook_event,
-    deliver_hook_feedback, finish_synchronous_hook,
+    SpoolAppendOutcomeV1, admit_async_exact_scope, deliver_hook_feedback, finish_synchronous_hook,
 };
 #[cfg(test)]
 use tracedecay_hooks::{HookImmediateAdmissionStateV1, HookScopedFeedbackV1};
@@ -473,8 +472,7 @@ fn prepare_bound_hook(
     let native_session_id = native_fields.session_id().map(str::to_owned);
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
     let material = native_material(event_json, decoded.family(), now)?;
-    let envelope =
-        decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material).ok()?;
+    let envelope = decoded.into_envelope(binding, material).ok()?;
     Some(PreparedBoundHook {
         host,
         layout,

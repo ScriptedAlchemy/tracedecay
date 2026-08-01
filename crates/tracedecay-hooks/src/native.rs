@@ -47,15 +47,6 @@ pub struct DecodedOpenCodeLspEventV1 {
     pub ordering: HookOrderingV1,
 }
 
-impl OpenCodePluginSurfaceV1 {
-    pub const fn native_name(self) -> &'static str {
-        match self {
-            Self::Event => "event",
-            Self::ToolExecuteAfter => "tool.execute.after",
-        }
-    }
-}
-
 impl NativeHookSignalV1 {
     pub const fn family(self) -> HookEventFamily {
         match self {
