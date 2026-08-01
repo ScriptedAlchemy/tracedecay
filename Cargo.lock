@@ -5895,7 +5895,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-code-extraction",
