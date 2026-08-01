@@ -731,6 +731,45 @@ fn daemon_install_service_command_parses_socket_and_no_start() {
 }
 
 #[test]
+fn daemon_run_start_and_stop_commands_parse_lifecycle_options() {
+    let run = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "run",
+        "--profile-root",
+        r"C:\Users\trace\AppData\Local\TraceDecay",
+    ])
+    .expect("daemon run profile root should parse");
+    assert!(matches!(
+        run.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Run {
+                socket: None,
+                profile_root: Some(profile_root),
+            }
+        }) if profile_root == r"C:\Users\trace\AppData\Local\TraceDecay"
+    ));
+
+    let start =
+        Cli::try_parse_from(["tracedecay", "daemon", "start"]).expect("daemon start should parse");
+    assert!(matches!(
+        start.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Start
+        })
+    ));
+
+    let stop =
+        Cli::try_parse_from(["tracedecay", "daemon", "stop"]).expect("daemon stop should parse");
+    assert!(matches!(
+        stop.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Stop
+        })
+    ));
+}
+
+#[test]
 fn status_and_branch_add_commands_dispatch_to_expected_variants() {
     let status = Cli::try_parse_from([
         "tracedecay",
