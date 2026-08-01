@@ -2211,42 +2211,14 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
 /// This is used to allow hidden (dot-prefixed) directories that would
 /// otherwise be skipped by the file walker.
 pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && pattern.matches_with(path, match_opts)
-        {
-            return true;
-        }
-    }
-
-    false
+    any_pattern_matches(&config.include, &[path])
 }
 
 /// Returns `true` if a directory should be entered because it or one of its
 /// descendants matches an explicit include glob.
 pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && (pattern.matches_with(dir_path, match_opts)
-                || pattern.matches_with(&format!("{dir_path}/_"), match_opts))
-        {
-            return true;
-        }
-    }
-
-    false
+    let descendant_probe = format!("{dir_path}/_");
+    any_pattern_matches(&config.include, &[dir_path, &descendant_probe])
 }
 
 /// Returns `true` if a directory should be pruned during scanning.
@@ -2256,44 +2228,39 @@ pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
 /// ensures that patterns like `**/node_modules` and `**/node_modules/**`
 /// both trigger directory pruning in `scan_files_walkdir`.
 pub fn is_excluded_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.exclude {
-        if let Ok(pattern) = Pattern::new(pattern_str) {
-            // Try both the dummy-file probe (catches dir/**) and the bare
-            // directory path (catches **/dirname).
-            if pattern.matches_with(&format!("{dir_path}/_"), match_opts)
-                || pattern.matches_with(dir_path, match_opts)
-            {
-                return true;
-            }
-        }
-    }
-
-    false
+    // Try both the dummy-file probe (catches `dir/**`) and the bare directory
+    // path (catches `**/dirname`).
+    let descendant_probe = format!("{dir_path}/_");
+    any_pattern_matches(&config.exclude, &[&descendant_probe, dir_path])
 }
 
 /// Returns `true` if the file matches any of the configured exclude patterns.
 pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
+    any_pattern_matches(&config.exclude, &[file_path])
+}
 
-    for pattern_str in &config.exclude {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && pattern.matches_with(file_path, match_opts)
-        {
-            return true;
-        }
-    }
+/// Glob semantics shared by every include/exclude test. Kept in one place so
+/// the four entry points cannot drift apart on case or separator handling.
+const PATTERN_MATCH_OPTIONS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: false,
+    require_literal_leading_dot: false,
+};
 
-    false
+/// True when any of `patterns` matches any of `candidates`. Unparseable
+/// patterns are skipped rather than failing the whole test, matching the
+/// long-standing behaviour of the include/exclude entry points.
+///
+/// Callers pass every candidate string they want probed, built once per call:
+/// the directory variants used to format their `dir/_` probe once per pattern.
+fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
+    patterns.iter().any(|pattern_str| {
+        Pattern::new(pattern_str).is_ok_and(|pattern| {
+            candidates
+                .iter()
+                .any(|candidate| pattern.matches_with(candidate, PATTERN_MATCH_OPTIONS))
+        })
+    })
 }
 
 /// Serializes test and benchmark code that mutates process-wide storage env
