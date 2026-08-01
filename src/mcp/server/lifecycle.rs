@@ -89,40 +89,47 @@ fn log_startup_transcript_ingest_failure(
     );
 }
 
+/// What one startup catch-up pass actually did, per scope.
+///
+/// Both fields report observed outcomes, never intent: the user scope in
+/// particular is skipped by several paths (missing authority, an early
+/// return before the sweep, cancellation, or session storage with no profile
+/// root), and callers that wake the temporal refresh scheduler must not fire
+/// on a sweep that never ran.
+#[derive(Default)]
+pub(super) struct StartupSessionCatchUpOutcome {
+    /// The project session authority, present only when the project sweep
+    /// completed successfully.
+    pub(super) project_sessions: Option<Arc<RegisteredGlobalDb>>,
+    /// True only when the user transcript sweep actually ran to completion.
+    pub(super) user_sweep_completed: bool,
+}
+
 pub(super) async fn run_startup_session_catch_up(
-    session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    sessions: Option<Arc<RegisteredGlobalDb>>,
+    user_sessions: Option<Arc<RegisteredGlobalDb>>,
     registry_db: Option<Arc<RegisteredGlobalDb>>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: &Path,
     project_id: Option<&str>,
     cancellation: &crate::application::observation::ObservationCancellation,
-) -> Option<Arc<RegisteredGlobalDb>> {
-    let Some(db) = session_db else {
+) -> StartupSessionCatchUpOutcome {
+    let Some(sessions) = sessions else {
         tracing::warn!(
             project_root = %project_root.display(),
             "startup project transcript ingest skipped because authoritative session storage is unavailable"
         );
-        return None;
-    };
-    let Some(registered) = registered_session_db else {
-        tracing::warn!(
-            project_root = %project_root.display(),
-            "startup project transcript ingest skipped because registered session authority is unavailable"
-        );
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     };
     let Some(profile_identity) = profile_identity else {
         tracing::warn!(
             project_root = %project_root.display(),
             "startup transcript ingest skipped because durable profile identity is unavailable"
         );
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-    let project_authority = crate::store::GlobalDbSessionIngestAuthority::new(registered.as_ref());
+    let project_authority = crate::store::GlobalDbSessionIngestAuthority::new(sessions.as_ref());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
@@ -138,14 +145,13 @@ pub(super) async fn run_startup_session_catch_up(
         log_startup_transcript_ingest_failure("project", failure);
     }
     if cancellation.is_cancelled() {
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     }
-    if let (Some(user_db), Some(user_registered), Some(registry_db)) =
-        (user_session_db, registered_user_session_db, registry_db)
-    {
-        if let Some(profile_root) = user_db.db_path().parent() {
+    let mut user_sweep_completed = false;
+    if let (Some(user_sessions), Some(registry_db)) = (user_sessions, registry_db) {
+        if let Some(profile_root) = user_sessions.db_path().parent() {
             let user_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(user_registered.as_ref());
+                crate::store::GlobalDbSessionIngestAuthority::new(user_sessions.as_ref());
             let registry_authority =
                 crate::store::GlobalDbSessionIngestAuthority::new(registry_db.as_ref());
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
@@ -160,6 +166,7 @@ pub(super) async fn run_startup_session_catch_up(
             for failure in &outcome.failures {
                 log_startup_transcript_ingest_failure("user", failure);
             }
+            user_sweep_completed = true;
         } else {
             tracing::warn!(
                 "startup user transcript ingest skipped because session storage has no profile root"
@@ -170,21 +177,22 @@ pub(super) async fn run_startup_session_catch_up(
             "startup user transcript ingest skipped because session or registry storage is unavailable"
         );
     }
-    project_outcome.is_success().then_some(db)
+    StartupSessionCatchUpOutcome {
+        project_sessions: project_outcome.is_success().then_some(sessions),
+        user_sweep_completed,
+    }
 }
 
 async fn run_startup_session_catch_up_with_home(
     transcript_source_home: Option<PathBuf>,
-    session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    user_session_db: Option<Arc<RegisteredGlobalDb>>,
-    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    sessions: Option<Arc<RegisteredGlobalDb>>,
+    user_sessions: Option<Arc<RegisteredGlobalDb>>,
     registry_db: Option<Arc<RegisteredGlobalDb>>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: PathBuf,
     project_id: Option<String>,
     cancellation: crate::application::observation::ObservationCancellation,
-) -> Option<Arc<RegisteredGlobalDb>> {
+) -> StartupSessionCatchUpOutcome {
     // Own every capture inside the future passed to
     // `with_transcript_source_home`: `task_local::scope` returns
     // `impl Future + Send`, and the auto-trait leak check cannot prove Send
@@ -192,10 +200,8 @@ async fn run_startup_session_catch_up_with_home(
     // (E0477 notes on `&Path` / `&RegisteredGlobalDb`).
     let catch_up = async move {
         run_startup_session_catch_up(
-            session_db,
-            registered_session_db,
-            user_session_db,
-            registered_user_session_db,
+            sessions,
+            user_sessions,
             registry_db,
             profile_identity,
             project_root.as_path(),
@@ -415,16 +421,13 @@ impl McpServer {
         {
             let project_root = cg.project_root().to_path_buf();
             let project_id = cg.store_layout().identity.project_id.clone();
-            let session_db = self.session_db.clone();
-            let registered_session_db = self.registered_session_db.clone();
-            let user_session_db = self.user_session_db.clone();
-            let registered_user_session_db = self.registered_user_session_db.clone();
+            // `session_db`/`registered_session_db` (and the user pair) are set
+            // from the same `Arc` by every construction site, so startup
+            // catch-up takes one authority per scope rather than two.
+            let sessions = self.session_db.clone();
+            let user_sessions = self.user_session_db.clone();
             let registry_db = self.registry_db.clone();
             let profile_identity = self.profile_identity.clone();
-            let user_ingest_requested = user_session_db.is_some()
-                && registered_user_session_db.is_some()
-                && registry_db.is_some()
-                && profile_identity.is_some();
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
@@ -432,20 +435,18 @@ impl McpServer {
             let analytics_db = self.accounting_db.clone();
             let transcript_source_home = self.transcript_source_home.clone();
             let task = tokio::spawn(async move {
-                if let Some(db) = run_startup_session_catch_up_with_home(
+                let catch_up = run_startup_session_catch_up_with_home(
                     transcript_source_home,
-                    session_db,
-                    registered_session_db,
-                    user_session_db,
-                    registered_user_session_db,
+                    sessions,
+                    user_sessions,
                     registry_db,
                     profile_identity,
                     project_root.clone(),
                     project_id,
                     cancellation.clone(),
                 )
-                .await
-                {
+                .await;
+                if let Some(db) = catch_up.project_sessions {
                     if cancellation.is_cancelled() {
                         ingest_done_flag.store(true, Ordering::Release);
                         return;
@@ -495,7 +496,13 @@ impl McpServer {
                         .await;
                     }
                 }
-                if user_ingest_requested && let Some(wake) = &user_session_refresh_wake {
+                // Wake on the observed sweep, not on the authorities being
+                // present: every skip path above (missing authority, early
+                // return, cancellation, absent profile root) leaves nothing
+                // new for the temporal refresh scheduler to pick up.
+                if catch_up.user_sweep_completed
+                    && let Some(wake) = &user_session_refresh_wake
+                {
                     wake.wake();
                 }
                 ingest_done_flag.store(true, Ordering::Release);
