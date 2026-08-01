@@ -24,7 +24,7 @@ mod path_layout;
 pub use bootstrap::windows_hard_link_count;
 use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
-#[cfg(not(any(test, feature = "test-transport")))]
+#[cfg(not(test))]
 pub use lease::enter_owned_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
 pub use lease::{database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner};
@@ -166,7 +166,7 @@ impl MaintenanceDatabaseScope<'_> {
 }
 
 impl OwnedMaintenanceDatabaseScope {
-    #[cfg(not(any(test, feature = "test-transport")))]
+    #[cfg(not(test))]
     pub fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
         &self._lifecycle
     }

@@ -735,7 +735,7 @@ impl TraceDecay {
             read_only: self.read_only,
             context_scout_owner: self.context_scout_owner.clone(),
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             test_runtime_guard: self.test_runtime_guard.clone(),
             standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
         }
