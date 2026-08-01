@@ -1,10 +1,12 @@
 use super::{
     AnalyticsAction, CommandFamily, Commands, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
-    MAX_BLOCKING_THREADS, PostUpdateMode, SilentReinstallAction, StderrTracingDefault,
-    async_worker_threads, is_extract_worker, is_local_install_command,
-    should_skip_agent_install_maintenance, should_skip_startup_maintenance,
-    silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
+    MAX_BLOCKING_THREADS, PackageHookAction, PostUpdateMode, ScoopPackageHookAction,
+    SilentReinstallAction, StderrTracingDefault, async_worker_threads, is_extract_worker,
+    is_local_install_command, should_skip_agent_install_maintenance,
+    should_skip_startup_maintenance, silent_reinstall_action, stderr_tracing_default,
+    validate_host_bundle_options,
 };
+use std::path::PathBuf;
 use tracedecay::user_config::UserConfig;
 
 /// `wipe` destroys deployed state, so it takes the same `--yes` acceptance as
@@ -96,6 +98,17 @@ fn representative_commands_route_to_their_dispatch_family() {
         ),
         (Commands::HookStop, CommandFamily::Hook),
         (Commands::Dogfood, CommandFamily::Update),
+        (
+            Commands::PackageHook {
+                action: PackageHookAction::Scoop {
+                    action: ScoopPackageHookAction::Prepare {
+                        package_id: "tracedecay".to_string(),
+                        state_file: PathBuf::from("scoop-state.json"),
+                    },
+                },
+            },
+            CommandFamily::Update,
+        ),
         (Commands::DisableUploadCounter, CommandFamily::Configuration),
         (Commands::Monitor, CommandFamily::Diagnostics),
         (
@@ -174,6 +187,14 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         lifecycle_lease_token: None,
         strict: false,
         mode: PostUpdateMode::Normal,
+    }));
+    assert!(should_skip_startup_maintenance(&Commands::PackageHook {
+        action: PackageHookAction::Scoop {
+            action: ScoopPackageHookAction::Restore {
+                package_id: "tracedecay-beta".to_string(),
+                state_file: PathBuf::from("scoop-state.json"),
+            },
+        },
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
