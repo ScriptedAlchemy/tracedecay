@@ -158,7 +158,7 @@ async fn build_inventory_in_scope(
                 db.try_resolve_project_store_record_by_alias(&root)
                     .await?
                     .and_then(|store| {
-                        tracedecay_runtime_core::storage::classify_registry_storage(
+                        crate::root_seam::storage_adapters::classify_registry_storage(
                             &root,
                             profile_root,
                             &store,

@@ -396,7 +396,7 @@ impl ConsolidationRuntimeOwnerV1 {
             ));
         }
         let database =
-            match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
+            match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
             {
                 Ok(database) => database,
                 Err(error) => {
@@ -755,7 +755,7 @@ impl FrozenInputRuntimeSetV1 {
             ));
         }
         let database =
-            match Database::publish_runtime(Arc::new(runtime), DatabaseAccessMode::ReadWrite).await
+            match Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await
             {
                 Ok(database) => database,
                 Err(error) => {

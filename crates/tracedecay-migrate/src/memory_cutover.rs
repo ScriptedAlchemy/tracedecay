@@ -25,7 +25,7 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage;
-use tracedecay_runtime_core::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use crate::root_seam::tracedecay_root::{TraceDecay, TraceDecayOpenOptions};
 
 const LEGACY_SOURCE_STORE: &str = "legacy-memory-v1";
 const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
