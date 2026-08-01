@@ -17,6 +17,12 @@ use crate::storage;
 use super::current_timestamp;
 
 const MARKER_SCHEMA: u8 = 2;
+
+/// Sync-lock contention message. Callers (background re-index, tests) match on
+/// this text to tell contention apart from a genuine lock failure, so every
+/// producer and consumer must share the exact bytes.
+pub(crate) const SYNC_IN_PROGRESS_MESSAGE: &str = "another sync is already in progress";
+
 static EPOCH_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -325,7 +331,7 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     file.try_lock_exclusive()
         .map_err(|error| TraceDecayError::SyncLock {
             message: if crate::db::is_lock_contended(&error) {
-                "another sync is already in progress".to_string()
+                SYNC_IN_PROGRESS_MESSAGE.to_string()
             } else {
                 format!("could not lock sync lockfile: {error}")
             },
@@ -347,7 +353,7 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     {
         let _ = FileExt::unlock(&file);
         return Err(TraceDecayError::SyncLock {
-            message: format!("another sync is already in progress (legacy PID {pid})"),
+            message: format!("{SYNC_IN_PROGRESS_MESSAGE} (legacy PID {pid})"),
         });
     }
 

@@ -1348,6 +1348,49 @@ pub struct McpDoctorLabels<'a> {
     pub missing: &'a str,
 }
 
+/// Look up the tracedecay MCP server entry a host config stores under
+/// `root_key`, without judging its shape.
+///
+/// Hosts that only need a yes/no answer (or that accept non-object entries)
+/// can call this directly; [`doctor_check_mcp_registration`] layers the
+/// object-shape filter and doctor reporting on top.
+pub fn mcp_registration_entry(
+    config_path: &Path,
+    root_key: &str,
+    load: fn(&Path) -> serde_json::Value,
+) -> Option<serde_json::Value> {
+    load(config_path)
+        .get(root_key)
+        .and_then(|servers| servers.get("tracedecay"))
+        .cloned()
+}
+
+/// Emit the standard doctor pass/fail line for a host MCP registration.
+///
+/// Split out from [`doctor_check_mcp_registration`] so hosts with their own
+/// missing-file or legacy-path control flow still share the wording.
+pub fn report_mcp_registration(
+    dc: &mut DoctorCounters,
+    config_path: &Path,
+    registered: bool,
+    labels: &McpDoctorLabels<'_>,
+) {
+    if registered {
+        dc.pass(&format!(
+            "{} in {}",
+            labels.registered,
+            config_path.display()
+        ));
+    } else {
+        dc.fail(&format!(
+            "{} in {} — run `tracedecay install --agent {}`",
+            labels.missing,
+            config_path.display(),
+            labels.agent_id
+        ));
+    }
+}
+
 /// Report whether a host config registers tracedecay under `root_key`.
 ///
 /// Returns the registered server object so callers can keep checking
@@ -1369,28 +1412,10 @@ pub fn doctor_check_mcp_registration(
         return None;
     }
 
-    let settings = load(config_path);
-    let server = settings
-        .get(root_key)
-        .and_then(|servers| servers.get("tracedecay"))
-        .filter(|server| server.is_object());
-
-    if let Some(server) = server {
-        dc.pass(&format!(
-            "{} in {}",
-            labels.registered,
-            config_path.display()
-        ));
-        Some(server.clone())
-    } else {
-        dc.fail(&format!(
-            "{} in {} — run `tracedecay install --agent {}`",
-            labels.missing,
-            config_path.display(),
-            labels.agent_id
-        ));
-        None
-    }
+    let server =
+        mcp_registration_entry(config_path, root_key, load).filter(serde_json::Value::is_object);
+    report_mcp_registration(dc, config_path, server.is_some(), labels);
+    server
 }
 
 /// Finds the tracedecay binary path.

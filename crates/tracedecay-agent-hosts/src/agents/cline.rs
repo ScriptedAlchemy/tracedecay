@@ -11,9 +11,10 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
-    install_mcp_server_entry, load_json_file, load_json_file_strict,
-    mcp_servers_registration_state, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    McpUninstallPolicy, install_mcp_server_entry, load_json_file, load_json_file_strict,
+    mcp_registration_entry, mcp_servers_registration_state, report_mcp_registration,
+    uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
@@ -44,12 +45,10 @@ fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
     ]
 }
 
+/// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
+/// the object-shape filter [`super::doctor_check_mcp_registration`] applies.
 fn settings_have_tracedecay(path: &Path) -> bool {
-    path.exists()
-        && load_json_file(path)
-            .get("mcpServers")
-            .and_then(|servers| servers.get("tracedecay"))
-            .is_some()
+    path.exists() && mcp_registration_entry(path, "mcpServers", load_json_file).is_some()
 }
 
 impl AgentIntegration for ClineIntegration {
@@ -168,26 +167,34 @@ fn uninstall_mcp_server(settings_path: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Check Cline's `cline_mcp_settings.json` has tracedecay MCP server registered.
+///
+/// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
+/// primary settings file is not a warning on its own: Cline falls through to
+/// the legacy VS Code extension path first and only then reports a failure.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = cline_mcp_settings_path(home);
+    let registered = settings_have_tracedecay(&settings_path);
 
-    if settings_have_tracedecay(&settings_path) {
-        dc.pass(&format!(
-            "MCP server registered in {}",
-            settings_path.display()
-        ));
-        return;
+    if !registered {
+        let legacy_path = legacy_cline_mcp_settings_path(home);
+        if settings_have_tracedecay(&legacy_path) {
+            dc.warn(&format!(
+                "legacy Cline MCP registration found in {} — run `tracedecay install --agent cline` to repair",
+                legacy_path.display()
+            ));
+            return;
+        }
     }
-    let legacy_path = legacy_cline_mcp_settings_path(home);
-    if settings_have_tracedecay(&legacy_path) {
-        dc.warn(&format!(
-            "legacy Cline MCP registration found in {} — run `tracedecay install --agent cline` to repair",
-            legacy_path.display()
-        ));
-        return;
-    }
-    dc.fail(&format!(
-        "MCP server NOT registered in {} — run `tracedecay install --agent cline`",
-        settings_path.display()
-    ));
+
+    report_mcp_registration(
+        dc,
+        &settings_path,
+        registered,
+        &McpDoctorLabels {
+            agent_id: "cline",
+            product: "Cline",
+            registered: "MCP server registered",
+            missing: "MCP server NOT registered",
+        },
+    );
 }
