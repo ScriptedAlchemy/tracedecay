@@ -30,6 +30,10 @@ pub(super) use node_select_columns;
 /// [`node_select_columns!`] as a value, for `format!`-built SQL.
 pub(super) const NODE_SELECT_COLUMNS: &str = node_select_columns!();
 
+/// Columns [`row_to_node`] reads, and therefore the index of the trailing
+/// `rowid` cursor column in a paged node scan.
+pub(super) const NODE_COLUMNS: i32 = 23;
+
 /// Maps a row from the `nodes` table to a `Node`.
 ///
 /// Expected column order: id(0), kind(1), name(2), `qualified_name(3)`,

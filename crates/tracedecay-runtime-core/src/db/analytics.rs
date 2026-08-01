@@ -2,10 +2,49 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::Database;
-use super::rows::{NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
-use super::sql::{collect_rows, path_prefix_like_value};
+use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
+use super::sql::{collect_rowid_pages_with, collect_rows, path_prefix_like_value};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+/// One `rowid` keyset page of the whole `calls` partition.
+pub(super) const CALL_EDGE_PAGE_SQL: &str = "SELECT source, target, rowid FROM edges
+                 WHERE kind = 'calls' AND rowid > ?1 ORDER BY rowid LIMIT ?2";
+
+/// [`CALL_EDGE_PAGE_SQL`] narrowed to one source-file prefix, bound as `?1`.
+pub(super) const CALL_EDGE_PREFIXED_PAGE_SQL: &str =
+    "SELECT e.source, e.target, e.rowid FROM edges e
+                 JOIN nodes n ON e.source = n.id
+                 WHERE e.kind = 'calls' AND n.file_path LIKE ?1
+                   AND e.rowid > ?2 ORDER BY e.rowid LIMIT ?3";
+
+/// [`CALL_EDGE_PAGE_SQL`] plus the call site's line.
+pub(super) const CALL_EDGE_LINE_PAGE_SQL: &str = "SELECT source, target, line, rowid FROM edges
+                 WHERE kind = 'calls' AND rowid > ?1 ORDER BY rowid LIMIT ?2";
+
+/// [`CALL_EDGE_PREFIXED_PAGE_SQL`] plus the call site's line.
+pub(super) const CALL_EDGE_LINE_PREFIXED_PAGE_SQL: &str =
+    "SELECT e.source, e.target, e.line, e.rowid FROM edges e
+                 JOIN nodes n ON e.source = n.id
+                 WHERE e.kind = 'calls' AND n.file_path LIKE ?1
+                   AND e.rowid > ?2 ORDER BY e.rowid LIMIT ?3";
+
+/// Builds one `rowid` keyset page of the nodes under a path prefix (bound as
+/// `?1`) whose kind is one of `kind_count` kinds (bound as `?2..`), followed by
+/// the `rowid` cursor and the page row budget.
+pub(super) fn nodes_by_dir_page_sql(kind_count: usize) -> String {
+    let kind_placeholders: Vec<String> = (0..kind_count).map(|i| format!("?{}", i + 2)).collect();
+    let cursor_param = kind_count + 2;
+    format!(
+        "SELECT {NODE_SELECT_COLUMNS}, rowid
+             FROM nodes
+             WHERE file_path LIKE ?1 || '%' AND kind IN ({})
+               AND rowid > ?{cursor_param}
+             ORDER BY rowid LIMIT ?{}",
+        kind_placeholders.join(", "),
+        cursor_param + 1
+    )
+}
 
 /// Canonicalizes a caller-supplied qualified symbol name against stored graph
 /// names without turning a qualified request into a bare-name fallback.
@@ -702,105 +741,62 @@ impl Database {
     /// Returns all `calls` edges for cycle detection in the call graph.
     ///
     /// Returns `(source_id, target_id)` pairs for every `calls` edge.
+    ///
+    /// Read through `rowid` keyset pages over `edges`. `kind = 'calls'` is the
+    /// largest partition of the largest table, not a bound: a real repository
+    /// records far more call edges than the `SQLite` runtime will materialize
+    /// for one query, and the runtime refuses an oversized query outright
+    /// rather than truncating it.
     pub async fn get_call_edges(&self, path_prefix: Option<&str>) -> Result<Vec<(String, String)>> {
-        let op = "get_call_edges";
-        let (sql, param_values): (String, Vec<Value>) = match path_prefix {
+        let (sql, leading) = match path_prefix {
             Some(prefix) => (
-                "SELECT e.source, e.target FROM edges e
-                 JOIN nodes n ON e.source = n.id
-                 WHERE e.kind = 'calls' AND n.file_path LIKE ?1"
-                    .to_string(),
+                CALL_EDGE_PREFIXED_PAGE_SQL,
                 vec![path_prefix_like_value(prefix)],
             ),
-            None => (
-                "SELECT source, target FROM edges WHERE kind = 'calls'".to_string(),
-                vec![],
-            ),
+            None => (CALL_EDGE_PAGE_SQL, vec![]),
         };
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query call edges: {e}"),
-                operation: op.to_string(),
-            })?;
-
-        let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read row: {e}"),
-            operation: op.to_string(),
-        })? {
-            let source = row
-                .get::<String>(0)
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to read source: {e}"),
-                    operation: op.to_string(),
-                })?;
-            let target = row
-                .get::<String>(1)
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to read target: {e}"),
-                    operation: op.to_string(),
-                })?;
-            items.push((source, target));
-        }
-
-        Ok(items)
+        collect_rowid_pages_with(
+            &self.engine_conn(),
+            sql,
+            &leading,
+            2,
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+            "get_call_edges",
+        )
+        .await
     }
 
     /// Returns all `calls` edges with their source line for cycle detection.
     ///
     /// Returns `(source_id, target_id, line)` tuples for every `calls` edge.
+    ///
+    /// Paged for the same reason as [`Database::get_call_edges`].
     pub async fn get_call_edges_with_lines(
         &self,
         path_prefix: Option<&str>,
     ) -> Result<Vec<(String, String, Option<u32>)>> {
-        let op = "get_call_edges_with_lines";
-        let (sql, param_values): (String, Vec<Value>) = match path_prefix {
+        let (sql, leading) = match path_prefix {
             Some(prefix) => (
-                "SELECT e.source, e.target, e.line FROM edges e
-                 JOIN nodes n ON e.source = n.id
-                 WHERE e.kind = 'calls' AND n.file_path LIKE ?1"
-                    .to_string(),
+                CALL_EDGE_LINE_PREFIXED_PAGE_SQL,
                 vec![path_prefix_like_value(prefix)],
             ),
-            None => (
-                "SELECT source, target, line FROM edges WHERE kind = 'calls'".to_string(),
-                vec![],
-            ),
+            None => (CALL_EDGE_LINE_PAGE_SQL, vec![]),
         };
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query call edges with lines: {e}"),
-                operation: op.to_string(),
-            })?;
-
-        let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read row: {e}"),
-            operation: op.to_string(),
-        })? {
-            let source = row
-                .get::<String>(0)
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to read source: {e}"),
-                    operation: op.to_string(),
-                })?;
-            let target = row
-                .get::<String>(1)
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to read target: {e}"),
-                    operation: op.to_string(),
-                })?;
-            let line = row.get::<u32>(2).ok();
-            items.push((source, target, line));
-        }
-
-        Ok(items)
+        collect_rowid_pages_with(
+            &self.engine_conn(),
+            sql,
+            &leading,
+            3,
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<u32>(2).ok(),
+                ))
+            },
+            "get_call_edges_with_lines",
+        )
+        .await
     }
 
     /// Returns functions/methods ranked by a composite complexity score.
@@ -1029,39 +1025,39 @@ impl Database {
     /// Returns all nodes under a directory prefix filtered by kinds.
     ///
     /// Uses `LIKE dir || '%'` for the path prefix and an `IN` clause for kinds.
+    ///
+    /// Read through `rowid` keyset pages: a repository-root prefix selects most
+    /// of the `nodes` table, which exceeds what the `SQLite` runtime will
+    /// materialize for one query. The pages arrive in `rowid` order, so the
+    /// `(file_path, start_line)` ordering callers see is restored here rather
+    /// than by the database.
     pub async fn get_nodes_by_dir(&self, dir: &str, kinds: &[NodeKind]) -> Result<Vec<Node>> {
         if kinds.is_empty() {
             return Ok(Vec::new());
         }
 
-        let kind_placeholders: Vec<String> = kinds
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 2))
-            .collect();
-        let sql = format!(
-            "SELECT {NODE_SELECT_COLUMNS}
-             FROM nodes
-             WHERE file_path LIKE ?1 || '%' AND kind IN ({})
-             ORDER BY file_path, start_line",
-            kind_placeholders.join(", ")
-        );
+        let sql = nodes_by_dir_page_sql(kinds.len());
 
-        let mut param_values: Vec<Value> = Vec::new();
-        param_values.push(Value::Text(dir.to_string()));
+        let mut leading: Vec<Value> = Vec::with_capacity(kinds.len() + 1);
+        leading.push(Value::Text(dir.to_string()));
         for k in kinds {
-            param_values.push(Value::Text(k.as_str().to_string()));
+            leading.push(Value::Text(k.as_str().to_string()));
         }
 
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query nodes by dir: {e}"),
-                operation: "get_nodes_by_dir".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_node, "get_nodes_by_dir").await
+        let mut nodes = collect_rowid_pages_with(
+            &self.engine_conn(),
+            &sql,
+            &leading,
+            NODE_COLUMNS,
+            row_to_node,
+            "get_nodes_by_dir",
+        )
+        .await?;
+        nodes.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+        });
+        Ok(nodes)
     }
 }
