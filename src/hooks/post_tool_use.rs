@@ -99,23 +99,24 @@ async fn notify_post_tool_use_inner(
     let Some(root) = crate::config::discover_project_root_with_identity(&cwd).await else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
-        return;
-    }
-
     if (spec.is_edit_tool)(tool_name) {
-        let rels = (spec.edit_rel_paths)(parsed, &cwd, &root);
-        if rels.is_empty() {
-            return;
-        }
-        super::notify_hook_event_with_optional_telemetry(
+        let event_cwd = cwd.clone();
+        notify_edited_paths(
             &root,
-            DaemonHookEvent::post_tool_use_edit(spec.agent, rels, cwd)
-                .with_route(Some(hook_route_metadata_from_parsed(parsed, &root))),
+            parsed,
+            || (spec.edit_rel_paths)(parsed, &cwd, &root),
+            |rels| DaemonHookEvent::post_tool_use_edit(spec.agent, rels, event_cwd),
+            EmptyPathPolicy::Skip,
             telemetry,
         )
         .await;
     } else if (spec.is_shell_tool)(tool_name) {
+        // The edit branch gates inside `notify_edited_paths`; a tool that is
+        // neither edit nor shell reaches no notification at all, so the store
+        // check belongs to each branch rather than ahead of them.
+        if !crate::tracedecay::TraceDecay::is_initialized(&root) {
+            return;
+        }
         super::notify_hook_event_with_optional_telemetry(
             &root,
             DaemonHookEvent::post_tool_use_shell(spec.agent, cwd)
@@ -124,6 +125,49 @@ async fn notify_post_tool_use_inner(
         )
         .await;
     }
+}
+
+/// Whether a write event that named no in-project path is still worth sending.
+///
+/// The Claude/Codex `PostToolUse` edit branch and Cursor's `afterFileEdit`
+/// carry nothing but the paths, so an empty list is not an event. Kiro's
+/// `postToolUse` also reports the session `cwd`, which the daemon uses for
+/// worktree and branch tracking, so it is sent either way.
+pub(super) enum EmptyPathPolicy {
+    Skip,
+    Send,
+}
+
+/// The tail every host's post-write daemon notification shares: gate on an
+/// initialized store, resolve the edited project-relative paths, apply the
+/// host's empty-path policy, and send one route-annotated event.
+///
+/// `rel_paths` is a closure because path extraction is the one genuinely
+/// host-specific step (Claude reads `tool_input.file_path`, Codex parses an
+/// `apply_patch` envelope, Cursor reads `file_path` plus `edits[]`, Kiro sweeps
+/// several path-shaped keys) and because it must not run for a project with no
+/// store, exactly as before.
+pub(super) async fn notify_edited_paths(
+    project_root: &Path,
+    parsed: &Value,
+    rel_paths: impl FnOnce() -> Vec<String>,
+    build_event: impl FnOnce(Vec<String>) -> DaemonHookEvent,
+    empty_paths: EmptyPathPolicy,
+    telemetry: Option<&super::analytics::HookTimingSpan>,
+) {
+    if !crate::tracedecay::TraceDecay::is_initialized(project_root) {
+        return;
+    }
+    let rels = rel_paths();
+    if rels.is_empty() && matches!(empty_paths, EmptyPathPolicy::Skip) {
+        return;
+    }
+    super::notify_hook_event_with_optional_telemetry(
+        project_root,
+        build_event(rels).with_route(Some(hook_route_metadata_from_parsed(parsed, project_root))),
+        telemetry,
+    )
+    .await;
 }
 
 fn tool_input_command(parsed: &Value) -> &str {

@@ -11,11 +11,12 @@ use tracedecay_hooks::DaemonHookEvent;
 
 use super::claude::is_code_research_prompt;
 use super::memory_inject;
+use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_cwd, event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_or_process_cwd, event_session_id, hook_route_metadata_from_event,
-    read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,
+    event_cwd_from_parsed, event_project_root, event_project_root_from_json,
+    event_project_root_or_process_cwd, event_session_id, read_hook_event, record_hook_invoked,
+    record_hook_invoked_parsed, rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
@@ -180,10 +181,17 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// fail-open.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_from_json(&event);
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
-    notify_kiro_post_tool_use(&event, &hook_telemetry).await;
+    // One parse for the root, the analytics row, and the notification.
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root(&parsed);
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Kiro,
+        "postToolUse",
+        &event,
+        &parsed,
+    );
+    notify_kiro_post_tool_use(&parsed, &hook_telemetry).await;
     0
 }
 
@@ -271,19 +279,20 @@ async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
         .await
 }
 
-async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytics::HookTimingSpan) {
-    let Some(project_root) = kiro_project_root(event_json) else {
+async fn notify_kiro_post_tool_use(parsed: &Value, telemetry: &super::analytics::HookTimingSpan) {
+    let Some(project_root) = event_project_root_or_process_cwd(parsed) else {
         return;
     };
-    if !crate::tracedecay::TraceDecay::is_initialized(&project_root) {
-        return;
-    }
-    let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
-    super::notify_hook_event_with_telemetry(
+    let cwd = event_cwd_from_parsed(parsed);
+    // Kiro's event reports the session `cwd` alongside the paths, so it is sent
+    // even when no edited path landed inside the project.
+    notify_edited_paths(
         &project_root,
-        DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
-            .with_route(hook_route_metadata_from_event(event_json, &project_root)),
-        telemetry,
+        parsed,
+        || kiro_post_tool_use_rel_paths_from_parsed(parsed, &project_root),
+        |rel_paths| DaemonHookEvent::kiro_post_tool_use(rel_paths, cwd),
+        EmptyPathPolicy::Send,
+        Some(telemetry),
     )
     .await;
 }
@@ -292,7 +301,11 @@ pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Ve
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return Vec::new();
     };
-    let cwd = event_cwd_from_parsed(&parsed).unwrap_or_else(|| project_root.to_path_buf());
+    kiro_post_tool_use_rel_paths_from_parsed(&parsed, project_root)
+}
+
+fn kiro_post_tool_use_rel_paths_from_parsed(parsed: &Value, project_root: &Path) -> Vec<String> {
+    let cwd = event_cwd_from_parsed(parsed).unwrap_or_else(|| project_root.to_path_buf());
     let tool_input = parsed
         .get("tool_input")
         .or_else(|| parsed.get("toolInput"))
@@ -300,7 +313,7 @@ pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Ve
         .unwrap_or(&Value::Null);
 
     let mut paths = Vec::new();
-    collect_event_path_fields(&parsed, &mut paths);
+    collect_event_path_fields(parsed, &mut paths);
     collect_event_path_fields(tool_input, &mut paths);
 
     let mut rels = Vec::new();
