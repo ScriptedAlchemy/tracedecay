@@ -3127,6 +3127,19 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
     if user_cfg.installed_agents.is_empty() {
         eprintln!("No installed agents found. Run `tracedecay install` first.");
     } else {
+        // Drop tracked ids that no longer resolve to an integration (a release
+        // renamed or removed one, or a typo landed in `installed_agents`).
+        // `migrate_installed_agents` only ADDS ids, so without this the stale
+        // id is retried forever. Mirrors `run_post_update_mutations`.
+        let before = user_cfg.installed_agents.len();
+        user_cfg
+            .installed_agents
+            .retain(|id| tracedecay::agents::get_integration(id).is_ok());
+        if user_cfg.installed_agents.len() != before
+            && let Err(err) = user_cfg.save()
+        {
+            eprintln!("warning: could not save tracedecay config: {err}");
+        }
         let agents = user_cfg.installed_agents.clone();
         eprintln!(
             "Reinstalling {} agent(s): {}",
@@ -3134,26 +3147,15 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.join(", ")
         );
         let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
-        let mut deferred_any = false;
-        for (id, result) in &results {
-            if let Ok(AgentReinstallOutcome::DeferredUserAction(deferred)) = result {
-                deferred_any = true;
-                eprintln!(
-                    "\x1b[33mwarning:\x1b[0m {id} reinstall deferred: {}",
-                    deferred.remediation
-                );
-                for path in &deferred.staged_paths {
-                    eprintln!("  staged: {}", path.display());
-                }
-            }
-        }
-        // Keep the reason with the name — a bare id list left "failed for:
-        // claude, cursor, hermes, kimi" undiagnosable from the output.
-        let failed: Vec<String> = results
+        let deferred_any = results
             .iter()
-            .filter_map(|(id, result)| result.as_ref().err().map(|error| format!("{id}: {error}")))
-            .collect();
-        if !failed.is_empty() {
+            .any(|(_, result)| matches!(result, Ok(AgentReinstallOutcome::DeferredUserAction(_))));
+        // Reporting lives in `partition_reinstall_results`, which every
+        // reinstall pass shares. Keep the reason with the name — a bare id list
+        // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
+        if let crate::update_cmd::ReinstallOutcome::PartialFailure { failed } =
+            crate::update_cmd::partition_reinstall_results(results)
+        {
             return Err(tracedecay::errors::TraceDecayError::Config {
                 message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
             });
@@ -3165,12 +3167,10 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
         } else {
             eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
         }
-        user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
-        user_cfg
-            .save()
-            .map_err(|err| tracedecay::errors::TraceDecayError::Config {
-                message: format!("failed to save user config: {err}"),
-            })?;
+        // Advance BOTH markers: `previous_version` is what arms the startup
+        // silent reinstall, so recording only `last_installed_version` here
+        // left this explicit pass re-running on the next ordinary command.
+        crate::update_cmd::record_completed_reinstall_pass(&mut user_cfg)?;
     }
     Ok(())
 }
