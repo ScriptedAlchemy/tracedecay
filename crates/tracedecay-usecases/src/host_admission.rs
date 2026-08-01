@@ -35,6 +35,8 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 
 mod disposition;
 mod durability;
+#[cfg(test)]
+mod provider_capture_tests;
 mod replay;
 mod runtime;
 mod schedule;
