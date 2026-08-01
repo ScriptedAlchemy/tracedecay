@@ -61,6 +61,19 @@ struct KiroManagedHook {
 /// Every managed-agent hook, in registration order. The single source of
 /// truth for the generated agent config ([`managed_agent_config`]) and the
 /// doctor checks.
+///
+/// No `stop`/session-end hook is registered, and this omission is deliberate,
+/// not an oversight. Kiro's own documentation describes a Stop trigger, so the
+/// host-event catalog carries it (`fixtures/host_events/kiro.json`, identity
+/// `stop`) — but only at `support: documented_unverified`, because tracedecay
+/// has never captured a real Kiro stop event or verified Kiro's persisted
+/// session format. Until that is verified, the native decoder rejects the event
+/// (see `decode_kiro` and the `kiro_documented_unverified_events_are_rejected_instead_of_emulated`
+/// test in `tracedecay-hooks`), `stock_event_support(Kiro, SessionBoundary)` is
+/// `Unavailable`, and no CLI subcommand or managed hook is wired. See
+/// `docs/KIRO-INTEGRATION.md` ("Deliberate non-defaults"). The catalog entry is
+/// therefore correct as documentation of a Kiro-documented-but-unverified event
+/// and must not be removed; wiring it would require a verified capture first.
 const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
     KiroManagedHook {
         event: "userPromptSubmit",
