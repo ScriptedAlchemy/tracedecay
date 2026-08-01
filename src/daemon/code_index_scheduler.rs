@@ -6,7 +6,7 @@
 #![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -150,9 +150,22 @@ impl SharedCodeIndexBytePoolV1 {
     }
 }
 
+/// How many non-active sealed generations stay decoded for repeat pinned or
+/// cursor-paged reads. Pinned reads target one generation for the life of a
+/// paged query, so a small cache converts a per-page rescan into a single load.
+const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
+
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+    /// Already-loaded, already-verified non-active generations, newest last.
+    ///
+    /// Decoding a sealed generation re-reads every generation file in the store
+    /// and fully re-validates each one, so serving a pinned generation per page
+    /// repeated that whole scan per access. A published generation is immutable
+    /// and content-addressed by its sealed filename, so a generation that
+    /// loaded once can be served again without redoing the load-time checks.
+    decoded: Arc<Mutex<VecDeque<Arc<CodeIndexPublishedGenerationV1>>>>,
     active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
@@ -168,6 +181,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
             active: Arc::new(Mutex::new(None)),
+            decoded: Arc::new(Mutex::new(VecDeque::new())),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
@@ -221,6 +235,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(Some(active));
         }
+        if let Some(cached) = self.cached_generation(generation_id)? {
+            return Ok(Some(cached));
+        }
 
         let mut paths = std::fs::read_dir(&self.generations_root)
             .map_err(Self::unavailable)?
@@ -273,7 +290,48 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 ));
             }
         }
+        if let Some(generation) = matched.as_ref() {
+            self.remember_generation(Arc::clone(generation))?;
+        }
         Ok(matched)
+    }
+
+    /// Serve an already-loaded non-active generation.
+    ///
+    /// Entries only ever enter through `load_generation`, which performs the
+    /// full sealed-bytes digest, format, decode, and validation sequence, so a
+    /// hit here is a generation whose load-time checks already passed.
+    fn cached_generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+        let decoded = self.decoded.lock().map_err(|_| {
+            CodeIndexPublicationStoreErrorV1::Unavailable(
+                "daemon decoded-generation lock is poisoned".to_owned(),
+            )
+        })?;
+        Ok(decoded
+            .iter()
+            .find(|generation| generation.manifest().generation_id == *generation_id)
+            .map(Arc::clone))
+    }
+
+    fn remember_generation(
+        &self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut decoded = self.decoded.lock().map_err(|_| {
+            CodeIndexPublicationStoreErrorV1::Unavailable(
+                "daemon decoded-generation lock is poisoned".to_owned(),
+            )
+        })?;
+        let generation_id = generation.manifest().generation_id.clone();
+        decoded.retain(|cached| cached.manifest().generation_id != generation_id);
+        decoded.push_back(generation);
+        while decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
+            decoded.pop_front();
+        }
+        Ok(())
     }
 
     fn load_active_shared(
