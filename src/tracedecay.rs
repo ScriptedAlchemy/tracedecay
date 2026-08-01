@@ -8,7 +8,7 @@
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
 //! (session memory), and [`locking`] (dirty sentinel + sync lock).
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::config::TraceDecayConfig;
 use crate::db::Database;
@@ -58,6 +58,13 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
+    /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
+    /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
+    /// immutable for the lifetime of an instance — branch changes produce a
+    /// new `TraceDecay` rather than mutating an existing one (see
+    /// `sync_retained_worktree_branch`) — so the resolved path is safe to
+    /// cache for the instance's lifetime.
+    db_path_cache: OnceLock<PathBuf>,
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(any(test, feature = "test-transport")))]
-use std::sync::{LazyLock, Mutex, Weak};
+use std::sync::{LazyLock, Mutex, OnceLock, Weak};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
@@ -346,6 +346,7 @@ impl TraceDecay {
             serving_branch: None,
             fallback_warning: None,
             read_only: false,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -699,6 +700,7 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: false,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -896,6 +898,7 @@ impl TraceDecay {
             serving_branch,
             fallback_warning,
             read_only: true,
+            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
