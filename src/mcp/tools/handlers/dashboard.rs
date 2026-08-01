@@ -25,7 +25,8 @@ use super::support::generic_tool_result;
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
     DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyFuture,
-    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
+    DashboardStateCompositionV1, bind_dashboard, build_state_with_automation_reconciler, router,
+    validate_dashboard_host,
 };
 
 struct DashboardInvocationExecutorAdapter {
@@ -264,17 +265,19 @@ pub(super) async fn handle_dashboard(
             });
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
-                dashboard_project_graph_resolver,
-                registered_project_session_db,
-                registered_savings_db,
-                automation_scheduler_reconciler,
-                automation_writer,
-                doctor_report_reader,
-                doctor_remediation_dispatcher,
-                code_index_freshness_reader,
-                feedback_status_reader,
-                code_diagnostics_broker,
-                application_invocation_executor,
+                DashboardStateCompositionV1 {
+                    project_graph_resolver: dashboard_project_graph_resolver,
+                    registered_project_session_db,
+                    registered_savings_db,
+                    automation_scheduler_reconciler,
+                    automation_writer,
+                    doctor_report_reader,
+                    doctor_remediation_dispatcher,
+                    code_index_freshness_reader,
+                    feedback_status_reader,
+                    code_diagnostics_broker,
+                    application_invocation_executor,
+                },
             )
             .await?;
 
