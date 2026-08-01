@@ -151,12 +151,6 @@ pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilit
     }
 }
 
-/// Convenience wrapper over [`shard_kind_durability_class`] for callers that
-/// already hold a real [`StoreShardScopeV1`].
-pub(crate) fn shard_scope_durability_class(scope: &StoreShardScopeV1) -> StoreDurabilityClass {
-    shard_kind_durability_class(StoreShardKind::from(scope))
-}
-
 impl StoreShardKind {
     /// Whether one physical file of this kind holds tables of more than one
     /// [`StoreDurabilityClass`], so that no single whole-file verdict can
