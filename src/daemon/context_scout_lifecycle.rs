@@ -54,9 +54,9 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     if authority_project_id != &project_id {
         return false;
     }
-    let Ok(mut authorities) = registered_context_scout_lifecycle_authorities().lock() else {
-        return false;
-    };
+    let mut authorities = registered_context_scout_lifecycle_authorities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = (hook_project_id, hook_worktree_id);
     if let Some(existing) = authorities.get(&key)
         && let Some(existing_sessions) = existing.sessions.upgrade()
@@ -87,7 +87,7 @@ pub(crate) async fn lookup_registered_context_scout_lifecycle(
     let (profile_id, project_id, worktree_id, sessions) = {
         let authorities = registered_context_scout_lifecycle_authorities()
             .lock()
-            .ok()?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
         (
             authority.profile_id.clone(),
@@ -123,7 +123,7 @@ pub(crate) async fn lookup_registered_context_scout_native_session(
     let (profile_id, project_id, worktree_id, sessions) = {
         let authorities = registered_context_scout_lifecycle_authorities()
             .lock()
-            .ok()?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let authority = authorities.get(&(hook_project_id, hook_worktree_id))?;
         (
             authority.profile_id.clone(),
