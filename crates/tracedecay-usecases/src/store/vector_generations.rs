@@ -2715,18 +2715,21 @@ mod tests {
             target_projection_key: embedding_key.projection_key().clone(),
             replay_reason: ProjectionReplayReasonV1::SourceEdit,
         };
-        request.request_digest = crate::code_index::projection::expected_request_digest(&request)
-            .expect("projection request digest");
-        let receipt = crate::code_index::projection::build_batch_receipt(
+        request.request_digest =
+            tracedecay_code_index::projection::expected_request_digest(&request)
+                .expect("projection request digest");
+        let receipt = tracedecay_code_index::projection::build_batch_receipt(
             &request,
-            &[crate::code_index::projection::ChunkProjectionDecisionV1 {
-                chunk_id: chunk_id.clone(),
-                prior_chunk_digest: Some(chunk_digest.clone()),
-                current_chunk_digest: Some(chunk_digest.clone()),
-                operation: ProjectionOperationV1::Reused,
-                outcome: ProjectionOutcomeV1::Reused,
-                output_digest: None,
-            }],
+            &[
+                tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
+                    chunk_id: chunk_id.clone(),
+                    prior_chunk_digest: Some(chunk_digest.clone()),
+                    current_chunk_digest: Some(chunk_digest.clone()),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
+                    output_digest: None,
+                },
+            ],
         )
         .expect("reused projection receipt");
         PreparedVectorGenerationV1 {
