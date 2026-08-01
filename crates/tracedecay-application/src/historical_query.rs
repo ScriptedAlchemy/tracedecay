@@ -172,6 +172,51 @@ pub enum HistoricalQueryError {
     ProviderAnchorMismatch,
 }
 
+/// Why one scope-bound historical read produced no evidence.
+///
+/// This is the caller-facing projection of [`HistoricalQueryError`]: an
+/// absent mount, a scope that does not match the admitted checkout, an
+/// unauthorized commit/path, or a failed read.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoricalGitReadUnavailableReasonV1 {
+    AuthorityAbsent,
+    ScopeMismatch,
+    NotAuthorized,
+    ReadFailed,
+}
+
+/// Outcome of one scope-bound historical read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+// Boxing Complete would ripple through admission/match sites; size gap is accepted.
+#[allow(clippy::large_enum_variant)]
+pub enum HistoricalGitReadOutcomeV1 {
+    Complete {
+        scope: ResolvedScope,
+        result: HistoricalQueryResultV1,
+    },
+    Unavailable {
+        reason: HistoricalGitReadUnavailableReasonV1,
+    },
+}
+
+impl HistoricalGitReadUnavailableReasonV1 {
+    /// Project one adapter error onto the caller-facing unavailable reason.
+    pub fn from_query_error(error: &HistoricalQueryError) -> Self {
+        match error {
+            HistoricalQueryError::MissingAuthorization
+            | HistoricalQueryError::InvalidAuthorization
+            | HistoricalQueryError::UnauthorizedCommit(_)
+            | HistoricalQueryError::UnauthorizedPath(_) => Self::NotAuthorized,
+            HistoricalQueryError::ScopeMismatch | HistoricalQueryError::ProviderScopeMismatch => {
+                Self::ScopeMismatch
+            }
+            _ => Self::ReadFailed,
+        }
+    }
+}
+
 /// Code-index join over one already-mounted Plan 36 Git authority.
 pub struct HistoricalGitQueryAdapter<'a, P: GitHistoricalBlobReadPort> {
     port: &'a P,
