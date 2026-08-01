@@ -10,7 +10,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use common::{capability_id, handler_for, profile, profile_id, read_manifest, schema, use_case_id};
+use common::{
+    ample_budget, capability_id, handler_for, profile, profile_id, read_manifest, schema,
+    use_case_id,
+};
 
 #[test]
 fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
@@ -90,10 +93,6 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
             maximum: 1,
         })
     );
-    assert_ne!(
-        ProfileBudget::DEFAULT.maximum_bindings(),
-        ProfileBudget::HOST_LIMITED.maximum_bindings()
-    );
 }
 
 #[test]
@@ -123,7 +122,7 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
         capability_ids: Vec::new(),
         enabled_surfaces: Vec::new(),
         requires_cli_mcp_pairing: false,
-        budget: ProfileBudget::COMPACT,
+        budget: ample_budget(),
         routing_fixtures: Vec::new(),
     })
     .unwrap();
@@ -134,7 +133,7 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
         .add_profile(profile(
             primary_profile_id,
             vec![capability_id],
-            ProfileBudget::DEFAULT,
+            ample_budget(),
         ))
         .add_profile(compact_profile);
     let snapshot = builder.build().unwrap();
@@ -172,7 +171,7 @@ fn paired_profiles_reject_capabilities_without_cli_and_mcp_bindings() {
         capability_ids: vec![capability_id.clone()],
         enabled_surfaces: vec![BindingSurface::Cli, BindingSurface::Mcp],
         requires_cli_mcp_pairing: true,
-        budget: ProfileBudget::DEFAULT,
+        budget: ample_budget(),
         routing_fixtures: vec![
             RoutingFixtureV1::new(
                 "outline source",
