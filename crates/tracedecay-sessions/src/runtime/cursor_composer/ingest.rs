@@ -48,7 +48,7 @@ pub fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-struct ComposerIngestContext<'facade, 'db, 'root> {
+struct ComposerIngestContext<'facade, 'root> {
     facade: &'facade dyn HostAdmission,
     scope: ObservationScopeV1,
     project_root: Option<&'root Path>,
@@ -56,7 +56,7 @@ struct ComposerIngestContext<'facade, 'db, 'root> {
     cancellation: &'root ObservationCancellation,
 }
 
-async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_, '_>) {
+async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_>) {
     if let Err(error) = crate::runtime::claude_observation::drain_projection_queue(
         context.facade,
         &context.scope,
@@ -83,7 +83,7 @@ pub fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1>
     ObservationSourceGenerationV1::new(identity).ok()
 }
 
-struct ComposerCoverageContext<'facade, 'db> {
+struct ComposerCoverageContext<'facade> {
     facade: &'facade dyn HostAdmission,
     scope: &'facade ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -91,7 +91,7 @@ struct ComposerCoverageContext<'facade, 'db> {
 }
 
 async fn advance_composer_coverage(
-    context: ComposerCoverageContext<'_, '_>,
+    context: ComposerCoverageContext<'_>,
     source: ObservationSourceIdentityV1,
     position: u64,
     expected_cursor: Option<ObservationSourceCursorV1>,
@@ -283,7 +283,7 @@ impl CursorComposerSource {
 
     async fn ingest_with_context(
         &self,
-        context: &ComposerIngestContext<'_, '_, '_>,
+        context: &ComposerIngestContext<'_, '_>,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
@@ -323,7 +323,7 @@ impl CursorComposerSource {
 
     async fn ingest_state_vscdb(
         &self,
-        context: &ComposerIngestContext<'_, '_, '_>,
+        context: &ComposerIngestContext<'_, '_>,
         envelope_cap: usize,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
@@ -744,7 +744,7 @@ impl CursorComposerSource {
 
     async fn ingest_chat_store_dbs(
         &self,
-        context: &ComposerIngestContext<'_, '_, '_>,
+        context: &ComposerIngestContext<'_, '_>,
         workspace_paths: &HashMap<String, String>,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
@@ -798,7 +798,7 @@ impl CursorComposerSource {
 
     async fn ingest_one_store_db(
         &self,
-        context: &ComposerIngestContext<'_, '_, '_>,
+        context: &ComposerIngestContext<'_, '_>,
         store_path: &Path,
         project_path: &str,
         byte_budget: &mut IngestByteBudget,

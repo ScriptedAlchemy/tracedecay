@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::accounting::parser::parse_timestamp;
+use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     TranscriptLocation, append_location_metadata, append_tool_calls_metadata,

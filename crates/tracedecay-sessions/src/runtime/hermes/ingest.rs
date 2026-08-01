@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::agents::hermes::read_config_pinned_project_root;
+use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project_root;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
@@ -482,7 +482,7 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
-        || crate::config::has_project_database(project_root);
+        || tracedecay_runtime_core::config::has_project_database(project_root);
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];
         if let Ok(entries) = std::fs::read_dir(home.join("profiles")) {
@@ -535,7 +535,7 @@ fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &
     }
     source.legacy_project_pin.is_some()
         || tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
-        || crate::config::has_project_database(project_root)
+        || tracedecay_runtime_core::config::has_project_database(project_root)
 }
 
 #[cfg(test)]

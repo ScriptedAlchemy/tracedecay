@@ -253,7 +253,7 @@ pub async fn ingest_user_sessions_with_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
-    admission: &crate::admission::dyn HostAdmission,
+    admission: &dyn crate::admission::HostAdmission,
 ) -> crate::runtime::shared::TranscriptIngestStats {
     match crate::runtime::claude_observation::ingest_user_sessions_with_admission(
         profile_root,

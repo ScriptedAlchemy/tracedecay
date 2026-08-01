@@ -753,17 +753,17 @@ struct IngestProtectionDefaults {
 
 impl IngestProtectionDefaults {
     fn from_profile() -> Self {
-        Self::from_user_config(&crate::user_config::UserConfig::load())
+        Self::from_policy(&crate::host_ports::lcm_redaction::resolve())
     }
 
-    fn from_user_config(config: &crate::user_config::UserConfig) -> Self {
-        let patterns: Vec<String> = config
-            .lcm_sensitive_redaction_patterns
+    fn from_policy(policy: &crate::host_ports::LcmRedactionPolicy) -> Self {
+        let patterns: Vec<String> = policy
+            .patterns
             .iter()
             .map(|pattern| pattern.to_ascii_lowercase())
             .collect();
         Self {
-            sensitive_patterns_enabled: config.lcm_sensitive_redaction_enabled,
+            sensitive_patterns_enabled: policy.enabled,
             sensitive_patterns: (!patterns.is_empty()).then_some(patterns),
         }
     }

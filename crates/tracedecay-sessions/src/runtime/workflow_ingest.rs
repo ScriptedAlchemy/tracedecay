@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
 
-use crate::accounting::parser::parse_timestamp;
+use crate::host_ports::parse_timestamp;
 use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::shared::ProjectRootMatcher;
 use crate::runtime::snapshot_observation::{

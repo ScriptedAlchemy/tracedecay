@@ -5,7 +5,7 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalReasoningVisibilityV1,
 };
 
-use crate::accounting::parser::parse_timestamp;
+use crate::host_ports::parse_timestamp;
 use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{content_storage_text_and_tools, preview_truncated};

@@ -156,7 +156,7 @@ impl ClineLikeSource {
         Self {
             provider: "cline",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
             user_registered_roots: None,
@@ -167,7 +167,7 @@ impl ClineLikeSource {
         Self {
             provider: "roo-code",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
             user_registered_roots: None,
@@ -178,7 +178,7 @@ impl ClineLikeSource {
         Self {
             provider: "kilo",
             storage_roots: vec![
-                crate::agents::vscode_data_dir(home)
+                crate::host_ports::vscode_data_dir(home)
                     .join("User/globalStorage/kilocode.kilo-code/tasks"),
                 home.join(".kilocode/cli/global/tasks"),
             ],

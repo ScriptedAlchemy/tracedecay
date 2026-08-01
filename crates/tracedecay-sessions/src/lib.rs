@@ -7,6 +7,7 @@
 pub mod admission;
 mod authorization;
 pub mod compatibility;
+pub mod host_ports;
 mod ingest;
 pub mod lcm;
 pub mod observation;
