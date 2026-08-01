@@ -7,8 +7,8 @@ use thiserror::Error;
 use tracedecay_hooks::HookFeedbackDeliveryPortV1;
 
 use tracedecay_runtime_core::db::Database;
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::tracedecay::TraceDecay;
 
 use super::github_runtime::GitHubSourceAccessAuthorityV1;

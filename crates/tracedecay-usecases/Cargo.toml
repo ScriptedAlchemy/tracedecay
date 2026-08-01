@@ -25,7 +25,13 @@ test-transport = [
 
 [dependencies]
 cap-std = "4.0.2"
+getrandom = "0.2"
+fs2 = "0.4"
+gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+glob = "0.3"
+hex = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
+regex = "1"
 same-file = "1"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +39,7 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
+toml = "1"
 ureq = { version = "3", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -42,9 +49,12 @@ zeroize = "1.9.0"
 ignore = "0.4"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
+tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }

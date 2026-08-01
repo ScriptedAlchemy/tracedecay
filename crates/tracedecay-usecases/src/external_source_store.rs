@@ -26,8 +26,8 @@ use tracedecay_store::{
     SourceObservationEvidenceV1, SourceStoreStateV1, StorageRuntimeReadPort,
 };
 
-use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
 use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
 
 #[derive(Debug, Error)]
 pub enum RuntimeExternalSourceErrorV1 {

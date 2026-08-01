@@ -4,6 +4,7 @@ pub mod concrete;
 pub mod grep_analysis;
 pub mod production;
 pub mod runtime;
+mod support;
 pub mod symbol_graph;
 
 pub use concrete::{
