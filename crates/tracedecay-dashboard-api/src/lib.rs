@@ -80,6 +80,8 @@ pub mod scope;
 mod settings_api;
 mod storage_findings_api;
 mod storage_telemetry_api;
+#[cfg(test)]
+mod test_support;
 mod token_count;
 mod util;
 mod work_api;
@@ -112,7 +114,9 @@ use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::backend;
-use tracedecay_agent_hosts::automation::config::{self, AutomationBackend, AutomationHostMode};
+use tracedecay_agent_hosts::automation::config::{
+    self as automation_config, AutomationBackend, AutomationHostMode,
+};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
@@ -1591,12 +1595,13 @@ async fn forward_project_request(
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let has_lcm = state.lcm_db.is_some();
     let global_automation = crate::user_config::UserConfig::load().automation;
-    let project_automation = config::load_project_config(&state.dashboard_root)
+    let project_automation = automation_config::load_project_config(&state.dashboard_root)
         .await
         .ok()
         .flatten();
-    let automation = config::effective_config(&global_automation, project_automation.as_ref())
-        .unwrap_or(global_automation);
+    let automation =
+        automation_config::effective_config(&global_automation, project_automation.as_ref())
+            .unwrap_or(global_automation);
     let automation_backend = automation.backend;
     let automation_host_mode = automation.host_mode;
     let backend_availability = backend::backend_availability(&automation);
@@ -1670,7 +1675,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn dashboard_state_resolves_exact_application_scope_once() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1708,7 +1713,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn project_memory_owner_uses_validated_store_identity() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1736,7 +1741,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn dashboard_state_reuses_its_active_database_as_memory_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1767,7 +1772,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_retains_the_exact_mounted_project_graph() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1838,7 +1843,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn retained_project_session_authority_is_reused_exactly() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1882,7 +1887,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_fails_closed() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1905,7 +1910,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_is_read_only() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1940,7 +1945,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn application_routes_are_active_project_only() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -2052,7 +2057,7 @@ mod authority_tests {
     /// existing families are exposed.
     #[tokio::test]
     async fn v2_read_models_are_reachable_through_both_gateways() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");

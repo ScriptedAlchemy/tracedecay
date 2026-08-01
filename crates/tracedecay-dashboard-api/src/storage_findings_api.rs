@@ -299,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_without_admitted_reader_is_typed_unsupported() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
