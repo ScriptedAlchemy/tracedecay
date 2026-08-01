@@ -1243,6 +1243,10 @@ mod application_surface_request_id_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod message_search_cutover_tests;
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod lcm_claude_recall_tests;
+
 mod project_host_admission_replay;
 
 /// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
