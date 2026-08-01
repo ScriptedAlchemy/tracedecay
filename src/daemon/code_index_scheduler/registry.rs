@@ -1361,39 +1361,6 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
     }
 }
 
-impl crate::application::diagnostics_publication::CodeIndexPublicationIdentityPortV1
-    for CodeIndexSchedulerRegistryV1
-{
-    fn resolve(
-        &self,
-        project_root: PathBuf,
-    ) -> crate::application::diagnostics_publication::CodeIndexPublicationIdentityFuture<'_> {
-        let registry = self.clone();
-        Box::pin(async move {
-            let root = project_root.canonicalize().ok()?;
-            let current = registry.latest_complete_ready(&root).await?;
-            let snapshot = current.generation.snapshot();
-            Some(
-                crate::application::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
-                    current.generation.manifest().generation_id.clone(),
-                    current.generation.manifest().seal.sealed_at,
-                    snapshot.repository.clone(),
-                    snapshot.worktree.clone(),
-                    snapshot.reference.clone(),
-                    snapshot.source_revision.clone(),
-                    snapshot.files.iter().map(|file| {
-                        (
-                            file.logical_path.clone(),
-                            file.file_occurrence_id.clone(),
-                            file.content_digest.clone(),
-                        )
-                    }),
-                ),
-            )
-        })
-    }
-}
-
 impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
     for CodeIndexSchedulerRegistryV1
 {
