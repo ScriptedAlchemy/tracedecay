@@ -21,7 +21,7 @@ use crate::automation::skill_usage::{
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage,
     summarize_skill_usage_for,
 };
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
@@ -322,7 +322,7 @@ async fn sync_project_skill_analytics(
 }
 
 fn profile_root_or_error() -> std::result::Result<std::path::PathBuf, JsonError> {
-    crate::storage::default_profile_root().map_err(|err| internal_error(&err))
+    tracedecay_runtime_core::storage::default_profile_root().map_err(|err| internal_error(&err))
 }
 
 fn bad_request(err: &impl ToString) -> JsonError {

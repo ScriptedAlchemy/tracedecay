@@ -32,7 +32,7 @@ use crate::request_identity::{
     GlobalOpaqueIdentityKind, RequestIdentityError, mint_global_opaque_id,
 };
 use crate::sessions::lcm::{LcmGcConfig, query};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type LcmResponse = (StatusCode, Json<Value>);
 type LcmResult = Result<LcmResponse, LcmResponse>;

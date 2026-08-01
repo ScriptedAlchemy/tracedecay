@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::{DashboardState, build_selected_project_state, config_error};
-use crate::errors::{Result, TraceDecayError};
 use crate::global_db::ProjectRegistryContext;
-use crate::project_registry::{PublicCodeProject, build_project_registry_view};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::project_registry::{PublicCodeProject, build_project_registry_view};
 
 #[derive(Clone)]
 pub struct DashboardRuntime {
@@ -135,8 +135,8 @@ pub(super) struct ProjectsPayloadV1 {
     projects: Option<Vec<PublicCodeProject>>,
     active_project_id: Option<String>,
     active_project_root: String,
-    summary: Option<crate::project_registry::ProjectRegistrySummary>,
-    project_tree: Option<Vec<crate::project_registry::ProjectRepoGroup>>,
+    summary: Option<tracedecay_runtime_core::project_registry::ProjectRegistrySummary>,
+    project_tree: Option<Vec<tracedecay_runtime_core::project_registry::ProjectRepoGroup>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

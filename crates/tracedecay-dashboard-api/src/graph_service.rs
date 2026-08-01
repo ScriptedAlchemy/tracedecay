@@ -259,7 +259,7 @@ fn largest_file_rows(files: &[FileRecord]) -> Vec<Value> {
 }
 
 /// Adapts typed graph-database aggregates to the legacy dashboard JSON shape.
-/// Storage access stays behind [`crate::db::Database`]; this layer only sorts
+/// Storage access stays behind [`tracedecay_runtime_core::db::Database`]; this layer only sorts
 /// and labels presentation rows.
 fn overview_metrics(stats: &GraphStats, files: &[FileRecord]) -> Value {
     json!({

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::db::engine::{QueryExecutor, Value as DbValue, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params};
 
 use super::util::{qmarks, query_i64, query_i64_result, query_rows};
 

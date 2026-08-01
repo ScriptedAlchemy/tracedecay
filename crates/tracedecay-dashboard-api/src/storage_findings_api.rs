@@ -304,7 +304,7 @@ mod tests {
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().expect("profile root"),
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             ProjectId::new("project.dashboard-storage-findings").expect("project id"),
         )

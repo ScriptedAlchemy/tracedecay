@@ -20,8 +20,8 @@ use crate::automation::staged_notice::{
     AutomationPendingCounts, PendingReviewCount, count_pending_fact_proposals,
     count_pending_managed_skills,
 };
-use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonError>;
 
@@ -201,7 +201,7 @@ async fn pending_review_counts(state: &DashboardState) -> AutomationPendingCount
             "the project fact authority is not available: {error}"
         )),
     };
-    let skills = match crate::storage::default_profile_root() {
+    let skills = match tracedecay_runtime_core::storage::default_profile_root() {
         Ok(profile_root) => count_pending_managed_skills(&profile_root).await,
         Err(error) => PendingReviewCount::unreadable(format!(
             "the user profile root could not be resolved: {error}"

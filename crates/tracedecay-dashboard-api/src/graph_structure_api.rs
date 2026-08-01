@@ -24,11 +24,11 @@ use super::read_model::{
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
-use crate::db::engine::params;
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
-use crate::memory::entities::normalize_entity;
 use tracedecay_domain::code_intelligence::{Edge, Node};
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::memory::entities::normalize_entity;
 
 const MAX_CALL_CHAIN_DEPTH: usize = 20;
 const TEST_CALLER_DEPTH: usize = 3;
