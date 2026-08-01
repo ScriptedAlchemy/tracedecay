@@ -21,7 +21,7 @@ use tracedecay_domain::{
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, LaneBoundEvidence,
     LaneEvidenceRejections, RetrievalPortError, checkpoint_digest, contract_error,
-    lane_bound_evidence,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
@@ -281,10 +281,7 @@ where
                         .cmp(&right.0.retriever_evidence_anchor)
                 })
         });
-        let cap = request
-            .budget
-            .max_candidates_per_lane
-            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let truncated = admitted.len().saturating_sub(cap);
         admitted.truncate(cap);
         let mut candidates = Vec::with_capacity(admitted.len());

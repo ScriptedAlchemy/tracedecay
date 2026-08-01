@@ -20,7 +20,7 @@ use tracedecay_domain::{
 
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError, candidate_checkpoint_prefix,
-    checkpoint_digest, contract_error,
+    checkpoint_digest, contract_error, lane_candidate_cap,
 };
 
 mod execution_authority;
@@ -416,10 +416,7 @@ where
                 })
                 .then_with(|| left.1.chunk_id.cmp(&right.1.chunk_id))
         });
-        let cap = request
-            .budget
-            .max_candidates_per_lane
-            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let truncated = ranked.len().saturating_sub(cap);
         ranked.truncate(cap);
 
