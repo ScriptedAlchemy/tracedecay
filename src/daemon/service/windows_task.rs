@@ -141,16 +141,11 @@ fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Res
         Some(profile_root) => profile_root.clone(),
         None => super::tracedecay_data_dir()?,
     };
-    #[cfg(windows)]
-    let profile_root = if profile_root.is_absolute() {
-        profile_root
-    } else {
-        std::env::current_dir()?.join(profile_root)
-    };
-    let executable = xml_escape(windows_path_text(
-        &spec.tracedecay_bin,
-        "daemon executable",
-    )?);
+    let profile_root = fully_qualified_windows_path(&profile_root, "daemon profile root")?;
+    let executable_path = fully_qualified_windows_path(&spec.tracedecay_bin, "daemon executable")?;
+    let executable_text = windows_path_text(&executable_path, "daemon executable")?;
+    validate_task_command_text(executable_text)?;
+    let executable = xml_escape(executable_text);
     let arguments = xml_escape(&format!(
         "daemon run --profile-root {}",
         quote_windows_argument(windows_path_text(&profile_root, "daemon profile root")?)
@@ -206,6 +201,57 @@ fn windows_path_text<'a>(path: &'a Path, description: &str) -> Result<&'a str> {
             path.display()
         ),
     })
+}
+
+fn fully_qualified_windows_path(path: &Path, description: &str) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        if matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        ) && !path.has_root()
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler {description} path '{}' is drive-relative",
+                    path.display()
+                ),
+            });
+        }
+        let absolute = std::path::absolute(path).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "could not fully qualify Windows Task Scheduler {description} path '{}': {error}",
+                path.display()
+            ),
+        })?;
+        if !absolute.is_absolute() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler {description} path '{}' is not fully qualified",
+                    path.display()
+                ),
+            });
+        }
+        Ok(absolute)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = description;
+        Ok(path.to_path_buf())
+    }
+}
+
+fn validate_task_command_text(command: &str) -> Result<()> {
+    const TASK_COMMAND_UTF16_LIMIT: usize = 260;
+    let length = command.encode_utf16().count();
+    if length > TASK_COMMAND_UTF16_LIMIT {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "Windows Task Scheduler daemon executable exceeds the 260 UTF-16 code units allowed by task XML (got {length})"
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
@@ -1368,6 +1414,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_command_enforces_scheduler_utf16_limit() {
+        let at_limit = format!("C:\\{}", "x".repeat(257));
+        let over_limit = format!("C:\\{}", "x".repeat(258));
+
+        assert_eq!(at_limit.encode_utf16().count(), 260);
+        validate_task_command_text(&at_limit).expect("260 UTF-16 units");
+        assert!(
+            validate_task_command_text(&over_limit)
+                .expect_err("261 UTF-16 units")
+                .to_string()
+                .contains("260 UTF-16 code units")
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn relative_profile_root_is_made_absolute() {
@@ -1386,6 +1447,23 @@ mod tests {
                     .join("relative-profile")
             )
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_executable_is_made_absolute_and_drive_relative_profile_is_rejected() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let xml = render_task_xml_for(&spec("tracedecay.exe", "relative-profile"), &identity)
+            .expect("render task XML");
+        let command = xml_element_text(&xml, "Command").expect("command");
+        assert!(Path::new(command).is_absolute());
+
+        let error = render_task_xml_for(
+            &spec(r"C:\TraceDecay\tracedecay.exe", r"C:relative-profile"),
+            &identity,
+        )
+        .expect_err("drive-relative profile");
+        assert!(error.to_string().contains("drive-relative"));
     }
 
     #[test]
@@ -1511,8 +1589,7 @@ mod tests {
             FakeTaskScheduler::with_task(DaemonServiceState::RunningDisabled, "<Task>old</Task>");
         api.fail_next_run = true;
 
-        register_task_xml_with(&mut api, "<Task>new</Task>")
-            .expect_err("restart must fail");
+        register_task_xml_with(&mut api, "<Task>new</Task>").expect_err("restart must fail");
 
         assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
         assert_eq!(

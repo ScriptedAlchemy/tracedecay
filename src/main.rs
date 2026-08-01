@@ -816,7 +816,7 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
             tracedecay::daemon::run_foreground(socket_path).await?;
         }
         DaemonAction::InstallService { socket, no_start } => {
-            let tracedecay_bin = tracedecay::agents::which_tracedecay().ok_or_else(|| {
+            let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
                 tracedecay::errors::TraceDecayError::Config {
                     message: "tracedecay not found on PATH".to_string(),
                 }

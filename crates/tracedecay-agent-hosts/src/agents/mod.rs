@@ -1343,10 +1343,16 @@ pub fn doctor_check_mcp_registration(
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
 pub fn which_tracedecay() -> Option<String> {
+    which_tracedecay_path()
+        .and_then(|path| path.to_str().map(|path| normalize_path_separators(path)))
+}
+
+/// Finds the tracedecay binary without converting its platform-native path.
+pub fn which_tracedecay_path() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok();
     let path_var = std::env::var_os("PATH");
     let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
-    which_tracedecay_from(
+    which_tracedecay_path_from(
         current_exe.as_deref(),
         path_var.as_deref(),
         cargo_target_dir.as_deref(),
@@ -1358,24 +1364,42 @@ fn which_tracedecay_from(
     path_var: Option<&std::ffi::OsStr>,
     cargo_target_dir: Option<&Path>,
 ) -> Option<String> {
+    which_tracedecay_path_from(current_exe, path_var, cargo_target_dir)
+        .and_then(|path| path.to_str().map(|path| normalize_path_separators(path)))
+}
+
+fn which_tracedecay_path_from(
+    current_exe: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+    cargo_target_dir: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(exe) = current_exe
         .filter(|exe| is_tracedecay_exe(exe) && !is_cargo_target_binary(exe, cargo_target_dir))
     {
-        return Some(normalize_path_separators(&exe.to_string_lossy()));
+        return absolute_executable_path(exe);
     }
 
     let path_match = path_var.and_then(|path_var| {
         std::env::split_paths(path_var).find_map(|dir| {
             let candidate = dir.join(tracedecay_bin_name());
             (candidate.exists() && !is_cargo_target_binary(&candidate, cargo_target_dir))
-                .then(|| normalize_path_separators(&candidate.to_string_lossy()))
+                .then(|| absolute_executable_path(&candidate))
+                .flatten()
         })
     });
     path_match.or_else(|| {
         current_exe
             .filter(|exe| is_tracedecay_exe(exe))
-            .map(|exe| normalize_path_separators(&exe.to_string_lossy()))
+            .and_then(absolute_executable_path)
     })
+}
+
+fn absolute_executable_path(path: &Path) -> Option<PathBuf> {
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        std::path::absolute(path).ok()
+    }
 }
 
 fn tracedecay_bin_name() -> String {
@@ -1385,25 +1409,55 @@ fn tracedecay_bin_name() -> String {
 fn is_tracedecay_exe(path: &Path) -> bool {
     path.file_stem()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "tracedecay")
+        .is_some_and(|name| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case("tracedecay")
+            } else {
+                name == "tracedecay"
+            }
+        })
 }
 
 fn is_cargo_target_binary(path: &Path, cargo_target_dir: Option<&Path>) -> bool {
-    if cargo_target_dir.is_some_and(|target_dir| path.starts_with(target_dir)) {
+    if cargo_target_dir.is_some_and(|target_dir| path_starts_with_platform(path, target_dir)) {
         return true;
     }
 
     let mut saw_target = false;
     for component in path.components() {
         let value = component.as_os_str();
-        if saw_target && (value == "debug" || value == "release") {
+        if saw_target && (path_component_eq(value, "debug") || path_component_eq(value, "release"))
+        {
             return true;
         }
-        if value == "target" {
+        if path_component_eq(value, "target") {
             saw_target = true;
         }
     }
     false
+}
+
+fn path_starts_with_platform(path: &Path, prefix: &Path) -> bool {
+    if !cfg!(windows) {
+        return path.starts_with(prefix);
+    }
+    let mut path_components = path.components();
+    prefix.components().all(|expected| {
+        path_components
+            .next()
+            .is_some_and(|actual| path_component_eq(actual.as_os_str(), expected.as_os_str()))
+    })
+}
+
+fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::OsStr>) -> bool {
+    let expected = expected.as_ref();
+    if !cfg!(windows) {
+        return actual == expected;
+    }
+    match (actual.to_str(), expected.to_str()) {
+        (Some(actual), Some(expected)) => actual.eq_ignore_ascii_case(expected),
+        _ => actual == expected,
+    }
 }
 
 /// Replace backslashes with forward slashes so paths work in JSON/shell
@@ -3069,6 +3123,51 @@ mod safe_config_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod path_normalize_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_preserves_non_unicode_parent_components() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_parent = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(vec![b'n', b'o', b'n', 0xff]));
+        let executable = invalid_parent.join(tracedecay_bin_name());
+        std::fs::create_dir_all(&invalid_parent).unwrap();
+        std::fs::write(&executable, "").unwrap();
+        let path_var = std::env::join_paths([&invalid_parent]).unwrap();
+
+        assert_eq!(
+            which_tracedecay_path_from(None, Some(path_var.as_os_str()), None),
+            Some(executable)
+        );
+        assert!(which_tracedecay_from(None, Some(path_var.as_os_str()), None).is_none());
+    }
+
+    #[test]
+    fn path_lookup_absolutizes_relative_path_entries() {
+        let relative = Path::new("target").join(tracedecay_bin_name());
+
+        let absolute = absolute_executable_path(&relative).expect("absolute path");
+
+        assert!(absolute.is_absolute());
+        assert!(absolute.ends_with(&relative));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_classification_is_case_insensitive() {
+        assert!(is_tracedecay_exe(Path::new(r"C:\Tools\TraceDecay.EXE")));
+        assert!(is_cargo_target_binary(
+            Path::new(r"C:\Work\TARGET\DEBUG\TraceDecay.EXE"),
+            None
+        ));
+        assert!(is_cargo_target_binary(
+            Path::new(r"C:\Work\Custom\TraceDecay.EXE"),
+            Some(Path::new(r"c:\work\CUSTOM"))
+        ));
+    }
 
     #[test]
     fn normalizes_windows_backslashes() {
