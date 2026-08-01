@@ -46,9 +46,7 @@ fn session_dimension_deltas(
 }
 
 fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolResult {
-    rendered_tool_result(Some(cg.project_root()), args, output, vec![], || {
-        render::generic_md(output)
-    })
+    generic_tool_result(Some(cg.project_root()), args, output, vec![])
 }
 
 /// Handles `tracedecay_session_start` tool calls.

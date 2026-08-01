@@ -60,12 +60,11 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
             "levels": [],
             "cycles": [],
         });
-        return Ok(rendered_tool_result(
+        return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
             &result,
             vec![],
-            || render::generic_md(&result),
         ));
     }
 
@@ -362,11 +361,10 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         "cycles": cycles_json,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &result,
         touched_files,
-        || render::generic_md(&result),
     ))
 }

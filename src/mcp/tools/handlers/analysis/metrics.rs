@@ -81,12 +81,11 @@ pub(crate) async fn handle_rank(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -135,12 +134,11 @@ pub(crate) async fn handle_largest(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -190,12 +188,11 @@ pub(crate) async fn handle_coupling(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }
 
@@ -235,12 +232,11 @@ pub(crate) async fn handle_inheritance_depth(
         "ranking": items,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         touched_files,
-        || render::generic_md(&output),
     ))
 }
 
@@ -309,11 +305,10 @@ pub(crate) async fn handle_distribution(
         })
     };
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }

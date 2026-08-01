@@ -167,12 +167,11 @@ pub(crate) async fn handle_gini(
         "outliers": outliers,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }
 
@@ -214,12 +213,11 @@ pub(crate) async fn handle_dependency_depth(
         "chains": chains,
     });
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }
 
@@ -290,11 +288,10 @@ pub(crate) async fn handle_health(
         })
     };
 
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &output,
         vec![],
-        || render::generic_md(&output),
     ))
 }

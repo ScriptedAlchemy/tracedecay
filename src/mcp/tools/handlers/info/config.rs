@@ -77,12 +77,11 @@ pub(crate) fn handle_config(cg: &TraceDecay, args: &Value) -> Result<ToolResult>
         "match_count": matches.iter().filter(|m| m.get("found") != Some(&Value::Bool(false))).count(),
         "matches": matches,
     });
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         args,
         &payload,
         touched,
-        || render::generic_md(&payload),
     ))
 }
 

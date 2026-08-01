@@ -269,11 +269,10 @@ pub(crate) async fn handle_runtime(
     {
         value["semantic_runtime"] = serde_json::to_value(&semantic).unwrap_or_else(|_| json!({}));
     }
-    Ok(rendered_tool_result(
+    Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
         &value,
         vec![],
-        || render::generic_md(&value),
     ))
 }

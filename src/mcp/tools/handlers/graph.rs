@@ -119,6 +119,16 @@ where
     support::rendered_tool_result(Some(cg.project_root()), args, value, touched_files, md)
 }
 
+/// [`rendered_tool_result`] with the default [`render::generic_md`] body.
+fn generic_tool_result(
+    cg: &TraceDecay,
+    args: &Value,
+    value: &Value,
+    touched_files: Vec<String>,
+) -> ToolResult {
+    support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
+}
+
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -887,13 +897,7 @@ pub(super) async fn handle_callers(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_callees` tool calls.
@@ -965,13 +969,7 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
     );
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
@@ -1044,13 +1042,7 @@ pub(super) async fn handle_find_exact_symbol(
         "matches": items,
         "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &body,
-        touched_files,
-        || render::generic_md(&body),
-    ))
+    Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
 
 /// Handles `tracedecay_impact` tool calls.
@@ -1086,13 +1078,7 @@ pub(super) async fn handle_impact(cg: &TraceDecay, args: Value) -> Result<ToolRe
         "nodes": nodes,
     });
 
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_node` tool calls.
@@ -1157,13 +1143,7 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
                 "cost_to_expand": cost_to_expand(&n, file_size_bytes),
                 "derives": derives,
             });
-            Ok(rendered_tool_result(
-                cg,
-                &args,
-                &output,
-                touched_files,
-                || render::generic_md(&output),
-            ))
+            Ok(generic_tool_result(cg, &args, &output, touched_files))
         }
         None => Ok(text_tool_result(
             &format!("Node not found: {node_id}"),
@@ -1236,13 +1216,7 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
@@ -1423,13 +1397,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
         "text_only_matches": text_only_matches,
     });
 
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_callers_for` tool calls — bulk caller lookup over many IDs.
@@ -1495,9 +1463,7 @@ pub(super) async fn handle_callers_for(cg: &TraceDecay, args: Value) -> Result<T
         "truncated": truncated,
         "max_per_item": max_per_item,
     });
-    Ok(rendered_tool_result(cg, &args, &output, vec![], || {
-        render::generic_md(&output)
-    }))
+    Ok(generic_tool_result(cg, &args, &output, vec![]))
 }
 
 /// Handles `tracedecay_by_qualified_name` — cross-run node lookup by name.
@@ -1529,13 +1495,7 @@ pub(super) async fn handle_by_qualified_name(cg: &TraceDecay, args: Value) -> Re
         .collect();
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_signature` — signature-only lookup (no body) by
@@ -1588,13 +1548,7 @@ pub(super) async fn handle_signature(cg: &TraceDecay, args: Value) -> Result<Too
     }
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Handles `tracedecay_impls` — index of `impl Trait for Type` blocks.
@@ -1643,13 +1597,7 @@ pub(super) async fn handle_impls(cg: &TraceDecay, args: Value) -> Result<ToolRes
         "truncated": truncated,
         "impls": items,
     });
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &output,
-        touched_files,
-        || render::generic_md(&output),
-    ))
+    Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
 
 /// Handles `tracedecay_derives` — lists `#[derive(...)]` macros on a type
@@ -1708,13 +1656,7 @@ pub(super) async fn handle_derives(cg: &TraceDecay, args: Value) -> Result<ToolR
     }
 
     let value = json!(items);
-    Ok(rendered_tool_result(
-        cg,
-        &args,
-        &value,
-        touched_files,
-        || render::generic_md(&value),
-    ))
+    Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
 /// Approximate token cost of expanding a node's body and its full file.
@@ -1865,9 +1807,7 @@ pub(super) async fn handle_implementations(
         "match_count": entries.len(),
         "implementations": entries,
     });
-    Ok(rendered_tool_result(cg, &args, &payload, touched, || {
-        render::generic_md(&payload)
-    }))
+    Ok(generic_tool_result(cg, &args, &payload, touched))
 }
 
 async fn collect_method_bodies(
