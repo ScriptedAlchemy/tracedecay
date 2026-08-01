@@ -579,11 +579,13 @@ async fn sessions_ingest(
     profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Value> {
     let profile_root = profile_identity.profile_root();
+    let user_authority = crate::store::GlobalDbSessionIngestAuthority::new(registered_user_db);
+    let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(registry_db);
     let user_outcome = crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
-        registered_user_db,
-        registry_db,
+        &user_authority,
+        &registry_authority,
         profile_root,
         None,
     )
@@ -594,10 +596,12 @@ async fn sessions_ingest(
         .project_id
         .as_deref()
         .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
+    let project_authority =
+        crate::store::GlobalDbSessionIngestAuthority::new(registered_project_db);
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
-        registered_project_db,
+        &project_authority,
         cg.project_root(),
         project_id,
         None,

@@ -4,18 +4,17 @@
 //! concrete registered-database binding, authority checks, and high-level
 //! façade methods.
 
-use std::future::Future;
-
 use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::ReadSnapshot;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use crate::sessions::git_correlation::{
     AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, CommitRelationFilter,
-    CorrelationIndexHealth, GitCorrelationError, GitCorrelationWriteTxn, GitReflogSource,
-    SessionGitCorrelationHit, SessionsForQuery, SpanObservation, SpanScanTarget, TargetScan,
-    correlation_index_health, record_span_observation_in_transaction, run_backfill,
-    run_commit_attribution_sweep, run_incremental_backfill, sessions_for_with_relation,
+    CorrelationIndexHealth, GitCorrelationError, GitCorrelationSessionStore,
+    GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
+    SpanObservation, SpanScanTarget, TargetScan, correlation_index_health,
+    record_span_observation_in_transaction, run_backfill, run_commit_attribution_sweep,
+    run_incremental_backfill, sessions_for_with_relation,
 };
 
 /// Borrowed adapter over an already-open project-sessions database.
@@ -123,12 +122,23 @@ impl<'a> GlobalDbGitCorrelationStore<'a> {
     }
 }
 
-impl GitCorrelationWriteTxn for RegisteredGlobalDbWriteTransaction<'_> {
-    fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send {
-        async move {
-            RegisteredGlobalDbWriteTransaction::commit(self)
-                .await
-                .map_err(|error| GitCorrelationError::Db(error.to_string()))
-        }
+impl GitCorrelationSessionStore for GlobalDbGitCorrelationStore<'_> {
+    type WriteTxn<'txn>
+        = RegisteredGlobalDbWriteTransaction<'txn>
+    where
+        Self: 'txn;
+
+    fn require_project_sessions_authority(&self) -> Result<(), GitCorrelationError> {
+        GlobalDbGitCorrelationStore::require_project_sessions_authority(self)
+    }
+
+    async fn read_snapshot(&self) -> Result<ReadSnapshot, GitCorrelationError> {
+        GlobalDbGitCorrelationStore::read_snapshot(self).await
+    }
+
+    async fn open_write_transaction(
+        &self,
+    ) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
+        GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
 }

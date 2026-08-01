@@ -34,7 +34,7 @@ impl BrokerStreamTransport {
         }
     }
 
-    fn push_replay(&mut self, line: String) -> std::io::Result<()> {
+    pub(super) fn push_replay(&mut self, line: String) -> std::io::Result<()> {
         if line.len() > crate::application::host_admission::MAX_MCP_JSONRPC_FRAME_BYTES {
             let prefix = line.as_bytes()[..line
                 .len()
@@ -48,7 +48,7 @@ impl BrokerStreamTransport {
         Ok(())
     }
 
-    fn with_project_response_lifecycle(
+    pub(super) fn with_project_response_lifecycle(
         mut self,
         lifecycle: crate::mcp::server::ProjectServerResponseLifecycle,
     ) -> Self {

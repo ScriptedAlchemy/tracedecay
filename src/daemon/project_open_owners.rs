@@ -88,7 +88,7 @@ use crate::application::feedback::{
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
 };
-use crate::application::lsp_runtime::{DaemonLspSessionFactory, graph_semantic_capabilities};
+use crate::application::lsp_runtime::DaemonLspSessionFactory;
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
     admitted_root_uri_for_project, locator_digest_for_project,
@@ -101,6 +101,7 @@ use crate::daemon::service::invocation::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use crate::graph_semantic_capabilities;
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -1095,7 +1096,7 @@ pub(super) async fn register_project_open_production_owners(
         })?;
     let primitive_runtime = open_pr12_production_primitive_runtime(
         database.clone(),
-        Arc::clone(&graph),
+        graph.clone(),
         Arc::clone(&session_db),
         project_root.to_path_buf(),
         Arc::new(invocation.code_index_schedulers.clone()),
@@ -1497,7 +1498,7 @@ async fn register_production_feedback_cycle(
         message: format!("project-open feedback policy digest failed: {error}"),
     })?;
     let runtime_state = Arc::new(ProductionFeedbackRuntimeStateV1::new(
-        Arc::clone(&graph),
+        graph.clone(),
         configuration_digest.clone(),
         policy_digest,
     ));
@@ -1517,7 +1518,7 @@ async fn register_production_feedback_cycle(
         },
         requester,
         authorization,
-        graph: Arc::clone(&graph),
+        graph: graph.clone(),
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -1688,7 +1689,7 @@ async fn register_production_advisory_owner(
     ) as _;
     let ci_code_anchors = Arc::new(
         ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
-            Arc::clone(&graph),
+            graph.clone(),
             feedback_scope.clone(),
             Arc::new(invocation.code_index_schedulers.clone()),
         )

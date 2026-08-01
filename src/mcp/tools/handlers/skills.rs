@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use tracedecay_agent_hosts::ports::session_store::AutomationSessionStore;
 
 use crate::automation::hermes_skill_bridge::{
     HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
@@ -262,7 +263,7 @@ async fn sync_project_skill_analytics(
     ingest_project_analytics_events(
         profile_root,
         cg.project_root(),
-        analytics_db,
+        analytics_db.map(|database| database as &dyn AutomationSessionStore),
         SKILL_ANALYTICS_IMPORT_LIMIT,
     )
     .await

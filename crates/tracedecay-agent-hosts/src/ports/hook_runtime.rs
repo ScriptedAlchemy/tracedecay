@@ -31,7 +31,8 @@ pub type DaemonToolInvoker = for<'a> fn(
     Option<&'a Path>,
     &'a str,
     Value,
-) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+)
+    -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
 /// Reports whether memory injection is enabled for the active profile.
 pub type MemoryInjectionGate = fn() -> bool;

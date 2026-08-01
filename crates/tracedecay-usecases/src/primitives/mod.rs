@@ -16,9 +16,9 @@ pub use grep_analysis::{
     TraceDecayComplexityAuthorityV1, TraceDecayDependencyDepthAuthorityV1,
     production_grep_analysis_operations,
 };
-pub(crate) use production::open_pr12_production_primitive_runtime;
 pub use production::{
     TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
+    open_pr12_production_primitive_runtime,
 };
 pub use runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,

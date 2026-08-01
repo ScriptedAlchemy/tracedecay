@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 // Only the authority-gate fixtures below reach these; the production paths lost
@@ -556,6 +557,109 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
 
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriteTransaction::execute_batch(self, sql).await
+    }
+}
+
+impl tracedecay_sessions::runtime::store_port::SessionWriteTxn
+    for RegisteredGlobalDbWriteTransaction<'_>
+{
+    fn commit(
+        self,
+    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
+        async move {
+            RegisteredGlobalDbWriteTransaction::commit(self)
+                .await
+                .map_err(|error| {
+                    registered_error("commit registered session transaction", error)
+                })
+        }
+    }
+
+    fn rollback(
+        self,
+    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
+        async move {
+            RegisteredGlobalDbWriteTransaction::rollback(self)
+                .await
+                .map_err(|error| {
+                    registered_error("roll back registered session transaction", error)
+                })
+        }
+    }
+}
+
+impl tracedecay_sessions::runtime::store_port::SessionStoreAuthority for RegisteredGlobalDb {
+    type WriteTxn<'txn>
+        = RegisteredGlobalDbWriteTransaction<'txn>
+    where
+        Self: 'txn;
+
+    fn shard_id(&self) -> &tracedecay_store::StoreShardIdV1 {
+        &self.binding().shard_id
+    }
+
+    fn db_path(&self) -> &Path {
+        RegisteredGlobalDb::db_path(self)
+    }
+
+    fn read_snapshot(
+        &self,
+    ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<ReadSnapshot>> + Send {
+        async move {
+            RegisteredGlobalDb::read_snapshot(self)
+                .await
+                .map_err(|error| {
+                    registered_error("open registered session read snapshot", error)
+                })
+        }
+    }
+
+    fn begin_write_transaction(
+        &self,
+    ) -> impl Future<
+        Output = tracedecay_runtime_core::errors::Result<Self::WriteTxn<'_>>,
+    > + Send {
+        RegisteredGlobalDb::begin_write_transaction(self)
+    }
+}
+
+impl tracedecay_sessions::runtime::git_correlation::GitCorrelationWriteTxn
+    for RegisteredGlobalDbWriteTransaction<'_>
+{
+    fn commit(
+        self,
+    ) -> impl Future<
+        Output = Result<(), tracedecay_sessions::runtime::git_correlation::GitCorrelationError>,
+    > + Send {
+        async move {
+            RegisteredGlobalDbWriteTransaction::commit(self)
+                .await
+                .map_err(|error| {
+                    tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                        error.to_string(),
+                    )
+                })
+        }
+    }
+}
+
+impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
+    for RegisteredGlobalDbWriteTransaction<'_>
+{
+    fn commit(
+        self,
+    ) -> impl Future<
+        Output = Result<(), tracedecay_sessions::runtime::workflow_index::WorkflowIndexError>,
+    > + Send {
+        async move {
+            RegisteredGlobalDbWriteTransaction::commit(self)
+                .await
+                .map_err(|error| {
+                    tracedecay_sessions::runtime::workflow_index::WorkflowIndexError::Db(
+                        error.to_string(),
+                    )
+                })
+        }
     }
 }
 

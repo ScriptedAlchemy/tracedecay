@@ -15,13 +15,13 @@ use super::{
     SemanticAcceptedProfileAuthorityPortV1, SemanticActivationCoordinationErrorV1,
     SemanticRuntimeFuture,
 };
-use crate::configuration::{
-    ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    DirectConfigurationMutation, ProjectConfigurationRuntime,
-};
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
     RetrievalProfileCasV1, RetrievalRuntimeCompatibilityV1,
+};
+use crate::configuration::{
+    ConfigurationCurrentStateV1, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
+    DirectConfigurationMutation, ProjectConfigurationRuntime,
 };
 use tracedecay_search_eval::{
     DirectActivationEvaluationV1, DirectEvaluatedProfileMaterialV1, DirectEvaluationReportV1,
@@ -80,7 +80,7 @@ pub struct SemanticEvaluationProfileCandidateV1 {
 
 /// Exact mounted authority observed on both sides of a direct evaluation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SemanticEvaluationPublicationSnapshotV1 {
+pub struct SemanticEvaluationPublicationSnapshotV1 {
     pub project_root: PathBuf,
     pub scope: ResolvedScope,
     pub code_generation: CodeGenerationId,
@@ -92,7 +92,7 @@ pub(crate) struct SemanticEvaluationPublicationSnapshotV1 {
     pub runtime: RetrievalRuntimeCompatibilityV1,
 }
 
-pub(crate) trait SemanticEvaluationPublicationSnapshotPortV1: Send + Sync {
+pub trait SemanticEvaluationPublicationSnapshotPortV1: Send + Sync {
     fn current(
         &self,
     ) -> SemanticRuntimeFuture<
@@ -121,7 +121,7 @@ pub(crate) trait SemanticEvaluationPublicationSnapshotPortV1: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SemanticEvaluatedProfilePublicationV1 {
+pub struct SemanticEvaluatedProfilePublicationV1 {
     pub report: DirectEvaluationReportV1,
     pub accepted_profile: AcceptedRetrievalProfileV1,
     pub snapshot: SemanticEvaluationPublicationSnapshotV1,
@@ -130,7 +130,7 @@ pub(crate) struct SemanticEvaluatedProfilePublicationV1 {
 /// Closed durable effect supplied to the snapshot authority after the genuine
 /// evaluator has produced a PASS. Runtime and freshness bindings are taken
 /// only from the snapshot protected by the authority's CAS/guard.
-pub(crate) struct SemanticEvaluationAuthorityPublicationV1 {
+pub struct SemanticEvaluationAuthorityPublicationV1 {
     configuration: Arc<ProjectConfigurationRuntime>,
     accepted_profiles: Arc<RegisteredSemanticAcceptedProfileAuthorityV1>,
     report: DirectEvaluationReportV1,
@@ -138,7 +138,7 @@ pub(crate) struct SemanticEvaluationAuthorityPublicationV1 {
 }
 
 impl SemanticEvaluationAuthorityPublicationV1 {
-    pub(crate) async fn commit(
+    pub async fn commit(
         self,
         expected: &SemanticEvaluationPublicationSnapshotV1,
     ) -> Result<(), SemanticActivationCoordinationErrorV1> {
@@ -179,7 +179,7 @@ impl SemanticEvaluationAuthorityPublicationV1 {
 /// semantic-profile transition. Profile/evaluation/runtime values are resolved
 /// from durable accepted authority by immutable digest; transport callers
 /// cannot submit a `pass` label or executable profile directly.
-pub(crate) struct ProductionSemanticConfigurationOperationV1 {
+pub struct ProductionSemanticConfigurationOperationV1 {
     configuration: Arc<ProjectConfigurationRuntime>,
     accepted_profiles: Arc<RegisteredSemanticAcceptedProfileAuthorityV1>,
 }
@@ -198,7 +198,7 @@ impl ProductionSemanticConfigurationOperationV1 {
     /// Run the genuine checked-in direct evaluator and publish only when the
     /// exact mounted scope, source generation, snapshot, and runtime remain
     /// unchanged through evaluation.
-    pub(crate) async fn evaluate_and_publish_profile(
+    pub async fn evaluate_and_publish_profile(
         &self,
         snapshot_authority: &dyn SemanticEvaluationPublicationSnapshotPortV1,
         repo_root: &Path,
@@ -281,7 +281,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
-    pub(crate) async fn activate(
+    pub async fn activate(
         &self,
         request: SemanticProtectedActivationOperationV1,
     ) -> Result<SemanticAppliedActivationV1, SemanticActivationCoordinationErrorV1> {
@@ -393,7 +393,7 @@ impl ProductionSemanticConfigurationOperationV1 {
         })
     }
 
-    pub(crate) async fn rollback(
+    pub async fn rollback(
         &self,
         request: SemanticProtectedRollbackOperationV1,
     ) -> Result<SemanticAppliedRollbackV1, SemanticActivationCoordinationErrorV1> {
@@ -558,25 +558,25 @@ fn validate_evaluation_snapshot(
     Ok(())
 }
 
-pub(crate) struct SemanticProtectedActivationOperationV1 {
+pub struct SemanticProtectedActivationOperationV1 {
     pub authority: ConfigurationMutationAuthority,
     pub selected_profile: crate::config::SemanticProfileSelection,
     pub central_mutation: DirectConfigurationMutation,
     pub now: UtcMicros,
 }
 
-pub(crate) struct SemanticProtectedRollbackOperationV1 {
+pub struct SemanticProtectedRollbackOperationV1 {
     pub authority: ConfigurationMutationAuthority,
     pub central_mutation: DirectConfigurationMutation,
     pub trigger: String,
     pub now: UtcMicros,
 }
 
-pub(crate) struct SemanticAppliedActivationV1 {
+pub struct SemanticAppliedActivationV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
 }
 
-pub(crate) struct SemanticAppliedRollbackV1 {
+pub struct SemanticAppliedRollbackV1 {
     pub configuration_receipt: ConfigurationMutationReceipt,
 }
 

@@ -7,22 +7,20 @@ use tracedecay_domain::configuration::SourceKindV1;
 use tracedecay_domain::{LocatorDigest, canonical_sha256};
 
 use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
-use crate::advisory::ci_runtime::{
-    CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1,
-};
+use crate::advisory::ci_runtime::{CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1};
 use crate::configuration::ConfigurationControlStore;
 use crate::source_authorization::{
     ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
 };
 
-pub(crate) struct ConfiguredGitHubSourceAccessAuthorityV1<C> {
+pub struct ConfiguredGitHubSourceAccessAuthorityV1<C> {
     configuration: C,
     scope: ResolvedScope,
     expected_locator: LocatorDigest,
 }
 
 impl<C> ConfiguredGitHubSourceAccessAuthorityV1<C> {
-    pub(crate) fn new(
+    pub fn new(
         configuration: C,
         scope: ResolvedScope,
         repository_owner: &str,

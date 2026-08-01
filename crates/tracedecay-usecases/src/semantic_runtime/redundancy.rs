@@ -8,10 +8,10 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, EmbeddingMetricV1, ManifestDigest, canonical_sha256,
 };
 
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use crate::config::retrieval::SemanticCompatibilityPinsV1;
-use tracedecay_runtime_core::db::Database;
 use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_runtime_core::db::Database;
 
 use super::{CommittedRetrievalProfileStateV1, project_semantic_generation_pointer};
 
@@ -19,14 +19,14 @@ const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
 const MAX_COSINE_DISTANCE_MICROS: i64 = 2_000_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SemanticRedundancyVectorV1 {
+pub struct SemanticRedundancyVectorV1 {
     pub file_path: String,
     pub qualified_name: String,
     pub values: Vec<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SemanticRedundancyGenerationV1 {
+pub struct SemanticRedundancyGenerationV1 {
     pub vector_generation: String,
     pub source_generation: String,
     pub projection_key: String,
@@ -35,7 +35,7 @@ pub(crate) struct SemanticRedundancyGenerationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SemanticRedundancyProfileV1 {
+pub struct SemanticRedundancyProfileV1 {
     pub scope_digest: String,
     pub accepted_profile_digest: String,
     pub calibration_profile_id: String,
@@ -53,7 +53,7 @@ impl SemanticRedundancyProfileV1 {
         (scaled >= 0.0 && scaled <= MAX_COSINE_DISTANCE_MICROS as f64).then_some(scaled as i64)
     }
 
-    pub(crate) fn accepts(&self, cosine: f64) -> Option<i64> {
+    pub fn accepts(&self, cosine: f64) -> Option<i64> {
         let distance = self.distance_micros(cosine)?;
         (distance <= self.maximum_distance_micros).then_some(distance)
     }
@@ -112,7 +112,7 @@ pub(crate) fn register_project_semantic_redundancy_generation(
     project.generations.insert(incoming, generation);
 }
 
-pub(crate) fn register_project_semantic_redundancy_authority(
+pub fn register_project_semantic_redundancy_authority(
     project_root: PathBuf,
     committed: &CommittedRetrievalProfileStateV1,
 ) -> bool {
@@ -130,7 +130,7 @@ pub(crate) fn register_project_semantic_redundancy_authority(
     true
 }
 
-pub(crate) fn unregister_project_semantic_redundancy_authority(project_root: &Path) {
+pub fn unregister_project_semantic_redundancy_authority(project_root: &Path) {
     retained_authorities()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -147,7 +147,7 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
 
 /// Read only a complete active cosine generation whose source identity equals
 /// the semantic runtime's atomically current pointer.
-pub(crate) async fn project_semantic_redundancy_generation(
+pub async fn project_semantic_redundancy_generation(
     project_root: &Path,
     database: &Database,
 ) -> Option<SemanticRedundancyGenerationV1> {

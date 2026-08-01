@@ -20,15 +20,15 @@ const MAX_GITHUB_DISCOVERY_RESPONSE_BYTES_V1: usize = 1024 * 1024;
 /// prose or the caller's current branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubExactCommitPullRequestV1 {
-    pub(crate) target: GitHubRepositoryTargetV1,
-    pub(crate) base_commit_id: CommitId,
-    pub(crate) head_commit_id: CommitId,
+    pub target: GitHubRepositoryTargetV1,
+    pub base_commit_id: CommitId,
+    pub head_commit_id: CommitId,
 }
 
 /// Closed read-side discovery states. This type cannot represent a GitHub
 /// mutation, token, arbitrary method, or caller-supplied continuation URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GitHubExactCommitDiscoveryOutcomeV1 {
+pub enum GitHubExactCommitDiscoveryOutcomeV1 {
     Found(GitHubExactCommitPullRequestV1),
     NotFound,
     Ambiguous,
@@ -65,7 +65,7 @@ struct AssociatedRepositoryV1 {
 /// GitHub's commit-associated pull-request endpoint. Anonymous acquisition is
 /// used only for repositories this request proves publicly readable; private
 /// acquisition requires a registered verified read credential.
-pub(crate) fn discover_exact_commit_pull_request_v1(
+pub fn discover_exact_commit_pull_request_v1(
     owner: &str,
     repository: &str,
     head_commit: &CommitId,

@@ -1718,7 +1718,8 @@ async fn ingest_transcript(
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let session_id = required_str(args, "session_id")?.to_string();
             required_user_db(session_authorities)?;
-            let roots = crate::sessions::registered_project_roots_from(global_db)
+            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             let stats = crate::sessions::claude_observation::ingest_user_sessions_with_admission(
@@ -1743,7 +1744,8 @@ async fn ingest_transcript(
                 profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let session_id = required_str(args, "session_id")?.to_string();
-            let roots = crate::sessions::registered_project_roots_from(global_db)
+            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             crate::sessions::try_ingest_user_codex_sessions_with_db_and_admission(
@@ -1760,7 +1762,8 @@ async fn ingest_transcript(
             profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let event_json = required_str(args, "event_json")?;
-            let roots = crate::sessions::registered_project_roots_from(global_db)
+            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             crate::sessions::cursor::try_ingest_cursor_user_transcript_event_capped_with_admission(
@@ -1813,7 +1816,8 @@ async fn ingest_transcript(
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let source = crate::sessions::kiro::KiroSource::new()
                 .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
-            let roots = crate::sessions::registered_project_roots_from(global_db)
+            let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(global_db);
+            let roots = crate::sessions::registered_project_roots_from(&registry_authority)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             let source = source.for_user_scope(roots);

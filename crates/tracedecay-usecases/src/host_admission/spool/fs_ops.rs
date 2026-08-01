@@ -34,8 +34,12 @@ fn replace_file_atomically(
     destination: &Path,
     label: &str,
 ) -> Result<(), SpoolError> {
-    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(temporary, destination, label)
-        .map_err(|_| SpoolError::Io)
+    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
+        temporary,
+        destination,
+        label,
+    )
+    .map_err(|_| SpoolError::Io)
 }
 
 pub(crate) fn truncate_file(path: &Path, len: u64) -> Result<(), SpoolError> {

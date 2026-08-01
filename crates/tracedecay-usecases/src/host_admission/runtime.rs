@@ -18,13 +18,13 @@ use super::HostAdmissionStatus;
 pub(crate) const DEFAULT_MAX_REPLAY_RECORDS_PER_PASS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DurableHostAdmission {
-    pub(crate) seq: u64,
-    pub(crate) outcome: HostAdmissionOutcome,
+pub struct DurableHostAdmission {
+    pub seq: u64,
+    pub outcome: HostAdmissionOutcome,
 }
 
 #[derive(Debug)]
-pub(crate) struct HostAdmissionRuntime {
+pub struct HostAdmissionRuntime {
     spool: HostAdmissionSpool,
     scheduler: FairSourceScheduler,
     queued: BTreeSet<u64>,
@@ -345,7 +345,7 @@ impl HostAdmissionRuntime {
         self.spool.pending_count()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(super) fn quarantine_count(&self) -> usize {
         self.spool.quarantine_count()
     }

@@ -20,9 +20,7 @@ use tracedecay_store::{
     build_scope_resolution_authorization_v1,
 };
 
-use crate::anchor_resolution::{
-    EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
-};
+use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
 use crate::memory::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
@@ -43,24 +41,24 @@ mod schedule;
 mod spool;
 mod wire;
 
-pub use disposition::HostAdmissionStatus;
-pub(crate) use disposition::{
-    HostAdmissionDispositionClass, HostAdmissionTelemetryDisposition, is_bounded_reason_code,
+pub(crate) use disposition::is_bounded_reason_code;
+pub use disposition::{
+    HostAdmissionDispositionClass, HostAdmissionStatus, HostAdmissionTelemetryDisposition,
 };
-pub(crate) use durability::{DirectorySyncPolicy, sync_directory};
-pub(crate) use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
+pub use durability::{DirectorySyncPolicy, sync_directory};
+pub use replay::{ReplayPassDecision, classify_replay_pass, replay_backoff};
 
-pub(crate) use runtime::HostAdmissionRuntime;
+pub use runtime::{DurableHostAdmission, HostAdmissionRuntime};
 pub type SharedHostAdmissionBroker = Arc<HostAdmissionBroker>;
 
-pub(crate) struct HostAdmissionBroker {
+pub struct HostAdmissionBroker {
     runtime: Arc<Mutex<HostAdmissionRuntime>>,
     replay: tokio::sync::Mutex<()>,
     /// Coalesced wake for daemon-owned profile/project replay workers.
     replay_wake: tokio::sync::Notify,
 }
 
-pub(crate) struct HostAdmissionReplay<'a> {
+pub struct HostAdmissionReplay<'a> {
     broker: &'a HostAdmissionBroker,
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
@@ -94,11 +92,11 @@ impl HostAdmissionBroker {
         })
     }
 
-    pub(crate) async fn admit(
+    pub async fn admit(
         &self,
         source: &str,
         payload: &[u8],
-    ) -> Result<runtime::DurableHostAdmission, HostAdmissionOutcome> {
+    ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
         let source = source.to_owned();
         let payload = payload.to_vec();
         let admitted = self
@@ -109,30 +107,28 @@ impl HostAdmissionBroker {
     }
 
     /// Wake any coalesced replay worker without holding client permits.
-    pub(crate) fn request_replay(&self) {
+    pub fn request_replay(&self) {
         // notify_one retains one permit when the worker has not subscribed yet,
         // closing the broker-creation/admission lost-wake window.
         self.replay_wake.notify_one();
     }
 
-    pub(crate) async fn wait_for_replay_request(&self) {
+    pub async fn wait_for_replay_request(&self) {
         self.replay_wake.notified().await;
     }
 
-    pub(crate) async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
+    pub async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
         self.with_runtime(|runtime| Ok(runtime.pending_count()))
             .await
     }
 
-    pub(crate) async fn has_pending_replay(&self) -> bool {
+    pub async fn has_pending_replay(&self) -> bool {
         self.pending_replay_count()
             .await
             .is_ok_and(|count| count > 0)
     }
 
-    pub(crate) async fn begin_replay(
-        &self,
-    ) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
+    pub async fn begin_replay(&self) -> Result<HostAdmissionReplay<'_>, HostAdmissionOutcome> {
         let guard = self.replay.lock().await;
         self.with_runtime(HostAdmissionRuntime::recover_leases)
             .await?;
@@ -142,13 +138,13 @@ impl HostAdmissionBroker {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn pending_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn pending_count(&self) -> usize {
         self.pending_replay_count().await.unwrap_or_default()
     }
 
-    #[cfg(test)]
-    pub(crate) async fn quarantine_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn quarantine_count(&self) -> usize {
         self.with_runtime(|runtime| Ok(runtime.quarantine_count()))
             .await
             .unwrap_or_default()
@@ -156,25 +152,25 @@ impl HostAdmissionBroker {
 }
 
 impl HostAdmissionReplay<'_> {
-    pub(crate) async fn lease_next(&self) -> Result<Option<SpoolRecord>, HostAdmissionOutcome> {
+    pub async fn lease_next(&self) -> Result<Option<SpoolRecord>, HostAdmissionOutcome> {
         self.broker
             .with_runtime(HostAdmissionRuntime::try_lease_next)
             .await
     }
 
-    pub(crate) async fn defer(&self, seq: u64) -> Result<(), HostAdmissionOutcome> {
+    pub async fn defer(&self, seq: u64) -> Result<(), HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.defer(seq))
             .await
     }
 
-    pub(crate) async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
+    pub async fn commit(&self, seq: u64) -> Result<usize, HostAdmissionOutcome> {
         self.broker
             .with_runtime(move |runtime| runtime.commit(seq))
             .await
     }
 
-    pub(crate) async fn quarantine(
+    pub async fn quarantine(
         &self,
         seq: u64,
         reason: TerminalReason,
@@ -189,17 +185,18 @@ pub(crate) use schedule::{FairEnqueueOutcome, FairScheduleBounds, FairSourceSche
 #[allow(unused_imports)]
 pub(crate) use spool::{
     DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SOURCE_BYTES,
-    DEFAULT_MAX_SPOOL_BYTES, HostAdmissionSpool, SpoolBounds, SpoolError, SpoolIntegrity,
-    SpoolOpenReport, SpoolOverflowDisposition, SpoolRecord, TerminalReason,
+    DEFAULT_MAX_SPOOL_BYTES, HostAdmissionSpool, SpoolError, SpoolIntegrity,
+    SpoolOverflowDisposition,
 };
-pub(crate) use wire::{
+pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
+pub use wire::{
     MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
     WIRE_RECORD_TOO_LARGE, WireReadOutcome, is_wire_oversized_io_error, read_bounded_mcp_line,
     read_bounded_to_string, wire_oversized_inspect_prefix, wire_oversized_io_error,
     wire_oversized_io_error_with_prefix,
 };
-#[cfg(test)]
-pub(crate) use wire::{line_outcome_to_io, read_bounded_line};
+#[cfg(any(test, feature = "test-transport"))]
+pub use wire::{line_outcome_to_io, read_bounded_line};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct HostAdmissionOutcome {
@@ -239,15 +236,15 @@ impl HostAdmissionOutcome {
         Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
     }
 
-    pub(crate) const fn retained_backpressured(reason_code: &'static str) -> Self {
+    pub const fn retained_backpressured(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Backpressured, true, Some(reason_code))
     }
 
-    pub(crate) const fn retained_unavailable(reason_code: &'static str) -> Self {
+    pub const fn retained_unavailable(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Unavailable, true, Some(reason_code))
     }
 
-    pub(crate) const fn degraded(reason_code: &'static str) -> Self {
+    pub const fn degraded(reason_code: &'static str) -> Self {
         Self::new(HostAdmissionStatus::Degraded, false, Some(reason_code))
     }
 
@@ -281,7 +278,7 @@ impl HostAdmissionOutcome {
     /// bound ([`wire::MAX_WIRE_MESSAGE_BYTES`] or
     /// [`wire::MAX_MCP_JSONRPC_FRAME_BYTES`]) before durable retention.
     /// Non-retryable; full payload is not retained.
-    pub(crate) const fn wire_record_too_large() -> Self {
+    pub const fn wire_record_too_large() -> Self {
         Self::new(
             HostAdmissionStatus::Degraded,
             false,
@@ -313,11 +310,11 @@ impl HostAdmissionOutcome {
         )
     }
 
-    pub(crate) const fn durable_payload_unsupported_version() -> Self {
+    pub const fn durable_payload_unsupported_version() -> Self {
         Self::retained_unavailable("host_event_payload_unsupported_version")
     }
 
-    pub(crate) const fn durable_payload_malformed() -> Self {
+    pub const fn durable_payload_malformed() -> Self {
         Self::new(
             HostAdmissionStatus::Unavailable,
             false,
@@ -341,7 +338,7 @@ impl HostAdmissionOutcome {
         )
     }
 
-    pub(crate) const fn quarantine_full() -> Self {
+    pub const fn quarantine_full() -> Self {
         Self::new(
             HostAdmissionStatus::Backpressured,
             true,
@@ -407,7 +404,7 @@ pub struct HostAdmissionAuthorities<'a> {
 }
 
 impl<'a> HostAdmissionAuthorities<'a> {
-    pub(crate) fn registered_for_project(
+    pub fn registered_for_project(
         brain_id: BrainId,
         profile_id: UserProfileId,
         project_id: ProjectId,
@@ -438,7 +435,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn for_project(
+    pub fn for_project(
         brain_id: BrainId,
         profile_id: UserProfileId,
         project_id: ProjectId,
@@ -447,7 +444,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
         Self::registered_for_project(brain_id, profile_id, project_id, registered)
     }
 
-    pub(crate) fn for_profile(
+    pub fn for_profile(
         brain_id: BrainId,
         profile_id: UserProfileId,
         registered: &'a RegisteredGlobalDb,
@@ -477,7 +474,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn unavailable_for_project(
+    pub fn unavailable_for_project(
         brain_id: BrainId,
         profile_id: UserProfileId,
         project_id: ProjectId,
@@ -492,7 +489,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
         }
     }
 
-    pub(crate) fn unavailable_for_profile(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+    pub fn unavailable_for_profile(brain_id: BrainId, profile_id: UserProfileId) -> Self {
         Self {
             project_id: None,
             project_registered: None,
@@ -534,7 +531,7 @@ impl<'a> HostAdmissionAuthorities<'a> {
     }
 
     #[must_use]
-    pub(crate) fn with_repository_provenance(
+    pub fn with_repository_provenance(
         mut self,
         repository_provenance: RepositoryProvenanceAdmissionContext,
     ) -> Self {
@@ -686,6 +683,161 @@ impl TranscriptCursorAdmissionPort for HostAdmissionFacade<'_> {
     }
 }
 
+impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
+    fn capture_observation<'a>(
+        &'a self,
+        request: CaptureObservationRequest,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CaptureObservationOutcome> {
+        Box::pin(async move {
+            HostAdmissionFacade::capture_observation(self, request)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn advance_non_durable_source_cursor<'a>(
+        &'a self,
+        advance: ObservationCursorAdvance,
+        cancellation: ObservationCancellation,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CursorAdvanceOutcome> {
+        Box::pin(async move {
+            HostAdmissionFacade::advance_non_durable_source_cursor(self, advance, cancellation)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn get_source_cursor<'a>(
+        &'a self,
+        source: &'a ObservationSourceIdentityV1,
+        scope: &'a ObservationScopeV1,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<
+        'a,
+        Option<ObservationSourceCursorV1>,
+    > {
+        Box::pin(async move {
+            HostAdmissionFacade::get_source_cursor(self, source, scope)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn drain_projection_queue<'a>(
+        &'a self,
+        provider: &'a str,
+        scope: &'a ObservationScopeV1,
+        cancellation: &'a ObservationCancellation,
+        max: usize,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<
+        'a,
+        tracedecay_sessions::admission::HostProjectionDrainOutcome,
+    > {
+        Box::pin(async move {
+            HostAdmissionFacade::drain_projection_queue(
+                self,
+                provider,
+                scope,
+                cancellation,
+                max,
+            )
+            .await
+            .map(canonical_projection_drain_outcome)
+            .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn has_session_message<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_id: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
+        Box::pin(async move {
+            HostAdmissionFacade::has_session_message(self, scope, provider, message_id)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn get_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ParseOffset>> {
+        Box::pin(async move {
+            HostAdmissionFacade::get_parse_offset(self, scope, path)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn advance_parse_offset<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        path: &'a str,
+        offset: ParseOffset,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
+        Box::pin(async move {
+            HostAdmissionFacade::advance_parse_offset(self, scope, path, offset)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+}
+
+const fn canonical_admission_status(
+    status: HostAdmissionStatus,
+) -> tracedecay_sessions::admission::HostAdmissionStatus {
+    match status {
+        HostAdmissionStatus::Supported => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Supported
+        }
+        HostAdmissionStatus::Degraded => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Degraded
+        }
+        HostAdmissionStatus::Unavailable => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Unavailable
+        }
+        HostAdmissionStatus::Unknown => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Unknown
+        }
+        HostAdmissionStatus::Backpressured => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Backpressured
+        }
+        HostAdmissionStatus::AcceptedForReplay => {
+            tracedecay_sessions::admission::HostAdmissionStatus::AcceptedForReplay
+        }
+        HostAdmissionStatus::Committed => {
+            tracedecay_sessions::admission::HostAdmissionStatus::Committed
+        }
+        HostAdmissionStatus::ExactDuplicate => {
+            tracedecay_sessions::admission::HostAdmissionStatus::ExactDuplicate
+        }
+    }
+}
+
+const fn canonical_admission_outcome(
+    outcome: HostAdmissionOutcome,
+) -> tracedecay_sessions::admission::HostAdmissionOutcome {
+    tracedecay_sessions::admission::HostAdmissionOutcome {
+        status: canonical_admission_status(outcome.status),
+        retryable: outcome.retryable,
+        reason_code: outcome.reason_code,
+    }
+}
+
+fn canonical_projection_drain_outcome(
+    outcome: HostProjectionDrainOutcome,
+) -> tracedecay_sessions::admission::HostProjectionDrainOutcome {
+    tracedecay_sessions::admission::HostProjectionDrainOutcome {
+        projected: outcome.projected,
+        projected_outputs: outcome.projected_outputs,
+        skipped: outcome.skipped,
+        exact_duplicates: outcome.exact_duplicates,
+        session_ids: outcome.session_ids,
+    }
+}
+
 impl<'a> HostAdmissionFacade<'a> {
     pub const fn new(authorities: HostAdmissionAuthorities<'a>) -> Self {
         Self { authorities }
@@ -721,8 +873,8 @@ impl<'a> HostAdmissionFacade<'a> {
             database.runtime().clone(),
             database.authority().clone(),
         )?
-            .resolve_anchor(context, owner, anchor_id)
-            .await
+        .resolve_anchor(context, owner, anchor_id)
+        .await
     }
 
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
@@ -846,16 +998,16 @@ impl<'a> HostAdmissionFacade<'a> {
                 database.runtime().clone(),
                 database.authority().clone(),
             )
-                .map_err(|error| {
-                    tracing::warn!(%error, "registered external-source adapter is unavailable");
-                    HostAdmissionOutcome::registered_authority_unavailable()
-                })?
-                .capture_host_observation(outcome.receipt())
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "registered external-source commit failed");
-                    HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
-                })?;
+            .map_err(|error| {
+                tracing::warn!(%error, "registered external-source adapter is unavailable");
+                HostAdmissionOutcome::registered_authority_unavailable()
+            })?
+            .capture_host_observation(outcome.receipt())
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "registered external-source commit failed");
+                HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+            })?;
         }
         Ok(outcome)
     }
@@ -1115,7 +1267,9 @@ pub struct HostAdmissionTestRuntimeV1 {
 pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
 #[cfg(any(test, feature = "test-transport"))]
-fn canonical_session_domain_sha256(path: &Path) -> tracedecay_runtime_core::errors::Result<[u8; 32]> {
+fn canonical_session_domain_sha256(
+    path: &Path,
+) -> tracedecay_runtime_core::errors::Result<[u8; 32]> {
     let connection = RusqliteConnection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| session_domain_digest_error("open session database", error))?;
     let mut table_statement = connection
@@ -1224,7 +1378,9 @@ impl ProjectScopedTestRuntimeV1 {
     /// Checked promotion for runtimes whose scope is not known statically,
     /// such as one recovered from an already-open graph.
     #[doc(hidden)]
-    pub fn new(runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>) -> tracedecay_runtime_core::errors::Result<Self> {
+    pub fn new(
+        runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         let runtime = runtime.into();
         if runtime.project_id.is_none() || runtime.project_registered.is_none() {
             return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
@@ -1334,7 +1490,9 @@ impl HostAdmissionTestRuntimeV1 {
         RegisteredGlobalDb::canonical_project_key(project_path)
     }
 
-    pub async fn profile(profile_root: impl AsRef<Path>) -> tracedecay_runtime_core::errors::Result<Self> {
+    pub async fn profile(
+        profile_root: impl AsRef<Path>,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         Self::open(profile_root.as_ref().to_path_buf(), None).await
     }
 
@@ -1421,13 +1579,12 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "project graph initialization requires project-scoped test authority"
-                        .to_owned(),
-                })?;
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "project graph initialization requires project-scoped test authority"
+                    .to_owned(),
+            }
+        })?;
         let project_database = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "project graph initialization requires a registered project session"
@@ -1484,13 +1641,15 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         open_options: &crate::tracedecay::TraceDecayOpenOptions,
-    ) -> tracedecay_runtime_core::errors::Result<(tracedecay_runtime_core::storage::StoreLayout, Arc<RegisteredGlobalDb>)> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "project graph open requires project-scoped test authority".to_owned(),
-                })?;
+    ) -> tracedecay_runtime_core::errors::Result<(
+        tracedecay_runtime_core::storage::StoreLayout,
+        Arc<RegisteredGlobalDb>,
+    )> {
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "project graph open requires project-scoped test authority".to_owned(),
+            }
+        })?;
         let project_database = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "project graph open requires a registered project session".to_owned(),
@@ -1520,13 +1679,11 @@ impl HostAdmissionTestRuntimeV1 {
         branch_name: &str,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> tracedecay_runtime_core::errors::Result<crate::tracedecay::TraceDecay> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: "project branch open requires project-scoped test authority"
-                        .to_owned(),
-                })?;
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "project branch open requires project-scoped test authority".to_owned(),
+            }
+        })?;
         let project_database = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Config {
                 message: "project branch open requires a registered project session".to_owned(),
@@ -1613,7 +1770,9 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<crate::store::session::GlobalDbSessionTemporalStore<'_>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        crate::store::session::GlobalDbSessionTemporalStore<'_>,
+    > {
         Ok(crate::store::session::GlobalDbSessionTemporalStore::new(
             self.session_database_for_test(scope)?,
         ))
@@ -1627,10 +1786,12 @@ impl HostAdmissionTestRuntimeV1 {
         self.session_database_for_test(scope)?
             .ensure_active_session_cursor_key_result()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "provision test session cursor authentication key".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "provision test session cursor authentication key".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -1657,33 +1818,42 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open session-temporal fixture count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open session-temporal fixture count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query session-temporal fixture count".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query session-temporal fixture count".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read session-temporal fixture count".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read session-temporal fixture count".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
-        row.get::<i64>(0)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read session-temporal fixture count".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read session-temporal fixture count".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
+        row.get::<i64>(0).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode session-temporal fixture count".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -1691,15 +1861,18 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         session_id: &tracedecay_domain::SessionId,
-    ) -> tracedecay_runtime_core::errors::Result<Option<(i64, tracedecay_domain::TemporalValidityV1)>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<(i64, tracedecay_domain::TemporalValidityV1)>>
+    {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open session-temporal copy edge snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open session-temporal copy edge snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT knowledge_at, valid_time_json
@@ -1708,32 +1881,33 @@ impl HostAdmissionTestRuntimeV1 {
                 [session_id.as_str()],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query session-temporal copy edge fixture".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read session-temporal copy edge fixture".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query session-temporal copy edge fixture".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read session-temporal copy edge fixture".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        let knowledge_at =
-            row.get::<i64>(0)
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "decode session-temporal copy edge knowledge time".to_string(),
-                    message: error.to_string(),
-                })?;
-        let valid_time_json =
-            row.get::<String>(1)
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "decode session-temporal copy edge valid time".to_string(),
-                    message: error.to_string(),
-                })?;
+        let knowledge_at = row.get::<i64>(0).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "decode session-temporal copy edge knowledge time".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let valid_time_json = row.get::<String>(1).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "decode session-temporal copy edge valid time".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         let valid_time = serde_json::from_str(&valid_time_json).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "parse session-temporal copy edge valid time".to_string(),
@@ -1754,10 +1928,12 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open session-temporal generation snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open session-temporal generation snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT generation FROM session_temporal_generations
@@ -1765,26 +1941,27 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![session_id.as_str(), state],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query session-temporal generation fixture".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read session-temporal generation fixture".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query session-temporal generation fixture".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read session-temporal generation fixture".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        let generation =
-            row.get::<i64>(0)
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "decode session-temporal generation fixture".to_string(),
-                    message: error.to_string(),
-                })?;
+        let generation = row.get::<i64>(0).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "decode session-temporal generation fixture".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         u64::try_from(generation).map(Some).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "validate session-temporal generation fixture".to_string(),
@@ -1931,24 +2108,33 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn registered_project_paths_for_test(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn registered_project_paths_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         self.profile_database
             .try_list_code_project_paths(usize::MAX)
             .await
     }
 
     #[doc(hidden)]
-    pub async fn registered_project_roots_for_test(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn registered_project_roots_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         tracedecay_sessions::runtime::registered_project_roots_from(self.profile_database.as_ref())
             .await
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "list registered project roots for test".to_string(),
-                message: "project registry unavailable".to_string(),
-            })
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "list registered project roots for test".to_string(),
+                    message: "project registry unavailable".to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
-    pub fn profile_relative_path_for_test(&self, path: &Path) -> tracedecay_runtime_core::errors::Result<PathBuf> {
+    pub fn profile_relative_path_for_test(
+        &self,
+        path: &Path,
+    ) -> tracedecay_runtime_core::errors::Result<PathBuf> {
         let profile_root = self.profile_database.db_path().parent().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "resolve test profile-relative path".to_string(),
@@ -1957,10 +2143,12 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         path.strip_prefix(profile_root)
             .map(Path::to_path_buf)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "resolve test profile-relative path".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "resolve test profile-relative path".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -1985,10 +2173,12 @@ impl HostAdmissionTestRuntimeV1 {
         database
             .append_analytics_event(event)
             .await
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "append registered analytics event".to_string(),
-                message,
-            })
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "append registered analytics event".to_string(),
+                    message,
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -2013,19 +2203,27 @@ impl HostAdmissionTestRuntimeV1 {
         database
             .append_analytics_events(events)
             .await
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "append registered analytics event batch".to_string(),
-                message,
-            })
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "append registered analytics event batch".to_string(),
+                    message,
+                },
+            )
     }
 
     #[doc(hidden)]
-    pub async fn insert_turn_for_test(&self, turn: &tracedecay_runtime_core::types::CostTurn) -> bool {
+    pub async fn insert_turn_for_test(
+        &self,
+        turn: &tracedecay_runtime_core::types::CostTurn,
+    ) -> bool {
         self.profile_database.insert_turn(turn).await
     }
 
     #[doc(hidden)]
-    pub async fn insert_turns_for_test(&self, turns: &[tracedecay_runtime_core::types::CostTurn]) -> usize {
+    pub async fn insert_turns_for_test(
+        &self,
+        turns: &[tracedecay_runtime_core::types::CostTurn],
+    ) -> usize {
         self.profile_database.insert_turns(turns).await
     }
 
@@ -2033,18 +2231,23 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn query_profile_analytics_events_for_test(
         &self,
         query: &tracedecay_global_db::AnalyticsEventQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_global_db::AnalyticsEventRecord>>
+    {
         self.profile_database
             .query_analytics_events(query)
             .await
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered profile analytics events".to_string(),
-                message,
-            })
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered profile analytics events".to_string(),
+                    message,
+                },
+            )
     }
 
     #[doc(hidden)]
-    pub async fn profile_analytics_indexes_present_for_test(&self) -> tracedecay_runtime_core::errors::Result<i64> {
+    pub async fn profile_analytics_indexes_present_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
         let snapshot = self.profile_database.read_snapshot().await?;
         let mut rows = snapshot
             .query(
@@ -2057,26 +2260,33 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered profile analytics indexes".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered profile analytics indexes".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered profile analytics indexes".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered profile analytics indexes".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
-        row.get(0)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered profile analytics indexes".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered profile analytics indexes".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
+        row.get(0).map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode registered profile analytics indexes".to_string(),
                 message: error.to_string(),
-            })
+            },
+        )
     }
 
     #[doc(hidden)]
@@ -2139,22 +2349,25 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn clear_project_aliases_for_test(&self) -> tracedecay_runtime_core::errors::Result<u64> {
+    pub async fn clear_project_aliases_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<u64> {
         let transaction = self.profile_database.begin_write_transaction().await?;
         let deleted = transaction
             .execute("DELETE FROM project_aliases", ())
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "clear registered project aliases for test".to_string(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "clear registered project aliases for test".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
+        transaction.commit().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "commit registered project alias cleanup for test".to_string(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         Ok(deleted)
     }
 
@@ -2250,7 +2463,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_registry_context_by_alias(
         &self,
         alias_path: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>>
+    {
         self.profile_database
             .project_registry_context_by_alias(alias_path)
             .await
@@ -2261,7 +2475,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectRegistryContext>>
+    {
         self.profile_database
             .project_registry_context_by_identity(project_root, git_common_dir)
             .await
@@ -2282,7 +2497,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectStoreResolution>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_global_db::ProjectStoreResolution>>
+    {
         self.profile_database
             .resolve_project_store_by_identity(project_root, git_common_dir)
             .await
@@ -2387,14 +2603,15 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn ingest_workflows_for_test(
         &self,
         project_root: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "ingest workflow test fixture".to_string(),
-                    message: "project session authority is unavailable".to_string(),
-                })?;
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats,
+    > {
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "ingest workflow test fixture".to_string(),
+                message: "project session authority is unavailable".to_string(),
+            }
+        })?;
         let database = self.project_registered.as_deref().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "ingest workflow test fixture".to_string(),
@@ -2420,23 +2637,25 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         let transaction = database.begin_write_transaction().await?;
-        let span_id = tracedecay_sessions::runtime::git_correlation::record_span_observation_in_transaction(
-            &transaction,
-            observation,
-            merge_gap_secs,
-        )
-        .await
-        .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "record workflow test git span".to_string(),
-            message: error.to_string(),
-        })?;
-        transaction
-            .commit()
+        let span_id =
+            tracedecay_sessions::runtime::git_correlation::record_span_observation_in_transaction(
+                &transaction,
+                observation,
+                merge_gap_secs,
+            )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "record workflow test git span".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+        transaction.commit().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "commit workflow test git span".to_string(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         Ok(span_id)
     }
 
@@ -2444,7 +2663,9 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) async fn read_snapshot(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::ReadSnapshot> {
+    ) -> tracedecay_runtime_core::db::engine::Result<
+        tracedecay_runtime_core::db::engine::ReadSnapshot,
+    > {
         match scope {
             HostAdmissionScope::Project => self
                 .project_registered
@@ -2456,12 +2677,19 @@ impl HostAdmissionTestRuntimeV1 {
                 })?
                 .read_snapshot()
                 .await
-                .map_err(|error| tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())),
-            HostAdmissionScope::Profile => self
-                .profile_registered
-                .read_snapshot()
-                .await
-                .map_err(|error| tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())),
+                .map_err(|error| {
+                    tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
+                }),
+            HostAdmissionScope::Profile => {
+                self.profile_registered
+                    .read_snapshot()
+                    .await
+                    .map_err(|error| {
+                        tracedecay_runtime_core::db::engine::Error::invalid_operation(
+                            error.to_string(),
+                        )
+                    })
+            }
         }
     }
 
@@ -2511,13 +2739,15 @@ impl HostAdmissionTestRuntimeV1 {
         ))
     }
 
-    fn project_database_for_test(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
-        self.project_registered
-            .as_deref()
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
+    fn project_database_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
+        self.project_registered.as_deref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind registered project session test runtime".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -2531,12 +2761,12 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn project_observation_database_arc_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
-        self.project_registered
-            .clone()
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        self.project_registered.clone().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind registered project Work test runtime".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
-            })
+            }
+        })
     }
 
     fn session_database_for_test(
@@ -2590,7 +2820,8 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn session_activity_for_test(
         &self,
         scope: HostAdmissionScope,
-    ) -> tracedecay_runtime_core::errors::Result<crate::automation::scheduler::SessionActivity> {
+    ) -> tracedecay_runtime_core::errors::Result<crate::automation::scheduler::SessionActivity>
+    {
         Ok(crate::automation::scheduler::load_session_activity(
             self.session_database_for_test(scope)?,
         )
@@ -2687,10 +2918,12 @@ impl HostAdmissionTestRuntimeV1 {
             HostAdmissionScope::Project => self.project_registered.clone(),
             HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
         }
-        .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "bind session temporal refresh test authority".to_string(),
-            message: "registered session database mount is unavailable".to_string(),
-        })?;
+        .ok_or_else(
+            || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind session temporal refresh test authority".to_string(),
+                message: "registered session database mount is unavailable".to_string(),
+            },
+        )?;
         Ok(
             crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshTestAuthority::new(
                 self, database,
@@ -2704,7 +2937,8 @@ impl HostAdmissionTestRuntimeV1 {
         self,
         cg: crate::tracedecay::TraceDecay,
         scope_prefix: Option<String>,
-    ) -> tracedecay_runtime_core::errors::Result<crate::mcp::server::McpServerConstructionContext> {
+    ) -> tracedecay_runtime_core::errors::Result<crate::mcp::server::McpServerConstructionContext>
+    {
         Arc::new(self).mcp_server_context_for_test(cg, scope_prefix)
     }
 
@@ -2714,18 +2948,21 @@ impl HostAdmissionTestRuntimeV1 {
         self: Arc<Self>,
         cg: crate::tracedecay::TraceDecay,
         scope_prefix: Option<String>,
-    ) -> tracedecay_runtime_core::errors::Result<crate::mcp::server::McpServerConstructionContext> {
+    ) -> tracedecay_runtime_core::errors::Result<crate::mcp::server::McpServerConstructionContext>
+    {
         let profile_root = self.profile_root.clone();
         let transcript_source_home =
             profile_root
                 .parent()
                 .map(Path::to_path_buf)
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Config {
-                    message: format!(
-                        "test profile '{}' has no isolated transcript-source home",
-                        profile_root.display()
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Config {
+                        message: format!(
+                            "test profile '{}' has no isolated transcript-source home",
+                            profile_root.display()
+                        ),
+                    },
+                )?;
         let project_sessions = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),
@@ -2753,7 +2990,9 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub(crate) fn dashboard_test_authority(
         self: &Arc<Self>,
-    ) -> tracedecay_runtime_core::errors::Result<crate::dashboard::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        crate::dashboard::DashboardHostAdmissionTestAuthorityV1,
+    > {
         let project_sessions = self.project_registered.clone().ok_or_else(|| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "bind dashboard test project sessions".to_string(),
@@ -2801,10 +3040,12 @@ impl HostAdmissionTestRuntimeV1 {
         self.session_database_for_test(scope)?
             .set_parse_offset(path, offset)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "set retained test parse offset".to_string(),
-                message: error.clone(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "set retained test parse offset".to_string(),
+                    message: error.clone(),
+                },
+            )?;
         Ok(())
     }
 
@@ -2823,10 +3064,12 @@ impl HostAdmissionTestRuntimeV1 {
             }
             None => database.session_message_count().await,
         };
-        result.map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "count registered session messages".to_string(),
-            message,
-        })
+        result.map_err(
+            |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "count registered session messages".to_string(),
+                message,
+            },
+        )
     }
 
     #[doc(hidden)]
@@ -2839,10 +3082,12 @@ impl HostAdmissionTestRuntimeV1 {
         database
             .session_ingest_health_for_provider(provider)
             .await
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered session ingest health".to_string(),
-                message,
-            })
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered session ingest health".to_string(),
+                    message,
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -2851,7 +3096,8 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         session_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
+    {
         Ok(self
             .session_database_for_test(scope)?
             .get_session(provider, session_id)
@@ -2864,7 +3110,9 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Option<tracedecay_sessions::runtime::SessionMessageRecord>,
+    > {
         Ok(self
             .session_database_for_test(scope)?
             .get_session_message(provider, message_id)
@@ -2883,10 +3131,12 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered transcript store count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered transcript store count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT
@@ -2912,27 +3162,34 @@ impl HostAdmissionTestRuntimeV1 {
                 ],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered transcript store counts".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered transcript store counts".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered transcript store counts".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered transcript store counts".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered transcript store counts".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered transcript store counts".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
         let value = |index| {
-            row.get::<i64>(index)
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            row.get::<i64>(index).map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
                     operation: "decode registered transcript store counts".to_string(),
                     message: error.to_string(),
-                })
+                }
+            })
         };
         Ok((
             value(0)?,
@@ -2964,10 +3221,12 @@ impl HostAdmissionTestRuntimeV1 {
             .writer_connection()?
             .execute_batch(statement)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "configure registered parse-offset failure".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "configure registered parse-offset failure".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -2986,21 +3245,25 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         connection
             .pragma_update(None, "foreign_keys", "OFF")
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "disable foreign keys out of band for orphan summary fixture"
-                    .to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "disable foreign keys out of band for orphan summary fixture"
+                        .to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         connection
             .execute(
                 "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
                  VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
                 [store_id.to_string()],
             )
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "insert orphan summary source fixture".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "insert orphan summary source fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         Ok(())
     }
 
@@ -3019,10 +3282,13 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         connection
             .pragma_update(None, "foreign_keys", "OFF")
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "disable foreign keys out of band for orphan debt fixture".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "disable foreign keys out of band for orphan debt fixture"
+                        .to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         connection
             .execute(
                 "INSERT INTO lcm_maintenance_debt(
@@ -3031,10 +3297,12 @@ impl HostAdmissionTestRuntimeV1 {
                  VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
                 (),
             )
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "insert foreign orphan debt fixture".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "insert foreign orphan debt fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         Ok(())
     }
 
@@ -3051,10 +3319,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "clear lcm schema migration fixture".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "clear lcm schema migration fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3074,10 +3344,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "poison lcm raw projection fixture".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "poison lcm raw projection fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3094,10 +3366,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "set lcm schema migration fixture version".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "set lcm schema migration fixture version".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3115,26 +3389,27 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query lcm schema migration fixture version".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read lcm schema migration fixture version".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query lcm schema migration fixture version".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read lcm schema migration fixture version".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        row.get::<i64>(0).map(Some).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode lcm schema migration fixture version".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3153,10 +3428,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "set lcm schema migration fixture applied_at".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "set lcm schema migration fixture applied_at".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3176,26 +3453,27 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query lcm schema migration fixture applied_at".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read lcm schema migration fixture applied_at".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query lcm schema migration fixture applied_at".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read lcm schema migration fixture applied_at".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        row.get::<i64>(0).map(Some).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode lcm schema migration fixture applied_at".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3230,10 +3508,12 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "clear transcript backfill fixture marker".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "clear transcript backfill fixture marker".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         Ok(())
     }
 
@@ -3246,10 +3526,12 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open transcript backfill marker snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open transcript backfill marker snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT version FROM session_schema_migrations
@@ -3257,26 +3539,27 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query transcript backfill marker".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read transcript backfill marker".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query transcript backfill marker".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read transcript backfill marker".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        row.get::<i64>(0).map(Some).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode transcript backfill marker".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3298,10 +3581,12 @@ impl HostAdmissionTestRuntimeV1 {
             .writer_connection()?
             .execute_batch(statement)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "configure LCM compression-debt failure".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "configure LCM compression-debt failure".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3323,10 +3608,12 @@ impl HostAdmissionTestRuntimeV1 {
             .writer_connection()?
             .execute_batch(statement)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "configure late LCM summary projection failure".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "configure late LCM summary projection failure".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3343,10 +3630,12 @@ impl HostAdmissionTestRuntimeV1 {
                 (node_id,),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "delete LCM summary source fixture".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "delete LCM summary source fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         writer
             .execute(
                 "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
@@ -3354,10 +3643,12 @@ impl HostAdmissionTestRuntimeV1 {
                 (node_id, source_node_id),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "replace LCM summary source fixture".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "replace LCM summary source fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         Ok(())
     }
 
@@ -3371,36 +3662,45 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open LCM session row-count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open LCM session row-count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
                 (session_id,),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query LCM session row count".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query LCM session row count".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read LCM session row count".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read LCM session row count".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
-        row.get::<i64>(0)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read LCM session row count".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read LCM session row count".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
+        row.get::<i64>(0).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode LCM session row count".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3455,16 +3755,18 @@ impl HostAdmissionTestRuntimeV1 {
             }
             None => writer.execute("DELETE FROM lcm_raw_messages_fts", ()).await,
         };
-        result
-            .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        result.map(|_| ()).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "wipe registered LCM raw-message FTS fixture".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
-    pub async fn drop_project_workflow_schema_for_test(&self) -> tracedecay_runtime_core::errors::Result<()> {
+    pub async fn drop_project_workflow_schema_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         self.project_database_for_test()?
             .writer_connection()?
             .execute_batch(
@@ -3472,10 +3774,12 @@ impl HostAdmissionTestRuntimeV1 {
                  DROP TABLE workflow_runs;",
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "drop registered project workflow schema fixture".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "drop registered project workflow schema fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3487,10 +3791,12 @@ impl HostAdmissionTestRuntimeV1 {
         self.project_database_for_test()?
             .advance_parse_offset_result(path, offset)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "write registered project parse offset test seed".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "write registered project parse offset test seed".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3515,13 +3821,15 @@ impl HostAdmissionTestRuntimeV1 {
         let session = database
             .get_session(&message.provider, &message.session_id)
             .await
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "seed registered session message fixture".to_string(),
-                message: format!(
-                    "session {}/{} is unavailable",
-                    message.provider, message.session_id
-                ),
-            })?;
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_string(),
+                    message: format!(
+                        "session {}/{} is unavailable",
+                        message.provider, message.session_id
+                    ),
+                },
+            )?;
         let source = format!(
             "host-admission-test-message:{}:{}",
             message.provider, message.message_id
@@ -3547,16 +3855,21 @@ impl HostAdmissionTestRuntimeV1 {
     > {
         let database = self
             .session_database_for_test(HostAdmissionScope::Profile)
-            .map_err(
-                |error| tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
+            .map_err(|error| {
+                tracedecay_sessions::runtime::source::TranscriptIngestError::ScanIo {
                     operation: "bind registered profile session test runtime",
                     path: project_root.to_path_buf(),
                     source: std::io::Error::other(error.to_string()),
-                },
-            )?;
+                }
+            })?;
         let store = crate::store::GlobalDbTranscriptStore::new(database);
-        tracedecay_sessions::runtime::source::try_ingest_source(&store, source, project_root, max_new_bytes)
-            .await
+        tracedecay_sessions::runtime::source::try_ingest_source(
+            &store,
+            source,
+            project_root,
+            max_new_bytes,
+        )
+        .await
     }
 
     #[doc(hidden)]
@@ -3567,7 +3880,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
+    > {
         Ok(self
             .session_database_for_test(scope)?
             .search_session_messages(provider, project_key, query, limit)
@@ -3583,7 +3898,9 @@ impl HostAdmissionTestRuntimeV1 {
         query: &str,
         limit: usize,
         filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
+    > {
         let fetch_limit = limit.saturating_mul(16).max(limit);
         let mut results = self
             .session_database_for_test(scope)?
@@ -3592,8 +3909,12 @@ impl HostAdmissionTestRuntimeV1 {
         results.retain(|result| {
             let scope_matches = match filters.scope {
                 tracedecay_sessions::runtime::SessionSearchScope::All => true,
-                tracedecay_sessions::runtime::SessionSearchScope::ParentsOnly => !result.session.is_subagent,
-                tracedecay_sessions::runtime::SessionSearchScope::SubagentsOnly => result.session.is_subagent,
+                tracedecay_sessions::runtime::SessionSearchScope::ParentsOnly => {
+                    !result.session.is_subagent
+                }
+                tracedecay_sessions::runtime::SessionSearchScope::SubagentsOnly => {
+                    result.session.is_subagent
+                }
             };
             let tool_result = result.message.role == "tool"
                 || matches!(
@@ -3646,20 +3967,28 @@ impl HostAdmissionTestRuntimeV1 {
         limit: usize,
         filters: tracedecay_sessions::runtime::SessionSearchFilters<'_>,
         git_filter: &tracedecay_sessions::runtime::git_correlation::GitScopeFilter,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
-        let provider = provider.ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-            operation: "search registered git-scoped session messages".to_string(),
-            message: "test facade requires an exact provider".to_string(),
-        })?;
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
+    > {
+        let provider =
+            provider.ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "search registered git-scoped session messages".to_string(),
+                    message: "test facade requires an exact provider".to_string(),
+                },
+            )?;
         let database = self.session_database_for_test(scope)?;
         let snapshot = database.read_snapshot().await?;
-        let scoped_ids =
-            tracedecay_sessions::runtime::git_correlation::session_ids_for_scope(&snapshot, git_filter)
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "resolve registered git-scoped sessions".to_string(),
-                    message: error.to_string(),
-                })?;
+        let scoped_ids = tracedecay_sessions::runtime::git_correlation::session_ids_for_scope(
+            &snapshot, git_filter,
+        )
+        .await
+        .map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "resolve registered git-scoped sessions".to_string(),
+                message: error.to_string(),
+            },
+        )?;
         drop(snapshot);
         let mut results = self
             .search_session_messages_filtered_for_test(
@@ -3694,10 +4023,12 @@ impl HostAdmissionTestRuntimeV1 {
         crate::store::GlobalDbGitCorrelationStore::new(self.session_database_for_test(scope)?)
             .record_span_observation(observation, merge_gap_secs)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "record registered session span".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "record registered session span".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -3716,13 +4047,12 @@ impl HostAdmissionTestRuntimeV1 {
         } else {
             "DROP TRIGGER IF EXISTS fail_session_message_projection;"
         };
-        writer
-            .execute_batch(sql)
-            .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        writer.execute_batch(sql).await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "set registered session projection failure fixture".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3742,17 +4072,18 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "delete registered session message fixture".to_string(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "delete registered session message fixture".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
+        transaction.commit().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "commit registered session message fixture deletion".to_string(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         Ok(deleted)
     }
 
@@ -3780,13 +4111,15 @@ impl HostAdmissionTestRuntimeV1 {
             let raw = database
                 .lcm_load_raw_message(&message.provider, &message.message_id)
                 .await
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered transcript fixture store id".to_string(),
-                    message: format!(
-                        "LCM raw message {}/{} is unavailable after insert",
-                        message.provider, message.message_id
-                    ),
-                })?;
+                .ok_or_else(
+                    || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                        operation: "read registered transcript fixture store id".to_string(),
+                        message: format!(
+                            "LCM raw message {}/{} is unavailable after insert",
+                            message.provider, message.message_id
+                        ),
+                    },
+                )?;
             store_ids.push(raw.store_id);
         }
         Ok(store_ids)
@@ -3819,10 +4152,12 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered lcm fts count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered lcm fts count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT COUNT(*) FROM lcm_raw_messages_fts
@@ -3830,26 +4165,33 @@ impl HostAdmissionTestRuntimeV1 {
                 [query],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered lcm fts count".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered lcm fts count".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered lcm fts count".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered lcm fts count".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
-        row.get::<i64>(0)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered lcm fts count".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered lcm fts count".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
+        row.get::<i64>(0).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode registered lcm fts count".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3863,10 +4205,12 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered lcm raw store id snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered lcm raw store id snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT store_id FROM lcm_raw_messages
@@ -3874,26 +4218,27 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered lcm raw store id".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered lcm raw store id".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered lcm raw store id".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered lcm raw store id".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        row.get::<i64>(0).map(Some).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "decode registered lcm raw store id".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -3901,7 +4246,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         draft: tracedecay_sessions::runtime::lcm::LcmSummaryNodeDraft,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
@@ -3913,7 +4261,8 @@ impl HostAdmissionTestRuntimeV1 {
             tracedecay_global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
                 &transaction,
             );
-        let summary = tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft).await?;
+        let summary =
+            tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft).await?;
         transaction.commit().await?;
         Ok(summary)
     }
@@ -3947,14 +4296,17 @@ impl HostAdmissionTestRuntimeV1 {
         }
 
         let external_content = "canonical external payload";
-        let external_hash = tracedecay_sessions::runtime::lcm::util::sha256_hex(external_content.as_bytes());
+        let external_hash =
+            tracedecay_sessions::runtime::lcm::util::sha256_hex(external_content.as_bytes());
         let payload_dir = database
             .db_path()
             .parent()
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "seed canonical lcm render payload".to_string(),
-                message: "registered session database has no storage root".to_string(),
-            })?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "seed canonical lcm render payload".to_string(),
+                    message: "registered session database has no storage root".to_string(),
+                },
+            )?
             .join("lcm-payloads");
         std::fs::create_dir_all(&payload_dir).map_err(|error| {
             tracedecay_runtime_core::errors::TraceDecayError::Database {
@@ -4025,10 +4377,12 @@ impl HostAdmissionTestRuntimeV1 {
                 char_count = external_content.chars().count(),
             ))
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "seed canonical lcm render rows".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "seed canonical lcm render rows".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -4036,7 +4390,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         update: tracedecay_sessions::runtime::lcm::LcmLifecycleUpdate,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
@@ -4045,7 +4402,8 @@ impl HostAdmissionTestRuntimeV1 {
             .await
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
         let state =
-            tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update).await?;
+            tracedecay_sessions::runtime::lcm::compression::update_lifecycle(&transaction, update)
+                .await?;
         transaction.commit().await?;
         Ok(state)
     }
@@ -4112,9 +4470,11 @@ impl HostAdmissionTestRuntimeV1 {
                          PRAGMA foreign_keys = OFF;",
                     )
                     .await
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "prepare missing lcm generation fixture".to_string(),
-                        message: error.to_string(),
+                    .map_err(|error| {
+                        tracedecay_runtime_core::errors::TraceDecayError::Database {
+                            operation: "prepare missing lcm generation fixture".to_string(),
+                            message: error.to_string(),
+                        }
                     })?;
                 connection
                     .execute(
@@ -4135,9 +4495,11 @@ impl HostAdmissionTestRuntimeV1 {
                         (),
                     )
                     .await
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "prepare changed lcm watermarks fixture".to_string(),
-                        message: error.to_string(),
+                    .map_err(|error| {
+                        tracedecay_runtime_core::errors::TraceDecayError::Database {
+                            operation: "prepare changed lcm watermarks fixture".to_string(),
+                            message: error.to_string(),
+                        }
                     })?;
                 connection
                     .execute(
@@ -4157,7 +4519,9 @@ impl HostAdmissionTestRuntimeV1 {
                     .execute(
                         "DELETE FROM session_summary_availability
                          WHERE session_id = ?1 AND generation = ?2 AND summary_id = ?3",
-                        tracedecay_runtime_core::db::engine::params![session_id, generation, summary_id],
+                        tracedecay_runtime_core::db::engine::params![
+                            session_id, generation, summary_id
+                        ],
                     )
                     .await
             }
@@ -4218,9 +4582,11 @@ impl HostAdmissionTestRuntimeV1 {
                         (),
                     )
                     .await
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "prepare failed lcm generation fixture".to_string(),
-                        message: error.to_string(),
+                    .map_err(|error| {
+                        tracedecay_runtime_core::errors::TraceDecayError::Database {
+                            operation: "prepare failed lcm generation fixture".to_string(),
+                            message: error.to_string(),
+                        }
                     })?;
                 connection
                     .execute(
@@ -4239,9 +4605,11 @@ impl HostAdmissionTestRuntimeV1 {
                          DROP TRIGGER IF EXISTS observation_retrieval_anchors_immutable_update;",
                     )
                     .await
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "prepare corrupt lcm retrieval owner fixture".to_string(),
-                        message: error.to_string(),
+                    .map_err(|error| {
+                        tracedecay_runtime_core::errors::TraceDecayError::Database {
+                            operation: "prepare corrupt lcm retrieval owner fixture".to_string(),
+                            message: error.to_string(),
+                        }
                     })?;
                 connection
                     .execute(
@@ -4274,9 +4642,11 @@ impl HostAdmissionTestRuntimeV1 {
                         (),
                     )
                     .await
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "prepare corrupt lcm summary source fixture".to_string(),
-                        message: error.to_string(),
+                    .map_err(|error| {
+                        tracedecay_runtime_core::errors::TraceDecayError::Database {
+                            operation: "prepare corrupt lcm summary source fixture".to_string(),
+                            message: error.to_string(),
+                        }
                     })?;
                 connection
                     .execute(
@@ -4285,17 +4655,21 @@ impl HostAdmissionTestRuntimeV1 {
                              source_anchor_id = NULL,
                              source_summary_id = ?3
                          WHERE summary_id = ?1 AND source_ordinal = ?2",
-                        tracedecay_runtime_core::db::engine::params![summary_id, ordinal, source_summary_id],
+                        tracedecay_runtime_core::db::engine::params![
+                            summary_id,
+                            ordinal,
+                            source_summary_id
+                        ],
                     )
                     .await
             }
         };
-        result
-            .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+        result.map(|_| ()).map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "apply bounded lcm lineage fault fixture".to_string(),
                 message: error.to_string(),
-            })
+            }
+        })
     }
 
     #[doc(hidden)]
@@ -4307,10 +4681,12 @@ impl HostAdmissionTestRuntimeV1 {
             .primary_session_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open lcm lineage count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open lcm lineage count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT
@@ -4331,27 +4707,34 @@ impl HostAdmissionTestRuntimeV1 {
                 [session_id],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query lcm lineage counts".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query lcm lineage counts".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read lcm lineage counts".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read lcm lineage counts".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read lcm lineage counts".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read lcm lineage counts".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
         let value = |index| {
-            row.get::<i64>(index)
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+            row.get::<i64>(index).map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
                     operation: "decode lcm lineage counts".to_string(),
                     message: error.to_string(),
-                })
+                }
+            })
         };
         Ok(LcmLineageCountsForTest {
             active_generations: value(0)?,
@@ -4368,7 +4751,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmStatus, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_status(provider, session_id)
             .await
@@ -4378,7 +4764,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: Option<&str>,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmStatus, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmStatus,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_status_with_options(
                 provider,
@@ -4393,7 +4782,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_describe_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmDescribeRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmDescribeResponse, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmDescribeResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_describe(request)
             .await
@@ -4403,7 +4795,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_expand_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmExpandResponse, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmExpandResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_expand(request)
             .await
@@ -4415,7 +4810,10 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         node_id: &str,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryExpansion, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryExpansion,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_expand_summary_node(provider, session_id, node_id)
             .await
@@ -4425,7 +4823,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_expand_query_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmExpandQueryRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmExpandQueryResponse, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmExpandQueryResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_expand_query(request)
             .await
@@ -4435,7 +4836,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_grep_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmGrepRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmGrepOutcome, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmGrepOutcome,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_grep(request)
             .await
@@ -4445,7 +4849,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_load_session_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmLoadSessionRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLoadSessionPage, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLoadSessionPage,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_load_session(request)
             .await
@@ -4456,7 +4863,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<tracedecay_sessions::runtime::lcm::LcmRecentSession>, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        Vec<tracedecay_sessions::runtime::lcm::LcmRecentSession>,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_recent_sessions(provider, limit)
             .await
@@ -4476,7 +4886,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_session_replay_slice_for_test(
         &self,
         request: &tracedecay_sessions::runtime::lcm::LcmSessionReplayRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSessionReplaySlice, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSessionReplaySlice,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_session_replay_slice(request)
             .await
@@ -4573,7 +4986,10 @@ impl HostAdmissionTestRuntimeV1 {
         scope: HostAdmissionScope,
         payload_ref: &str,
         opts: &tracedecay_sessions::runtime::lcm::payload::DeleteOpts,
-    ) -> Result<tracedecay_sessions::runtime::lcm::payload::DeleteOutcome, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::payload::DeleteOutcome,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
@@ -4586,27 +5002,28 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
-        let prepared = tracedecay_sessions::runtime::lcm::payload::delete_external_payload_in_transaction(
-            &transaction,
-            storage_root,
-            payload_ref,
-            opts,
-        )
-        .await?;
+        let prepared =
+            tracedecay_sessions::runtime::lcm::payload::delete_external_payload_in_transaction(
+                &transaction,
+                storage_root,
+                payload_ref,
+                opts,
+            )
+            .await?;
         transaction.commit().await?;
 
         let mut outcome = prepared.outcome;
         if prepared.pending_removal_bytes.is_some() {
-            let transaction = database
-                .begin_write_transaction()
-                .await
-                .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
-            let drained = tracedecay_sessions::runtime::lcm::gc::drain_pending_payload_delete_in_transaction(
-                &transaction,
-                storage_root,
-                payload_ref,
-            )
-            .await;
+            let transaction = database.begin_write_transaction().await.map_err(|error| {
+                tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string())
+            })?;
+            let drained =
+                tracedecay_sessions::runtime::lcm::gc::drain_pending_payload_delete_in_transaction(
+                    &transaction,
+                    storage_root,
+                    payload_ref,
+                )
+                .await;
             match drained {
                 Ok(removed) => {
                     transaction.commit().await?;
@@ -4630,7 +5047,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_external_payload_manifest_for_test(
         &self,
         payload_ref: &str,
-    ) -> Result<Option<LcmExternalPayloadManifestTestRecord>, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        Option<LcmExternalPayloadManifestTestRecord>,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let snapshot = self
             .primary_session_database_for_test()
             .read_snapshot()
@@ -4749,8 +5169,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_session_boundary_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmSessionBoundaryRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSessionBoundaryResponse, tracedecay_sessions::runtime::lcm::LcmError>
-    {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSessionBoundaryResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_session_boundary(request)
             .await
@@ -4761,20 +5183,30 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         conversation_id: &str,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmLifecycleState, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmLifecycleState,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let snapshot = self
             .primary_session_database_for_test()
             .read_snapshot()
             .await?;
-        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(&snapshot, provider, conversation_id)
-            .await
+        tracedecay_sessions::runtime::lcm::compression::lifecycle_state(
+            &snapshot,
+            provider,
+            conversation_id,
+        )
+        .await
     }
 
     #[doc(hidden)]
     pub async fn lcm_preflight_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmPreflightRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmPreflightResponse, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmPreflightResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_preflight(request)
             .await
@@ -4784,7 +5216,10 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn lcm_compress_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmCompressionRequest,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmCompressionResponse, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmCompressionResponse,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .lcm_compress(request)
             .await
@@ -4798,7 +5233,10 @@ impl HostAdmissionTestRuntimeV1 {
         session_id: Option<&str>,
         config: &tracedecay_sessions::runtime::lcm::LcmGcConfig,
         now: i64,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmGcReport, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmGcReport,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_sessions::runtime::lcm::LcmError::Db(error.to_string()))?;
@@ -4817,8 +5255,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         session_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<tracedecay_global_db::PendingCodexCompactionSummary>, tracedecay_sessions::runtime::lcm::LcmError>
-    {
+    ) -> Result<
+        Vec<tracedecay_global_db::PendingCodexCompactionSummary>,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .pending_codex_compaction_summary_requests(session_id, limit)
             .await
@@ -4831,7 +5271,10 @@ impl HostAdmissionTestRuntimeV1 {
         summary_text: &str,
         route: &str,
         model: Option<&str>,
-    ) -> Result<tracedecay_sessions::runtime::lcm::LcmSummaryNode, tracedecay_sessions::runtime::lcm::LcmError> {
+    ) -> Result<
+        tracedecay_sessions::runtime::lcm::LcmSummaryNode,
+        tracedecay_sessions::runtime::lcm::LcmError,
+    > {
         self.primary_session_database_for_test()
             .publish_codex_compaction_summary_successor(node_id, summary_text, route, model)
             .await
@@ -4845,10 +5288,12 @@ impl HostAdmissionTestRuntimeV1 {
             .primary_session_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered LCM successor-edge snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered LCM successor-edge snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT predecessor_summary_id, successor_summary_id
@@ -4857,31 +5302,31 @@ impl HostAdmissionTestRuntimeV1 {
                 (),
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered LCM successor edges".to_string(),
-                message: error.to_string(),
-            })?;
-        let mut edges = Vec::new();
-        while let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered LCM successor edge".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered LCM successor edges".to_string(),
                     message: error.to_string(),
-                })?
-        {
-            let predecessor =
-                row.get::<String>(0)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "decode registered LCM predecessor".to_string(),
-                        message: error.to_string(),
-                    })?;
-            let successor =
-                row.get::<String>(1)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                        operation: "decode registered LCM successor".to_string(),
-                        message: error.to_string(),
-                    })?;
+                },
+            )?;
+        let mut edges = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered LCM successor edge".to_string(),
+                message: error.to_string(),
+            }
+        })? {
+            let predecessor = row.get::<String>(0).map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "decode registered LCM predecessor".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+            let successor = row.get::<String>(1).map_err(|error| {
+                tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "decode registered LCM successor".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
             edges.push((predecessor, successor));
         }
         Ok(edges)
@@ -4896,10 +5341,12 @@ impl HostAdmissionTestRuntimeV1 {
             .primary_session_database_for_test()
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered LCM availability snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered LCM availability snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT availability.summary_id, availability.availability
@@ -4913,30 +5360,32 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![session_id],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered LCM active summary availability".to_string(),
-                message: error.to_string(),
-            })?;
-        let mut labels = Vec::new();
-        while let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered LCM active summary availability".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered LCM active summary availability".to_string(),
                     message: error.to_string(),
-                })?
-        {
+                },
+            )?;
+        let mut labels = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered LCM active summary availability".to_string(),
+                message: error.to_string(),
+            }
+        })? {
             labels.push((
-                row.get(0)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                row.get(0).map_err(|error| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered LCM availability summary".to_string(),
                         message: error.to_string(),
-                    })?,
-                row.get(1)
-                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    }
+                })?,
+                row.get(1).map_err(|error| {
+                    tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered LCM availability label".to_string(),
                         message: error.to_string(),
-                    })?,
+                    }
+                })?,
             ));
         }
         Ok(labels)
@@ -4958,10 +5407,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "set registered LCM raw message metadata".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "set registered LCM raw message metadata".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -4988,10 +5439,12 @@ impl HostAdmissionTestRuntimeV1 {
             )
             .await
             .map(|_| ())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "insert registered LCM poison summary".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "insert registered LCM poison summary".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -5027,10 +5480,12 @@ impl HostAdmissionTestRuntimeV1 {
             .writer_connection()?
             .execute_batch(statement)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "configure registered LCM summary failure".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "configure registered LCM summary failure".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     /// Drives one transcript source through the retained ProjectSessions mount.
@@ -5051,8 +5506,13 @@ impl HostAdmissionTestRuntimeV1 {
             }
         })?;
         let store = crate::store::GlobalDbTranscriptStore::new(database);
-        tracedecay_sessions::runtime::source::try_ingest_source(&store, source, project_root, max_new_bytes)
-            .await
+        tracedecay_sessions::runtime::source::try_ingest_source(
+            &store,
+            source,
+            project_root,
+            max_new_bytes,
+        )
+        .await
     }
 
     /// Runs one selected provider through the exact registered project authority.
@@ -5061,37 +5521,44 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         provider: Option<tracedecay_sessions::runtime::SessionProvider>,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_sessions::runtime::shared::TranscriptIngestStats> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "ingest registered project provider test fixture".to_string(),
-                    message: "registered project identity is unavailable".to_string(),
-                })?;
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_sessions::runtime::shared::TranscriptIngestStats,
+    > {
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "ingest registered project provider test fixture".to_string(),
+                message: "registered project identity is unavailable".to_string(),
+            }
+        })?;
         let database = self.project_database_for_test()?;
-        Ok(tracedecay_sessions::runtime::ingest_project_sources_for_provider(
-            &self.brain_id,
-            &self.profile_id,
-            database,
-            project_root,
-            Some(project_id.clone()),
-            provider,
-            true,
+        Ok(
+            tracedecay_sessions::runtime::ingest_project_sources_for_provider(
+                &self.brain_id,
+                &self.profile_id,
+                database,
+                project_root,
+                Some(project_id.clone()),
+                provider,
+                true,
+            )
+            .await
+            .stats,
         )
-        .await
-        .stats)
     }
 
     #[doc(hidden)]
-    pub async fn project_session_message_count_for_test(&self) -> tracedecay_runtime_core::errors::Result<i64> {
+    pub async fn project_session_message_count_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
         self.project_database_for_test()?
             .session_message_count()
             .await
-            .map_err(|message| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "count registered project session messages".to_string(),
-                message,
-            })
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "count registered project session messages".to_string(),
+                    message,
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -5112,7 +5579,9 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub fn project_workflow_storage_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    > {
         self.project_database_for_test()?.workflow_storage()
     }
 
@@ -5121,7 +5590,8 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         session_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
+    {
         Ok(self
             .project_database_for_test()?
             .get_session(provider, session_id)
@@ -5133,7 +5603,9 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Option<tracedecay_sessions::runtime::SessionMessageRecord>,
+    > {
         Ok(self
             .project_database_for_test()?
             .get_session_message(provider, message_id)
@@ -5147,7 +5619,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_key: Option<&str>,
         query: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
+    > {
         Ok(self
             .project_database_for_test()?
             .search_session_messages(provider, project_key, query, limit)
@@ -5158,22 +5632,27 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn project_git_sessions_for_test(
         &self,
         query: &tracedecay_sessions::runtime::git_correlation::SessionsForQuery,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::git_correlation::SessionGitCorrelationHit>>
-    {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::git_correlation::SessionGitCorrelationHit>,
+    > {
         let snapshot = self
             .project_database_for_test()?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered project git-session snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered project git-session snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         tracedecay_sessions::runtime::git_correlation::sessions_for(&snapshot, query)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered project git sessions".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered project git sessions".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -5181,7 +5660,9 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_key: &str,
         limit: usize,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Vec<tracedecay_sessions::runtime::SessionMessageSearchResult>,
+    > {
         Ok(self
             .project_database_for_test()?
             .recent_session_goals(Some(project_key), limit)
@@ -5199,7 +5680,9 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .run_backfill(analytics_events, git, options)
@@ -5216,7 +5699,9 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .run_incremental_backfill(git, limit_sessions)
@@ -5227,11 +5712,14 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn git_correlation_meta_for_test(
         &self,
         key: &str,
-    ) -> Result<Option<i64>, tracedecay_sessions::runtime::git_correlation::GitCorrelationError> {
+    ) -> Result<Option<i64>, tracedecay_sessions::runtime::git_correlation::GitCorrelationError>
+    {
         let snapshot = self
             .project_database_for_test()
             .map_err(|error| {
-                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(error.to_string())
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                    error.to_string(),
+                )
             })?
             .read_snapshot()
             .await?;
@@ -5257,7 +5745,9 @@ impl HostAdmissionTestRuntimeV1 {
         tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
-            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(error.to_string())
+            tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                error.to_string(),
+            )
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
             .sessions_for_with_relation(query, relation)
@@ -5267,7 +5757,8 @@ impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     pub async fn project_workflow_fact_rows_for_test(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>>
+    {
         self.project_database_for_test()?.workflow_fact_rows().await
     }
 
@@ -5289,7 +5780,9 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>> {
+    ) -> tracedecay_runtime_core::errors::Result<
+        Option<tracedecay_sessions::runtime::lcm::LcmRawMessage>,
+    > {
         Ok(self
             .project_database_for_test()?
             .lcm_load_raw_message(provider, message_id)
@@ -5305,10 +5798,12 @@ impl HostAdmissionTestRuntimeV1 {
             .project_database_for_test()?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered project parse-offset snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered project parse-offset snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(
                 "SELECT byte_offset, mtime, file_id
@@ -5319,27 +5814,30 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![suffix],
             )
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "query registered project parse offset by suffix".to_string(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "read registered project parse offset by suffix".to_string(),
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "query registered project parse offset by suffix".to_string(),
                     message: error.to_string(),
-                })?
+                },
+            )?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered project parse offset by suffix".to_string(),
+                message: error.to_string(),
+            }
+        })?
         else {
             return Ok(None);
         };
         let decode = |index| {
             row.get::<i64>(index)
                 .map(|value| u64::try_from(value).unwrap_or_default())
-                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                    operation: "decode registered project parse offset by suffix".to_string(),
-                    message: error.to_string(),
-                })
+                .map_err(
+                    |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                        operation: "decode registered project parse offset by suffix".to_string(),
+                        message: error.to_string(),
+                    },
+                )
         };
         Ok(Some(tracedecay_global_db::ParseOffset {
             byte_offset: decode(0)?,
@@ -5370,34 +5868,44 @@ impl HostAdmissionTestRuntimeV1 {
             .project_database_for_test()?
             .read_snapshot()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered project observation count snapshot".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "open registered project observation count snapshot".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let mut rows = snapshot
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "count registered project observation table".to_string(),
-                message: error.to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "count registered project observation table".to_string(),
+                    message: error.to_string(),
+                },
+            )?;
         let row = rows
             .next()
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered project observation table count".to_string(),
-                message: error.to_string(),
-            })?
-            .ok_or_else(|| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "read registered project observation table count".to_string(),
-                message: "count query returned no row".to_string(),
-            })?;
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered project observation table count".to_string(),
+                    message: error.to_string(),
+                },
+            )?
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "read registered project observation table count".to_string(),
+                    message: "count query returned no row".to_string(),
+                },
+            )?;
         row.get::<i64>(0)
             .map(|count| u64::try_from(count).unwrap_or_default())
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "decode registered project observation table count".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "decode registered project observation table count".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     /// Installs or removes the deterministic projection-failure trigger in-place.
@@ -5420,10 +5928,12 @@ impl HostAdmissionTestRuntimeV1 {
             .writer_connection()?
             .execute_batch(statement)
             .await
-            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "configure registered project projection failure".to_string(),
-                message: error.to_string(),
-            })
+            .map_err(
+                |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "configure registered project projection failure".to_string(),
+                    message: error.to_string(),
+                },
+            )
     }
 
     #[doc(hidden)]
@@ -5488,7 +5998,9 @@ impl HostAdmissionTestRuntimeV1 {
 }
 
 #[cfg(unix)]
-fn prepare_host_admission_test_profile_root(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<()> {
+fn prepare_host_admission_test_profile_root(
+    profile_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::create_dir_all(profile_root).map_err(|error| {
@@ -5526,12 +6038,16 @@ fn prepare_host_admission_test_profile_root(profile_root: &Path) -> tracedecay_r
 }
 
 #[cfg(not(unix))]
-fn prepare_host_admission_test_profile_root(profile_root: &Path) -> tracedecay_runtime_core::errors::Result<()> {
-    std::fs::create_dir_all(profile_root).map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Config {
-        message: format!(
-            "failed to create host-admission test profile '{}': {error}",
-            profile_root.display()
-        ),
+fn prepare_host_admission_test_profile_root(
+    profile_root: &Path,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    std::fs::create_dir_all(profile_root).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Config {
+            message: format!(
+                "failed to create host-admission test profile '{}': {error}",
+                profile_root.display()
+            ),
+        }
     })
 }
 

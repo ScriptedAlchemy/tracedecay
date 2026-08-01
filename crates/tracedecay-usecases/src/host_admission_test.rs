@@ -13,7 +13,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::ObservationReplayRequest;
 
-use tracedecay_runtime_core::privacy::{ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::privacy::{
+    ClaudeRecordParseErrorV1, parse_normalized_observation_record_v1,
+};
 
 use super::*;
 

@@ -25,15 +25,36 @@ use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
 };
 
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_code_index::projection::expected_request_digest;
 use crate::config::SemanticResourceCeilings;
-use tracedecay_runtime_core::db::Database;
 use crate::retention::code_index_generations::{
     CodeGenerationRetentionModeV1, CodeGenerationRetentionReceiptV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention,
     plan_code_generation_retention, recover_code_generation_retention,
 };
+use crate::store::vector_generations::{
+    DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
+    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    VectorGenerationPlanV1,
+};
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
+use tracedecay_code_index::projection::expected_request_digest;
+use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
+use tracedecay_query::retrieval::graph::production_code_index_freshness;
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+};
+use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
+use tracedecay_query::retrieval::semantic::{
+    CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
+    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
+    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
+    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
+    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
+    SemanticVectorScanSummaryV1,
+};
+use tracedecay_runtime_core::db::Database;
 use tracedecay_search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
 use tracedecay_search_eval::semantic_native::{
     SemanticProjectionCaseOutcomeV1, SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1,
@@ -59,27 +80,6 @@ use tracedecay_semantic::{
     SemanticGenerationPointerV1, SemanticModelLifecycleOwnerV1, SemanticRuntimeScheduleFailureV1,
     SemanticRuntimeScheduleStatusV1, SemanticRuntimeStatusProjectionV1,
     prepare_semantic_evaluation_projection,
-};
-use crate::store::vector_generations::{
-    DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
-    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
-    VectorGenerationPlanV1,
-};
-use tracedecay_query::retrieval::AuthorizedQueryFallbackV1;
-use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
-use tracedecay_query::retrieval::graph::production_code_index_freshness;
-use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
-};
-use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
-use tracedecay_query::retrieval::semantic::{
-    CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
-    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
-    SemanticVectorScanSummaryV1,
 };
 
 #[cfg(test)]
@@ -195,13 +195,13 @@ pub struct ProductionSemanticRuntimeV1 {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SemanticCompatibleCurrentGenerationSnapshotV1 {
+pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
     pub executable: SemanticExecutableGenerationV1,
     pub vector_state_revision: i64,
     pub vector_generation_id: VectorGenerationIdV1,
 }
 
-pub(crate) struct SemanticVectorPublicationLeaseV1<'runtime> {
+pub struct SemanticVectorPublicationLeaseV1<'runtime> {
     _writer: tokio::sync::MutexGuard<'runtime, ()>,
 }
 
@@ -552,7 +552,7 @@ impl ProductionSemanticRuntimeV1 {
     /// corpus. The verified production artifact/runtime are reused, while the
     /// resulting vectors remain process-local and cannot replace the project's
     /// active vector generation.
-    pub(crate) fn prepare_evaluation_generation(
+    pub fn prepare_evaluation_generation(
         &self,
         generation: &CodeIndexPublishedGenerationV1,
     ) -> Result<PreparedSemanticEvaluationGenerationV1, SemanticRuntimeScheduleFailureV1> {
@@ -591,7 +591,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Measure a genuine incremental evaluator projection from an already
     /// prepared immutable generation. This never publishes a durable pointer
     /// or relabels a clean rebuild.
-    pub(crate) fn measure_incremental_evaluation_projection(
+    pub fn measure_incremental_evaluation_projection(
         &self,
         current: &PreparedSemanticEvaluationGenerationV1,
         generation: &CodeIndexPublishedGenerationV1,
@@ -653,7 +653,7 @@ impl ProductionSemanticRuntimeV1 {
         Ok(resources)
     }
 
-    pub(crate) fn measure_evaluation_projection_cases(
+    pub fn measure_evaluation_projection_cases(
         &self,
         clean: &PreparedSemanticEvaluationGenerationV1,
         sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
@@ -1000,7 +1000,7 @@ impl ProductionSemanticRuntimeV1 {
             .executable)
     }
 
-    pub(crate) async fn inspect_compatible_current_generation_snapshot(
+    pub async fn inspect_compatible_current_generation_snapshot(
         &self,
         required: &crate::config::retrieval::SemanticCompatibilityPinsV1,
         source_generation: &CodeGenerationId,
@@ -1049,7 +1049,7 @@ impl ProductionSemanticRuntimeV1 {
     /// Freeze vector-pointer mutation while a freshness-bound accepted profile
     /// publication commits. Every vector mutation enters this same writer
     /// lane, so a validated revision/generation remains exact for the lease.
-    pub(crate) async fn acquire_vector_publication_lease(
+    pub async fn acquire_vector_publication_lease(
         &self,
         expected_revision: i64,
         expected_generation: &VectorGenerationIdV1,
@@ -1499,11 +1499,11 @@ impl PreparedSemanticEvaluationGenerationV1 {
         resources
     }
 
-    pub(crate) fn projection(&self) -> &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
+    pub fn projection(&self) -> &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1 {
         &self.projection
     }
 
-    pub(crate) fn with_query_inputs(
+    pub fn with_query_inputs(
         &self,
         context: ProductionCandidateNativeQueryContextV1<'_>,
         rerank_authority: Option<&ProductionCodeRerankAuthorityV1>,
@@ -2806,13 +2806,13 @@ mod tests {
         VectorWatermark,
     };
 
+    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_semantic::legacy_migration::ProductionLegacyVectorCanonicalRebuilderV1;
     use tracedecay_semantic::{
         DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1,
         PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
         SemanticRuntimeScheduleFailureV1, SemanticRuntimeScheduleStatusV1, SemanticRuntimeWorkV1,
     };
-    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_semantic::legacy_migration::ProductionLegacyVectorCanonicalRebuilderV1;
 
     use super::*;
 

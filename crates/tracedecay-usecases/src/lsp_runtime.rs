@@ -63,7 +63,7 @@ use crate::feedback::concrete::{
 use crate::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
-pub(crate) use crate::lsp_support::{
+pub use crate::lsp_support::{
     BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
     LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
 };

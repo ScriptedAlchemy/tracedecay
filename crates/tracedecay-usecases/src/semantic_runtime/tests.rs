@@ -305,24 +305,24 @@ mod config_backend_tests {
     };
 
     use super::*;
-    use crate::semantic_runtime::{
-        ConfigurationLinkedSemanticRuntimeBackendV1, SemanticConfigurationBackendErrorV1,
-        SemanticConfigurationTransitionV1, SemanticCurrentLinkedActivationV1,
-        SemanticExecutableGenerationV1, SemanticLinkedTransitionV1,
-        SemanticRetrievalConfigurationPortV1, SemanticRuntimeGenerationInspectorV1,
-    };
     use crate::config::retrieval::{
         AcceptedRetrievalProfileV1, PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1,
         RetrievalProfileAuditEventV1, RetrievalProfileAuditOperationV1, RetrievalProfileCasV1,
         RetrievalRuntimeCompatibilityV1, SemanticCompatibilityPinsV1,
         SemanticResourceRequirementV1,
     };
+    use crate::semantic_runtime::{
+        ConfigurationLinkedSemanticRuntimeBackendV1, SemanticConfigurationBackendErrorV1,
+        SemanticConfigurationTransitionV1, SemanticCurrentLinkedActivationV1,
+        SemanticExecutableGenerationV1, SemanticLinkedTransitionV1,
+        SemanticRetrievalConfigurationPortV1, SemanticRuntimeGenerationInspectorV1,
+    };
+    use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
     use tracedecay_search_eval::{
         DirectEvaluationReportV1, DirectEvaluationStatusV1, DirectProfileEvaluationV1,
         DirectQualityMetricsV1, DirectRatioMetricV1, OptionalStageMeasurementV1,
         OptionalStageMeasurementsV1,
     };
-    use tracedecay_query::retrieval::semantic::SemanticCalibrationProfileV1;
 
     fn typed_id<T>(value: &str) -> T
     where
@@ -457,9 +457,7 @@ mod config_backend_tests {
 
         assert_eq!(
             SemanticCurrentLinkedActivationV1::new(receipt, shifted),
-            Err(
-                crate::semantic_runtime::SemanticRuntimeContractErrorV1::InvalidCompatibility
-            )
+            Err(crate::semantic_runtime::SemanticRuntimeContractErrorV1::InvalidCompatibility)
         );
     }
 

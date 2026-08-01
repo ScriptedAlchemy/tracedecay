@@ -16,7 +16,7 @@ pub(crate) const DEFAULT_MAX_RECORDS_PER_SOURCE: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]
-pub(crate) struct SpoolBounds {
+pub struct SpoolBounds {
     pub(crate) max_record_bytes: usize,
     pub(crate) max_source_bytes: usize,
     pub(crate) max_spool_bytes: usize,
@@ -28,7 +28,7 @@ pub(crate) struct SpoolBounds {
 }
 
 impl SpoolBounds {
-    pub(crate) const fn new(
+    pub const fn new(
         max_record_bytes: usize,
         max_source_bytes: usize,
         max_spool_bytes: usize,
@@ -47,7 +47,7 @@ impl SpoolBounds {
         }
     }
 
-    pub(crate) const fn with_source_limits(
+    pub const fn with_source_limits(
         mut self,
         max_spool_bytes_per_source: usize,
         max_records_per_source: usize,
@@ -57,8 +57,8 @@ impl SpoolBounds {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) const fn with_quarantine_limits(
+    #[cfg(any(test, feature = "test-transport"))]
+    pub const fn with_quarantine_limits(
         mut self,
         max_quarantine_bytes: usize,
         max_quarantine_records: usize,

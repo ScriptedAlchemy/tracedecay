@@ -524,6 +524,27 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 }
 
+impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
+    fn read_feedback_status(
+        &self,
+        project_root: PathBuf,
+    ) -> crate::dashboard::feedback_api::FeedbackStatusReadFuture {
+        let registrar = self.clone();
+        Box::pin(async move {
+            let store = registrar.doctor_read_store(&project_root).await.ok_or(
+                ApplicationContractError::Inconsistent {
+                    field: "feedback status runtime",
+                },
+            )?;
+            store.observation_read_model().await.map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "feedback status read model",
+                }
+            })
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
@@ -784,12 +805,14 @@ impl DaemonWorkRuntimeRegistrar {
                 || {
                     // Opening the provider runtime is deferred until the slot is
                     // known to be free so a refused registration never starts one.
-                    let runtime = database.work_runtime(
+                    let runtime = DaemonWorkRuntimeV1::new(
                         authority,
+                        database.work_storage()?,
                         config,
                         configuration_digest.clone(),
+                        Arc::clone(&database),
                         project_root.clone(),
-                    )?;
+                    );
                     Ok(RegisteredWorkRuntime {
                         database,
                         runtime: Arc::new(runtime),

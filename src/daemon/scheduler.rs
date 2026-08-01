@@ -1209,9 +1209,12 @@ async fn maybe_run_global_retention(
         return;
     };
     let now_secs = crate::tracedecay::current_timestamp();
-    let succeeded = match database
-        .prune_global_retention(&config.retention, now_secs)
-        .await
+    let succeeded = match crate::retention::prune_global_retention(
+        database,
+        &config.retention,
+        now_secs,
+    )
+    .await
     {
         Ok(reports) => {
             for report in reports {

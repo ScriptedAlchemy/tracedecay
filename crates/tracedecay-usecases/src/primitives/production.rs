@@ -2105,7 +2105,7 @@ fn operational_problem(
 }
 
 /// Opens the complete owned PR12 primitive runtime from production authorities.
-pub(crate) async fn open_pr12_production_primitive_runtime(
+pub async fn open_pr12_production_primitive_runtime(
     database: Database,
     graph: Arc<TraceDecay>,
     session_db: Arc<RegisteredGlobalDb>,

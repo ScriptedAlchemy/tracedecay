@@ -5,8 +5,16 @@
 //! existing URL if already running for this process. Supports optional `stop`
 //! action to shut down a previously-started instance.
 
-use serde_json::{Value, json};
 use std::sync::Arc;
+
+use axum::{Router, routing::get};
+use serde_json::{Value, json};
+use tracedecay_application::{
+    ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
+};
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::configuration::ConfigurationRevisionId;
+use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
@@ -16,9 +24,142 @@ use super::super::ToolResult;
 use super::support::generic_tool_result;
 
 use crate::dashboard::{
-    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardAutomationWriter, bind_dashboard,
-    build_state_with_automation_reconciler, router, validate_dashboard_host,
+    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
+    DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyFuture,
+    bind_dashboard, build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
+
+struct DashboardInvocationExecutorAdapter {
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+}
+
+impl DashboardInvocationExecutorAdapter {
+    fn new(executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
+    fn routers(
+        &self,
+        active_project_id: ProjectId,
+    ) -> std::result::Result<DashboardApplicationRouters, String> {
+        let http = crate::application_surface::http_application_router_with_executor(
+            Arc::clone(&self.executor),
+            crate::application::operation_stream::OperationEventAuthority::default(),
+            active_project_id,
+        )
+        .map_err(|error| error.to_string())?;
+        let configuration =
+            crate::application_surface::dashboard_configuration_application_router_with_executor(
+                Arc::clone(&self.executor),
+            )
+            .map_err(|error| error.to_string())?;
+        let feedback =
+            crate::application_surface::dashboard_feedback_application_router_with_executor(
+                Arc::clone(&self.executor),
+            )
+            .map_err(|error| error.to_string())?;
+        let work = crate::application_surface::dashboard_work_application_router_with_executor(
+            Arc::clone(&self.executor),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(DashboardApplicationRouters {
+            http,
+            configuration,
+            feedback,
+            work,
+        })
+    }
+
+    fn apply_configuration_batch<'a>(
+        &'a self,
+        request_id: RequestId,
+        mutations: Vec<DirectConfigurationMutation>,
+        expected_revision: ConfigurationRevisionId,
+    ) -> DashboardConfigurationApplyFuture<'a> {
+        let executor = Arc::clone(&self.executor);
+        let mut direct_mutations = Vec::new();
+        for mutation in mutations {
+            append_direct_configuration_mutations(mutation, &mut direct_mutations);
+        }
+        Box::pin(async move {
+            let error_request_id = request_id.clone();
+            match crate::application_surface::resolve_dashboard_application_surface(
+                crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
+                request_id,
+                crate::application_surface::ApplicationSurfaceRequest::Configuration(
+                    crate::application_surface::ConfigurationSurfaceRequest::Batch(
+                        crate::application_surface::ConfigurationBatchSurfaceRequest {
+                            mutations: direct_mutations,
+                            expected_revision,
+                        },
+                    ),
+                ),
+                crate::daemon_client::RequestedOutputFormat::Json,
+                Some(executor.as_ref()),
+            )
+            .await
+            {
+                Ok(result) => result.result.map(|_| ()),
+                Err(_) => Err(dashboard_configuration_unavailable(error_request_id)),
+            }
+        })
+    }
+}
+
+fn append_direct_configuration_mutations(
+    mutation: DirectConfigurationMutation,
+    direct_mutations: &mut Vec<
+        crate::application_surface::ConfigurationDirectMutationSurfaceRequest,
+    >,
+) {
+    match mutation {
+        DirectConfigurationMutation::Set { layer, key, value } => {
+            direct_mutations.push(
+                crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Set {
+                    layer,
+                    key,
+                    value,
+                },
+            );
+        }
+        DirectConfigurationMutation::Unset { layer, key } => {
+            direct_mutations.push(
+                crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Unset {
+                    layer,
+                    key,
+                },
+            );
+        }
+        DirectConfigurationMutation::Batch { mutations } => {
+            for mutation in mutations {
+                append_direct_configuration_mutations(mutation, direct_mutations);
+            }
+        }
+    }
+}
+
+fn dashboard_configuration_unavailable(request_id: RequestId) -> ApplicationProblemEnvelope {
+    let operation = tracedecay_application::configuration_surface_operation("configuration_batch")
+        .expect("configuration batch application contract is valid")
+        .expect("configuration batch application operation is registered");
+    ApplicationProblemEnvelope::new(
+        operation.result_contract().clone(),
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.surface.unavailable".to_owned(),
+            message: "The dashboard configuration application service is unavailable".to_owned(),
+        }),
+    )
+}
+
+fn dashboard_spa_router() -> Router {
+    Router::new()
+        .route("/", get(crate::dashboard::assets::app_index))
+        .route("/static/{*tail}", get(crate::dashboard::assets::app_static))
+        .fallback(get(crate::dashboard::assets::app_spa_fallback))
+}
 
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
@@ -123,9 +264,15 @@ pub(super) async fn handle_dashboard(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained dashboard project graph is unavailable".to_string(),
             })?;
+            let dashboard_project_graph_resolver = retained_project_graph_resolver
+                .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
+            let application_invocation_executor = application_invocation_executor.map(|executor| {
+                Arc::new(DashboardInvocationExecutorAdapter::new(executor))
+                    as Arc<dyn DashboardApplicationRuntime>
+            });
             let state = build_state_with_automation_reconciler(
-                Arc::clone(&retained_cg),
-                retained_project_graph_resolver,
+                retained_cg.clone(),
+                dashboard_project_graph_resolver,
                 registered_project_session_db,
                 registered_savings_db,
                 automation_scheduler_reconciler,
@@ -139,7 +286,7 @@ pub(super) async fn handle_dashboard(
             )
             .await?;
 
-            let app = router(retained_cg.as_ref(), state).await?;
+            let app = router(retained_cg.as_ref(), state, dashboard_spa_router()).await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let app = crate::dashboard::with_dashboard_http_admission(app, addr);
             let url = format!("http://{addr}/");

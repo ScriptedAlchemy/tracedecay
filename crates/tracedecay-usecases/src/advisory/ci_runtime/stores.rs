@@ -25,8 +25,8 @@ use super::production::{
     CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
 };
 use crate::advisory::context_allows_feedback_operation;
-use tracedecay_runtime_core::db::Database;
 use crate::tracedecay::TraceDecay;
+use tracedecay_runtime_core::db::Database;
 
 const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.pr13.ci.retained-key.v1";
 const RETAINED_KEY_PREFIX_V1: &str = "feedback.ci-failure.retained.v1.";
@@ -197,7 +197,7 @@ impl ProjectCiCodeAnchorStoreV1 {
         })
     }
 
-    pub(crate) fn new_with_code_index_identity(
+    pub fn new_with_code_index_identity(
         graph: Arc<TraceDecay>,
         scope: FeedbackScopeV1,
         code_index_identity: Arc<

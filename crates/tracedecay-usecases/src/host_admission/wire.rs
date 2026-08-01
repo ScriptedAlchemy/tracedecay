@@ -38,7 +38,7 @@ pub const WIRE_RECORD_TOO_LARGE: &str = "wire_record_too_large";
 
 /// Typed read outcome for non-MCP bounded inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WireReadOutcome<T> {
+pub enum WireReadOutcome<T> {
     Ready(T),
     Oversized,
 }
@@ -82,7 +82,7 @@ pub fn is_wire_oversized_io_error(err: &io::Error) -> bool {
 }
 
 /// Bounded leading prefix carried by a typed oversized IO error, if any.
-pub(crate) fn wire_oversized_inspect_prefix(err: &io::Error) -> &[u8] {
+pub fn wire_oversized_inspect_prefix(err: &io::Error) -> &[u8] {
     err.get_ref()
         .and_then(|inner| inner.downcast_ref::<WireOversizedError>())
         .map_or(&[], |inner| inner.inspect_prefix.as_slice())
@@ -142,7 +142,7 @@ pub(crate) fn read_bounded_to_end(
 }
 
 /// UTF-8 variant of [`read_bounded_to_end`].
-pub(crate) fn read_bounded_to_string(
+pub fn read_bounded_to_string(
     reader: &mut impl Read,
     max_bytes: usize,
 ) -> io::Result<WireReadOutcome<String>> {
@@ -159,8 +159,8 @@ pub(crate) fn read_bounded_to_string(
 /// Read one newline-delimited frame, retaining at most `max_bytes` of content
 /// (excluding the terminating newline). On overflow, discards until newline or
 /// EOF and returns [`WireReadOutcome::Oversized`].
-#[cfg(test)]
-pub(crate) async fn read_bounded_line<R>(
+#[cfg(any(test, feature = "test-transport"))]
+pub async fn read_bounded_line<R>(
     reader: &mut R,
     max_bytes: usize,
 ) -> io::Result<WireReadOutcome<Option<String>>>
@@ -177,7 +177,7 @@ where
 ///
 /// Oversized input is discarded through newline/EOF and returned as the typed
 /// IO error carrying only a bounded leading prefix for request-id inspection.
-pub(crate) async fn read_bounded_mcp_line<R>(reader: &mut R) -> io::Result<Option<String>>
+pub async fn read_bounded_mcp_line<R>(reader: &mut R) -> io::Result<Option<String>>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -250,10 +250,8 @@ fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
 }
 
 /// Map a bounded line read into the historical `Option<String>` transport shape.
-#[cfg(test)]
-pub(crate) fn line_outcome_to_io(
-    outcome: WireReadOutcome<Option<String>>,
-) -> io::Result<Option<String>> {
+#[cfg(any(test, feature = "test-transport"))]
+pub fn line_outcome_to_io(outcome: WireReadOutcome<Option<String>>) -> io::Result<Option<String>> {
     match outcome {
         WireReadOutcome::Ready(line) => Ok(line),
         WireReadOutcome::Oversized => Err(wire_oversized_io_error()),

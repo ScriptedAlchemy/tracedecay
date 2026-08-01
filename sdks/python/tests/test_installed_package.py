@@ -231,15 +231,37 @@ for mode in ("local",):
     server_operations = set(SERVER_OPERATIONS)
     available_operations = set(WORK_OPERATIONS)
     unavailable_operations = set(UNAVAILABLE_OPERATIONS)
+    schema_unavailable_operations = {
+        operation
+        for operation, reason in UNAVAILABLE_OPERATIONS.items()
+        if reason == "schema_unavailable"
+    }
+    route_unavailable_operations = {
+        operation
+        for operation, reason in UNAVAILABLE_OPERATIONS.items()
+        if reason == "route_unavailable"
+    }
     if (
         not SERVER_OPERATIONS
         or not UNAVAILABLE_OPERATIONS
-        or server_operations != available_operations | unavailable_operations
+        or server_operations
+        != available_operations | schema_unavailable_operations
         or available_operations & unavailable_operations
     ):
         raise AssertionError("installed operation availability inventory drifted")
-    if any(value != "schema_unavailable" for value in UNAVAILABLE_OPERATIONS.values()):
-        raise AssertionError("base routes must remain typed schema-unavailable")
+    expected_route_unavailable_operations = {
+        "workflow_activate_definition",
+        "workflow_handoff_issue",
+        "workflow_handoff_redeem",
+        "workflow_register_definition",
+    }
+    if (
+        route_unavailable_operations != expected_route_unavailable_operations
+        or server_operations & route_unavailable_operations
+        or unavailable_operations
+        != schema_unavailable_operations | route_unavailable_operations
+    ):
+        raise AssertionError("installed unavailable operation inventory drifted")
     if hasattr(client, "call") or not hasattr(client.operations, "work_snapshot"):
         raise AssertionError("only typed Work operations may be callable")
     attempt_finish = WORK_OPERATIONS.get("work_attempt_finish")

@@ -16,16 +16,16 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros, canonical_sha256};
 
-use crate::semantic_runtime::{
-    ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
-};
 use crate::config::{
     ConfigurationDaemonClient, OpenedRuntimeConfiguration, PinnedRuntimeConfiguration,
     RuntimeConfigurationFuture, RuntimeConfigurationTarget,
 };
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use crate::semantic_runtime::{
+    ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
+};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 use super::authorization::PolicyBackedConfigurationMutationAuthorization;
 use super::ephemeral_grants::EphemeralConfigurationGrantAuthority;
@@ -59,7 +59,7 @@ pub struct ProjectConfigurationRuntime {
 }
 
 impl ProjectConfigurationRuntime {
-    pub(crate) fn open(
+    pub fn open(
         opened: OpenedRuntimeConfiguration,
     ) -> Result<(Self, PinnedRuntimeConfiguration)> {
         let OpenedRuntimeConfiguration {
@@ -137,15 +137,15 @@ impl ProjectConfigurationRuntime {
     /// Immutable routing identity only. Effective values and revisions must be
     /// read from [`Self::client`] so the retained store remains the sole
     /// runtime configuration authority.
-    pub(crate) fn configuration_target(&self) -> &RuntimeConfigurationTarget {
+    pub fn configuration_target(&self) -> &RuntimeConfigurationTarget {
         &self.target
     }
 
-    pub(crate) fn registered_database(&self) -> Arc<RegisteredGlobalDb> {
+    pub fn registered_database(&self) -> Arc<RegisteredGlobalDb> {
         Arc::clone(&self.configuration_database)
     }
 
-    pub(crate) fn install_authorities(
+    pub fn install_authorities(
         &self,
         scopes: Arc<dyn ScopeResolutionPort + Send + Sync>,
         authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
@@ -153,13 +153,13 @@ impl ProjectConfigurationRuntime {
         self.authorities.install(scopes, authorization)
     }
 
-    pub(crate) fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
+    pub fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
         Arc::clone(&self.client)
     }
 
     /// Daemon-owned user-profile settings authority. Dashboard and other
     /// adapters receive this narrow client rather than loading `config.toml`.
-    pub(crate) fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient> {
+    pub fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient> {
         Arc::clone(&self.user_settings) as Arc<dyn UserSettingsDaemonClient>
     }
 
@@ -167,11 +167,11 @@ impl ProjectConfigurationRuntime {
         Arc::clone(&self.client) as Arc<dyn crate::config::ConfigurationDaemonClient>
     }
 
-    pub(crate) fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {
+    pub fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {
         self.client.store.clone()
     }
 
-    pub(crate) fn record_runtime_activation(
+    pub fn record_runtime_activation(
         &self,
         observed_revision_id: Option<ConfigurationRevisionId>,
         activation_error_code: Option<String>,
@@ -185,7 +185,7 @@ impl ProjectConfigurationRuntime {
         )
     }
 
-    pub(crate) fn install_semantic_runtime(
+    pub fn install_semantic_runtime(
         &self,
         runtime: Arc<ProductionSemanticActivationCoordinatorV1>,
     ) -> Result<()> {
@@ -204,10 +204,8 @@ impl ProjectConfigurationRuntime {
         authority: ConfigurationMutationAuthority,
         expected_revision: &ConfigurationRevisionId,
         now: UtcMicros,
-    ) -> std::result::Result<
-        (),
-        crate::semantic_runtime::SemanticActivationCoordinationErrorV1,
-    > {
+    ) -> std::result::Result<(), crate::semantic_runtime::SemanticActivationCoordinationErrorV1>
+    {
         self.retrieval_profile_mutation_capability(authority, expected_revision, now)
             .await
             .map(|_| ())
@@ -218,15 +216,11 @@ impl ProjectConfigurationRuntime {
         configuration: super::ports::ConfigurationCurrentStateV1,
         accepted_query: crate::config::retrieval::AcceptedRetrievalProfileV1,
         runtime: &crate::config::retrieval::RetrievalRuntimeCompatibilityV1,
-    ) -> std::result::Result<
-        (),
-        crate::semantic_runtime::SemanticActivationCoordinationErrorV1,
-    > {
+    ) -> std::result::Result<(), crate::semantic_runtime::SemanticActivationCoordinationErrorV1>
+    {
         self.semantic_runtime
             .get()
-            .ok_or(
-                crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
-            )?
+            .ok_or(crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable)?
             .bootstrap_query_profile(configuration, accepted_query, runtime)
             .await
     }
@@ -257,9 +251,7 @@ impl ProjectConfigurationRuntime {
             .await?;
         self.semantic_runtime
             .get()
-            .ok_or(
-                crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
-            )?
+            .ok_or(crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable)?
             .stage_and_activate(
                 base_configuration,
                 result_configuration,
@@ -300,9 +292,7 @@ impl ProjectConfigurationRuntime {
             .await?;
         self.semantic_runtime
             .get()
-            .ok_or(
-                crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable,
-            )?
+            .ok_or(crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Unavailable)?
             .stage_and_rollback(
                 base_configuration,
                 result_configuration,
@@ -352,9 +342,7 @@ impl ProjectConfigurationRuntime {
         crate::config::retrieval::RetrievalProfileMutationCapabilityV1::from_current_authorization(
             authority, current,
         )
-        .map_err(|_| {
-            crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Rejected
-        })
+        .map_err(|_| crate::semantic_runtime::SemanticActivationCoordinationErrorV1::Rejected)
     }
 }
 
@@ -1110,7 +1098,9 @@ mod tests {
             },
         )
         .unwrap();
-        let layout = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
+                .unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
         let host_runtime =
             HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
@@ -1183,7 +1173,9 @@ mod tests {
             },
         )
         .unwrap();
-        let layout = tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root).unwrap();
+        let layout =
+            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
+                .unwrap();
         std::fs::create_dir_all(&layout.data_root).unwrap();
         let host_runtime =
             HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())

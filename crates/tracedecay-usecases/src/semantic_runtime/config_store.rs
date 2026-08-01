@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
-use crate::configuration::{
-    ConfigurationMutationAuthority, DirectConfigurationMutation,
+use crate::config::retrieval::{
+    AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
+    RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
 };
+use crate::configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use crate::semantic_runtime::{
     CommittedRetrievalProfileStateV1, SemanticActivationCommandV1, SemanticActivationReceiptV1,
     SemanticConfigurationBackendErrorV1, SemanticConfigurationPinV1,
@@ -14,12 +16,8 @@ use crate::semantic_runtime::{
     SemanticLinkedTransitionV1, SemanticRetrievalConfigurationPortV1, SemanticRollbackCommandV1,
     SemanticRuntimeFuture,
 };
-use crate::config::retrieval::{
-    AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
-    RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
-};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
@@ -54,7 +52,7 @@ pub struct ProductionSemanticRetrievalConfigurationStoreV1 {
 }
 
 impl ProductionSemanticRetrievalConfigurationStoreV1 {
-    pub(crate) async fn open(
+    pub async fn open(
         database: Arc<RegisteredGlobalDb>,
         scope: ResolvedScope,
     ) -> Result<Self, SemanticConfigurationBackendErrorV1> {
@@ -148,7 +146,7 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
         }))
     }
 
-    pub(crate) async fn current_state_if_present(
+    pub async fn current_state_if_present(
         &self,
     ) -> Result<Option<RetrievalProfileStateV1>, SemanticConfigurationBackendErrorV1> {
         self.ensure_schema().await?;
@@ -922,8 +920,8 @@ mod tests {
     use tracedecay_domain::{ProjectId, RepositoryId, RetrieverKind, WorktreeId};
 
     use super::*;
-    use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
     use crate::daemon::query_authority_provider::tests::accepted_profile;
+    use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     #[tokio::test]
     async fn exact_query_bootstrap_is_explicit_and_required_before_activation() {
