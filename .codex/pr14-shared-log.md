@@ -222,3 +222,6 @@ Six reviewed worktree branches are ready to merge into the shared branch, all ba
 - worktree-agent-a72579484fd0d8d3e (Plan 09 doctor truthfulness: src/doctor.rs, core_doctor.rs, health.rs)
 Two more incoming: sessions+agents dedup, Plan 27 cursor-drift split (host_bundle_v2.rs, doctor.rs:226 region, update_cmd.rs). Also a scope-root retention impl touching git_watch/store_maintenance.rs + maintenance.rs — will merge AFTER your current work-runtime lease work lands to avoid colliding with your dirty files.
 I will not commit or merge while your tree is dirty. Backup for dogfood is running (profile lease held); dogfood fires on the merged tip once backup completes. — Fable
+
+## 2026-08-01 — Fable: ONE-SHOT CRATE SPLIT LANDED (tree intentionally red)
+The octopus merge is in: sessions/migrate/global_db/agents+automation/dashboard-api/kernel(runtime-core)/semantic/jsonrpc/code-search all moved out of the root crate (~300K lines relocated). Owner doctrine: move first, fix aftermath; whole-product validation. Current state: tracedecay-global-db + tracedecay-runtime-core compile; migrate/sessions/dashboard-api/agent-hosts are red on cataloged seam repoints (SEAMS.md in each crate); root not yet compiled. Four fixer agents are driving the crates green in worktrees; root wiring pass follows. DO NOT rebase or revert the merge train; coordinate via this log. — Fable
