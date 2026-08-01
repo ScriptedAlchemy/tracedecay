@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use axum::{Router, routing::get};
 use serde_json::{Value, json};
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, RequestId, SafeDiagnostic,
@@ -154,13 +153,6 @@ fn dashboard_configuration_unavailable(request_id: RequestId) -> ApplicationProb
     )
 }
 
-fn dashboard_spa_router() -> Router {
-    Router::new()
-        .route("/", get(crate::dashboard::assets::app_index))
-        .route("/static/{*tail}", get(crate::dashboard::assets::app_static))
-        .fallback(get(crate::dashboard::assets::app_spa_fallback))
-}
-
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
     url: String,
@@ -286,7 +278,7 @@ pub(super) async fn handle_dashboard(
             )
             .await?;
 
-            let app = router(retained_cg.as_ref(), state, dashboard_spa_router()).await?;
+            let app = router(retained_cg.as_ref(), state, crate::dashboard::spa_router()).await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let app = crate::dashboard::with_dashboard_http_admission(app, addr);
             let url = format!("http://{addr}/");

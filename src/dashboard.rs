@@ -13,3 +13,150 @@
 pub use tracedecay_dashboard_api::*;
 
 pub(crate) mod assets;
+
+/// Embedded single-page-app routes shared by production and integration
+/// servers. Keeping the asset router at the composition root preserves the
+/// root build script's `OUT_DIR` ownership.
+#[doc(hidden)]
+pub fn spa_router() -> axum::Router {
+    use axum::routing::get;
+
+    axum::Router::new()
+        .route("/", get(assets::app_index))
+        .route("/static/{*tail}", get(assets::app_static))
+        .fallback(get(assets::app_spa_fallback))
+}
+
+/// Root-owned graph composition used by dashboard integration tests.
+///
+/// The dashboard API crate cannot own daemon session registration or graph
+/// lifecycle. This opaque adapter keeps those authorities at the root while
+/// exposing only graph initialization and reopening to the integration suite.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub struct DashboardGraphTestRuntimeV1 {
+    profile_root: std::path::PathBuf,
+    profile_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+    registry: std::sync::Arc<
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    >,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+}
+
+#[cfg(feature = "test-transport")]
+impl DashboardGraphTestRuntimeV1 {
+    pub async fn open(profile_root: impl AsRef<std::path::Path>) -> crate::errors::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ELECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+        let profile_root = profile_root.as_ref().to_path_buf();
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let epoch = NEXT_ELECTION_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            identity.profile_root(),
+            epoch,
+            "dashboard-graph-test-runtime",
+        )?;
+        let registry = std::sync::Arc::new(
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await?,
+        );
+        let profile_database = registry.profile_database().await?;
+        Ok(Self {
+            profile_root,
+            profile_database,
+            registry,
+            _database_scope: database_scope,
+        })
+    }
+
+    pub async fn initialize(
+        &self,
+        project_root: &std::path::Path,
+        project_id: tracedecay_domain::ProjectId,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )?;
+        let options = crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(self.profile_root.clone()),
+            global_db_path: Some(self.profile_database.db_path().to_path_buf()),
+        };
+        let layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        if layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "dashboard graph identity differs from its test authority".to_owned(),
+            });
+        }
+        let project_database = self
+            .registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await?;
+        crate::tracedecay::TraceDecay::init_with_registered_configuration(
+            project_root,
+            options,
+            layout,
+            project_database,
+            std::sync::Arc::clone(&self.profile_database),
+            std::sync::Arc::clone(&self.registry),
+        )
+        .await
+    }
+
+    pub async fn reopen(
+        &self,
+        project_root: &std::path::Path,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let options = crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(self.profile_root.clone()),
+            global_db_path: Some(self.profile_database.db_path().to_path_buf()),
+        };
+        let layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        let project_id = layout
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "dashboard graph fixture has no project identity".to_owned(),
+            })
+            .and_then(|project_id| {
+                tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
+                    crate::errors::TraceDecayError::Config {
+                        message: format!("invalid dashboard graph fixture identity: {error}"),
+                    }
+                })
+            })?;
+        let project_database = self
+            .registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await?;
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_root,
+            options,
+            layout,
+            project_database,
+            std::sync::Arc::clone(&self.profile_database),
+            std::sync::Arc::clone(&self.registry),
+        )
+        .await
+    }
+}
