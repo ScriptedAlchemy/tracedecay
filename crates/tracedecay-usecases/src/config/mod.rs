@@ -214,19 +214,6 @@ pub async fn open_runtime_configuration_for_registered_database_read_only(
         .await
 }
 
-#[cfg(test)]
-pub(crate) async fn ensure_runtime_configuration_for_registered_database(
-    project_root: &Path,
-    layout: &StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
-) -> Result<PinnedRuntimeConfiguration> {
-    Ok(
-        open_runtime_configuration_for_registered_database(project_root, layout, database)
-            .await?
-            .configuration,
-    )
-}
-
 fn runtime_configuration_authority() -> Result<&'static dyn RuntimeConfigurationAuthorityPort> {
     RUNTIME_CONFIGURATION_AUTHORITY
         .get()

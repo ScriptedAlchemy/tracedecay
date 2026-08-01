@@ -1,15 +1,13 @@
 #![cfg(test)]
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracedecay_application::{
-    ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, IdempotencyKey, PolicyDecisionRef,
-    RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationFuture,
-    SourceEditAuthorizationPort, SourceEditEffectProofV1, SourceEditEffectRequestV1,
-    SourceEditKind, SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1,
-    SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation,
+    AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+    SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
+    source_edit_operation, source_edit_reconciliation_operation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -161,76 +159,5 @@ pub(super) fn fixture_reconciliation(
         disposition,
         proof: request.proof.clone(),
         observed_at: UtcMicros(4),
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct FixtureSourceEditAuthorization(
-    pub(super) tracedecay_application::SourceEditAuthorizationAdmissionV1,
-);
-
-pub(super) fn fixture_authorization(
-    request: &SourceEditEffectRequestV1,
-) -> FixtureSourceEditAuthorization {
-    FixtureSourceEditAuthorization(
-        tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
-            request.authority.clone(),
-            request.proof.clone(),
-            request.context.scope(),
-        )
-        .unwrap(),
-    )
-}
-
-impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
-    fn admit<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
-
-    fn recheck_effect<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
-}
-
-pub(super) struct CancelBeforeEffectAuthorization {
-    pub(super) admission: tracedecay_application::SourceEditAuthorizationAdmissionV1,
-    pub(super) cancellation: CancellationSignal,
-    pub(super) rechecks: AtomicUsize,
-}
-
-impl SourceEditAuthorizationPort for CancelBeforeEffectAuthorization {
-    fn admit<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move { Ok(self.admission.clone()) })
-    }
-
-    fn recheck_effect<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move {
-            if self.rechecks.fetch_add(1, Ordering::AcqRel) == 1 {
-                assert!(self.cancellation.cancel(UtcMicros(4)));
-            }
-            Ok(self.admission.clone())
-        })
     }
 }
