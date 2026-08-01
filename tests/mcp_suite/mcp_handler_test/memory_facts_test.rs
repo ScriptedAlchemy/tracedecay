@@ -1424,3 +1424,85 @@ async fn memory_status_reports_repair_state_without_repairing() {
         "status should report the vector the explicit repair fixed: {repaired}"
     );
 }
+
+#[tokio::test]
+async fn fact_store_reason_without_entities_names_the_missing_parameter() {
+    let (cg, _dir) = setup_project().await;
+
+    let err = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({"action": "reason", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("entities"),
+        "error should name the missing `entities` parameter instead of a bare \
+         canonicalization failure: {message}"
+    );
+    assert!(
+        !message.contains("is not canonical"),
+        "error should not surface the internal contract-violation phrasing \
+         for a plain missing parameter: {message}"
+    );
+}
+
+#[tokio::test]
+async fn fact_store_add_out_of_range_trust_states_the_valid_range() {
+    let (cg, _dir) = setup_project().await;
+
+    let err = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "format": "json",
+            "content": "Trust out of range must be rejected with an actionable message",
+            "category": "project",
+            "trust": 1.5
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("0.0") && message.contains("1.0"),
+        "error should state the valid 0.0-1.0 trust range: {message}"
+    );
+}
+
+#[tokio::test]
+async fn fact_feedback_on_nonexistent_fact_id_fails_fast_like_get() {
+    let (cg, _dir) = setup_project().await;
+
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle_tool_call(
+            &cg,
+            "tracedecay_fact_feedback",
+            json!({"fact_id": 999_999_999_i64, "action": "helpful", "format": "json"}),
+            None,
+            None,
+        ),
+    )
+    .await
+    .expect("fact_feedback on a nonexistent fact must not hang until a client deadline")
+    .unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "fact_feedback on a nonexistent fact must fail fast like fact_store get: {:?}",
+        started.elapsed()
+    );
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("not found") || message.contains("missing") || message.contains("unavailable"),
+        "error should clearly report the fact as absent: {message}"
+    );
+}

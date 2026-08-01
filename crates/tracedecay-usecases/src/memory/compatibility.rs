@@ -132,7 +132,7 @@ pub(super) fn compatibility_add_command(
 ) -> Result<CompatibilityFactAddCommandV1, MemoryApplicationError> {
     let trust = Confidence::new(request.trust.unwrap_or(DEFAULT_TRUST)).map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy add trust",
+            invariant: "trust must be between 0.0 and 1.0",
         }
     })?;
     CompatibilityFactAddCommandV1::new(
@@ -188,7 +188,7 @@ pub(super) fn compatibility_confidence(
 ) -> Result<Option<Confidence>, MemoryApplicationError> {
     value.map(Confidence::new).transpose().map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy memory confidence",
+            invariant: "confidence (trust/min_trust) must be between 0.0 and 1.0",
         }
     })
 }

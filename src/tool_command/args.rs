@@ -132,6 +132,25 @@ pub(super) fn parse_invocation_with_stdin(
             flag if flag.starts_with("--") => {
                 let key = flag.trim_start_matches('-').replace('-', "_");
                 let prop_schema = schema_properties.get(&key);
+                let is_boolean = prop_schema
+                    .and_then(|p| p.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("boolean");
+                // A boolean flag's value is optional: `--helpful` alone means
+                // `true`. Without this, a bare boolean flag would blindly
+                // consume whatever token follows it as its value — including
+                // the *next* flag (e.g. `--helpful --note x` would read
+                // `--note` as `--helpful`'s value and error on it, or worse,
+                // silently coerce it), which also drops that next flag from
+                // parsing entirely. Only treat the following token as this
+                // flag's value when it doesn't itself look like a flag.
+                if is_boolean
+                    && inline_value.is_none()
+                    && iter.clone().next().is_none_or(|next| next.starts_with("--"))
+                {
+                    merge_value(&mut collected, &key, Value::Bool(true));
+                    continue;
+                }
                 let raw_value = take_flag_value(&mut iter, flag, inline_value)
                     .map_err(|_| missing_flag_value_error(flag, prop_schema))?;
                 let resolved = resolve_at_file(&raw_value, &mut read_stdin)?;
