@@ -645,6 +645,7 @@ pub(crate) struct TestEnv {
     pub(crate) _env_lock: MutexGuard<'static, ()>,
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) struct CrossProjectMemoryEnv {
     pub(crate) _dir: TestTempDir,
     pub(crate) _storage_guard: common::TraceDecayStorageEnvGuard,
@@ -810,6 +811,7 @@ pub(crate) async fn setup_generated_dir_project(
     (cg, env, dir)
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn setup_cross_project_memory_projects()
 -> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
     let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
@@ -901,6 +903,7 @@ pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().sessions_db_path.clone()
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn open_active_project_session_db(
     cg: &TraceDecay,
 ) -> Arc<HostAdmissionTestRuntimeV1> {
@@ -910,6 +913,7 @@ pub(crate) async fn open_active_project_session_db(
 
 /// The active graph's retained runtime, promoted to the project scope the MCP
 /// test server constructor requires.
+#[cfg(feature = "test-transport")]
 pub(crate) async fn open_active_project_scoped_runtime(
     cg: &TraceDecay,
 ) -> ProjectScopedTestRuntimeV1 {

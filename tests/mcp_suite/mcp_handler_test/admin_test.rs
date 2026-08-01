@@ -2,6 +2,7 @@
 use crate::fixture;
 use crate::support::*;
 use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
 use std::fs;
 #[cfg(feature = "test-transport")]
 use std::path::Path;
