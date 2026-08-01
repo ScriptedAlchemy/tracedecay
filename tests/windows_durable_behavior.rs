@@ -42,24 +42,43 @@ async fn sqlite_writer_uses_production_wal_normal_policy() {
         .writer_connection("inspect production SQLite policy")
         .await
         .expect("acquire SQLite writer");
-    let mut rows = writer
-        .engine_connection()
-        .query(
-            "SELECT lower(journal_mode), synchronous, wal_autocheckpoint
-             FROM pragma_journal_mode(), pragma_synchronous(), pragma_wal_autocheckpoint()",
-            (),
+    let (journal_mode, synchronous) = {
+        let mut rows = writer
+            .engine_connection()
+            .query(
+                "SELECT lower(journal_mode), synchronous
+                 FROM pragma_journal_mode(), pragma_synchronous()",
+                (),
+            )
+            .await
+            .expect("inspect production SQLite journal policy");
+        let row = rows
+            .next()
+            .await
+            .expect("read production SQLite journal policy")
+            .expect("production SQLite journal policy row");
+        (
+            row.get::<String>(0).expect("journal_mode"),
+            row.get::<i64>(1).expect("synchronous"),
         )
-        .await
-        .expect("inspect production SQLite policy");
-    let row = rows
-        .next()
-        .await
-        .expect("read production SQLite policy")
-        .expect("production SQLite policy row");
+    };
+    let wal_autocheckpoint = {
+        let mut rows = writer
+            .engine_connection()
+            .query("PRAGMA wal_autocheckpoint", ())
+            .await
+            .expect("inspect production SQLite checkpoint policy");
+        let row = rows
+            .next()
+            .await
+            .expect("read production SQLite checkpoint policy")
+            .expect("production SQLite checkpoint policy row");
+        row.get::<i64>(0).expect("wal_autocheckpoint")
+    };
 
-    assert_eq!(row.get::<String>(0).expect("journal_mode"), "wal");
-    assert_eq!(row.get::<i64>(1).expect("synchronous"), 1);
-    assert_eq!(row.get::<i64>(2).expect("wal_autocheckpoint"), 0);
+    assert_eq!(journal_mode, "wal");
+    assert_eq!(synchronous, 1);
+    assert_eq!(wal_autocheckpoint, 0);
 }
 
 mod temporal_kernel_behavior {
