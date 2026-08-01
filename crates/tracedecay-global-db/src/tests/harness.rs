@@ -60,12 +60,8 @@ impl RegisteredGlobalDbHarness {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HostAdmissionScope {
-    Project,
-    Profile,
-}
+#[doc(hidden)]
+pub use tracedecay_sessions::admission::HostAdmissionScope;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,35 +75,41 @@ pub(crate) enum SessionTemporalFixtureCountV1 {
 }
 
 /// Test-only registered database fixture retained below the use-case layer.
-#[cfg(test)]
-pub(crate) struct HostAdmissionTestRuntimeV1 {
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub struct HostAdmissionTestRuntimeV1 {
+    profile_registry: Arc<RegisteredGlobalDb>,
     profile_registered: Arc<RegisteredGlobalDb>,
     project_registered: Option<Arc<RegisteredGlobalDb>>,
     _scope: DaemonDatabaseScope,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl HostAdmissionTestRuntimeV1 {
-    pub(crate) async fn profile(
+    pub async fn profile(
         profile_root: impl AsRef<std::path::Path>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         Self::open(profile_root.as_ref(), None).await
     }
 
-    pub(crate) async fn project(
+    pub async fn project(
         profile_root: impl AsRef<std::path::Path>,
         project_root: impl AsRef<std::path::Path>,
-        _project_id: tracedecay_domain::ProjectId,
+        project_id: tracedecay_domain::ProjectId,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
-        Self::open(profile_root.as_ref(), Some(project_root.as_ref())).await
+        Self::open(
+            profile_root.as_ref(),
+            Some((project_root.as_ref(), project_id)),
+        )
+        .await
     }
 
     async fn open(
         profile_root: &std::path::Path,
-        project_root: Option<&std::path::Path>,
+        project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         std::fs::create_dir_all(profile_root)?;
-        if let Some(project_root) = project_root {
+        if let Some((project_root, _)) = project.as_ref() {
             std::fs::create_dir_all(project_root)?;
         }
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -116,32 +118,53 @@ impl HostAdmissionTestRuntimeV1 {
             nonce,
             "global-db-test-runtime",
         )?;
-        let profile_registered =
-            open_registered_test_database(&profile_root.join("profile-sessions.db")).await?;
-        let project_registered = match project_root {
-            Some(project_root) => Some(
-                open_registered_test_database(
-                    &project_root.join(".tracedecay").join("project-sessions.db"),
-                )
-                .await?,
-            ),
+        let profile_registry =
+            open_registered_test_database(&profile_root.join("global.db")).await?;
+        let profile_registered = open_registered_test_database(
+            &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
+        )
+        .await?;
+        let project_registered = match project {
+            Some((project_root, project_id)) => {
+                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
+                    project_id: project_id.to_string(),
+                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+                };
+                let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+                    project_root,
+                    profile_root,
+                    &marker,
+                )?;
+                Some(open_registered_test_database(&layout.sessions_db_path).await?)
+            }
             None => None,
         };
         Ok(Self {
+            profile_registry,
             profile_registered,
             project_registered,
             _scope: scope,
         })
     }
 
-    pub(crate) fn registered_database(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Option<&RegisteredGlobalDb> {
+    pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
         match scope {
             HostAdmissionScope::Project => self.project_registered.as_deref(),
             HostAdmissionScope::Profile => Some(self.profile_registered.as_ref()),
         }
+    }
+
+    pub fn database_path(&self, scope: HostAdmissionScope) -> Option<&std::path::Path> {
+        self.registered_database(scope)
+            .map(RegisteredGlobalDb::db_path)
+    }
+
+    pub fn profile_registry(&self) -> &RegisteredGlobalDb {
+        self.profile_registry.as_ref()
+    }
+
+    pub fn canonical_project_key(project_path: &std::path::Path) -> String {
+        RegisteredGlobalDb::canonical_project_key(project_path)
     }
 
     fn session_database_for_test(
@@ -156,6 +179,7 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn observation_store(
         &self,
         scope: HostAdmissionScope,
@@ -167,6 +191,149 @@ impl HostAdmissionTestRuntimeV1 {
         ))
     }
 
+    pub async fn upsert_session_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        session: &tracedecay_sessions::runtime::SessionRecord,
+    ) -> tracedecay_runtime_core::errors::Result<bool> {
+        Ok(self
+            .session_database_for_test(scope)?
+            .upsert_session(session)
+            .await)
+    }
+
+    pub async fn upsert_session_message_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        message: &tracedecay_sessions::runtime::SessionMessageRecord,
+    ) -> tracedecay_runtime_core::errors::Result<bool> {
+        let database = self.session_database_for_test(scope)?;
+        let session = database
+            .get_session(&message.provider, &message.session_id)
+            .await
+            .ok_or_else(
+                || tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "seed registered session message fixture".to_owned(),
+                    message: format!(
+                        "session {}/{} is unavailable",
+                        message.provider, message.session_id
+                    ),
+                },
+            )?;
+        Ok(database
+            .upsert_transcript_batch(
+                &session,
+                std::slice::from_ref(message),
+                &format!(
+                    "global-db-test-message:{}:{}",
+                    message.provider, message.message_id
+                ),
+                crate::ParseOffset::default(),
+            )
+            .await)
+    }
+
+    pub async fn session_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<Option<tracedecay_sessions::runtime::SessionRecord>>
+    {
+        Ok(self
+            .session_database_for_test(scope)?
+            .get_session(provider, session_id)
+            .await)
+    }
+
+    pub async fn transcript_store_counts_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+        transcript_path: &std::path::Path,
+    ) -> tracedecay_runtime_core::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
+        let snapshot = self
+            .session_database_for_test(scope)?
+            .read_snapshot()
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT
+                    (SELECT COUNT(*) FROM sessions
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM session_messages
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages_fts
+                     JOIN lcm_raw_messages raw
+                       ON raw.store_id = lcm_raw_messages_fts.rowid
+                     WHERE raw.provider = ?1 AND raw.session_id = ?2),
+                    (SELECT COUNT(*) FROM lcm_raw_messages_fts),
+                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                     WHERE provider = ?1 AND session_id = ?2),
+                    (SELECT COUNT(*) FROM parse_offsets
+                     WHERE file_path = ?3)",
+                tracedecay_runtime_core::db::engine::params![
+                    provider,
+                    session_id,
+                    transcript_path.to_string_lossy().as_ref()
+                ],
+            )
+            .await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "read registered transcript store counts".to_owned(),
+                message: "count query returned no row".to_owned(),
+            }
+        })?;
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    }
+
+    pub async fn delete_session_message_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        message_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<u64> {
+        let transaction = self
+            .session_database_for_test(scope)?
+            .begin_write_transaction()
+            .await?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
+            )
+            .await?;
+        transaction.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn project_session_message_count_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<i64> {
+        self.session_database_for_test(HostAdmissionScope::Project)?
+            .session_message_count()
+            .await
+            .map_err(
+                |message| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "count registered project session messages".to_owned(),
+                    message,
+                },
+            )
+    }
+
+    #[cfg(test)]
     pub(crate) fn session_temporal_store_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -178,6 +345,7 @@ impl HostAdmissionTestRuntimeV1 {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn project_configuration_control_store_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
@@ -196,6 +364,7 @@ impl HostAdmissionTestRuntimeV1 {
         )
     }
 
+    #[cfg(test)]
     pub(crate) async fn session_temporal_fixture_count_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -227,6 +396,7 @@ impl HostAdmissionTestRuntimeV1 {
         row.get(0).map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub(crate) async fn session_temporal_copy_edge_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -259,6 +429,7 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(Some((knowledge_at, valid_time)))
     }
 
+    #[cfg(test)]
     pub(crate) async fn lcm_describe_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmDescribeRequest,
@@ -269,6 +440,7 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_registered.lcm_describe(request).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn lcm_expand_for_test(
         &self,
         request: tracedecay_sessions::runtime::lcm::LcmExpandRequest,
@@ -279,6 +451,7 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_registered.lcm_expand(request).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn seed_lcm_render_fixture_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -382,7 +555,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 async fn open_registered_test_database(
     path: &std::path::Path,
 ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {

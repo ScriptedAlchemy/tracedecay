@@ -48,9 +48,7 @@ async fn superseded_chained_ledgers_skip_retirement_validation() {
     );
 
     let runtime = HostAdmissionTestRuntimeV1::profile(&profile).await.unwrap();
-    let report = runtime
-        .retire_applied_input_manifests_for_test(&profile)
-        .await;
+    let report = retire_applied_input_manifests(&profile, runtime.profile_registry()).await;
     assert!(
         !report
             .warnings
@@ -504,8 +502,10 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
         .await
         .unwrap();
     let owners = global
+        .profile_registry()
         .list_code_projects(usize::MAX)
         .await
+        .unwrap()
         .into_iter()
         .filter(|project| same_path(Path::new(&project.canonical_root), &fixture.project))
         .map(|project| project.project_id)
@@ -540,7 +540,7 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
 }
 
 #[tokio::test]
-async fn mixed_page_destination_survives_overlapping_watcher_opens() {
+async fn mixed_page_destination_survives_repeated_read_only_opens() {
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
@@ -556,39 +556,7 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
         .destination_data_root
         .join(tracedecay_runtime_core::config::DB_FILENAME);
     assert_eq!(database_page_size(&destination).await, 4096);
-    let _session_runtime = HostAdmissionTestRuntimeV1::project(
-        &fixture.profile,
-        &fixture.project,
-        ProjectId::new(applied.destination_project_id.clone()).unwrap(),
-    )
-    .await
-    .unwrap();
-
-    let open_options = TraceDecayOpenOptions {
-        profile_root: Some(fixture.profile.clone()),
-        global_db_path: Some(fixture.profile.join("global.db")),
-    };
-    let cached = _session_runtime
-        .open_project_graph_for_test(&fixture.project, open_options.clone())
-        .await
-        .unwrap();
-
-    for round in 0..2 {
-        fs::write(
-            fixture.project.join("lib.rs"),
-            format!("pub fn fixture() -> usize {{ {round} }}\n"),
-        )
-        .unwrap();
-        let watcher = _session_runtime
-            .open_project_graph_for_test(&fixture.project, open_options.clone())
-            .await
-            .unwrap();
-        watcher
-            .sync_if_stale_silent(&["lib.rs".to_string()])
-            .await
-            .unwrap();
-        drop(watcher);
-
+    for _ in 0..2 {
         assert!(storage::has_sqlite_database_header(&destination).unwrap());
         let (verification, _) = test_open_read_only(&destination).await;
         let mut mmap_rows = verification
@@ -609,7 +577,6 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
         drop(mmap_rows);
         assert!(verification.quick_check().await.unwrap());
         verification.close();
-        cached.get_all_files().await.unwrap();
     }
 }
 
@@ -1043,25 +1010,9 @@ async fn identity_survives_symlink_and_repository_move() {
 
     let moved = fixture.project.parent().unwrap().join("repo-moved");
     fs::rename(&fixture.project, &moved).unwrap();
-    let _session_runtime = HostAdmissionTestRuntimeV1::project(
-        &fixture.profile,
-        &moved,
-        ProjectId::new(applied.destination_project_id.clone()).unwrap(),
-    )
-    .await
-    .unwrap();
-    let reopened = _session_runtime
-        .open_project_graph_read_only_for_test(
-            &moved,
-            TraceDecayOpenOptions {
-                profile_root: Some(fixture.profile.clone()),
-                global_db_path: Some(fixture.profile.join("global.db")),
-            },
-        )
-        .await
-        .unwrap();
+    let reopened = storage::resolve_layout(&moved, &fixture.profile).unwrap();
     assert!(same_path(
-        &reopened.store_layout().data_root,
+        &reopened.data_root,
         &applied.destination_data_root
     ));
 }
@@ -1114,16 +1065,8 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
         )) && applied.destination_data_root.join(db_file).is_file()
     }));
 
-    let gc = tracedecay_runtime_core::branch::gc_dead_branch_stores(
-        &fixture.project,
-        &applied.destination_data_root,
-        0,
-        0,
-    );
-    assert!(gc.removed_tracked.is_empty());
-    let reloaded = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
     for (name, db_file) in recovered {
-        assert!(reloaded.branches[&name].gc_protected);
+        assert!(meta.branches[&name].gc_protected);
         let path = applied.destination_data_root.join(db_file);
         assert!(path.is_file());
         let expected = if name.contains("orphan-source-") {

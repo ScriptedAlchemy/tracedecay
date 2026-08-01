@@ -17,26 +17,24 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
+use tracedecay_global_db::{GlobalDbObservationStore, RegisteredGlobalDb};
+use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationStore, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    ObservationStore, ObservationWrite, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
+    SessionRecord, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use super::*;
-use crate::root_seam::application::host_admission::{
-    HostAdmissionScope, HostAdmissionTestRuntimeV1,
-};
-use crate::root_seam::global_db::RegisteredGlobalDb;
-use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 use tracedecay_runtime_core::memory::store::MemoryStore;
 use tracedecay_runtime_core::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
-use tracedecay_runtime_core::tracedecay::TraceDecayOpenOptions;
 
 mod configuration;
 mod external_source;
@@ -78,6 +76,31 @@ async fn test_open_read_only(path: &Path) -> (Database, bool) {
     )
     .await
     .unwrap()
+}
+
+fn test_observation_store(db: &RegisteredGlobalDb) -> GlobalDbObservationStore<'_> {
+    GlobalDbObservationStore::with_runtime(db.runtime(), db.authority())
+}
+
+async fn clear_project_aliases_for_test(
+    db: &RegisteredGlobalDb,
+) -> tracedecay_runtime_core::errors::Result<u64> {
+    let transaction = db.begin_write_transaction().await?;
+    let deleted = transaction
+        .execute("DELETE FROM project_aliases", ())
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "clear registered project aliases for test".to_owned(),
+            message: error.to_string(),
+        })?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "commit registered project alias cleanup for test".to_owned(),
+            message: error.to_string(),
+        })?;
+    Ok(deleted)
 }
 
 async fn open_historical_project_runtime(
@@ -514,7 +537,7 @@ async fn persist_migration_observation(
     let write =
         AnchoredObservationWrite::new(write, retrieval_anchor, projection_generation).unwrap();
     assert!(matches!(
-        db.observation_store()
+        test_observation_store(db)
             .persist_observation(write)
             .await
             .unwrap(),
@@ -523,7 +546,7 @@ async fn persist_migration_observation(
 }
 
 async fn project_all_migration_observations(db: &RegisteredGlobalDb) -> usize {
-    let store = db.observation_store();
+    let store = test_observation_store(db);
     let mut projected = 0;
     while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
         store.project_observation(&observation_id).await.unwrap();
@@ -549,8 +572,7 @@ async fn assert_observation_authority(db: &RegisteredGlobalDb) {
     ] {
         assert_eq!(registered_count_rows(db, table).await, expected);
     }
-    let cursor = db
-        .observation_store()
+    let cursor = test_observation_store(db)
         .get_source_cursor(&migration_source(), &ObservationScopeV1::Profile)
         .await
         .unwrap()
@@ -780,7 +802,10 @@ async fn insert_projection_alias(
         )
         .await
         .unwrap();
-    let rebuilt = db.observation_store().rebuild_projection(0).await.unwrap();
+    let rebuilt = test_observation_store(db)
+        .rebuild_projection(0)
+        .await
+        .unwrap();
     assert!(rebuilt.is_complete());
 }
 
@@ -809,16 +834,7 @@ static FIXTURE_TEMPLATE: tokio::sync::OnceCell<Option<PathBuf>> =
 /// system temp dir across runs) is abandoned rather than served with the wrong
 /// shape.
 fn fixture_template_dir_name() -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    for source in [
-        include_str!("../../global_db/schema_stages.rs"),
-        include_str!("../../global_db/schema_contract/definitions.rs"),
-        include_str!("../../global_db/schema_contract/invariants/triggers.rs"),
-    ] {
-        hasher.update(source.as_bytes());
-    }
-    let fingerprint = hex::encode(&hasher.finalize()[..8]);
+    let fingerprint = tracedecay_global_db::tests::registered_schema_fixture_fingerprint();
     format!("{FIXTURE_TEMPLATE_BASE}-{fingerprint}")
 }
 
@@ -880,6 +896,7 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
     let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project).unwrap();
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
+            .profile_registry()
             .upsert_code_project(
                 project_id,
                 project,
@@ -890,6 +907,7 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
             .await
             .unwrap();
         global
+            .profile_registry()
             .upsert_store_instance(StoreInstanceUpsert {
                 store_id: format!("store:{project_id}:profile_sharded"),
                 project_id: project_id.to_string(),
@@ -907,10 +925,11 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
             .unwrap();
     }
     global
+        .profile_registry()
         .upsert_project_alias(project, FIXTURE_TARGET_ID)
         .await
         .unwrap();
-    global.checkpoint_profile_database_for_test().await;
+    global.profile_registry().checkpoint().await;
     storage::write_repository_identity_marker(project, FIXTURE_TARGET_ID).unwrap();
 }
 
@@ -936,9 +955,12 @@ async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
     let global = HostAdmissionTestRuntimeV1::profile(profile).await.ok()?;
     // Drop the template build's path aliases so only fresh new-path aliases
     // remain after the re-upserts below.
-    global.clear_project_aliases_for_test().await.ok()?;
+    clear_project_aliases_for_test(global.profile_registry())
+        .await
+        .ok()?;
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
+            .profile_registry()
             .upsert_code_project(
                 project_id,
                 project,
@@ -949,9 +971,10 @@ async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
             .await?;
     }
     global
+        .profile_registry()
         .upsert_project_alias(project, FIXTURE_TARGET_ID)
         .await?;
-    global.checkpoint_profile_database_for_test().await;
+    global.profile_registry().checkpoint().await;
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         let layout = layout_for_id(project, profile, project_id).ok()?;
         storage::write_store_manifest(&layout).ok()?;
