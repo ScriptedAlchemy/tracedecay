@@ -109,6 +109,10 @@ impl DashboardTestRuntimeV1 {
         }
     }
 
+    pub(crate) fn database_path(&self, scope: HostAdmissionScope) -> Option<&Path> {
+        self.database(scope).ok().map(RegisteredGlobalDb::db_path)
+    }
+
     fn primary_session_database(&self) -> &RegisteredGlobalDb {
         self.databases
             .project_database()
