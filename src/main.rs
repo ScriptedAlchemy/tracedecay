@@ -828,10 +828,12 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
                 service_path.display()
             );
             if cfg!(windows) {
-                let profile_root = match spec.data_dir_override.as_ref() {
-                    Some(profile_root) => profile_root.clone(),
-                    None => tracedecay::storage::default_profile_root()?,
-                };
+                let profile_root = tracedecay::daemon::installed_service_socket_path()?
+                    .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "installed Windows daemon task has no absolute profile root"
+                            .to_string(),
+                    })?;
                 eprintln!("Daemon profile root: {}", profile_root.display());
                 eprintln!("Daemon endpoint: authenticated loopback (authority-discovered)");
             } else {
