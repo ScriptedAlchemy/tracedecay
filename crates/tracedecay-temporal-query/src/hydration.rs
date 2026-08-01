@@ -237,6 +237,17 @@ pub async fn hydrate_selected(
         })?;
     let mut seen = BTreeSet::new();
     let mut total_bytes = 0_usize;
+    // This loop is deliberately sequential and must stay that way. Each
+    // authorized read is granted `remaining_total = hydration_total_bytes -
+    // total_bytes`, where `total_bytes` is the running sum of every prior
+    // anchor's read. That gate bounds the sink and decides whether a read
+    // truncates, succeeds, or trips `BudgetExceeded` at a specific anchor; the
+    // resulting payloads are also appended to `batch` in anchor order. Running
+    // anchors concurrently would have to grant each read a budget computed
+    // before its predecessors finished, changing truncation, the first
+    // over-budget anchor, and batch ordering — i.e. changing the output.
+    // Bounded concurrency cannot preserve this running-budget semantics, so the
+    // sequential walk is the correct implementation.
     for anchor_id in anchors {
         snapshot.request().execution_control().checkpoint()?;
         if !seen.insert(anchor_id.clone()) {
