@@ -247,16 +247,16 @@ mod tests {
             300_000 + "::lossless-tail".chars().count()
         );
         assert_eq!(
-            crate::lcm::MAX_DERIVED_TEXT_CHARS,
+            crate::runtime::lcm::MAX_DERIVED_TEXT_CHARS,
             MAX_DERIVED_TEXT_CHARS,
             "LCM must re-export the application derived-text cap, not redefine it"
         );
         assert_eq!(
-            crate::lcm::DERIVED_TRUNCATION_MARKER,
+            crate::runtime::lcm::DERIVED_TRUNCATION_MARKER,
             DERIVED_TRUNCATION_MARKER
         );
         assert_eq!(
-            crate::lcm::derived_text_for_index(&content),
+            crate::runtime::lcm::derived_text_for_index(&content),
             derived,
             "LCM derived_text_for_index must be the application helper"
         );

@@ -4,9 +4,7 @@ use serde_json::json;
 
 use crate::runtime::lcm::schema;
 use crate::runtime::lcm::util::{self, file_mtime_seconds};
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, IntoParams, QueryExecutor, Rows, TestConnection, TransactionBehavior,
-};
+use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 
 use super::pending_delete::{PENDING_PAYLOAD_DELETE_ERROR_PREFIX, pending_payload_delete_key};
 use super::*;
@@ -16,36 +14,6 @@ const PRIMARY_REF: &str =
     "payload_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.payload";
 const SECONDARY_REF: &str =
     "payload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.payload";
-
-impl QueryExecutor for TestConnection {
-    async fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        Connection::query(self, sql, params).await
-    }
-}
-
-impl Executor for TestConnection {
-    async fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        Connection::execute(self, sql, params).await
-    }
-
-    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        Connection::execute_batch(self, sql).await
-    }
-}
 
 async fn drain_pending_payload_deletes(
     conn: &Connection,
