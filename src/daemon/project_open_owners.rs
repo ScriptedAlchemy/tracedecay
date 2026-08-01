@@ -954,7 +954,6 @@ pub(super) async fn register_project_open_production_owners(
             .map_err(|error| TraceDecayError::Config {
             message: format!("project-open source access denied: {error}"),
         })?;
-    let configuration_digest = access.configuration_digest.clone();
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
     if let Some(repository_root) = crate::worktree::git_worktree_root(project_root) {

@@ -9,19 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rmcp::ServiceExt;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
-use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace, LspSessionRegistry};
-use tracedecay_query::code_search;
+use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
 use crate::application::context::CancellationToken;
-use crate::application_surface::ApplicationSurfaceOperation;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
@@ -86,8 +83,10 @@ mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
 mod code_index_executor;
+use code_index_executor::code_index_search_executor;
+#[cfg(test)]
 use code_index_executor::{
-    code_index_scope_unavailable, code_index_search_display_binding, code_index_search_executor,
+    code_index_scope_unavailable, code_index_search_display_binding,
     code_index_search_hydration_budget, mcp_search_request_termination,
 };
 pub(crate) mod code_index_scheduler;
@@ -95,7 +94,7 @@ mod connection_serving;
 pub(crate) mod context_scout_lifecycle;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(any(not(unix), test))]
+#[cfg(not(unix))]
 use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(test)]
 use connection_serving::{
@@ -172,26 +171,23 @@ mod maintenance;
 mod maintenance_tasks;
 pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
-#[path = "daemon/git_watch/store_maintenance.rs"]
-mod store_maintenance;
-pub(crate) use lsp_gateway::{
-    BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, DaemonSemanticProviderAdapter,
-    LspDiagnosticDocumentPort, LspSemanticRequestAuthority,
-};
 #[cfg(unix)]
 mod memory_repair_scheduler;
 #[cfg(unix)]
 pub mod pr_autotrack;
 mod production_harness;
+#[path = "daemon/git_watch/store_maintenance.rs"]
+mod store_maintenance;
 #[cfg(any(test, feature = "test-transport"))]
 pub use production_harness::ProductionProjectCompositionHarnessV1;
 #[cfg(all(unix, feature = "test-transport"))]
 pub use production_harness::capture_exact_git_snapshot_for_test;
 mod profile_host_admission_replay;
 mod projectless;
+#[cfg(test)]
+use projectless::projectless_tools_call_response;
 use projectless::{
-    projectless_tool_call, projectless_tools_call_response, projectless_user_session_request,
-    serve_projectless_client,
+    projectless_tool_call, projectless_user_session_request, serve_projectless_client,
 };
 pub(crate) mod profile_identity;
 mod project_composition;
@@ -199,12 +195,14 @@ mod project_composition;
 use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
+#[cfg(test)]
+use project_open_admission::project_open_retry_backoff;
 use project_open_admission::{
     MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
     MaintenanceTransitionKey, ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates,
     ProjectOpenTaskClaim, ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey,
     ProjectServerKey, ProjectServerPublication, ProjectServerRequirement, StoreOwnerKey,
-    project_open_retry_backoff, project_server_requirement,
+    project_server_requirement,
 };
 mod project_open_handshake;
 #[cfg(test)]
@@ -240,9 +238,8 @@ use project_routing::{
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
 use project_server_lifecycle::{
-    cancel_project_server_startup_ingests, detach_project_servers,
-    ensure_user_profile_host_admission_replay_for_identity, schedule_project_server_retirement,
-    shutdown_detached_project_servers, shutdown_project_servers,
+    cancel_project_server_startup_ingests, ensure_user_profile_host_admission_replay_for_identity,
+    schedule_project_server_retirement, shutdown_project_servers,
 };
 mod query_mcp_admission;
 #[cfg(unix)]
@@ -273,8 +270,6 @@ pub(crate) use crate::daemon_contract::{
 #[cfg(all(unix, test))]
 use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
-#[cfg(unix)]
-use bootstrap::set_owner_only_permissions;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,
