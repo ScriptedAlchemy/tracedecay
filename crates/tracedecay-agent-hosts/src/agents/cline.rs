@@ -12,7 +12,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpUninstallPolicy,
-    install_mcp_server_entry, load_json_file, load_json_file_strict, uninstall_mcp_server_entry,
+    install_mcp_server_entry, load_json_file, load_json_file_strict,
+    mcp_servers_registration_state, uninstall_mcp_server_entry,
 };
 
 /// Cline agent.
@@ -113,28 +114,7 @@ impl AgentIntegration for ClineIntegration {
         _component: super::host_bundle_v2::HostBundleComponentV1,
         ctx: &HealthcheckContext,
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
-        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
-
-        let path = cline_mcp_settings_path(&ctx.home);
-        let Ok(bytes) = std::fs::read(path) else {
-            return State::Missing;
-        };
-        let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return State::Corrupt;
-        };
-        if settings
-            .pointer("/mcpServers/tracedecay/disabled")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-            && settings
-                .pointer("/mcpServers/tracedecay/args")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
-        {
-            State::Current
-        } else {
-            State::Missing
-        }
+        mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
     }
 
     fn is_detected(&self, home: &Path) -> bool {

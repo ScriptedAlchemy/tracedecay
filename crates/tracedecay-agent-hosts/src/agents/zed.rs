@@ -10,8 +10,9 @@ use serde_json::json;
 use crate::errors::Result;
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, backup_and_write_json,
-    backup_config_file, load_jsonc_file, load_jsonc_file_strict, safe_write_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
+    backup_and_write_json, backup_config_file, doctor_check_mcp_registration, load_jsonc_file,
+    load_jsonc_file_strict, safe_write_json_file,
 };
 
 /// Zed agent.
@@ -183,29 +184,16 @@ fn uninstall_context_server(settings_path: &Path) {
 /// Check Zed settings.json has tracedecay context server registered.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = zed_config_dir(home).join("settings.json");
-
-    if !settings_path.exists() {
-        dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent zed` if you use Zed",
-            settings_path.display()
-        ));
-        return;
-    }
-
-    let settings = load_jsonc_file(&settings_path);
-    let server = settings
-        .get("context_servers")
-        .and_then(|v| v.get("tracedecay"));
-
-    if server.and_then(|v| v.as_object()).is_some() {
-        dc.pass(&format!(
-            "Context server registered in {}",
-            settings_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
-            "Context server NOT registered in {} — run `tracedecay install --agent zed`",
-            settings_path.display()
-        ));
-    }
+    doctor_check_mcp_registration(
+        dc,
+        &settings_path,
+        "context_servers",
+        load_jsonc_file,
+        &McpDoctorLabels {
+            agent_id: "zed",
+            product: "Zed",
+            registered: "Context server registered",
+            missing: "Context server NOT registered",
+        },
+    );
 }
