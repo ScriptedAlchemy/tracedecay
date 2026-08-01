@@ -70,7 +70,7 @@ impl ProfileConfigDocument {
 
 /// Reads the removed `plugins.tracedecay.project_root` setting solely as
 /// provenance for one-time data migration and transcript import.
-pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
+pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(config_path).ok()?;
     let config = ProfileConfigDocument::parse(&contents).ok()?;
     let plugins = config.root().get_mapping("plugins")?;

@@ -50,7 +50,7 @@ impl SessionActivity {
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
-pub(crate) async fn load_session_activity(sessions_db: &RegisteredGlobalDb) -> SessionActivity {
+pub async fn load_session_activity(sessions_db: &RegisteredGlobalDb) -> SessionActivity {
     SessionActivity {
         last_activity_secs: sessions_db.latest_session_activity_secs().await,
     }

@@ -5539,6 +5539,7 @@ dependencies = [
  "toml",
  "toml_edit",
  "tower",
+ "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
@@ -5575,6 +5576,43 @@ dependencies = [
  "yaml-edit",
  "zeroize",
  "zip",
+]
+
+[[package]]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "dirs",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracedecay-application",
+ "tracedecay-automation",
+ "tracedecay-domain",
+ "tracedecay-hooks",
+ "tracedecay-host-integration",
+ "tracedecay-lsp",
+ "tracedecay-store",
+ "tracedecay-temporal-query",
+ "tracedecay-tool-catalog",
+ "tracing",
+ "url",
+ "webpki-roots",
+ "xattr",
+ "yaml-edit",
 ]
 
 [[package]]

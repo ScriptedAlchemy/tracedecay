@@ -226,7 +226,7 @@ pub(crate) fn prepare_run_artifact(
     Ok((artifact, bytes))
 }
 
-pub(crate) async fn read_published_artifact_manifest(
+pub async fn read_published_artifact_manifest(
     dashboard_root: &Path,
     run_id: &str,
     expected_identity: Option<&Value>,

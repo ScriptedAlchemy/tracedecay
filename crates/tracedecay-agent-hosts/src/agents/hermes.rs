@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
-pub(crate) use profile_config::read_config_pinned_project_root;
+pub use profile_config::read_config_pinned_project_root;
 use profile_config::{disable_plugin, enable_plugin};
 
 use super::{
