@@ -16,7 +16,7 @@ impl RegisteredGlobalDb {
         &self,
         project_path: &Path,
         tokens_saved: u64,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let path = super::project_path_alias_key(project_path);
         let transaction = self.begin_write_transaction().await?;
         transaction
@@ -24,7 +24,7 @@ impl RegisteredGlobalDb {
                 "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET
                     tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
-                crate::db::engine::params![path, tokens_saved as i64],
+                tracedecay_runtime_core::db::engine::params![path, tokens_saved as i64],
             )
             .await
             .map_err(|error| global_db_operation_error("update project token total", error))?;
@@ -46,7 +46,7 @@ impl RegisteredGlobalDb {
         let mut rows = snapshot
             .query(
                 "SELECT tokens_saved FROM projects WHERE path = ?1",
-                crate::db::engine::params![path],
+                tracedecay_runtime_core::db::engine::params![path],
             )
             .await
             .map_err(|error| format!("failed to query project tokens saved: {error}"))?;
@@ -121,7 +121,7 @@ impl RegisteredGlobalDb {
         before_tokens: u64,
         after_tokens: u64,
         timestamp: i64,
-    ) -> crate::errors::Result<()> {
+    ) -> tracedecay_runtime_core::errors::Result<()> {
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
         let transaction = self.begin_write_transaction().await?;
         transaction
@@ -129,7 +129,7 @@ impl RegisteredGlobalDb {
                 "INSERT INTO savings_ledger
                      (ts, project_path, tool_name, before_tokens, after_tokens)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     timestamp,
                     project_path,
                     tool_name,
@@ -148,7 +148,7 @@ impl RegisteredGlobalDb {
     fn report_optional_accounting_failure(
         &self,
         operation: &'static str,
-        error: &crate::errors::TraceDecayError,
+        error: &tracedecay_runtime_core::errors::TraceDecayError,
     ) {
         tracing::error!(
             database = %self.db_path().display(),
@@ -213,7 +213,7 @@ impl RegisteredGlobalDb {
                                 COALESCE(MAX(id), 0)
                          FROM savings_ledger
                          WHERE project_path = ?1 AND ts >= ?2",
-                        crate::db::engine::params![project, since],
+                        tracedecay_runtime_core::db::engine::params![project, since],
                     )
                     .await
             }
@@ -228,7 +228,7 @@ impl RegisteredGlobalDb {
                                 COALESCE(MAX(id), 0)
                          FROM savings_ledger
                          WHERE ts >= ?1",
-                        crate::db::engine::params![since],
+                        tracedecay_runtime_core::db::engine::params![since],
                     )
                     .await
             }
@@ -279,7 +279,7 @@ impl RegisteredGlobalDb {
                          FROM savings_ledger
                          WHERE project_path = ?1 AND ts >= ?2
                          GROUP BY day ORDER BY day DESC",
-                        crate::db::engine::params![project, since],
+                        tracedecay_runtime_core::db::engine::params![project, since],
                     )
                     .await
             }
@@ -295,7 +295,7 @@ impl RegisteredGlobalDb {
                          FROM savings_ledger
                          WHERE ts >= ?1
                          GROUP BY day ORDER BY day DESC",
-                        crate::db::engine::params![since],
+                        tracedecay_runtime_core::db::engine::params![since],
                     )
                     .await
             }
@@ -420,7 +420,7 @@ impl RegisteredGlobalDb {
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM turns WHERE timestamp >= ?1",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .map_err(|error| format!("failed to query total cost: {error}"))?;
@@ -442,7 +442,7 @@ impl RegisteredGlobalDb {
             .query(
                 "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
                  FROM turns WHERE timestamp >= ?1",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .map_err(|error| format!("failed to query total tokens: {error}"))?;
@@ -467,7 +467,7 @@ impl RegisteredGlobalDb {
                         COALESCE(SUM(cost_usd), 0.0),
                         COALESCE(MAX(timestamp), 0)
                  FROM turns WHERE timestamp >= ?1",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .ok()?;
@@ -494,7 +494,7 @@ impl RegisteredGlobalDb {
                         COALESCE(SUM(output_tokens), 0),
                         COALESCE(SUM(cache_read_tokens), 0)
                  FROM turns WHERE timestamp >= ?1",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .map_err(|error| format!("failed to query token breakdown: {error}"))?;
@@ -526,7 +526,7 @@ impl RegisteredGlobalDb {
                 "SELECT model, SUM(cost_usd), SUM(input_tokens + output_tokens)
                  FROM turns WHERE timestamp >= ?1
                  GROUP BY model ORDER BY SUM(cost_usd) DESC",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .map_err(|error| format!("failed to query model cost breakdown: {error}"))?;
@@ -570,7 +570,7 @@ impl RegisteredGlobalDb {
                 "SELECT category, SUM(cost_usd), COUNT(*)
                  FROM turns WHERE timestamp >= ?1
                  GROUP BY category ORDER BY SUM(cost_usd) DESC",
-                crate::db::engine::params![since as i64],
+                tracedecay_runtime_core::db::engine::params![since as i64],
             )
             .await
             .map_err(|error| format!("failed to query category cost breakdown: {error}"))?;
@@ -596,8 +596,8 @@ impl RegisteredGlobalDb {
     }
 }
 
-fn turn_params(turn: &tracedecay_domain::observability::CostTurn) -> crate::db::engine::Params {
-    crate::db::engine::params![
+fn turn_params(turn: &tracedecay_domain::observability::CostTurn) -> tracedecay_runtime_core::db::engine::Params {
+    tracedecay_runtime_core::db::engine::params![
         turn.message_id.as_str(),
         turn.project_hash.as_str(),
         turn.session_id.as_str(),

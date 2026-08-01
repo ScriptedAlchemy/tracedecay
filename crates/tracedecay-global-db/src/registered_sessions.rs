@@ -2,10 +2,10 @@ use std::fmt::Write as _;
 
 use serde_json::Value as JsonValue;
 
-use crate::application::session::compatibility::{
+use tracedecay_sessions::compatibility::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
-use crate::db::engine::Value;
+use tracedecay_runtime_core::db::engine::Value;
 
 use super::{
     RegisteredGlobalDb, SESSION_MESSAGE_SEARCH_MAX_FETCH, SessionActivityRow, SessionIngestHealth,
@@ -51,7 +51,7 @@ impl RegisteredGlobalDb {
                      LEFT JOIN parse_offsets AS offsets
                        ON offsets.file_path = paths.transcript_path
                      ORDER BY paths.transcript_path",
-                    crate::db::engine::params![
+                    tracedecay_runtime_core::db::engine::params![
                         provider,
                         after_path.as_str(),
                         SESSION_INGEST_HEALTH_PAGE_SIZE
@@ -131,7 +131,7 @@ impl RegisteredGlobalDb {
                     SELECT 1 FROM session_messages
                     WHERE provider = ?1 AND message_id = ?2
                  )",
-                crate::db::engine::params![provider, message_id],
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
             .map_err(|error| format!("failed to query session message existence: {error}"))?;
@@ -177,7 +177,7 @@ impl RegisteredGlobalDb {
                  FROM session_messages m
                  JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
                  WHERE s.project_key = ?1",
-                crate::db::engine::params![project_key],
+                tracedecay_runtime_core::db::engine::params![project_key],
             )
             .await
             .map_err(|error| format!("failed to count project session messages: {error}"))?;
@@ -212,7 +212,7 @@ impl RegisteredGlobalDb {
                    AND timestamp IS NOT NULL AND timestamp >= ?3
                  ORDER BY timestamp, ordinal
                  LIMIT ?4",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
                     since_ts,
@@ -286,7 +286,7 @@ impl RegisteredGlobalDb {
                 "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
                         model, tool_names, source_path, source_offset, metadata_json
                  FROM session_messages WHERE provider = ?1 AND message_id = ?2",
-                crate::db::engine::params![provider, message_id],
+                tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await
             .ok()?;
@@ -533,9 +533,9 @@ impl RegisteredGlobalDb {
     /// Reads the canonical workflow fact columns used by projection acceptance.
     pub async fn workflow_fact_rows(
         &self,
-    ) -> crate::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<(String, Option<String>, Option<String>)>> {
         let snapshot = self.read_snapshot().await.map_err(|error| {
-            crate::errors::TraceDecayError::Database {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "begin registered workflow fact snapshot".to_owned(),
                 message: error.to_string(),
             }
@@ -548,7 +548,7 @@ impl RegisteredGlobalDb {
                 (),
             )
             .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
+            .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                 operation: "query registered workflow facts".to_owned(),
                 message: error.to_string(),
             })?;
@@ -556,24 +556,24 @@ impl RegisteredGlobalDb {
         while let Some(row) =
             rows.next()
                 .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
+                .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                     operation: "read registered workflow fact row".to_owned(),
                     message: error.to_string(),
                 })?
         {
             values.push((
                 row.get(0)
-                    .map_err(|error| crate::errors::TraceDecayError::Database {
+                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact kind".to_owned(),
                         message: error.to_string(),
                     })?,
                 row.get(1)
-                    .map_err(|error| crate::errors::TraceDecayError::Database {
+                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact status".to_owned(),
                         message: error.to_string(),
                     })?,
                 row.get(2)
-                    .map_err(|error| crate::errors::TraceDecayError::Database {
+                    .map_err(|error| tracedecay_runtime_core::errors::TraceDecayError::Database {
                         operation: "decode registered workflow fact state".to_owned(),
                         message: error.to_string(),
                     })?,
@@ -584,7 +584,7 @@ impl RegisteredGlobalDb {
 }
 
 async fn search_workflow_facts(
-    snapshot: &crate::db::engine::ReadSnapshot,
+    snapshot: &tracedecay_runtime_core::db::engine::ReadSnapshot,
     provider: &str,
     project_key: Option<&str>,
     query: &str,
@@ -666,7 +666,7 @@ async fn search_workflow_facts(
     results
 }
 
-fn row_to_session(row: &crate::db::engine::Row) -> Option<SessionRecord> {
+fn row_to_session(row: &tracedecay_runtime_core::db::engine::Row) -> Option<SessionRecord> {
     Some(SessionRecord {
         provider: row.get(0).ok()?,
         session_id: row.get(1).ok()?,
@@ -684,7 +684,7 @@ fn row_to_session(row: &crate::db::engine::Row) -> Option<SessionRecord> {
     })
 }
 
-fn row_to_message(row: &crate::db::engine::Row, offset: i32) -> Option<SessionMessageRecord> {
+fn row_to_message(row: &tracedecay_runtime_core::db::engine::Row, offset: i32) -> Option<SessionMessageRecord> {
     Some(SessionMessageRecord {
         provider: row.get(offset).ok()?,
         message_id: row.get(offset + 1).ok()?,
@@ -703,7 +703,7 @@ fn row_to_message(row: &crate::db::engine::Row, offset: i32) -> Option<SessionMe
 }
 
 fn row_to_workflow_message(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     offset: i32,
 ) -> Option<SessionMessageRecord> {
     let provider: String = row.get(offset).ok()?;

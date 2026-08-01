@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 pub use tracedecay_store::ParseOffset;
 
-use crate::db::engine::{Value as EngineValue, WalCheckpointExecutor};
-use crate::errors::TraceDecayError;
-use crate::sessions::{SessionMessageSearchResult, lcm::LcmSummaryRequest};
+use tracedecay_runtime_core::db::engine::{Value as EngineValue, WalCheckpointExecutor};
+use tracedecay_runtime_core::errors::TraceDecayError;
+use tracedecay_sessions::runtime::{SessionMessageSearchResult, lcm::LcmSummaryRequest};
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 pub mod configuration;
@@ -50,8 +50,8 @@ pub use transcript::TranscriptPersistenceError;
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 /// Compatibility re-export: workflow search filters now live beside the
-/// workflow-index contracts in [`crate::sessions::workflow_index`].
-pub use crate::sessions::workflow_index::WorkflowScopeFilter;
+/// workflow-index contracts in [`tracedecay_sessions::runtime::workflow_index`].
+pub use tracedecay_sessions::runtime::workflow_index::WorkflowScopeFilter;
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -103,12 +103,12 @@ pub struct AnalyticsEventRecord {
     pub metadata_json: Option<String>,
 }
 
-impl crate::sessions::git_correlation::AnalyticsSessionTimestampSource for AnalyticsEventRecord {
+impl tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestampSource for AnalyticsEventRecord {
     fn as_analytics_session_timestamp(
         &self,
-    ) -> Option<crate::sessions::git_correlation::AnalyticsSessionTimestamp> {
+    ) -> Option<tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestamp> {
         Some(
-            crate::sessions::git_correlation::AnalyticsSessionTimestamp {
+            tracedecay_sessions::runtime::git_correlation::AnalyticsSessionTimestamp {
                 provider: self.provider.clone(),
                 session_id: self.session_id.clone()?,
                 timestamp: self.timestamp,
@@ -335,7 +335,7 @@ impl SessionTemporalRepairStage {
         }
     }
 
-    fn parse(value: &str) -> crate::errors::Result<Self> {
+    fn parse(value: &str) -> tracedecay_runtime_core::errors::Result<Self> {
         match value {
             "repair_state" => Ok(Self::RepairState),
             "prepare_schema" => Ok(Self::PrepareSchema),
@@ -397,7 +397,7 @@ struct SessionTemporalRepairCheckpoint {
 
 pub async fn enqueue_session_temporal_store_repair(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+) -> tracedecay_runtime_core::errors::Result<SessionTemporalRepairOutcome> {
     let transaction = database
         .begin_write_transaction()
         .await
@@ -441,7 +441,7 @@ pub async fn enqueue_session_temporal_store_repair(
                 repair_name, stage, cursor, requested_at, updated_at
              ) VALUES (?1, ?2, 0, unixepoch(), unixepoch())
              ON CONFLICT(repair_name) DO NOTHING",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 SESSION_TEMPORAL_REPAIR_NAME,
                 SessionTemporalRepairStage::RepairState.as_str()
             ],
@@ -467,7 +467,7 @@ pub async fn enqueue_session_temporal_store_repair(
 
 pub async fn session_temporal_store_repair_status(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+) -> tracedecay_runtime_core::errors::Result<SessionTemporalRepairOutcome> {
     let snapshot = database
         .read_snapshot()
         .await
@@ -484,7 +484,7 @@ pub async fn session_temporal_store_repair_status(
 
 pub async fn advance_required_session_temporal_state_repair(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+) -> tracedecay_runtime_core::errors::Result<SessionTemporalRepairOutcome> {
     let status = session_temporal_store_repair_status(database).await?;
     if status
         == (SessionTemporalRepairOutcome::Pending {
@@ -499,7 +499,7 @@ pub async fn advance_required_session_temporal_state_repair(
 
 pub async fn advance_session_temporal_store_repair(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+) -> tracedecay_runtime_core::errors::Result<SessionTemporalRepairOutcome> {
     advance_session_temporal_store_repair_with_page_rows(
         database,
         schema_contract::SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS,
@@ -510,7 +510,7 @@ pub async fn advance_session_temporal_store_repair(
 pub async fn advance_session_temporal_store_repair_with_page_rows(
     database: &RegisteredGlobalDb,
     page_rows: i64,
-) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+) -> tracedecay_runtime_core::errors::Result<SessionTemporalRepairOutcome> {
     debug_assert!(page_rows > 0);
     let transaction = database
         .begin_write_transaction()
@@ -587,7 +587,7 @@ pub async fn advance_session_temporal_store_repair_with_page_rows(
                     "UPDATE session_temporal_repair_progress
                      SET stage = ?1, cursor = ?2, updated_at = unixepoch()
                      WHERE repair_name = ?3",
-                    crate::db::engine::params![
+                    tracedecay_runtime_core::db::engine::params![
                         next.as_str(),
                         next_cursor,
                         SESSION_TEMPORAL_REPAIR_NAME
@@ -607,7 +607,7 @@ pub async fn advance_session_temporal_store_repair_with_page_rows(
                      ON CONFLICT(repair_name) DO UPDATE SET
                         repair_version = excluded.repair_version,
                         completed_at = excluded.completed_at",
-                    crate::db::engine::params![
+                    tracedecay_runtime_core::db::engine::params![
                         SESSION_TEMPORAL_REPAIR_NAME,
                         SESSION_TEMPORAL_REPAIR_VERSION
                     ],
@@ -619,7 +619,7 @@ pub async fn advance_session_temporal_store_repair_with_page_rows(
             transaction
                 .execute(
                     "DELETE FROM session_temporal_repair_progress WHERE repair_name = ?1",
-                    crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+                    tracedecay_runtime_core::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
                 )
                 .await
                 .map_err(|error| {
@@ -651,7 +651,7 @@ pub async fn advance_session_temporal_store_repair_with_page_rows(
 
 pub async fn repair_session_temporal_store(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut outcome = enqueue_session_temporal_store_repair(database).await?;
     while matches!(outcome, SessionTemporalRepairOutcome::Pending { .. }) {
         outcome = advance_session_temporal_store_repair(database).await?;
@@ -667,17 +667,17 @@ pub async fn repair_session_temporal_store(
 }
 
 async fn session_temporal_repair_receipt_is_current(
-    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
-) -> crate::errors::Result<bool> {
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
+) -> tracedecay_runtime_core::errors::Result<bool> {
     if !connection_table_exists(conn, "session_temporal_repair_receipts").await? {
         return Ok(false);
     }
-    let mut rows = crate::db::engine::QueryExecutor::query(
+    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
         conn,
         "SELECT repair_version
          FROM session_temporal_repair_receipts
          WHERE repair_name = ?1",
-        crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+        tracedecay_runtime_core::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
     )
     .await
     .map_err(|error| global_db_operation_error("read session repair receipt", error))?;
@@ -695,17 +695,17 @@ async fn session_temporal_repair_receipt_is_current(
 }
 
 async fn read_session_temporal_repair_checkpoint(
-    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
-) -> crate::errors::Result<Option<SessionTemporalRepairCheckpoint>> {
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
+) -> tracedecay_runtime_core::errors::Result<Option<SessionTemporalRepairCheckpoint>> {
     if !connection_table_exists(conn, "session_temporal_repair_progress").await? {
         return Ok(None);
     }
-    let mut rows = crate::db::engine::QueryExecutor::query(
+    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
         conn,
         "SELECT stage, cursor
          FROM session_temporal_repair_progress
          WHERE repair_name = ?1",
-        crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+        tracedecay_runtime_core::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
     )
     .await
     .map_err(|error| global_db_operation_error("read session temporal repair progress", error))?;
@@ -728,13 +728,13 @@ async fn read_session_temporal_repair_checkpoint(
 }
 
 async fn connection_table_exists(
-    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
     table: &str,
-) -> crate::errors::Result<bool> {
-    let mut rows = crate::db::engine::QueryExecutor::query(
+) -> tracedecay_runtime_core::errors::Result<bool> {
+    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
         conn,
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        crate::db::engine::params![table],
+        tracedecay_runtime_core::db::engine::params![table],
     )
     .await
     .map_err(|error| global_db_operation_error("inspect global database schema", error))?;
@@ -776,7 +776,7 @@ pub fn global_db_path() -> Option<PathBuf> {
     if let Some(path) = global_db_path_override() {
         return Some(path);
     }
-    crate::config::user_data_dir().map(|dir| dir.join("global.db"))
+    tracedecay_runtime_core::config::user_data_dir().map(|dir| dir.join("global.db"))
 }
 
 /// True when `TRACEDECAY_GLOBAL_DB` pins the global DB to an explicit path.
@@ -859,7 +859,7 @@ pub fn global_accounting_enabled() -> bool {
     global_accounting_mode().enabled()
 }
 
-fn row_to_analytics_event(row: &crate::db::engine::Row) -> Option<AnalyticsEventRecord> {
+fn row_to_analytics_event(row: &tracedecay_runtime_core::db::engine::Row) -> Option<AnalyticsEventRecord> {
     Some(AnalyticsEventRecord {
         id: row.get(0).ok()?,
         provider: row.get(1).ok()?,
@@ -927,7 +927,7 @@ fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
     let mut substantive = Vec::with_capacity(results.len());
     let mut inventory = Vec::new();
     for result in results.drain(..) {
-        if crate::application::session::compatibility::is_inventory_text(&result.message.text) {
+        if tracedecay_sessions::compatibility::is_inventory_text(&result.message.text) {
             inventory.push(result);
         } else {
             substantive.push(result);
@@ -1047,26 +1047,26 @@ fn normalize_git_remote_url(remote: &str) -> Option<String> {
 }
 
 async fn table_column_exists(
-    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
+    conn: &(impl tracedecay_runtime_core::db::engine::QueryExecutor + ?Sized),
     table: &str,
     column: &str,
-) -> crate::db::engine::Result<bool> {
-    let mut rows = crate::db::engine::QueryExecutor::query(
+) -> tracedecay_runtime_core::db::engine::Result<bool> {
+    let mut rows = tracedecay_runtime_core::db::engine::QueryExecutor::query(
         conn,
         "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE",
-        crate::db::engine::params![table, column],
+        tracedecay_runtime_core::db::engine::params![table, column],
     )
     .await?;
     Ok(rows.next().await?.is_some())
 }
 
 async fn add_table_column_after_missing_check(
-    conn: &(impl crate::db::engine::Executor + ?Sized),
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
     table: &str,
     column: &str,
     ddl: &str,
-) -> crate::db::engine::Result<bool> {
-    match crate::db::engine::Executor::execute(conn, ddl, ()).await {
+) -> tracedecay_runtime_core::db::engine::Result<bool> {
+    match tracedecay_runtime_core::db::engine::Executor::execute(conn, ddl, ()).await {
         Ok(_) => Ok(true),
         Err(error) => {
             if table_column_exists(conn, table, column).await? {
@@ -1079,10 +1079,10 @@ async fn add_table_column_after_missing_check(
 }
 
 async fn ensure_table_columns(
-    conn: &(impl crate::db::engine::Executor + ?Sized),
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
     table: &str,
     columns: &[(&str, &str)],
-) -> crate::db::engine::Result<()> {
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     for &(column, ddl) in columns {
         if !table_column_exists(conn, table, column).await? {
             add_table_column_after_missing_check(conn, table, column, ddl).await?;
@@ -1092,8 +1092,8 @@ async fn ensure_table_columns(
 }
 
 async fn ensure_session_parent_columns(
-    conn: &(impl crate::db::engine::Executor + ?Sized),
-) -> crate::db::engine::Result<()> {
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     ensure_table_columns(
         conn,
         "sessions",
@@ -1114,7 +1114,7 @@ async fn ensure_session_parent_columns(
         ],
     )
     .await?;
-    crate::db::engine::Executor::execute(
+    tracedecay_runtime_core::db::engine::Executor::execute(
         conn,
         "CREATE INDEX IF NOT EXISTS idx_sessions_parent
             ON sessions(provider, parent_session_id)",
@@ -1125,8 +1125,8 @@ async fn ensure_session_parent_columns(
 }
 
 async fn ensure_parse_offset_columns(
-    conn: &(impl crate::db::engine::Executor + ?Sized),
-) -> crate::db::engine::Result<()> {
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     ensure_table_columns(
         conn,
         "parse_offsets",
@@ -1139,8 +1139,8 @@ async fn ensure_parse_offset_columns(
 }
 
 async fn ensure_code_project_native_root_columns(
-    conn: &(impl crate::db::engine::Executor + ?Sized),
-) -> crate::db::engine::Result<()> {
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     ensure_table_columns(
         conn,
         "code_projects",
@@ -1212,7 +1212,7 @@ impl RegisteredGlobalDb {
         &self,
         config: &crate::retention::RetentionConfig,
         now_secs: i64,
-    ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<crate::retention::RetentionTableReport>> {
         let transaction = self.begin_write_transaction().await?;
         let report = crate::retention::prune_global_tables(
             &transaction,
@@ -1231,7 +1231,7 @@ impl RegisteredGlobalDb {
         &self,
         config: &crate::retention::RetentionConfig,
         now_secs: i64,
-    ) -> crate::errors::Result<Vec<crate::retention::RetentionTableReport>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<crate::retention::RetentionTableReport>> {
         let transaction = self.begin_write_transaction().await?;
         let report = crate::retention::prune_global_tables(
             &transaction,

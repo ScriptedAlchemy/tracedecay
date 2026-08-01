@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::HydrationStateV1;
 
-use crate::application::session::lcm::contracts::{
+use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
@@ -12,7 +12,7 @@ use crate::application::session::lcm::contracts::{
     LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
 use crate::application::session::lcm::render::apply_canonical_content;
-use crate::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
+use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 
 macro_rules! field {
     ($row:expr, $column:expr) => {
@@ -877,9 +877,9 @@ async fn query<P>(
     snapshot: &ReadSnapshot,
     sql: &str,
     params: P,
-) -> Result<crate::db::engine::Rows, LcmError>
+) -> Result<tracedecay_runtime_core::db::engine::Rows, LcmError>
 where
-    P: crate::db::engine::IntoParams,
+    P: tracedecay_runtime_core::db::engine::IntoParams,
 {
     snapshot
         .query(sql, params)
@@ -887,7 +887,7 @@ where
         .map_err(|error| LcmError::Db(error.to_string()))
 }
 
-async fn next_row(rows: &mut crate::db::engine::Rows) -> Result<Option<Row>, LcmError> {
+async fn next_row(rows: &mut tracedecay_runtime_core::db::engine::Rows) -> Result<Option<Row>, LcmError> {
     rows.next()
         .await
         .map_err(|error| LcmError::Db(error.to_string()))

@@ -204,7 +204,7 @@ impl RegisteredGlobalDb {
         project_root: &Path,
     ) -> Result<Vec<String>, ProjectObservationStoreError> {
         let mut project_ids = BTreeSet::new();
-        match crate::storage::read_repository_identity_marker(project_root) {
+        match tracedecay_runtime_core::storage::read_repository_identity_marker(project_root) {
             Ok(Some(marker)) => {
                 project_ids.insert(marker.project_id);
             }
@@ -228,7 +228,7 @@ impl RegisteredGlobalDb {
         {
             project_ids.insert(project_id);
         }
-        if let Some(git_common_dir) = crate::worktree::git_common_dir(project_root)
+        if let Some(git_common_dir) = tracedecay_runtime_core::worktree::git_common_dir(project_root)
             && let Some(project_id) = self
                 .project_id_by_native_path_alias(&git_common_dir, LegacyPathAliasKind::GitCommonDir)
                 .await
@@ -284,7 +284,7 @@ impl RegisteredGlobalDb {
         }
         let expected_manifest_relpath_text = format!(
             "{expected_relpath_text}/{}",
-            crate::storage::STORE_MANIFEST_FILENAME
+            tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME
         );
         let expected_manifest_relpath = PathBuf::from(&expected_manifest_relpath_text);
         if store.manifest_relpath.as_deref() != Some(expected_manifest_relpath_text.as_str()) {
@@ -298,19 +298,19 @@ impl RegisteredGlobalDb {
             .db_path()
             .parent()
             .ok_or_else(|| noncanonical("registry database has no profile root".to_string()))?;
-        let validated = crate::storage::ValidatedProfileShard::resolve_existing(
+        let validated = tracedecay_runtime_core::storage::ValidatedProfileShard::resolve_existing(
             profile_root,
             &project.project_id,
         )
         .map_err(|error| match error {
-            crate::storage::ProfileShardValidationError::Unavailable { path } => {
+            tracedecay_runtime_core::storage::ProfileShardValidationError::Unavailable { path } => {
                 ProjectObservationStoreError::UnavailableStore {
                     project_id: project_id.clone(),
                     store_id: store_id.clone(),
                     path,
                 }
             }
-            crate::storage::ProfileShardValidationError::NonCanonical { reason } => {
+            tracedecay_runtime_core::storage::ProfileShardValidationError::NonCanonical { reason } => {
                 noncanonical(reason)
             }
         })?;

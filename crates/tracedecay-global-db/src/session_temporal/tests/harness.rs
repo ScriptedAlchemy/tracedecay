@@ -19,10 +19,10 @@ use tracedecay_store::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::DaemonDatabaseScope;
-use crate::db::engine::params;
+use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use tracedecay_runtime_core::db::engine::params;
 use crate::RegisteredGlobalDb;
-use crate::sessions::lcm::payload::{upsert_payload_metadata, write_external_payload};
+use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
 pub(super) const INLINE_PAYLOAD: &str = "non-empty inline occurrence payload";
@@ -43,7 +43,7 @@ impl RegisteredTemporalHarness {
         let profile_root = directory.path().join("profile");
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("profile identity");
-        let scope = crate::db::enter_daemon_database_scope(&profile_root, 1, label)
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, label)
             .expect("daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await

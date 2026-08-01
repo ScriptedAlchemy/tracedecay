@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::Executor;
 
 /// Version of the sealed complete topology value stored by this schema.
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
@@ -11,7 +11,7 @@ pub const WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME: &str = "work-topology-pol
 #[derive(Debug, Error)]
 pub enum ConfigurationSchemaError {
     #[error("configuration schema operation failed: {0}")]
-    Storage(#[from] crate::db::engine::Error),
+    Storage(#[from] tracedecay_runtime_core::db::engine::Error),
 }
 
 /// Tables are additive and append-only. Registration from the global schema
@@ -397,10 +397,10 @@ pub async fn ensure_configuration_schema(
 mod tests {
     use super::*;
 
-    async fn connection() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+    async fn connection() -> (tempfile::TempDir, tracedecay_runtime_core::db::engine::TestConnection) {
         let directory = tempfile::tempdir().unwrap();
         let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("configuration.db"));
+            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("configuration.db"));
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await

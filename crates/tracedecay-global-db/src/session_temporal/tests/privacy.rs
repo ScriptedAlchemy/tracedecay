@@ -29,7 +29,7 @@ use crate::application::session::{
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
 use crate::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
-use crate::sessions::lcm::{
+use tracedecay_sessions::runtime::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
 use tracedecay_temporal_query::TemporalKernelResult;

@@ -1,4 +1,4 @@
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use crate::{global_db_operation_error, global_db_operation_message};
 
@@ -1041,7 +1041,7 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
 
 pub async fn ensure_session_temporal_schema(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let version = schema_version(conn).await?;
     if let Some(version) = version
         && version > SESSION_TEMPORAL_SCHEMA_VERSION
@@ -1081,7 +1081,7 @@ pub async fn ensure_session_temporal_schema(
 
 pub async fn repair_session_temporal_state(
     conn: &impl Executor,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let Some(version) = schema_version(conn).await? else {
         return Ok(());
     };
@@ -1097,7 +1097,7 @@ pub async fn repair_session_temporal_state(
     repair_legacy_cursor_key_bindings(conn).await
 }
 
-async fn repair_interrupted_refresh_state(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn repair_interrupted_refresh_state(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     conn.execute_batch(
         "DROP TRIGGER IF EXISTS session_refresh_operations_delete_guard_v1;
          DROP TRIGGER IF EXISTS session_refresh_operations_state_guard_v1;
@@ -1396,7 +1396,7 @@ async fn repair_interrupted_refresh_state(conn: &impl Executor) -> crate::errors
     Ok(())
 }
 
-async fn repair_legacy_cursor_key_bindings(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn repair_legacy_cursor_key_bindings(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     // Projection receipts are immutable evidence whose digest includes the
     // generation's frozen watermarks. If an earlier repair rebound the active
     // generation directly, restore that evidence-authoritative snapshot rather
@@ -1586,7 +1586,7 @@ async fn repair_legacy_cursor_key_bindings(conn: &impl Executor) -> crate::error
 async fn migrate_logical_copy_bitemporality(
     conn: &impl Executor,
     version: Option<i64>,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_info('session_logical_copy_edges') ORDER BY cid",
@@ -1702,7 +1702,7 @@ async fn migrate_logical_copy_bitemporality(
     Ok(())
 }
 
-async fn temporal_fts_is_missing(conn: &impl Executor) -> crate::errors::Result<bool> {
+async fn temporal_fts_is_missing(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<bool> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
@@ -1723,7 +1723,7 @@ async fn temporal_fts_is_missing(conn: &impl Executor) -> crate::errors::Result<
     Ok(false)
 }
 
-async fn validate_temporal_fts_contracts(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn validate_temporal_fts_contracts(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     for (table, expected_sql) in TEMPORAL_FTS_CONTRACTS {
         let mut rows = conn
             .query(
@@ -1763,7 +1763,7 @@ fn normalize_fts_sql(sql: &str) -> String {
         .replace("ifnotexists", "")
 }
 
-async fn rebuild_temporal_fts(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn rebuild_temporal_fts(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.execute(
             &format!("INSERT INTO {table}({table}) VALUES ('rebuild')"),
@@ -1775,7 +1775,7 @@ async fn rebuild_temporal_fts(conn: &impl Executor) -> crate::errors::Result<()>
     Ok(())
 }
 
-async fn validate_temporal_fts_match(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn validate_temporal_fts_match(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     for (table, _) in TEMPORAL_FTS_CONTRACTS {
         conn.query(
             &format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 LIMIT 1"),
@@ -1787,7 +1787,7 @@ async fn validate_temporal_fts_match(conn: &impl Executor) -> crate::errors::Res
     Ok(())
 }
 
-async fn validate_temporal_table_shapes(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn validate_temporal_table_shapes(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     for &(table, expected_columns) in TEMPORAL_TABLE_COLUMNS {
         let mut rows = conn
             .query(
@@ -1821,7 +1821,7 @@ async fn validate_temporal_table_shapes(conn: &impl Executor) -> crate::errors::
     Ok(())
 }
 
-async fn schema_version(conn: &impl Executor) -> crate::errors::Result<Option<i64>> {
+async fn schema_version(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<Option<i64>> {
     let mut tables = conn
         .query(
             "SELECT 1 FROM sqlite_master
@@ -1860,7 +1860,7 @@ async fn schema_version(conn: &impl Executor) -> crate::errors::Result<Option<i6
 mod tests {
     use tempfile::TempDir;
 
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     use super::repair_session_temporal_state;
 
