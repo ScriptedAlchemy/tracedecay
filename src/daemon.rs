@@ -210,7 +210,9 @@ use project_open_admission::{
 };
 mod project_open_handshake;
 #[cfg(test)]
-use project_open_handshake::{is_missing_index_error, open_project_for_handshake};
+use project_open_handshake::is_missing_index_error;
+#[cfg(all(unix, test))]
+use project_open_handshake::open_project_for_handshake;
 use project_open_handshake::{
     open_project_for_handshake_with_health_mode, project_open_error_response,
     write_project_open_error,
@@ -263,9 +265,9 @@ use wire_io::{
 
 pub(crate) mod transport;
 #[cfg(test)]
-pub(crate) use crate::daemon_contract::{
-    DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationProblem,
-};
+pub(crate) use crate::daemon_contract::DaemonInvocationProblem;
+#[cfg(all(unix, test))]
+pub(crate) use crate::daemon_contract::{DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION};
 /// The wire contract now lives in `crate::daemon_contract`, outside this module
 /// tree. Daemon-internal call sites keep naming it through `crate::daemon::` so
 /// the move stayed mechanical; new callers should depend on the contract module
