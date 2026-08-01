@@ -280,6 +280,7 @@ impl LexicalGenerationPostingsV1 {
         &self,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
+        phrase_candidates: &BTreeMap<String, RoaringBitmap>,
     ) -> RoaringBitmap {
         let mut documents = RoaringBitmap::new();
         for term in &request.whole_terms {
@@ -297,12 +298,22 @@ impl LexicalGenerationPostingsV1 {
                 }
             }
         }
-        for phrase in &request.phrases {
-            documents |= self
-                .normalized_text
-                .candidate_documents(normalize_lexical(phrase).as_bytes());
+        // Reuse the per-phrase n-gram candidate sets computed once by the
+        // caller. Union is idempotent, so unioning the deduplicated normalized
+        // phrases yields exactly the same document set as re-intersecting the
+        // n-gram postings for every raw phrase here.
+        for candidates in phrase_candidates.values() {
+            documents |= candidates;
         }
         documents
+    }
+
+    /// The n-gram candidate-document set for one already-normalized phrase.
+    /// Computed once per phrase and shared by both the phrase document-frequency
+    /// tally and the lexical document set.
+    fn phrase_candidate_documents(&self, normalized_phrase: &str) -> RoaringBitmap {
+        self.normalized_text
+            .candidate_documents(normalized_phrase.as_bytes())
     }
 
     fn exact_candidate_documents(&self, request: &ExactLaneRequest) -> RoaringBitmap {
@@ -327,9 +338,13 @@ impl LexicalGenerationPostingsV1 {
         documents
     }
 
-    fn phrase_document_frequency(&self, rows: &[ProjectedChunkV1], phrase: &str) -> usize {
-        self.normalized_text
-            .candidate_documents(phrase.as_bytes())
+    fn phrase_document_frequency(
+        &self,
+        rows: &[ProjectedChunkV1],
+        phrase: &str,
+        candidates: &RoaringBitmap,
+    ) -> usize {
+        candidates
             .iter()
             .filter(|document| {
                 substring_count(&rows[*document as usize].normalized_text, phrase) > 0
@@ -455,16 +470,31 @@ impl CodeLexicalProjectionAdapterV1 {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request)?;
-        let phrase_document_frequencies = request
+        // Intersect the n-gram postings for each normalized phrase exactly once,
+        // then reuse the candidate set for both the document-frequency tally and
+        // the lexical document set below (previously each phrase was intersected
+        // twice per query).
+        let phrase_candidates: BTreeMap<String, RoaringBitmap> = request
             .phrases
             .iter()
-            .map(|phrase| normalize_lexical(phrase))
             .map(|phrase| {
-                let frequency = self.postings.phrase_document_frequency(&self.rows, &phrase);
-                (phrase, frequency)
+                let normalized = normalize_lexical(phrase);
+                let candidates = self.postings.phrase_candidate_documents(&normalized);
+                (normalized, candidates)
+            })
+            .collect();
+        let phrase_document_frequencies = phrase_candidates
+            .iter()
+            .map(|(phrase, candidates)| {
+                let frequency =
+                    self.postings
+                        .phrase_document_frequency(&self.rows, phrase, candidates);
+                (phrase.clone(), frequency)
             })
             .collect::<BTreeMap<_, _>>();
-        let documents = self.postings.lexical_documents(request, &fuzzy);
+        let documents = self
+            .postings
+            .lexical_documents(request, &fuzzy, &phrase_candidates);
         let mut pairs = Vec::new();
         let mut excluded = self.rows.len() as u64 - documents.len();
         for document in documents {
