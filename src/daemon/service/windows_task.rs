@@ -441,7 +441,7 @@ fn rollback_registration_with(
         definition_result,
         disable_result,
     );
-    if previous.is_some_and(|snapshot| !snapshot.enabled) {
+    if rollback_result.is_err() || previous.is_some_and(|snapshot| !snapshot.enabled) {
         let final_disable_result = api.disable_for_rollback();
         return combine_task_operations(
             "restore disabled daemon task registration",
@@ -1328,7 +1328,7 @@ mod tests {
         task: Option<TaskSnapshot>,
         xml: Option<String>,
         operations: Vec<Operation>,
-        fail_registration_after_mutation: bool,
+        registration_failures_remaining: usize,
         fail_next_enablement: bool,
         fail_next_run: bool,
         fail_next_stop: bool,
@@ -1351,7 +1351,7 @@ mod tests {
                 task: Some(TaskSnapshot { running, enabled }),
                 xml: Some(xml.to_string()),
                 operations: Vec::new(),
-                fail_registration_after_mutation: false,
+                registration_failures_remaining: 0,
                 fail_next_enablement: false,
                 fail_next_run: false,
                 fail_next_stop: false,
@@ -1391,7 +1391,8 @@ mod tests {
                 enabled: true,
             });
             self.xml = Some(xml.to_string());
-            if std::mem::take(&mut self.fail_registration_after_mutation) {
+            if self.registration_failures_remaining > 0 {
+                self.registration_failures_remaining -= 1;
                 return Err(TraceDecayError::Config {
                     message: "fake scheduler registration failed after mutation".to_string(),
                 });
@@ -1857,7 +1858,7 @@ mod tests {
     fn registration_api_failure_after_mutation_restores_disabled_state() {
         let mut api =
             FakeTaskScheduler::with_task(DaemonServiceState::StoppedDisabled, "<Task>old</Task>");
-        api.fail_registration_after_mutation = true;
+        api.registration_failures_remaining = 1;
 
         let error = register_task_xml_with(&mut api, "<Task>new</Task>")
             .expect_err("registration must fail");
@@ -1873,6 +1874,20 @@ mod tests {
             api.operations
                 .contains(&Operation::Register("<Task>old</Task>".to_string()))
         );
+    }
+
+    #[test]
+    fn failed_enabled_task_definition_rollback_disables_residual_task() {
+        let mut api =
+            FakeTaskScheduler::with_task(DaemonServiceState::StoppedEnabled, "<Task>old</Task>");
+        api.registration_failures_remaining = 2;
+
+        let error = register_task_xml_with(&mut api, "<Task>new</Task>")
+            .expect_err("registration and rollback must fail");
+
+        assert!(error.to_string().contains("state restoration also failed"));
+        assert_eq!(api.state(), DaemonServiceState::StoppedDisabled);
+        assert_eq!(api.operations.last(), Some(&Operation::Enable(false)));
     }
 
     #[test]
