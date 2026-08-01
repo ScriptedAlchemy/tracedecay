@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use fs2::FileExt;
@@ -27,17 +27,17 @@ pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 static DURABLE_ATOMIC_WRITE_FAULT: AtomicU8 = AtomicU8::new(0);
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 #[derive(Clone, Copy)]
 pub enum DurableAtomicWriteFaultForTest {
     AfterTempSync = 1,
     AfterRename = 2,
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub fn set_durable_atomic_write_fault_for_test(fault: DurableAtomicWriteFaultForTest) {
     DURABLE_ATOMIC_WRITE_FAULT.store(fault as u8, Ordering::SeqCst);
 }
@@ -49,7 +49,7 @@ enum DurableAtomicWritePhase {
 }
 
 fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
     if DURABLE_ATOMIC_WRITE_FAULT
         .compare_exchange(_phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
