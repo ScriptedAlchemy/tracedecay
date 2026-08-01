@@ -789,7 +789,10 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
-        self.ensure_branch_writable("full index")?;
+        // R4: one branch resolution for the whole full index — the write gate
+        // and the closing branch-meta stamp share it.
+        let live_branch = self.branch_memo();
+        self.ensure_branch_writable_with("full index", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
         #[cfg(any(test, feature = "test-transport"))]
         if migration_availability.is_some() {
@@ -970,7 +973,7 @@ impl TraceDecay {
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced();
+        self.touch_branch_meta_synced(&live_branch);
 
         let result = IndexResult {
             file_count: files.len(),
@@ -1026,13 +1029,17 @@ impl TraceDecay {
             return Ok(false);
         }
 
-        self.ensure_branch_writable("sync files")?;
+        // R4: one branch resolution for this whole sync — the entry gate, the
+        // inner `sync_single_files` gate, and the branch-meta stamp all read
+        // it instead of re-opening the repository three times.
+        let live_branch = self.branch_memo();
+        self.ensure_branch_writable_with("sync files", &live_branch)?;
 
         let Ok(sync_lease) = self.begin_active_sync() else {
             return Ok(true);
         };
 
-        let result = self.sync_single_files(&stale_files).await;
+        let result = self.sync_single_files(&stale_files, &live_branch).await;
 
         match result {
             Ok(()) => {
@@ -1063,7 +1070,10 @@ impl TraceDecay {
             return Ok(());
         }
 
-        self.ensure_branch_writable("sync files")?;
+        // R4: one branch resolution threaded through the entry gate, the inner
+        // `sync_single_files` gate, and the branch-meta stamp.
+        let live_branch = self.branch_memo();
+        self.ensure_branch_writable_with("sync files", &live_branch)?;
 
         let sync_lease = if let Ok(sync_lease) = self.begin_active_sync() {
             sync_lease
@@ -1093,7 +1103,11 @@ impl TraceDecay {
             }
         };
 
-        if self.sync_single_files(&stale_files).await.is_ok() {
+        if self
+            .sync_single_files(&stale_files, &live_branch)
+            .await
+            .is_ok()
+        {
             sync_lease.commit()?;
         }
         Ok(())
@@ -1101,10 +1115,17 @@ impl TraceDecay {
 
     /// Index/reexamine the given file paths, updating their graph nodes and edges.
     /// This is a focused, single-shot operation used by `sync_if_stale`.
-    async fn sync_single_files(&self, file_paths: &[String]) -> Result<()> {
+    ///
+    /// `live_branch` is the caller's per-request branch resolution; every
+    /// public entry that reaches here already made one.
+    async fn sync_single_files(
+        &self,
+        file_paths: &[String],
+        live_branch: &crate::branch::BranchMemo,
+    ) -> Result<()> {
         use crate::sync as sync_mod;
 
-        self.ensure_branch_writable("sync files")?;
+        self.ensure_branch_writable_with("sync files", live_branch)?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1208,7 +1229,7 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced();
+        self.touch_branch_meta_synced(&live_branch);
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1226,7 +1247,10 @@ impl TraceDecay {
         &self,
         file_paths: &[String],
     ) -> Result<Vec<String>> {
-        self.ensure_branch_writable("lazy index ignored dependency files")?;
+        // R4: one branch resolution for the entry gate and the inner
+        // `sync_single_files` gate.
+        let live_branch = self.branch_memo();
+        self.ensure_branch_writable_with("lazy index ignored dependency files", &live_branch)?;
 
         let mut accepted = Vec::new();
         let mut seen = HashSet::new();
@@ -1253,7 +1277,7 @@ impl TraceDecay {
 
         if !accepted.is_empty() {
             let sync_lease = self.begin_active_sync()?;
-            self.sync_single_files(&accepted).await?;
+            self.sync_single_files(&accepted, &live_branch).await?;
             sync_lease.commit()?;
         }
         Ok(accepted)
@@ -1422,7 +1446,10 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "sync: project root is not a directory"
         );
-        self.ensure_branch_writable("sync")?;
+        // R4: one branch resolution for the whole sync — the write gate and
+        // both branch-meta stamp points below share it.
+        let live_branch = self.branch_memo();
+        self.ensure_branch_writable_with("sync", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
@@ -1627,7 +1654,7 @@ impl TraceDecay {
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
             self.stamp_last_synced_commit().await;
-            self.touch_branch_meta_synced();
+            self.touch_branch_meta_synced(&live_branch);
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1769,7 +1796,7 @@ impl TraceDecay {
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced();
+        self.touch_branch_meta_synced(&live_branch);
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1950,8 +1977,8 @@ impl TraceDecay {
     /// `branch_list` reflects real sync recency rather than branch-add time
     /// only. No-op when the active branch cannot be resolved (detached HEAD)
     /// or the branch is untracked.
-    fn touch_branch_meta_synced(&self) {
-        if let Some(branch) = crate::branch::current_branch(&self.project_root) {
+    fn touch_branch_meta_synced(&self, live_branch: &crate::branch::BranchMemo) {
+        if let Some(branch) = live_branch.resolve_for(&self.project_root) {
             crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
         }
     }

@@ -31,9 +31,9 @@ pub fn register_branch_admin_recovery_gate() {
 /// depend on them and now live in that crate. Re-exported so every historical
 /// `crate::branch::<item>` path keeps resolving.
 pub use tracedecay_runtime_core::branch::{
-    BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, acquire_branch_add_lock_blocking_raw,
-    acquire_branch_lock_blocking, current_branch, try_acquire_branch_add_lock,
-    try_acquire_branch_add_lock_raw,
+    BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, BranchMemo,
+    acquire_branch_add_lock_blocking_raw, acquire_branch_lock_blocking, current_branch,
+    try_acquire_branch_add_lock, try_acquire_branch_add_lock_raw,
 };
 
 /// Default-branch detection, branch-name sanitisation, and branch DB-path

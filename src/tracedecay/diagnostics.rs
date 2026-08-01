@@ -28,7 +28,31 @@ impl TraceDecay {
         self.db_path()
     }
 
+    /// A fresh branch memo rooted at this instance's project root.
+    ///
+    /// Create one at a request or write-gate entry and thread it through every
+    /// drift check and gate that request performs, so a single `gix` HEAD read
+    /// (or, for a linked worktree, a single `git` spawn) serves all of them.
+    /// Never store it: a checkout must be visible to the next request.
+    #[must_use]
+    pub fn branch_memo(&self) -> branch::BranchMemo {
+        branch::BranchMemo::new(&self.project_root)
+    }
+
     pub(super) fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
+        self.ensure_branch_writable_with(operation, &self.branch_memo())
+    }
+
+    /// [`ensure_branch_writable`](Self::ensure_branch_writable) against a
+    /// branch resolution this request already made.
+    ///
+    /// The memo is only consulted on the drift-guard branch below, so a
+    /// read-only or fallback store still returns without resolving anything.
+    pub(super) fn ensure_branch_writable_with(
+        &self,
+        operation: &str,
+        live_branch: &branch::BranchMemo,
+    ) -> Result<()> {
         if self.read_only {
             return Err(TraceDecayError::Config {
                 message: format!("cannot {operation}: active TraceDecay store is open read-only"),
@@ -59,7 +83,7 @@ impl TraceDecay {
         // the branch we serve. Single-DB mode (no branch metadata) leaves
         // `serving_branch == None` and is exempt: there is only one DB (#2).
         if let Some(serving) = self.serving_branch.as_deref() {
-            let live = branch::current_branch(&self.project_root);
+            let live = live_branch.resolve_for(&self.project_root);
             if live.as_deref() != Some(serving) {
                 let live_name = live.as_deref().unwrap_or("detached HEAD");
                 return Err(TraceDecayError::Config {
@@ -88,10 +112,18 @@ impl TraceDecay {
     /// avoiding a reopen loop. Returns `false` in single-DB mode (no branch
     /// metadata), where every branch maps to the same DB.
     pub fn branch_drifted(&self) -> bool {
+        self.branch_drifted_with(&self.branch_memo())
+    }
+
+    /// [`branch_drifted`](Self::branch_drifted) against a branch resolution
+    /// this request already made.
+    ///
+    /// Single-DB mode still short-circuits without resolving anything.
+    pub fn branch_drifted_with(&self, live_branch: &branch::BranchMemo) -> bool {
         if self.serving_branch.is_none() {
             return false;
         }
-        branch::current_branch(&self.project_root).as_deref() != self.active_branch.as_deref()
+        live_branch.resolve_for(&self.project_root).as_deref() != self.active_branch.as_deref()
     }
 
     /// Reopens this project for the live git branch, returning a fresh instance
