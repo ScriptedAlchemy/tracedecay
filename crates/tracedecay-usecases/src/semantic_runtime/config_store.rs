@@ -5,8 +5,9 @@ use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::config::retrieval::{
-    AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileMutationCapabilityV1,
-    RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1, RetrievalRuntimeCompatibilityV1,
+    AcceptedRetrievalProfileV1, RetrievalProfileCasV1, RetrievalProfileCommitMetadataV1,
+    RetrievalProfileMutationCapabilityV1, RetrievalProfileStateSnapshotV1, RetrievalProfileStateV1,
+    RetrievalRuntimeCompatibilityV1,
 };
 use crate::configuration::{ConfigurationMutationAuthority, DirectConfigurationMutation};
 use crate::semantic_runtime::{
@@ -238,9 +239,11 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 candidate.clone(),
                 current_runtime,
                 candidate_runtime,
-                freshness_vector_digest,
-                result_configuration.revision_id.clone(),
-                now,
+                RetrievalProfileCommitMetadataV1::new(
+                    freshness_vector_digest,
+                    result_configuration.revision_id.clone(),
+                    now,
+                ),
             )
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
         let transition = SemanticConfigurationTransitionV1::activation(
@@ -298,9 +301,11 @@ impl ProductionSemanticRetrievalConfigurationStoreV1 {
                 &expected,
                 restored_runtime,
                 trigger.clone(),
-                freshness_vector_digest,
-                result_configuration.revision_id.clone(),
-                now,
+                RetrievalProfileCommitMetadataV1::new(
+                    freshness_vector_digest,
+                    result_configuration.revision_id.clone(),
+                    now,
+                ),
             )
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
         let transition = SemanticConfigurationTransitionV1::rollback(

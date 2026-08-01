@@ -569,10 +569,26 @@ pub struct RetrievalProfileAuditEventV1 {
     pub occurred_at: UtcMicros,
 }
 
-struct RetrievalProfileCommitMetadataV1 {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetrievalProfileCommitMetadataV1 {
     freshness_vector_digest: ManifestDigest,
     result_revision: ConfigurationRevisionId,
     now: UtcMicros,
+}
+
+impl RetrievalProfileCommitMetadataV1 {
+    #[must_use]
+    pub fn new(
+        freshness_vector_digest: ManifestDigest,
+        result_revision: ConfigurationRevisionId,
+        now: UtcMicros,
+    ) -> Self {
+        Self {
+            freshness_vector_digest,
+            result_revision,
+            now,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -677,7 +693,6 @@ impl RetrievalProfileStateV1 {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn activate(
         &mut self,
         capability: &RetrievalProfileMutationCapabilityV1,
@@ -685,21 +700,15 @@ impl RetrievalProfileStateV1 {
         candidate: AcceptedRetrievalProfileV1,
         current_runtime: &RetrievalRuntimeCompatibilityV1,
         candidate_runtime: &RetrievalRuntimeCompatibilityV1,
-        freshness_vector_digest: ManifestDigest,
-        result_revision: ConfigurationRevisionId,
-        now: UtcMicros,
+        commit: RetrievalProfileCommitMetadataV1,
     ) -> Result<&RetrievalProfileAuditEventV1, RetrievalProfileActivationErrorV1> {
         self.validate_cas(expected)?;
         let actor = capability
-            .validate(&expected.expected_configuration_revision, now)?
+            .validate(&expected.expected_configuration_revision, commit.now)?
             .clone();
         self.active.executable_under(current_runtime)?;
         candidate.executable_under(candidate_runtime)?;
-        let commit = RetrievalProfileCommitMetadataV1 {
-            freshness_vector_digest,
-            result_revision: result_revision.clone(),
-            now,
-        };
+        let result_revision = commit.result_revision.clone();
         let event = audit_event(
             actor,
             RetrievalProfileAuditOperationV1::Activate,
@@ -722,9 +731,7 @@ impl RetrievalProfileStateV1 {
         expected: &RetrievalProfileCasV1,
         restored_runtime: &RetrievalRuntimeCompatibilityV1,
         trigger: String,
-        freshness_vector_digest: ManifestDigest,
-        result_revision: ConfigurationRevisionId,
-        now: UtcMicros,
+        commit: RetrievalProfileCommitMetadataV1,
     ) -> Result<&RetrievalProfileAuditEventV1, RetrievalProfileActivationErrorV1> {
         self.validate_cas(expected)?;
         if trigger.trim().is_empty()
@@ -734,18 +741,14 @@ impl RetrievalProfileStateV1 {
             return Err(RetrievalProfileActivationErrorV1::InvalidRollbackTrigger);
         }
         let actor = capability
-            .validate(&expected.expected_configuration_revision, now)?
+            .validate(&expected.expected_configuration_revision, commit.now)?
             .clone();
         let restored = self
             .rollback
             .as_ref()
             .ok_or(RetrievalProfileActivationErrorV1::RollbackUnavailable)?;
         restored.executable_under(restored_runtime)?;
-        let commit = RetrievalProfileCommitMetadataV1 {
-            freshness_vector_digest,
-            result_revision: result_revision.clone(),
-            now,
-        };
+        let result_revision = commit.result_revision.clone();
         let event = audit_event(
             actor,
             RetrievalProfileAuditOperationV1::Rollback { trigger },
