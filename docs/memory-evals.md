@@ -170,7 +170,7 @@ Cost note: `codex` uses the local subscription (no per-token API); `claude`
   tool description did **not** help (the model never reached it).
 - **Fix:** `install --agent codex` writes the shared prompt rules plus a
   proactive-memory paragraph to the **global** `~/.codex/AGENTS.md`
-  (`src/agents/codex.rs::install_codex_global_prompt_rules`).
+  (`crates/tracedecay-agent-hosts/src/agents/codex.rs::install_codex_global_prompt_rules`).
 - **Result (n=1): proactive-store 0% → 100%, overall adoption 40% → 60%.**
 
 **The lever for adoption is the always-on, profile-level instruction the model
