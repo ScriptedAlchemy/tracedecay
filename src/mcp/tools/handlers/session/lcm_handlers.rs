@@ -189,6 +189,7 @@ fn lcm_retrieval_command(
     time_range: SessionSearchTimeRange,
     source: Option<String>,
     include_summaries: bool,
+    git_filter: GitScopeFilter,
 ) -> Result<SessionRetrievalCommand> {
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
@@ -216,7 +217,7 @@ fn lcm_retrieval_command(
             message_type,
             roles,
             time_range,
-            git_filter: GitScopeFilter::default(),
+            git_filter,
             workflow_scope: None,
         },
         false,
@@ -550,6 +551,7 @@ pub(in super::super) async fn handle_lcm_load_session(
         },
         None,
         false,
+        GitScopeFilter::default(),
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -629,14 +631,6 @@ pub(in super::super) async fn handle_lcm_grep(
     let provider = lcm_grep_provider_arg(&args)?;
     let git_filter = parse_git_scope_filter(&args)?;
     let include_summaries = bool_arg(&args, "include_summaries")?.unwrap_or(false);
-    if !git_filter.is_empty() {
-        return Ok(unsupported_lcm_filter(
-            context.project_root,
-            &args,
-            "hits",
-            "git",
-        ));
-    }
     let source = args
         .get("source")
         .map(|value| {
@@ -682,6 +676,7 @@ pub(in super::super) async fn handle_lcm_grep(
         message_search_time_range(&args)?,
         source,
         include_summaries,
+        git_filter,
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -1454,6 +1449,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
                 SessionSearchTimeRange::default(),
                 None,
                 false,
+                GitScopeFilter::default(),
             )?;
             service.execute(command).await
         }
@@ -1621,6 +1617,7 @@ pub(in super::super) async fn handle_lcm_compress(
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let response_handle_root = lcm_response_handle_root(context.project_root, &args);
+    let summarizer_advisory = summarizer_pressure_advisory(&args)?;
     let storage = match open_lcm_storage(context, &args, LcmOpenMode::Writable).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
@@ -1662,6 +1659,7 @@ pub(in super::super) async fn handle_lcm_compress(
             "status": response.status,
             "provider": provider,
             "session_id": session_id,
+            "summarizer_advisory": summarizer_advisory,
             "reason": response.reason,
             "summary_nodes_created": response.summary_nodes_created,
             "summary_nodes": response.summary_nodes,
