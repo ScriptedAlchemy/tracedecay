@@ -41,6 +41,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
+/// The identity primitive lives in the domain crate so the capture kernels,
+/// which sit below this crate, share the exact framing. Re-exported here
+/// because this module is where the session runtime's callers already import
+/// it from.
+pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
+
 use crate::admission::{WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
@@ -918,17 +924,6 @@ pub fn content_hash64(contents: &str) -> u64 {
     let mut bytes = [0_u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(bytes)
-}
-
-pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((domain.len() as u64).to_be_bytes());
-    hasher.update(domain);
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

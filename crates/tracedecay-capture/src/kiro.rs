@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 const PROVIDER: &str = "kiro";
 const DELIMITED_NATIVE_MESSAGE_ID_DOMAIN: &[u8] = b"tracedecay.kiro-delimited-native-message.v2";
@@ -86,15 +86,4 @@ pub fn stable_message_id(
         ],
     );
     format!("{DERIVED_MESSAGE_ID_PREFIX}{digest}")
-}
-
-fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((domain.len() as u64).to_be_bytes());
-    hasher.update(domain);
-    for part in parts {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
-    hex::encode(hasher.finalize())
 }

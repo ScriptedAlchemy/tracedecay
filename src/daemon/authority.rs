@@ -3,12 +3,15 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
+use tracedecay_runtime_core::path_safety::{
+    canonicalize_existing_prefix, collapse_relative_components,
+};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -299,6 +302,9 @@ fn authority_state_root(profile_root: &Path) -> PathBuf {
     }
 }
 
+/// Absolutizes `path`, canonicalizes through its deepest existing ancestor,
+/// then collapses `.`/`..` so the daemon's recorded identity paths are
+/// comparable byte-for-byte.
 pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -307,30 +313,11 @@ pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
             .map_err(|error| config_io("resolve", path, &error))?
             .join(path)
     };
-    if let Ok(canonical) = absolute.canonicalize() {
-        return Ok(canonical);
-    }
-
-    let mut suffix = Vec::new();
-    let mut existing = absolute.as_path();
-    while !existing.exists() {
-        let Some(name) = existing.file_name() else {
-            return Err(TraceDecayError::Config {
-                message: format!("failed to resolve identity path '{}'", path.display()),
-            });
-        };
-        suffix.push(name.to_os_string());
-        existing = existing.parent().ok_or_else(|| TraceDecayError::Config {
+    let canonical =
+        canonicalize_existing_prefix(&absolute).ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to resolve identity path '{}'", path.display()),
         })?;
-    }
-    let mut canonical = existing
-        .canonicalize()
-        .map_err(|error| config_io("canonicalize", existing, &error))?;
-    for component in suffix.iter().rev() {
-        canonical.push(component);
-    }
-    Ok(normalize_path(&canonical))
+    Ok(collapse_relative_components(&canonical))
 }
 
 fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
@@ -347,20 +334,6 @@ fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
         }
         DaemonEndpoint::Loopback(address) => DaemonEndpoint::loopback(*address),
     }
-}
-
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {

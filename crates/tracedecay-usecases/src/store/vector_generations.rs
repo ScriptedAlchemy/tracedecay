@@ -12,7 +12,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex, Weak},
-    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +26,9 @@ pub use tracedecay_domain::VectorGenerationIdV1;
 
 use tracedecay_code_index::projection::{expected_publication_digest, verify_batch_receipt};
 use tracedecay_runtime_core::db::{Database, engine::params};
+use tracedecay_runtime_core::sqlite_read_snapshot::{
+    BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe,
+};
 use tracedecay_semantic::legacy_migration::{
     LegacyVectorInventoryEntryV1, LegacyVectorInventoryPortV1, LegacyVectorInventoryV1,
     LegacyVectorMigrationOutcomeKindV1, LegacyVectorMigrationOwnerTransactionV1,
@@ -1075,14 +1077,8 @@ pub fn retained_readable_sources_from_read_only_project_store(
 fn retained_readable_sources_from_optional_read_only_database(
     database_path: &Path,
 ) -> Result<Option<BTreeSet<CodeGenerationId>>, VectorGenerationStoreErrorV1> {
-    let connection = rusqlite::Connection::open_with_flags(
-        database_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(storage_error)?;
-    connection
-        .busy_timeout(Duration::from_millis(200))
-        .map_err(storage_error)?;
+    let connection =
+        open_read_only_probe(database_path, BOUNDED_PROBE_BUSY_TIMEOUT).map_err(storage_error)?;
     let has_inventory = connection
         .query_row(
             "SELECT EXISTS(

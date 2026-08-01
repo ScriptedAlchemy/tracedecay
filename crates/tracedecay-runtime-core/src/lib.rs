@@ -71,6 +71,7 @@ pub mod lifecycle_lease;
 pub mod memory;
 pub mod open_store_holders;
 pub mod os_str_bytes;
+pub mod path_safety;
 pub mod path_scope;
 pub mod privacy;
 pub mod project_registry;
