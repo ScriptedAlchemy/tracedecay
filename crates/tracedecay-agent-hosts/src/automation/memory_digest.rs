@@ -43,7 +43,6 @@ use crate::errors::{Result, TraceDecayError};
 use crate::memory::hygiene::detect_secret_like;
 use crate::memory::types::{FactRecord, MemoryCategory};
 use crate::tracedecay::current_timestamp;
-use crate::user_config::UserConfig;
 
 pub const MEMORY_DIGEST_START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
 pub const MEMORY_DIGEST_END: &str = "<!-- TRACEDECAY MEMORY DIGEST END -->";
@@ -471,12 +470,25 @@ pub fn memory_digest_export_enabled(profile_root: &Path) -> bool {
     load_global_automation_config(profile_root).export_memory_digest
 }
 
+/// The one table this read needs out of the profile `config.toml`.
+///
+/// The full `user_config::UserConfig` stays in the root crate. Naming it here
+/// would drag the root's whole config type across the boundary to reach a
+/// single sub-table that this crate already owns. Every other key is ignored,
+/// so a newer or older profile schema still deserializes and still yields the
+/// automation defaults for a missing table.
+#[derive(Debug, Default, Deserialize)]
+struct ProfileAutomationSection {
+    #[serde(default)]
+    automation: AutomationConfig,
+}
+
 fn load_global_automation_config(profile_root: &Path) -> AutomationConfig {
     let path = profile_root.join("config.toml");
     let Ok(contents) = fs::read_to_string(&path) else {
         return AutomationConfig::default();
     };
-    let Ok(config) = toml::from_str::<UserConfig>(&contents) else {
+    let Ok(config) = toml::from_str::<ProfileAutomationSection>(&contents) else {
         return AutomationConfig::default();
     };
     config.automation

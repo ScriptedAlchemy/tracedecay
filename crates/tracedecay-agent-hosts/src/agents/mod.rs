@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
-use crate::mcp::tools::get_tool_definitions;
+use crate::ports::mcp_tools::advertised_tools;
 
 pub use antigravity::AntigravityIntegration;
 pub use claude::ClaudeIntegration;
@@ -1942,6 +1942,28 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
     additions
 }
 
+/// The tracked-agent list this crate backfills, as a port over the root
+/// crate's `user_config::UserConfig`.
+///
+/// `UserConfig` stays above this crate — it is the whole user-level profile,
+/// most of which host detection has no business seeing. The backfill below
+/// needs exactly three operations, so it takes them as a port rather than the
+/// concrete type.
+///
+/// Root wiring: the root implements this for `user_config::UserConfig`
+/// (`installed_agents` field reads/extends, and its existing `save`).
+pub trait InstalledAgentsConfig {
+    /// Agent ids currently recorded as installed.
+    fn installed_agents(&self) -> &[String];
+
+    /// Appends newly detected agent ids to the tracked list.
+    fn extend_installed_agents(&mut self, additions: Vec<String>);
+
+    /// Persists the config. Failures are logged, never fatal: a lost backfill
+    /// is retried on the next run.
+    fn save(&self) -> Result<()>;
+}
+
 /// Backfill `installed_agents` for users upgrading from older versions.
 ///
 /// Always scans every agent and adds any that have tracedecay configured
@@ -1950,12 +1972,12 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
 /// agent A first and agent B later would have only A in the list, so
 /// `tracedecay reinstall` would silently skip B and its tool permissions
 /// would never be refreshed when new tools ship.
-pub fn migrate_installed_agents(home: &Path, config: &mut crate::user_config::UserConfig) {
-    let additions = detect_missing_installed_agents(home, &config.installed_agents);
+pub fn migrate_installed_agents(home: &Path, config: &mut dyn InstalledAgentsConfig) {
+    let additions = detect_missing_installed_agents(home, config.installed_agents());
     if additions.is_empty() {
         return;
     }
-    config.installed_agents.extend(additions);
+    config.extend_installed_agents(additions);
     if let Err(err) = config.save() {
         tracing::warn!(%err, "could not save tracedecay config");
     }
@@ -2620,30 +2642,24 @@ mod git_hook_tests {
 }
 
 pub fn tool_names() -> Vec<String> {
-    get_tool_definitions()
-        .iter()
-        .map(|t| t.name.clone())
+    advertised_tools()
+        .into_iter()
+        .map(|tool| tool.name)
         .collect()
 }
 
 pub fn read_only_tool_names() -> Vec<String> {
-    get_tool_definitions()
-        .iter()
-        .filter(|t| {
-            t.annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get("readOnlyHint"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        })
-        .map(|t| t.name.clone())
+    advertised_tools()
+        .into_iter()
+        .filter(|tool| tool.read_only)
+        .map(|tool| tool.name)
         .collect()
 }
 
 pub fn expected_tool_perms() -> Vec<String> {
-    get_tool_definitions()
+    advertised_tools()
         .iter()
-        .map(|t| format!("mcp__tracedecay__{}", t.name))
+        .map(|tool| format!("mcp__tracedecay__{}", tool.name))
         .collect()
 }
 

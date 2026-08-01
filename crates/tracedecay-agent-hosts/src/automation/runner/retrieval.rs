@@ -40,7 +40,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use crate::sessions::lcm::LcmScope;
+use crate::ports::session_evidence::LcmScope;
 use crate::tracedecay::TraceDecay;
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};

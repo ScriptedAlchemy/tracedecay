@@ -11,7 +11,7 @@ use super::config::{
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use crate::ports::session_store::AutomationSessionStore;
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
@@ -50,7 +50,7 @@ impl SessionActivity {
 /// This reads from the read-only store using bounded indexed timestamp lookups,
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
-pub async fn load_session_activity(sessions_db: &RegisteredGlobalDb) -> SessionActivity {
+pub async fn load_session_activity(sessions_db: &dyn AutomationSessionStore) -> SessionActivity {
     SessionActivity {
         last_activity_secs: sessions_db.latest_session_activity_secs().await,
     }

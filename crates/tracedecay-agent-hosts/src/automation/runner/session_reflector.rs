@@ -28,7 +28,7 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::memory::user::open_user_memory_db;
-use crate::sessions::lcm::{LcmGrepSort, LcmScope};
+use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
