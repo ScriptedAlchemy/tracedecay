@@ -152,7 +152,11 @@ fn refresh_daemon_service(
     if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         return Ok(None);
     }
-    let tracedecay_bin = tracedecay_bin_on_path()?;
+    let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: "tracedecay not found on PATH".to_string(),
+        }
+    })?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
     refresh_daemon_service_with_spec(previous_state, &spec)
 }
