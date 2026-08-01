@@ -653,6 +653,52 @@ mod tests {
         )
     }
 
+    /// Writes durable evidence straight into the shard, bypassing the
+    /// runtime scope gate.
+    ///
+    /// This is only ever correct for staging state the store contract
+    /// forbids — a row scoped to another project — so that the reader-side
+    /// guards can be exercised against it. Everything else must go through
+    /// [`ObservationStore::persist_observation`].
+    async fn stage_foreign_scoped_observation(
+        sessions: &RegisteredGlobalDb,
+        write: &AnchoredObservationWrite,
+    ) {
+        let observation = write.observation();
+        let receipt = observation.receipt();
+        let writer = sessions.writer_connection().unwrap();
+        writer
+            .execute(
+                "INSERT INTO sanitization_receipts
+                    (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                crate::db::engine::params![
+                    receipt.receipt().receipt_id().as_str(),
+                    receipt.receipt().sanitizer_version().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .await
+            .unwrap();
+        writer
+            .execute(
+                "INSERT INTO observations
+                    (observation_id, payload_digest, receipt_id, observation_json,
+                     committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                crate::db::engine::params![
+                    observation.observation_id().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    receipt.receipt().receipt_id().as_str(),
+                    serde_json::to_string(observation).unwrap(),
+                    serde_json::to_string(write.next_cursor()).unwrap()
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
     /// Every test below registers under hook ids unique to that test: the
     /// authority registry is process-global, so overlapping keys would make
     /// parallel tests observe each other's entries.
@@ -1165,12 +1211,21 @@ mod tests {
             .unwrap();
         // Durable evidence carrying a foreign project scope, stored in the
         // shard that the lookup is otherwise authorized against.
-        observation_store(&sessions)
-            .persist_observation(durable_native_observation(&id::<ProjectId>(
-                "project.native.foreign-scope",
-            )))
-            .await
-            .unwrap();
+        let foreign = durable_native_observation(&id::<ProjectId>("project.native.foreign-scope"));
+        // The store contract refuses to create this state: every observation
+        // operation is gated on the observation scope matching the bound
+        // shard family, so the runtime rejects the write before it reaches
+        // the shard. The row can therefore only arrive by corruption or a
+        // pre-contract import, which is exactly what the lookup's durable
+        // scope check has to survive.
+        assert!(
+            observation_store(&sessions)
+                .persist_observation(foreign.clone())
+                .await
+                .is_err(),
+            "the runtime must refuse a foreign-scoped write against this shard"
+        );
+        stage_foreign_scoped_observation(&sessions, &foreign).await;
         let bound_profile_id = sessions.binding().shard_id.profile_id.clone();
 
         // Foreign-scoped evidence and no evidence at all both fail closed,
