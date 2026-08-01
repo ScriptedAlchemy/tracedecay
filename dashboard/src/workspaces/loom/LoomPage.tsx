@@ -5,7 +5,7 @@ import { Waypoints } from 'lucide-react';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { WireEnvelope } from '../../contracts/wire.ts';
-import { StateChip } from '../../ui/StateChip';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import {
   Legend,
   Panel,
@@ -298,29 +298,17 @@ function TemporalBoundary({
   result: EnvelopeResult<LoomTemporalPayload> | undefined;
   children: (envelope: WireEnvelope<LoomTemporalPayload>) => ReactNode;
 }) {
-  if (pending) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-        <StateChip kind="unknown" detail="reading Loom temporal authorities" />
-      </div>
-    );
-  }
-  if (!result) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-        <StateChip kind="offline" detail="Loom temporal response unavailable" />
-      </div>
-    );
-  }
+  // The three ways this read produces no envelope differ only in the chip they
+  // carry; the plate they are centred on is one plate, written once.
+  const plate = (kind: DomainStateKind, detail: string) => (
+    <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+      <StateChip kind={kind} detail={detail} />
+    </div>
+  );
+  if (pending) return plate('unknown', 'reading Loom temporal authorities');
+  if (!result) return plate('offline', 'Loom temporal response unavailable');
   if (result.outcome === 'transport') {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-        <StateChip
-          kind={result.state}
-          detail={result.detail ?? 'Loom temporal response unavailable'}
-        />
-      </div>
-    );
+    return plate(result.state, result.detail ?? 'Loom temporal response unavailable');
   }
   return children(result.envelope);
 }
