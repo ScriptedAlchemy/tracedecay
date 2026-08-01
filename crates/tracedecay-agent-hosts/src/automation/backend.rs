@@ -129,7 +129,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
             &self.config,
             "tracedecay_automation",
         )
-        .map_err(|error| AutomationError::port("codex_app_server", error))?;
+        .map_err(|error| AutomationError::port("codex_app_server", std::io::Error::other(error)))?;
         let output_json = request
             .contract
             .strict_json

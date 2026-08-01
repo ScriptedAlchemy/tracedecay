@@ -29,5 +29,6 @@ pub mod context;
 pub mod hook_runtime;
 pub mod mcp_tools;
 pub mod pricing;
+pub mod project_runtime;
 pub mod session_evidence;
 pub mod session_store;

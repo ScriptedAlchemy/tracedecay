@@ -5613,6 +5613,7 @@ dependencies = [
  "tracedecay-store",
  "tracedecay-temporal-query",
  "tracedecay-tool-catalog",
+ "tracedecay-usecases",
  "tracing",
  "url",
  "webpki-roots",

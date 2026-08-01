@@ -12,17 +12,14 @@ use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::application::memory::MemoryApplication;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::dashboard::memory_curate::{
-    CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
-    run_memory_curate, run_user_memory_curate,
-};
-use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
-use crate::memory::user::open_user_memory_db;
+use crate::ports::project_runtime::{MemoryCurateOptions, ProfileRuntime};
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
+use tracedecay_global_db::RegisteredGlobalDb;
+
+const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
+const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.72;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryCuratorAutomationOptions {
@@ -77,19 +74,18 @@ pub async fn run_memory_curator_with_backend(
 /// Runs autonomous curation against profile-level user memory.
 pub(crate) async fn run_user_memory_curator_with_backend(
     profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
-    let db = open_user_memory_db(session_registry.as_ref()).await?;
     let sessions_db = session_registry.profile_sessions().await?;
     let mut autonomous_config = config.clone();
     autonomous_config.auto_apply_memory_ops = true;
     run_memory_curator_for_store(
         MemoryCuratorStore::User {
             profile_root,
-            db: &db,
+            runtime: session_registry.as_ref(),
             sessions_db,
         },
         &autonomous_config,
@@ -106,7 +102,7 @@ enum MemoryCuratorStore<'a> {
     },
     User {
         profile_root: &'a std::path::Path,
-        db: &'a Database,
+        runtime: &'a dyn ProfileRuntime,
         sessions_db: Arc<RegisteredGlobalDb>,
     },
 }
@@ -129,18 +125,19 @@ impl MemoryCuratorStore<'_> {
 
     async fn curate(&self, options: &MemoryCurateOptions) -> Result<Value> {
         match self {
-            Self::Project { cg, .. } => run_memory_curate(cg, options).await,
+            Self::Project { cg, .. } => cg.curate_memory(options).await,
             Self::User {
-                profile_root, db, ..
+                profile_root,
+                runtime,
+                ..
             } => {
-                run_user_memory_curate(
-                    db,
-                    db.database_path(),
-                    profile_root,
-                    &super::runner::user_automation_root(profile_root),
-                    options,
-                )
-                .await
+                runtime
+                    .curate_user_memory(
+                        profile_root,
+                        &super::runner::user_automation_root(profile_root),
+                        options,
+                    )
+                    .await
             }
         }
     }

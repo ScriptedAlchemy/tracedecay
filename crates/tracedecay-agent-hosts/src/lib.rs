@@ -19,6 +19,8 @@ pub mod agents;
 pub mod analytics;
 pub mod automation;
 pub mod ports;
+pub(crate) use tracedecay_usecases as application;
+pub(crate) use tracedecay_usecases::request_identity;
 
 // Kernel shims. `tracedecay-runtime-core` owns the substrate these two
 // subsystems were extracted alongside; aliasing the kernel modules into this
@@ -36,5 +38,6 @@ pub(crate) use tracedecay_runtime_core::{
 /// orchestrator itself stays in the root crate and reaches this crate through
 /// [`ports::ProjectRuntime`].
 pub(crate) mod tracedecay {
+    pub(crate) use crate::ports::project_runtime::TraceDecay;
     pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
 }

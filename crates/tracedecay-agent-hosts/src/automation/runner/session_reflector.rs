@@ -24,13 +24,12 @@ use crate::automation::lifecycle::{
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_proposals;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_global_db::RegisteredGlobalDb;
-use crate::memory::user::open_user_memory_db;
+use crate::ports::project_runtime::ProfileRuntime;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::{TraceDecay, current_timestamp};
+use tracedecay_global_db::RegisteredGlobalDb;
 
 use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
@@ -618,7 +617,7 @@ pub async fn run_session_reflector_with_backend(
 
 pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
     profile_root: &std::path::Path,
-    session_registry: Arc<DaemonSessionRuntimeRegistryV1>,
+    session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -646,7 +645,7 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
             evidence_hash,
         ));
     }
-    let memory_db = open_user_memory_db(session_registry.as_ref()).await?;
+    let memory_db = session_registry.open_user_memory_db().await?;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&memory_db))
         .map_err(|error| TraceDecayError::Config {
         message: format!(
