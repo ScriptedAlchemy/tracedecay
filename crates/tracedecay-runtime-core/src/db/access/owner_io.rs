@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -12,13 +14,22 @@ use super::{
 };
 
 pub(super) fn open_lock_file(path: &Path) -> Result<File> {
+    #[cfg(windows)]
+    {
+        return crate::windows_security::open_or_create_private_file(path)
+            .map_err(|error| access_io_error("open lock", path, &error));
+    }
+
+    #[cfg(not(windows))]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(not(windows))]
     options
         .open(path)
         .map_err(|error| access_io_error("open lock", path, &error))
@@ -69,7 +80,9 @@ pub(super) fn publish_record_atomically(
     payload: &[u8],
     record_name: &str,
 ) -> Result<()> {
+    #[cfg(not(windows))]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
@@ -78,6 +91,12 @@ pub(super) fn publish_record_atomically(
     }
     let mut created = false;
     let publish = (|| {
+        #[cfg(windows)]
+        let mut file =
+            crate::windows_security::create_private_file(temporary).map_err(|error| {
+                access_io_error(&format!("create {record_name}"), temporary, &error)
+            })?;
+        #[cfg(not(windows))]
         let mut file = options.open(temporary).map_err(|error| {
             access_io_error(&format!("create {record_name}"), temporary, &error)
         })?;
@@ -85,7 +104,16 @@ pub(super) fn publish_record_atomically(
         file.write_all(payload)
             .and_then(|()| file.sync_all())
             .map_err(|error| access_io_error(&format!("write {record_name}"), temporary, &error))?;
+        drop(file);
         replace_file_atomically(temporary, destination, record_name)?;
+        #[cfg(windows)]
+        crate::windows_security::restrict_file(destination).map_err(|error| {
+            access_io_error(
+                &format!("validate published {record_name}"),
+                destination,
+                &error,
+            )
+        })?;
         sync_parent_directory(destination, record_name)
     })();
     if publish.is_err() && created {
@@ -97,6 +125,20 @@ pub(super) fn publish_record_atomically(
 pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
     const MAX_RECORD_BYTES: u64 = 4096;
 
+    #[cfg(windows)]
+    let file = match crate::windows_security::open_private_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(access_io_error(
+                &format!("secure {record_name} before read"),
+                path,
+                &error,
+            ));
+        }
+    };
+
+    #[cfg(not(windows))]
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -108,6 +150,7 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
             ));
         }
     };
+    #[cfg(not(windows))]
     if metadata.file_type().is_symlink() {
         return Err(access_error(
             &format!("read {record_name}"),
@@ -115,6 +158,7 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
             &format!("{record_name} must not be a symlink"),
         ));
     }
+    #[cfg(not(windows))]
     if !metadata.is_file() {
         return Err(access_error(
             &format!("read {record_name}"),
@@ -123,7 +167,9 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
         ));
     }
 
+    #[cfg(not(windows))]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
     options.read(true);
     #[cfg(target_os = "linux")]
     {
@@ -131,6 +177,7 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
         const O_NOFOLLOW: i32 = 0o40_0000;
         options.custom_flags(O_NOFOLLOW);
     }
+    #[cfg(not(windows))]
     let file = options
         .open(path)
         .map_err(|error| access_io_error(&format!("read {record_name}"), path, &error))?;
@@ -240,7 +287,11 @@ pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {
 
 pub(super) fn read_owner(path: &Path) -> Option<WriterOwner> {
     let mut value = String::new();
-    File::open(path).ok()?.read_to_string(&mut value).ok()?;
+    #[cfg(windows)]
+    let mut file = crate::windows_security::open_private_file(path).ok()?;
+    #[cfg(not(windows))]
+    let mut file = File::open(path).ok()?;
+    file.read_to_string(&mut value).ok()?;
     let mut fields = HashMap::new();
     for field in value.trim().split('\t') {
         let (key, value) = field.split_once('=')?;
