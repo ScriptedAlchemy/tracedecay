@@ -17,6 +17,8 @@ use tracedecay_store::StoreShardScopeV1;
 
 #[path = "host_admission/accounting_test_support.rs"]
 mod accounting_test_support;
+#[path = "host_admission/integration_test_support.rs"]
+mod integration_test_support;
 #[path = "host_admission/lcm_api_test_support.rs"]
 mod lcm_api_test_support;
 #[path = "host_admission/lcm_fixture_test_support.rs"]
