@@ -3,6 +3,8 @@ pub mod lcm;
 mod ports;
 mod refresh;
 mod retrieval;
+#[cfg(test)]
+mod tests;
 mod types;
 
 pub use ports::{

@@ -18,10 +18,8 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::RegisteredGlobalDb;
-use crate::host_ports::profile_sessions::{self, ProfileSessionsRuntime};
-use crate::tests::harness::UNWIRED_PROFILE_SESSIONS;
-use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
 
@@ -34,28 +32,23 @@ pub(super) const SAFE_PRIVACY_PAYLOAD: &str = "The billing pipeline regression i
 pub(super) struct RegisteredTemporalHarness {
     pub(super) registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
-    _scope: DaemonDatabaseScope,
-    _registry: Box<dyn ProfileSessionsRuntime>,
+    _runtime: HostAdmissionTestRuntimeV1,
 }
 
 impl RegisteredTemporalHarness {
     pub(super) async fn open(label: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary registered session store");
         let profile_root = directory.path().join("profile");
-        // The scope guard is entered before the runtime opens; the root opener
-        // creates the profile identity on its way to the session registry.
-        let scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, label)
-                .expect("daemon database scope");
-        let registry = profile_sessions::open(profile_root)
-            .expect(UNWIRED_PROFILE_SESSIONS)
-            .await;
-        let registered = registry.mount().await;
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+            .await
+            .unwrap_or_else(|error| panic!("{label}: registered profile runtime: {error}"));
+        let registered = runtime
+            .registered_database_arc(HostAdmissionScope::Profile)
+            .expect("registered profile database");
         Self {
             registered,
             _directory: directory,
-            _scope: scope,
-            _registry: registry,
+            _runtime: runtime,
         }
     }
 
