@@ -29,7 +29,7 @@ use tracedecay_store::{
 };
 
 use super::*;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 use tracedecay_runtime_core::memory::store::MemoryStore;
 use tracedecay_runtime_core::memory::types::{
