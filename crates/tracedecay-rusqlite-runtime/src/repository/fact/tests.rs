@@ -685,3 +685,75 @@ fn lineage_read_rejects_stored_event_identity_mismatch() {
 
     assert!(read_lineage(&connection, &query).is_err());
 }
+
+#[test]
+fn referenced_anchor_availability_matches_row_at_a_time() {
+    // The row-at-a-time predicate the batched `anchor_id IN (...)` load replaces.
+    fn old_path(
+        connection: &rusqlite::Connection,
+        owner: &OwnerColumns,
+        anchor_ids: &[RetrievalAnchorId],
+    ) -> rusqlite::Result<()> {
+        for anchor_id in anchor_ids {
+            let exists = connection.query_row(
+                "SELECT EXISTS(
+                        SELECT 1 FROM retrieval_anchors
+                        WHERE anchor_id = ?1 AND owner_json = ?2
+                     )",
+                params![anchor_id.as_str(), owner.json],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(invalid("fact references an unavailable retrieval anchor"));
+            }
+        }
+        Ok(())
+    }
+
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(tracedecay_store::RETRIEVAL_ANCHORS_SCHEMA_DDL)
+        .unwrap();
+    let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
+    let other_owner_json = encode(&FactOwnerV1::Project {
+        project_id: tracedecay_domain::ProjectId::new("project.other").unwrap(),
+    })
+    .unwrap();
+
+    let insert_anchor = |anchor_id: &str, owner_json: &str| {
+        connection
+            .execute(
+                "INSERT INTO retrieval_anchors (
+                        anchor_id, anchor_json, owner_json, projection_generation
+                     ) VALUES (?1, '{}', ?2, 'projection.fact')",
+                params![anchor_id, owner_json],
+            )
+            .unwrap();
+    };
+    insert_anchor("retrieval.fact-executor.alpha", &owner.json);
+    insert_anchor("retrieval.fact-executor.beta", &owner.json);
+    // The same anchor id filed under a different owner is not available here.
+    insert_anchor("retrieval.fact-executor.gamma", &other_owner_json);
+
+    let anchor = |id: &str| RetrievalAnchorId::new(id).unwrap();
+    let scenarios: Vec<Vec<RetrievalAnchorId>> = vec![
+        vec![],
+        vec![anchor("retrieval.fact-executor.alpha")],
+        vec![
+            anchor("retrieval.fact-executor.alpha"),
+            anchor("retrieval.fact-executor.beta"),
+        ],
+        vec![
+            anchor("retrieval.fact-executor.alpha"),
+            anchor("retrieval.fact-executor.missing"),
+        ],
+        vec![anchor("retrieval.fact-executor.gamma")],
+    ];
+    for anchor_ids in scenarios {
+        let batched = require_referenced_anchors_available(&connection, &owner, &anchor_ids)
+            .map_err(|error| error.to_string());
+        let reference =
+            old_path(&connection, &owner, &anchor_ids).map_err(|error| error.to_string());
+        assert_eq!(batched, reference, "outcome diverged for {anchor_ids:?}");
+    }
+}
