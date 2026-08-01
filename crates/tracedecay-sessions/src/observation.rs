@@ -100,7 +100,7 @@ impl CaptureObservationRequest {
         self
     }
 
-    pub(crate) fn with_repository_provenance(
+    pub fn with_repository_provenance(
         mut self,
         repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
     ) -> Self {

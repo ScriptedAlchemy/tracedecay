@@ -292,6 +292,17 @@ pub trait HostAdmission: Send + Sync {
         max: usize,
     ) -> AdmissionFuture<'a, HostProjectionDrainOutcome>;
 
+    /// Whether one provider message is already durable under `scope`.
+    ///
+    /// Composer sweeps ask before re-reading a bubble: an already-admitted
+    /// message must not be re-parsed out of the host's own store.
+    fn has_session_message<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        message_id: &'a str,
+    ) -> AdmissionFuture<'a, bool>;
+
     /// Reads the durable parse offset recorded for one transcript path.
     fn get_parse_offset<'a>(
         &'a self,

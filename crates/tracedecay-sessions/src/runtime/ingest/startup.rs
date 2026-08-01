@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::observation::ObservationCancellation;
-use tracedecay_global_db::RegisteredGlobalDb;
+use super::authority::SessionIngestAuthority;
 use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 
@@ -101,11 +101,11 @@ impl Drop for StartupUserIngestGuard {
 /// Coalesces the profile-wide user transcript sweep shared by every project
 /// server created during daemon startup. Live hooks use the retained
 /// registered profile authority, so the cooldown cannot hide a completed turn.
-pub async fn ingest_user_global_sources_for_startup_with_db(
+pub async fn ingest_user_global_sources_for_startup_with_db<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
-    registry_db: &RegisteredGlobalDb,
+    registered: &A,
+    registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestOutcome {
@@ -119,9 +119,9 @@ pub async fn ingest_user_global_sources_for_startup_with_db(
 }
 
 #[cfg(test)]
-pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority(
-    _db: &RegisteredGlobalDb,
-    _registry_db: &RegisteredGlobalDb,
+pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_authority<A: SessionIngestAuthority>(
+    _db: &A,
+    _registry_db: &A,
     _profile_root: &Path,
 ) -> TranscriptIngestOutcome {
     TranscriptIngestOutcome::new(
@@ -132,9 +132,9 @@ pub async fn ingest_user_global_sources_for_startup_with_db_without_registered_a
     )
 }
 
-async fn ingest_user_global_sources_for_startup_inner(
-    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
-    registry_db: &RegisteredGlobalDb,
+async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>(
+    registered: (&BrainId, &UserProfileId, &A),
+    registry_db: &A,
     profile_root: &Path,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestOutcome {

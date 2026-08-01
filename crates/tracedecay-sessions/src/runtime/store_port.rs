@@ -26,6 +26,9 @@ use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
 pub trait SessionWriteTxn: QueryExecutor + Executor + Sized + Send {
     /// Commits the transaction, releasing the writer.
     fn commit(self) -> impl Future<Output = Result<()>> + Send;
+
+    /// Rolls the transaction back, releasing the writer without applying it.
+    fn rollback(self) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// The already-open registered session database a backfill sweep operates on.

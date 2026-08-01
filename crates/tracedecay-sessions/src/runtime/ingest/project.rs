@@ -1,13 +1,12 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use crate::admission::{HostAdmissionAuthorities, HostAdmission};
+use crate::runtime::git_correlation::GitCorrelationSessionStore;
+use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::observation::ObservationCancellation;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, git_correlation};
-use crate::store::{GlobalDbGitCorrelationStore, GlobalDbWorkflowStore};
 use tracedecay_domain::{BrainId, ObservationScopeV1, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -49,10 +48,10 @@ pub fn home_dir() -> Option<PathBuf> {
 /// dedicated multi-destination driver scans each source database only once.
 ///
 /// `project_id` must already be the typed registry or repository-marker identity.
-pub async fn ingest_project_sources_for_provider(
+pub async fn ingest_project_sources_for_provider<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
+    registered: &A,
     project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
@@ -72,10 +71,10 @@ pub async fn ingest_project_sources_for_provider(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn ingest_project_sources_for_provider_with_cancellation(
+pub async fn ingest_project_sources_for_provider_with_cancellation<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
+    registered: &A,
     project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
@@ -97,8 +96,8 @@ pub async fn ingest_project_sources_for_provider_with_cancellation(
 /// closed for observation providers. Daemon-owned callers must use
 /// [`ingest_project_sources_for_provider`] with their retained registry mount.
 #[cfg(test)]
-pub async fn ingest_project_sources_for_provider_without_registered_authority(
-    _db: &RegisteredGlobalDb,
+pub async fn ingest_project_sources_for_provider_without_registered_authority<A: SessionIngestAuthority>(
+    _db: &A,
     _project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
@@ -123,8 +122,8 @@ pub async fn ingest_project_sources_for_provider_without_registered_authority(
     )
 }
 
-async fn ingest_project_sources_for_provider_inner(
-    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
+async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
+    registered: (&BrainId, &UserProfileId, &A),
     project_root: &Path,
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
@@ -143,7 +142,7 @@ async fn ingest_project_sources_for_provider_inner(
         );
     };
     let (brain_id, profile_id, registered) = registered;
-    let shard = &registered.binding().shard_id;
+    let shard = &registered.shard_id();
     if shard.brain_id != *brain_id
         || shard.profile_id != *profile_id
         || shard.scope
@@ -187,16 +186,13 @@ async fn ingest_project_sources_for_provider_inner(
                 &marker,
             )
         });
-    let mut authorities = HostAdmissionAuthorities::for_project(
-        brain_id.clone(),
-        profile_id.clone(),
-        canonical_project_id.clone(),
-        registered,
-    );
-    if let Some(repository_provenance) = repository_provenance {
-        authorities = authorities.with_repository_provenance(repository_provenance);
-    }
-    let facade = HostAdmission::new(authorities);
+    let facade = registered.admission(IngestAdmissionBinding::Project {
+        brain_id,
+        profile_id,
+        project_id: &canonical_project_id,
+        repository_provenance,
+    });
+    let facade = facade.as_ref();
     let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();
     let selected: Vec<SessionProvider> = PROJECT_CATCH_UP_PROVIDERS
@@ -222,7 +218,7 @@ async fn ingest_project_sources_for_provider_inner(
             ProjectProviderRun {
                 project_root,
                 project_id: &canonical_project_id,
-                facade: &facade,
+                facade,
                 scope: &scope,
                 candidate,
                 max_new_bytes: provider_byte_cap,
@@ -242,7 +238,7 @@ async fn ingest_project_sources_for_provider_inner(
 
     if !cancelled {
         match Box::pin(claude_observation::drain_projection_queue(
-            &facade,
+            facade,
             &scope,
             cancellation,
         ))
@@ -293,8 +289,8 @@ async fn ingest_project_sources_for_provider_inner(
     source_outcome.into_transcript_outcome()
 }
 
-pub async fn finalize_project_ingest(
-    db: &RegisteredGlobalDb,
+pub async fn finalize_project_ingest<A: SessionIngestAuthority>(
+    db: &A,
     project_id: &ProjectId,
     project_root: &Path,
 ) {
@@ -305,23 +301,43 @@ pub async fn finalize_project_ingest(
     // sessions' git spans already exist and each run inherits them. Fail-open:
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
-    let _ = GlobalDbWorkflowStore::new(db)
-        .ingest_workflow_runs(project_id, project_root)
+    if let Some(home) = super::home_dir() {
+        let _ = crate::runtime::workflow_ingest::ingest_workflow_runs_with_sink(
+            &db.workflow_sink(),
+            project_id,
+            project_root,
+            &home.join(".claude").join("projects"),
+        )
         .await;
+    }
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
 /// For each `(branch, worktree)` pair touched since the last sweep, scans that
 /// branch's git log inside the pair's span window (widened by the merge gap)
 /// and attributes overlapping commits to their sessions. Fail-open.
-async fn attribute_commits_after_ingest(db: &RegisteredGlobalDb) {
+async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(db: &A) {
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let result = GlobalDbGitCorrelationStore::new(db)
-        .run_commit_attribution_sweep(gap, |target| git_scan_commits(target, gap))
-        .await;
+    let result = commit_attribution_sweep(&db.git_correlation_store(), gap).await;
     if let Err(error) = result {
         tracing::debug!(%error, "commit attribution sweep skipped");
     }
+}
+
+/// One bounded sweep inside a single write transaction, so the sweep watermark
+/// can only advance together with the attribution rows it describes.
+async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
+    store: &S,
+    gap_secs: i64,
+) -> Result<usize, git_correlation::GitCorrelationError> {
+    let transaction = store.open_write_transaction().await?;
+    let attributed =
+        git_correlation::run_commit_attribution_sweep(&transaction, gap_secs, |target| {
+            git_scan_commits(target, gap_secs)
+        })
+        .await?;
+    git_correlation::GitCorrelationWriteTxn::commit(transaction).await?;
+    Ok(attributed)
 }
 
 /// Reads commits on one span target's branch within its (gap-widened) window

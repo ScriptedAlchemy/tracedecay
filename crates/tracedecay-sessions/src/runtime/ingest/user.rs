@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use crate::admission::{HostAdmissionAuthorities, HostAdmission};
+use crate::admission::HostAdmission;
+use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::observation::ObservationCancellation;
-use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
 use crate::runtime::{SessionProvider, claude_observation, codex, cursor, cursor_composer};
-use crate::store::GlobalDbTranscriptStore;
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
 use tracedecay_store::StoreShardScopeV1;
 
@@ -29,31 +28,13 @@ pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
 
-pub async fn registered_project_roots_from(
-    global: &RegisteredGlobalDb,
+pub async fn registered_project_roots_from<A: SessionIngestAuthority>(
+    global: &A,
 ) -> Option<Vec<PathBuf>> {
-    let log_unavailable = |surface: &'static str, error: &dyn std::fmt::Display| {
-        tracing::warn!(surface, %error, "project registry read failed during user-global ingest");
-    };
-    let mut roots = global
-        .try_list_project_paths()
-        .await
-        .inspect_err(|error| log_unavailable("project_paths", error))
-        .ok()?;
-    roots.extend(
-        global
-            .try_list_code_project_paths(usize::MAX)
-            .await
-            .inspect_err(|error| log_unavailable("code_project_paths", error))
-            .ok()?,
-    );
-    roots.extend(
-        global
-            .try_list_project_alias_paths()
-            .await
-            .inspect_err(|error| log_unavailable("project_alias_paths", error))
-            .ok()?,
-    );
+    let mut roots = global.registered_project_roots().await.or_else(|| {
+        tracing::warn!("project registry read failed during user-global ingest");
+        None
+    })?;
     roots.sort();
     roots.dedup();
     Some(roots)
@@ -220,15 +201,15 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-pub async fn ingest_user_global_sources_for_provider_with_authorities(
+pub async fn ingest_user_global_sources_for_provider_with_authorities<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
-    registry_db: &RegisteredGlobalDb,
+    registered: &A,
+    registry_db: &A,
     profile_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestOutcome {
-    let registry_shard = &registry_db.binding().shard_id;
+    let registry_shard = &registry_db.shard_id();
     if registry_shard.brain_id != *brain_id
         || registry_shard.profile_id != *profile_id
         || registry_shard.scope != StoreShardScopeV1::Profile
@@ -265,10 +246,10 @@ pub async fn ingest_user_global_sources_for_provider_with_authorities(
     .await
 }
 
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
+    registered: &A,
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
@@ -285,10 +266,10 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
     .await
 }
 
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation<A: SessionIngestAuthority>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
-    registered: &RegisteredGlobalDb,
+    registered: &A,
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
@@ -307,8 +288,8 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cance
 }
 
 #[cfg(test)]
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority(
-    _db: &RegisteredGlobalDb,
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<A: SessionIngestAuthority>(
+    _db: &A,
     _profile_root: &Path,
     provider: Option<SessionProvider>,
     _roots: Vec<PathBuf>,
@@ -322,8 +303,8 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_r
 }
 
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
-    registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded<A: SessionIngestAuthority>(
+    registered: (&BrainId, &UserProfileId, &A),
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
@@ -331,7 +312,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
     cancellation: &ObservationCancellation,
 ) -> IngestPassOutcome {
     let (brain_id, profile_id, registered) = registered;
-    let shard = &registered.binding().shard_id;
+    let shard = &registered.shard_id();
     if shard.brain_id != *brain_id
         || shard.profile_id != *profile_id
         || shard.scope != StoreShardScopeV1::ProfileSessions
@@ -348,7 +329,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         .copied()
         .filter(|candidate| provider_selected(provider, *candidate))
         .collect();
-    let transcript_store = GlobalDbTranscriptStore::new(registered);
+    let transcript_store = registered.transcript_store();
     let Some(frontier) =
         read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY).await
     else {
@@ -369,11 +350,11 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         .iter()
         .copied()
         .fold(0_u64, u64::saturating_add);
-    let facade = HostAdmission::new(HostAdmissionAuthorities::for_profile(
-        brain_id.clone(),
-        profile_id.clone(),
-        registered,
-    ));
+    let facade = registered.admission(IngestAdmissionBinding::Profile {
+        brain_id,
+        profile_id,
+    });
+    let facade = facade.as_ref();
 
     'providers: for &index in &plan.admitted_indices {
         if cancellation.is_cancelled() {
@@ -400,7 +381,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
                 &transcript_store,
                 profile_root,
                 &roots,
-                &facade,
+                facade,
                 candidate,
                 grant,
                 cancellation,
@@ -436,7 +417,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
 
     if !cancelled {
         match claude_observation::drain_projection_queue(
-            &facade,
+            facade,
             &ObservationScopeV1::Profile,
             cancellation,
         )
