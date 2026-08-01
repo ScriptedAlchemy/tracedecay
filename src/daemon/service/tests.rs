@@ -7,7 +7,6 @@ use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
-#[cfg(unix)]
 use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
@@ -69,7 +68,6 @@ impl Drop for CurrentDirGuard {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn released_windows_replacement_lease_is_reacquired_shared_before_restore() {
     let profile = TempDir::new().expect("profile");
