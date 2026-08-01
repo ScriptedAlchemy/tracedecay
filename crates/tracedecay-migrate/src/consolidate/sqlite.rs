@@ -4,10 +4,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::runtime::{ConsolidationArtifactAuthorityV1, ConsolidationAttachTokenV1};
-use crate::root_seam::db::Database;
-use crate::root_seam::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
-use crate::root_seam::errors::{Result, TraceDecayError};
-use crate::root_seam::memory::store::MemoryStore;
+use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::memory::store::MemoryStore;
 
 mod external_source;
 mod inspect;
@@ -220,7 +220,7 @@ pub(super) async fn merge_registered_graph_facts(
 /// including assertions, lineage, evidence, tombstones and feedback history.
 pub async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
-    source: &crate::root_seam::sqlite_read_snapshot::SnapshotDatabase,
+    source: &tracedecay_runtime_core::sqlite_read_snapshot::SnapshotDatabase,
 ) -> Result<Vec<MemoryV2ArchiveMergeProof>> {
     let offsets = registered_graph_maxima(target).await?;
     let transaction = target
@@ -830,7 +830,7 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
 #[cfg(test)]
 async fn reject_future_lcm_schema_path(path: &Path, role: &str) -> Result<()> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let database = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
+    let database = tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("validate_lcm_schema", error))?;
     reject_future_lcm_schema(database.connection(), "main", role).await
@@ -877,7 +877,7 @@ async fn reject_future_lcm_schema(
 #[cfg(test)]
 async fn reject_session_registry_rows(path: &Path) -> Result<()> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
+    let db = tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
     let snapshot = db.connection();
@@ -1503,7 +1503,7 @@ async fn attach_token_as(
 
 pub(super) async fn attach_snapshot_as(
     conn: &impl Executor,
-    token: &crate::root_seam::sqlite_read_snapshot::SnapshotAttachToken<'_>,
+    token: &tracedecay_runtime_core::sqlite_read_snapshot::SnapshotAttachToken<'_>,
     alias: &str,
 ) -> Result<()> {
     let path = token
@@ -1560,7 +1560,7 @@ async fn table_max(conn: &impl QueryExecutor, table: &str, column: &str) -> Resu
 #[cfg(test)]
 async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
     let scratch_root = path.parent().unwrap_or_else(|| Path::new("."));
-    let db = crate::root_seam::sqlite_read_snapshot::open_in(path, scratch_root)
+    let db = tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root)
         .await
         .map_err(|error| db_error("table_max", error))?;
     table_max(db.connection(), table, column).await
@@ -1568,15 +1568,15 @@ async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
 
 #[cfg(test)]
 async fn open_migration_database(path: &Path, operation: &'static str) -> Result<Database> {
-    let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(path, operation)?;
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(path, operation)?;
     match Database::open(path, &authority).await {
         Ok((database, _)) => Ok(database),
         #[cfg(test)]
-        Err(_) if authority.role() == crate::root_seam::db::DatabaseAuthorityRole::Test => {
+        Err(_) if authority.role() == tracedecay_runtime_core::db::DatabaseAuthorityRole::Test => {
             Database::publish_test_runtime(
                 path,
                 &authority,
-                crate::root_seam::db::TestDatabaseRuntimeMode::Existing,
+                tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing,
             )
             .await
             .map(|(database, _)| database)

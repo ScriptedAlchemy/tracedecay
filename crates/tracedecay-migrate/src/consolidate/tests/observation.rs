@@ -1342,7 +1342,7 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
         )
         .await
         .unwrap_err();
-    let crate::root_seam::errors::TraceDecayError::Database { message, operation } = error else {
+    let tracedecay_runtime_core::errors::TraceDecayError::Database { message, operation } = error else {
         panic!("authority preflight must return a typed database error");
     };
     assert_eq!(operation, "ensure global database authority invariants");

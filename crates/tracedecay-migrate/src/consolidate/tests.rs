@@ -28,11 +28,11 @@ use super::*;
 use crate::root_seam::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1,
 };
-use crate::root_seam::db::engine::{QueryExecutor, params};
-use crate::root_seam::db::{Database, DatabaseAuthority};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 use crate::root_seam::global_db::RegisteredGlobalDb;
-use crate::root_seam::memory::store::MemoryStore;
-use crate::root_seam::memory::types::{
+use tracedecay_runtime_core::memory::store::MemoryStore;
+use tracedecay_runtime_core::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
 use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
@@ -52,7 +52,7 @@ async fn test_initialize(path: &Path) -> (Database, bool) {
     Database::publish_test_runtime(
         path,
         &authority,
-        crate::root_seam::db::TestDatabaseRuntimeMode::Initialize,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
     )
     .await
     .unwrap()
@@ -63,7 +63,7 @@ async fn test_open(path: &Path) -> (Database, bool) {
     Database::publish_test_runtime(
         path,
         &authority,
-        crate::root_seam::db::TestDatabaseRuntimeMode::Existing,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing,
     )
     .await
     .unwrap()
@@ -74,7 +74,7 @@ async fn test_open_read_only(path: &Path) -> (Database, bool) {
     Database::publish_test_runtime(
         path,
         &authority,
-        crate::root_seam::db::TestDatabaseRuntimeMode::ReadOnly,
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::ReadOnly,
     )
     .await
     .unwrap()
@@ -877,7 +877,7 @@ async fn build_fixture_tree(project: &Path, profile: &Path) {
     )
     .await;
     let global = HostAdmissionTestRuntimeV1::profile(profile).await.unwrap();
-    let git_common_dir = crate::root_seam::worktree::git_common_dir(project).unwrap();
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project).unwrap();
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
         global
             .upsert_code_project(
@@ -932,7 +932,7 @@ async fn fixture_from_template() -> Option<Fixture> {
 /// aliases (recomputed git common dir + fresh path aliases), the two store
 /// manifests (`project_root/data_root`), and the repository-identity marker.
 async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
-    let git_common_dir = crate::root_seam::worktree::git_common_dir(project)?;
+    let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project)?;
     let global = HostAdmissionTestRuntimeV1::profile(profile).await.ok()?;
     // Drop the template build's path aliases so only fresh new-path aliases
     // remain after the re-upserts below.
@@ -1364,7 +1364,7 @@ fn init_repo(path: &Path) {
 }
 
 fn run_git(path: &Path, args: &[&str]) {
-    let status = Command::new(crate::root_seam::git::git_program())
+    let status = Command::new(tracedecay_runtime_core::git::git_program())
         .args(args)
         .current_dir(path)
         .status()

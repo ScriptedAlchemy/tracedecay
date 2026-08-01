@@ -76,8 +76,8 @@ pub fn legacy_store_candidates(
         .iter()
         .filter_map(|profile_dir| {
             let data_root = profile_dir.join(".tracedecay");
-            let sessions_db = data_root.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
-            let memory_db = data_root.join(crate::root_seam::config::db_filename(&data_root));
+            let sessions_db = data_root.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+            let memory_db = data_root.join(tracedecay_runtime_core::config::db_filename(&data_root));
             (sessions_db.is_file() || memory_db.is_file()).then(|| LegacyStoreCandidate {
                 profile_dir: profile_dir.clone(),
                 source_db: if sessions_db.is_file() {
@@ -102,8 +102,8 @@ pub fn legacy_store_candidates(
                 continue;
             }
             let shard = entry.path();
-            let manifest_path = shard.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME);
-            let Ok(manifest) = crate::root_seam::storage::read_store_manifest(&manifest_path)
+            let manifest_path = shard.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
+            let Ok(manifest) = tracedecay_runtime_core::storage::read_store_manifest(&manifest_path)
             else {
                 continue;
             };
@@ -113,8 +113,8 @@ pub fn legacy_store_candidates(
             else {
                 continue;
             };
-            let sessions_db = shard.join(crate::root_seam::storage::SESSIONS_DB_FILENAME);
-            let memory_db = shard.join(crate::root_seam::config::db_filename(&shard));
+            let sessions_db = shard.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
+            let memory_db = shard.join(tracedecay_runtime_core::config::db_filename(&shard));
             if sessions_db.is_file() || memory_db.is_file() {
                 candidates.push(LegacyStoreCandidate {
                     profile_dir: profile_dir.clone(),

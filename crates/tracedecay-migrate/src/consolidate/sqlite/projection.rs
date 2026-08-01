@@ -1,7 +1,7 @@
-use crate::root_seam::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::Executor;
 
 use super::{db_error, db_message, query_i64, quote_identifier};
-use crate::root_seam::errors::Result;
+use tracedecay_runtime_core::errors::Result;
 
 const PLAN_TABLES: &[&str] = &[
     "consolidation_projection_stable_claims",
