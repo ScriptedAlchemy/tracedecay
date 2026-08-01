@@ -107,8 +107,7 @@ It builds and runs `tests/live_daemon_suite.rs` against the real managed daemon
 and finishes with a PASS/FAIL table covering:
 
 - socket connect plus an MCP `initialize` whose `serverInfo.version` must equal
-  the installed binary's `--version` — this is the stale-daemon check, stated as
-  an assertion instead of two strings to eyeball;
+  the installed binary's `--version` — the stale-daemon check;
 - `tools/list` sanity (full catalog, no duplicates, the always-loaded tools
   present);
 - a daemon-brokered read battery (`status`, `search`, `grep`, `callers` on the

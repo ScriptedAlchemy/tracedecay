@@ -1,9 +1,8 @@
 # Dogfood Migration-Boundary Recovery Runbook
 
-Operational record of the forward-only migration boundary recovery for
-`cargo dogfood` on 2026-08-01 (attempts 7-11). Documents the boundary state
-file format, the backup contract, the recovery ladder that was actually
-used, and the failure classes fixed along the way. Sourced from
+How to recover `cargo dogfood` once it has crossed its forward-only migration
+boundary. Documents the boundary state file format, the backup contract, the
+recovery ladder, and the failure classes that strand a run. Sourced from
 `scripts/dogfood.sh`, `.claude/skills/dogfooding-tracedecay/SKILL.md`, and
 the runtime source cited inline. Do not read `~/.tracedecay` directly to
 verify this document — every claim below traces to a file in this repo.
@@ -78,23 +77,23 @@ Two mutually exclusive modes, gated by `TRACEDECAY_DOGFOOD_BACKUP_PLAIN`
   (`src/cli.rs:1227-1234`) — a full restore-and-verify into a throwaway
   directory, deleted immediately after. This is the safe, default path but
   re-reads and re-writes the entire profile twice.
-- **Plain backup** (`TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1`, owner-authorized
-  fast path added 2026-07-31, `scripts/dogfood.sh:538-557`).
+- **Plain backup** (`TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1`, the owner-authorized
+  fast path, `scripts/dogfood.sh:538-557`).
   `TRACEDECAY_DOGFOOD_BACKUP` must name a directory holding a plain `cp -a`
   profile copy at `<dir>/profile`, with `<dir>/profile/global.db` present.
   No manifest, no rehearsal (`scripts/dogfood.sh:687-697` skips the
   rehearsal step entirely when this flag is set). The script only checks
   that the copy *looks like* a profile (directory + `global.db` file
-  exist) — it does not verify contents. This mode exists because the
-  checksummed path's two full profile read/write passes outlasted the
-  maintenance window at the profile size hit during this recovery.
+  exist) — it does not verify contents. This mode exists for profiles large
+  enough that the checksummed path's two full read/write passes outlast the
+  available maintenance window.
 
 Both modes require the backup to already exist; `cargo dogfood` never
 creates one implicitly.
 
-## 3. The recovery ladder actually used (attempts 7-11)
+## 3. The recovery ladder
 
-In order, this is what got a stuck forward-only boundary back to a clean
+In order, this is what takes a stuck forward-only boundary back to a clean
 `validated` state:
 
 1. **Zero-writer proof.** Before touching anything, confirm no process
@@ -145,7 +144,7 @@ In order, this is what got a stuck forward-only boundary back to a clean
    `cargo dogfood` runs the normal flow end to end and should reach
    `outcome=validated`.
 
-## 4. Failure classes fixed en route
+## 4. Failure classes that strand a run
 
 - **Unenrolled admission.** Host-admission code paths assume a project has
   an enrollment marker (`src/application/host_admission.rs:1226-1246`
@@ -154,10 +153,9 @@ In order, this is what got a stuck forward-only boundary back to a clean
   missing or unreadable, `resolve_enrolled_layout()`
   (`crates/tracedecay-runtime-core/src/storage.rs:990-1019`) surfaces a
   denial rather than guessing, telling the caller to "open it through the
-  daemon so the registry can resolve and repair its identity." The fix
-  direction is: never admit a project on a best-effort path-derived guess
-  when the marker is absent — go through the daemon-owned repair path
-  instead.
+  daemon so the registry can resolve and repair its identity." A project with
+  no marker must never be admitted on a best-effort path-derived guess; it
+  goes through the daemon-owned repair path instead.
 - **Missing derived store.** Because the registry is derived
   (`crates/tracedecay-migrate/src/registry.rs`, section 3 above), a
   restored or stale `global.db` that is missing a store's registration is
@@ -188,9 +186,8 @@ In order, this is what got a stuck forward-only boundary back to a clean
   or corrupt-store repair that fails mid-flight cannot roll back or
   replace the database while this process still holds it mounted in the
   process-wide store-runtime registry — the deletion fence refuses any
-  database the process still holds an authority for, and the failure
-  previously surfaced as "this process already holds an incompatible
-  database authority or deletion fence."
+  database the process still holds an authority for, surfacing as "this
+  process already holds an incompatible database authority or deletion fence."
   `retire_branch_runtime_after_failed_sync()`
   (`src/tracedecay/lifecycle/branches.rs:378-410`) and the corrupt-branch
   repair path in `recover_corrupt_branch_or_fail()`
@@ -203,8 +200,8 @@ In order, this is what got a stuck forward-only boundary back to a clean
   failure.** `doctor`'s per-integration state machine treats a component
   that is staged but waiting on a human to activate it inside an
   interactive host (e.g. approving/reloading an editor extension) as
-  `State::ActivationDeferred`, reported as a warning
-  ("is staged and waiting on interactive host activation", not a failure
+  `State::ActivationDeferred`, reported as a warning ("is staged and waiting
+  on interactive host activation") rather than a failure
   (`src/doctor.rs:265-268`), distinct from `State::Missing`/`State::Corrupt`
   which fail. During recovery this means a doctor warning about deferred
   activation for an interactive host integration is expected and does not
