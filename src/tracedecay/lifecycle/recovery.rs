@@ -28,7 +28,7 @@ use super::{TraceDecay, TraceDecayOpenOptions};
 /// branch open or by failing closed — and the caller must return it as-is.
 pub(super) enum OpenHealthOutcome {
     Ready { db: Database, migrated: Option<u32> },
-    Recovered(Result<TraceDecay>),
+    Recovered(Box<Result<TraceDecay>>),
 }
 
 impl TraceDecay {
@@ -96,7 +96,7 @@ impl TraceDecay {
             )
         {
             drop(recovery_lock);
-            return Ok(OpenHealthOutcome::Recovered(
+            return Ok(OpenHealthOutcome::Recovered(Box::new(
                 Self::recover_corrupt_branch_or_fail(
                     project_root,
                     open_options,
@@ -109,7 +109,7 @@ impl TraceDecay {
                     runtime_registry,
                 )
                 .await,
-            ));
+            )));
         }
         if crashed {
             // FTS-only damage is repairable from the content table on the
@@ -121,7 +121,7 @@ impl TraceDecay {
                 project_root,
                 store_layout,
                 db_path,
-                mounted_graph_scope.as_deref(),
+                mounted_graph_scope,
                 "crash verification",
                 DatabaseAccessMode::ReadOnly,
             )
@@ -135,7 +135,7 @@ impl TraceDecay {
                         Ok(Some(problem)) if is_fts_only_corruption(&problem) => {}
                         Ok(Some(problem)) => {
                             drop(recovery_lock);
-                            return Ok(OpenHealthOutcome::Recovered(
+                            return Ok(OpenHealthOutcome::Recovered(Box::new(
                                 Self::recover_corrupt_branch_or_fail(
                                     project_root,
                                     open_options,
@@ -148,11 +148,11 @@ impl TraceDecay {
                                     runtime_registry,
                                 )
                                 .await,
-                            ));
+                            )));
                         }
                         Err(error) => {
                             drop(recovery_lock);
-                            return Ok(OpenHealthOutcome::Recovered(
+                            return Ok(OpenHealthOutcome::Recovered(Box::new(
                                 Self::recover_corrupt_branch_or_fail(
                                     project_root,
                                     open_options,
@@ -165,7 +165,7 @@ impl TraceDecay {
                                     runtime_registry,
                                 )
                                 .await,
-                            ));
+                            )));
                         }
                     }
                 }
@@ -178,7 +178,7 @@ impl TraceDecay {
                 Err(error) if is_readonly_recovery_block(&error.to_string()) => {}
                 Err(error) => {
                     drop(recovery_lock);
-                    return Ok(OpenHealthOutcome::Recovered(
+                    return Ok(OpenHealthOutcome::Recovered(Box::new(
                         Self::recover_corrupt_branch_or_fail(
                             project_root,
                             open_options,
@@ -191,7 +191,7 @@ impl TraceDecay {
                             runtime_registry,
                         )
                         .await,
-                    ));
+                    )));
                 }
             }
         }
@@ -204,7 +204,7 @@ impl TraceDecay {
             project_root,
             store_layout,
             db_path,
-            mounted_graph_scope.as_deref(),
+            mounted_graph_scope,
             "open project store",
             DatabaseAccessMode::ReadWrite,
         )
@@ -223,7 +223,7 @@ impl TraceDecay {
                 project_root,
                 store_layout,
                 db_path,
-                mounted_graph_scope.as_deref(),
+                mounted_graph_scope,
                 "remount project store for FTS repair",
                 DatabaseAccessMode::ReadWrite,
             )
@@ -234,7 +234,7 @@ impl TraceDecay {
                     Err(repair_error) => {
                         database.close();
                         drop(recovery_lock);
-                        return Ok(OpenHealthOutcome::Recovered(
+                        return Ok(OpenHealthOutcome::Recovered(Box::new(
                             Self::recover_corrupt_branch_or_fail(
                                 project_root,
                                 open_options,
@@ -247,12 +247,12 @@ impl TraceDecay {
                                 runtime_registry,
                             )
                             .await,
-                        ));
+                        )));
                     }
                 },
                 Err(repair_error) => {
                     drop(recovery_lock);
-                    return Ok(OpenHealthOutcome::Recovered(
+                    return Ok(OpenHealthOutcome::Recovered(Box::new(
                         Self::recover_corrupt_branch_or_fail(
                             project_root,
                             open_options,
@@ -265,7 +265,7 @@ impl TraceDecay {
                             runtime_registry,
                         )
                         .await,
-                    ));
+                    )));
                 }
             }
         }
@@ -273,7 +273,7 @@ impl TraceDecay {
             Ok(database) => database,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
                 drop(recovery_lock);
-                return Ok(OpenHealthOutcome::Recovered(
+                return Ok(OpenHealthOutcome::Recovered(Box::new(
                     Self::recover_corrupt_branch_or_fail(
                         project_root,
                         open_options,
@@ -286,7 +286,7 @@ impl TraceDecay {
                         runtime_registry,
                     )
                     .await,
-                ));
+                )));
             }
             Err(e) => return Err(e),
         };
@@ -313,7 +313,7 @@ impl TraceDecay {
                 Err(error) => {
                     db.close();
                     drop(recovery_lock);
-                    return Ok(OpenHealthOutcome::Recovered(
+                    return Ok(OpenHealthOutcome::Recovered(Box::new(
                         Self::recover_corrupt_branch_or_fail(
                             project_root,
                             open_options,
@@ -326,7 +326,7 @@ impl TraceDecay {
                             runtime_registry,
                         )
                         .await,
-                    ));
+                    )));
                 }
             }
         }
@@ -356,7 +356,7 @@ impl TraceDecay {
                     Err(error) => {
                         db.close();
                         drop(recovery_lock);
-                        return Ok(OpenHealthOutcome::Recovered(
+                        return Ok(OpenHealthOutcome::Recovered(Box::new(
                             Self::recover_corrupt_branch_or_fail(
                                 project_root,
                                 open_options,
@@ -369,7 +369,7 @@ impl TraceDecay {
                                 runtime_registry,
                             )
                             .await,
-                        ));
+                        )));
                     }
                 }
             }
@@ -382,7 +382,7 @@ impl TraceDecay {
                 Ok(Some(problem)) => {
                     db.close();
                     drop(recovery_lock);
-                    return Ok(OpenHealthOutcome::Recovered(
+                    return Ok(OpenHealthOutcome::Recovered(Box::new(
                         Self::recover_corrupt_branch_or_fail(
                             project_root,
                             open_options,
@@ -395,12 +395,12 @@ impl TraceDecay {
                             runtime_registry,
                         )
                         .await,
-                    ));
+                    )));
                 }
                 Err(e) => {
                     db.close();
                     drop(recovery_lock);
-                    return Ok(OpenHealthOutcome::Recovered(
+                    return Ok(OpenHealthOutcome::Recovered(Box::new(
                         Self::recover_corrupt_branch_or_fail(
                             project_root,
                             open_options,
@@ -413,7 +413,7 @@ impl TraceDecay {
                             runtime_registry,
                         )
                         .await,
-                    ));
+                    )));
                 }
             }
         }
