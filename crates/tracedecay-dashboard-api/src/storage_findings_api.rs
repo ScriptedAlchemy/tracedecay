@@ -255,8 +255,6 @@ const fn unavailable_reason(reason: DoctorFamilyUnavailableReasonV1) -> &'static
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_domain::ProjectId;
 
     #[test]
     fn budget_source_reports_configured_over_clean_unset_and_partial_honestly() {
@@ -300,24 +298,8 @@ mod tests {
     #[tokio::test]
     async fn route_without_admitted_reader_is_typed_unsupported() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            ProjectId::new("project.dashboard-storage-findings").expect("project id"),
-        )
-        .await
-        .expect("registered test runtime");
-        let cg = runtime
-            .initialize_project_graph_for_test(
-                project.path(),
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .expect("project init");
-        let state = crate::build_state(&cg).await.expect("dashboard state");
+        let (_project, state) =
+            crate::events_api::dashboard_state_fixture("project.dashboard-storage-findings").await;
 
         let Json(envelope) = findings(State(state)).await;
 

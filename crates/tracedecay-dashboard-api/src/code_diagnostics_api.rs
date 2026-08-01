@@ -185,40 +185,16 @@ mod tests {
 
     use super::*;
     use crate::application::dashboard_diagnostics::diagnostic_broker;
-    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
-    use tracedecay_domain::ProjectId;
     use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
 
-    async fn state_for_test() -> (
-        tempfile::TempDir,
-        HostAdmissionTestRuntimeV1,
-        DashboardState,
-    ) {
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            ProjectId::new("project.dashboard-code-diagnostics").expect("project id"),
-        )
-        .await
-        .expect("registered test runtime");
-        let cg = runtime
-            .initialize_project_graph_for_test(
-                project.path(),
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .expect("project init");
-        let state = crate::build_state(&cg).await.expect("dashboard state");
-        (project, runtime, state)
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+        crate::events_api::dashboard_state_fixture("project.dashboard-code-diagnostics").await
     }
 
     #[tokio::test]
     async fn overview_delegates_to_the_exact_mounted_diagnostics_authority() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         let mut settings = CodeDiagnosticsSettings {
             idle_backfill: IdleBackfillMode::Off,
             ..CodeDiagnosticsSettings::default()
@@ -257,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
             state.project_root.clone(),
             state.dashboard_root.clone(),
@@ -286,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
             state.project_root.clone(),
             state.dashboard_root.clone(),
@@ -314,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn overview_returns_service_unavailable_without_mounted_authority() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, state) = state_for_test().await;
+        let (_project, state) = state_for_test().await;
 
         let (status, Json(body)) = overview(State(state))
             .await
