@@ -268,45 +268,127 @@ fn augment_redundancy_output(
     })
 }
 
+/// One vectored-node projection entry used for bucketing: the node plus one of
+/// its usable embedding vectors reduced to a single normalized coordinate.
+struct SemanticEntry<'a> {
+    /// Normalized first coordinate (`values[0] / ‖values‖`); the sort/window
+    /// key. Any accepted pair differs by at most one window on this coordinate.
+    key: f64,
+    node: &'a Node,
+}
+
+/// Reduce a raw embedding vector to the normalized first coordinate used as the
+/// bucketing key, or `None` when the vector could never yield a finite cosine
+/// (empty, non-finite component, or zero norm) — matching [`semantic_cosine`]'s
+/// own usability preconditions, so no acceptable pair is ever excluded.
+fn normalized_projection(values: &[f32]) -> Option<f64> {
+    let first = f64::from(*values.first()?);
+    let mut norm_sq = 0.0_f64;
+    for &value in values {
+        if !value.is_finite() {
+            return None;
+        }
+        let value = f64::from(value);
+        norm_sq += value * value;
+    }
+    (norm_sq > 0.0).then(|| first / norm_sq.sqrt())
+}
+
 fn semantic_pairs<'a>(
     nodes: &'a [Node],
     structural: &[RedundantPair<'_>],
     semantic: &SemanticRedundancyGenerationV1,
 ) -> Vec<SemanticPair<'a>> {
+    // 1. Bind vectors to nodes in O(nodes + vectors) via an exact lookup index,
+    //    replacing the former O(vectors × nodes) filter-per-vector. A vector
+    //    binds to the node whose file path matches and whose qualified name OR
+    //    short name equals the vector's qualified name; a match that is
+    //    ambiguous across distinct nodes is dropped, exactly as the prior
+    //    linear scan did. Each node appears at most once per key (the short-name
+    //    entry is skipped when it equals the qualified name), so a lookup slice
+    //    of length one is precisely a unique node match.
+    let mut nodes_by_key: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        nodes_by_key
+            .entry((node.file_path.as_str(), node.qualified_name.as_str()))
+            .or_default()
+            .push(index);
+        if node.name != node.qualified_name {
+            nodes_by_key
+                .entry((node.file_path.as_str(), node.name.as_str()))
+                .or_default()
+                .push(index);
+        }
+    }
     let mut vectors_by_node: HashMap<&str, Vec<&[f32]>> = HashMap::new();
     for vector in &semantic.vectors {
-        let mut matches = nodes.iter().filter(|node| {
-            node.file_path == vector.file_path
-                && (node.qualified_name == vector.qualified_name
-                    || node.name == vector.qualified_name)
-        });
-        let Some(node) = matches.next() else {
+        let Some(matches) =
+            nodes_by_key.get(&(vector.file_path.as_str(), vector.qualified_name.as_str()))
+        else {
             continue;
         };
-        if matches.next().is_some() {
-            continue;
-        }
+        let [index] = matches.as_slice() else {
+            continue; // zero or multiple distinct nodes → ambiguous, skip.
+        };
         vectors_by_node
-            .entry(node.id.as_str())
+            .entry(nodes[*index].id.as_str())
             .or_default()
             .push(&vector.values);
     }
+
     let structural_pairs = structural
         .iter()
         .map(|pair| canonical_pair_ids(&pair.node_a.id, &pair.node_b.id))
         .collect::<std::collections::BTreeSet<_>>();
-    let mut semantic_pairs = Vec::new();
-    for (index, node_a) in nodes.iter().enumerate() {
-        let Some(vectors_a) = vectors_by_node.get(node_a.id.as_str()) else {
+
+    // 2. Bucket vectored candidates by their normalized projection so the scan
+    //    compares only plausibly-similar pairs instead of all pairs. Sorting by
+    //    one coordinate and sliding a window of `cosine_projection_window()`
+    //    preserves perfect recall: every accepted pair has cosine above the
+    //    profile threshold, hence its normalized vectors differ by at most one
+    //    window on any coordinate, so both endpoints fall inside the window.
+    let mut entries: Vec<SemanticEntry<'a>> = Vec::new();
+    for node in nodes {
+        let Some(vectors) = vectors_by_node.get(node.id.as_str()) else {
             continue;
         };
-        for node_b in nodes.iter().skip(index + 1) {
-            if nodes_overlap(node_a, node_b)
-                || structural_pairs.contains(&canonical_pair_ids(&node_a.id, &node_b.id))
-            {
+        for values in vectors {
+            if let Some(key) = normalized_projection(values) {
+                entries.push(SemanticEntry { key, node });
+            }
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.key
+            .total_cmp(&right.key)
+            .then_with(|| left.node.id.cmp(&right.node.id))
+    });
+    let window = semantic.profile.cosine_projection_window();
+
+    // 3. Emit candidate node pairs from the window, dedup so each unordered node
+    //    pair is scored once, and apply the exact accept + overlap +
+    //    structural-exclusion gate unchanged from the former all-pairs scan.
+    let mut seen_pairs: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
+    let mut semantic_pairs = Vec::new();
+    for (index, left) in entries.iter().enumerate() {
+        for right in entries.iter().skip(index + 1) {
+            if right.key - left.key > window {
+                break; // sorted by key — no later entry can be closer.
+            }
+            if left.node.id == right.node.id {
+                continue; // same node via two of its own vectors.
+            }
+            let ids = canonical_pair_ids(&left.node.id, &right.node.id);
+            if !seen_pairs.insert(ids) {
+                continue; // node pair already scored from an earlier entry pair.
+            }
+            if nodes_overlap(left.node, right.node) || structural_pairs.contains(&ids) {
                 continue;
             }
-            let Some(vectors_b) = vectors_by_node.get(node_b.id.as_str()) else {
+            let (Some(vectors_a), Some(vectors_b)) = (
+                vectors_by_node.get(left.node.id.as_str()),
+                vectors_by_node.get(right.node.id.as_str()),
+            ) else {
                 continue;
             };
             let cosine = vectors_a
@@ -323,10 +405,10 @@ fn semantic_pairs<'a>(
                     .accepts(cosine)
                     .map(|distance| (cosine, distance))
             }) {
-                let (node_a, node_b) = if node_a.id <= node_b.id {
-                    (node_a, node_b)
+                let (node_a, node_b) = if left.node.id <= right.node.id {
+                    (left.node, right.node)
                 } else {
-                    (node_b, node_a)
+                    (right.node, left.node)
                 };
                 semantic_pairs.push(SemanticPair {
                     node_a,
@@ -857,8 +939,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        RedundancyOptions, augment_redundancy_output, body_slice, ensure_fingerprints_with_loader,
-        is_generated_path, node_body_slice, redundancy_output, scoped_fingerprints,
+        RedundancyOptions, SemanticPair, augment_redundancy_output, body_slice, canonical_pair_ids,
+        ensure_fingerprints_with_loader, is_generated_path, node_body_slice, nodes_overlap,
+        redundancy_output, scoped_fingerprints, semantic_cosine, semantic_pairs,
     };
     use crate::application::semantic_runtime::{
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
@@ -1127,6 +1210,236 @@ mod tests {
         let output = augment_redundancy_output(&options, 2, 0, &nodes, &[], &[], Some(&generation));
 
         assert_eq!(output["pair_count"], 0);
+    }
+
+    // --- DEFECT A bucketing parity harness ----------------------------------
+
+    fn vec_row(file: &str, name: &str, values: Vec<f32>) -> SemanticRedundancyVectorV1 {
+        SemanticRedundancyVectorV1 {
+            file_path: file.to_owned(),
+            qualified_name: name.to_owned(),
+            values,
+        }
+    }
+
+    fn generation_with(
+        vectors: Vec<SemanticRedundancyVectorV1>,
+        maximum_distance_micros: i64,
+    ) -> SemanticRedundancyGenerationV1 {
+        SemanticRedundancyGenerationV1 {
+            vector_generation: "sha256:vector-generation".to_owned(),
+            source_generation: "sha256:source-generation".to_owned(),
+            projection_key: "sha256:projection-key".to_owned(),
+            profile: SemanticRedundancyProfileV1 {
+                scope_digest: "sha256:scope".to_owned(),
+                accepted_profile_digest: "sha256:accepted-profile".to_owned(),
+                calibration_profile_id: "calibration.semantic.v1".to_owned(),
+                calibration_digest: "sha256:calibration".to_owned(),
+                redundancy_profile_digest: "sha256:redundancy-profile".to_owned(),
+                maximum_distance_micros,
+            },
+            vectors,
+        }
+    }
+
+    /// Project accepted pairs to sorted `(id_a, id_b, distance)` triples so the
+    /// comparison against the brute-force oracle is a pure set equality,
+    /// independent of the ranked emission order.
+    fn projected(pairs: &[SemanticPair<'_>]) -> Vec<(String, String, i64)> {
+        let mut projected = pairs
+            .iter()
+            .map(|pair| {
+                (
+                    pair.node_a.id.clone(),
+                    pair.node_b.id.clone(),
+                    pair.distance_micros,
+                )
+            })
+            .collect::<Vec<_>>();
+        projected.sort();
+        projected
+    }
+
+    /// The original un-bucketed all-pairs scan, kept verbatim as an independent
+    /// oracle for the bucketed implementation. Returns the accepted pair set as
+    /// canonically-oriented `(id_a, id_b, distance)` triples, sorted so set
+    /// equality is a plain vector comparison.
+    fn brute_force_semantic_pairs(
+        nodes: &[Node],
+        structural: &[RedundantPair<'_>],
+        semantic: &SemanticRedundancyGenerationV1,
+    ) -> Vec<(String, String, i64)> {
+        let mut vectors_by_node: std::collections::HashMap<&str, Vec<&[f32]>> =
+            std::collections::HashMap::new();
+        for vector in &semantic.vectors {
+            let mut matches = nodes.iter().filter(|node| {
+                node.file_path == vector.file_path
+                    && (node.qualified_name == vector.qualified_name
+                        || node.name == vector.qualified_name)
+            });
+            let Some(node) = matches.next() else {
+                continue;
+            };
+            if matches.next().is_some() {
+                continue;
+            }
+            vectors_by_node
+                .entry(node.id.as_str())
+                .or_default()
+                .push(&vector.values);
+        }
+        let structural_pairs = structural
+            .iter()
+            .map(|pair| canonical_pair_ids(&pair.node_a.id, &pair.node_b.id))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut found = Vec::new();
+        for (index, node_a) in nodes.iter().enumerate() {
+            let Some(vectors_a) = vectors_by_node.get(node_a.id.as_str()) else {
+                continue;
+            };
+            for node_b in nodes.iter().skip(index + 1) {
+                if nodes_overlap(node_a, node_b)
+                    || structural_pairs.contains(&canonical_pair_ids(&node_a.id, &node_b.id))
+                {
+                    continue;
+                }
+                let Some(vectors_b) = vectors_by_node.get(node_b.id.as_str()) else {
+                    continue;
+                };
+                let cosine = vectors_a
+                    .iter()
+                    .flat_map(|left| {
+                        vectors_b
+                            .iter()
+                            .filter_map(move |right| semantic_cosine(left, right))
+                    })
+                    .max_by(f64::total_cmp);
+                if let Some((_, distance)) = cosine
+                    .and_then(|cosine| semantic.profile.accepts(cosine).map(|d| (cosine, d)))
+                {
+                    let (a, b) = canonical_pair_ids(&node_a.id, &node_b.id);
+                    found.push((a.to_owned(), b.to_owned(), distance));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn bucketed_semantic_pairs_match_brute_force_pair_set() {
+        // Known duplicate pairs, orthogonal non-duplicates, an ambiguous-name
+        // vector that must drop, and projection keys spread far enough that the
+        // sliding window actively prunes cross-cluster comparisons.
+        let nodes = vec![
+            candidate_node("dup-a", "encode_span", "src/a.rs", 8),
+            candidate_node("dup-b", "encode_range", "src/b.rs", 8),
+            candidate_node("far-a", "render_html", "src/c.rs", 8),
+            candidate_node("far-b", "parse_json", "src/d.rs", 8),
+            candidate_node("mid-a", "hash_key", "src/e.rs", 8),
+            candidate_node("mid-b", "digest_key", "src/f.rs", 8),
+            candidate_node("amb-1", "shared", "src/g.rs", 8),
+            candidate_node("amb-2", "shared", "src/g.rs", 8),
+        ];
+        let generation = generation_with(
+            vec![
+                vec_row("src/a.rs", "encode_span", vec![1.0, 0.02, 0.0]),
+                vec_row("src/b.rs", "encode_range", vec![0.999, 0.0, 0.02]),
+                vec_row("src/c.rs", "render_html", vec![0.0, 1.0, 0.0]),
+                vec_row("src/d.rs", "parse_json", vec![0.0, 0.0, 1.0]),
+                vec_row("src/e.rs", "hash_key", vec![0.6, 0.8, 0.0]),
+                vec_row("src/f.rs", "digest_key", vec![0.61, 0.79, 0.0]),
+                // Two distinct nodes in src/g.rs share this name → ambiguous,
+                // the vector must bind to neither.
+                vec_row("src/g.rs", "shared", vec![1.0, 0.0, 0.0]),
+            ],
+            60_000_000,
+        );
+
+        let bucketed = semantic_pairs(&nodes, &[], &generation);
+        let brute = brute_force_semantic_pairs(&nodes, &[], &generation);
+
+        // Perfect-recall proof: the bucketed pass reports exactly the oracle's
+        // accepted pair set even though the window prunes the mid↔dup and
+        // far↔mid comparisons.
+        assert_eq!(projected(&bucketed), brute);
+
+        let ids: Vec<(&str, &str)> = bucketed
+            .iter()
+            .map(|pair| (pair.node_a.id.as_str(), pair.node_b.id.as_str()))
+            .collect();
+        // The known duplicate pairs are found...
+        assert!(ids.contains(&("dup-a", "dup-b")));
+        assert!(ids.contains(&("mid-a", "mid-b")));
+        // ...and the orthogonal non-duplicates are excluded, as is the
+        // ambiguous-name node.
+        assert!(!ids.iter().any(|(a, b)| *a == "far-a" || *b == "far-a"));
+        assert!(!ids.iter().any(|(a, b)| *a == "far-b" || *b == "far-b"));
+        assert!(!ids.iter().any(|(a, b)| a.starts_with("amb") || b.starts_with("amb")));
+    }
+
+    #[test]
+    fn bucketed_semantic_pairs_find_high_cosine_pair_spread_on_first_coordinate() {
+        // Guard against bucketing on the wrong signal: a genuinely similar pair
+        // whose vectors differ most on the projected coordinate must still be
+        // found. Their normalized first coordinates differ (0.196 vs 0.290) yet
+        // the pair is well within the window, and cosine ≈ 0.997 is accepted.
+        let nodes = vec![
+            candidate_node("near-a", "alpha", "src/a.rs", 8),
+            candidate_node("near-b", "beta", "src/b.rs", 8),
+        ];
+        let generation = generation_with(
+            vec![
+                vec_row("src/a.rs", "alpha", vec![0.2, 1.0, 0.0]),
+                vec_row("src/b.rs", "beta", vec![0.3, 1.0, 0.0]),
+            ],
+            60_000_000,
+        );
+
+        let bucketed = semantic_pairs(&nodes, &[], &generation);
+        let brute = brute_force_semantic_pairs(&nodes, &[], &generation);
+        assert_eq!(projected(&bucketed), brute);
+        assert_eq!(bucketed.len(), 1);
+        assert_eq!(bucketed[0].node_a.id, "near-a");
+        assert_eq!(bucketed[0].node_b.id, "near-b");
+    }
+
+    #[test]
+    fn cosine_projection_window_bounds_every_accepted_pair() {
+        // Randomized recall stress: many vectored nodes, each pair independently
+        // checked so any window that dropped an accepted pair would surface as a
+        // brute-force mismatch.
+        let mut nodes = Vec::new();
+        let mut vectors = Vec::new();
+        // Deterministic pseudo-random vectors from a linear congruential
+        // sequence so the fixture is reproducible without external crates.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f64 / (1u64 << 31) as f64) - 1.0
+        };
+        for index in 0..40 {
+            let file = format!("src/n{index}.rs");
+            let name = format!("fn_{index}");
+            let id = format!("id-{index}");
+            nodes.push(candidate_node(&id, &name, &file, 8));
+            let values = vec![
+                next() as f32,
+                next() as f32,
+                next() as f32,
+                next() as f32,
+            ];
+            vectors.push(vec_row(&file, &name, values));
+        }
+        // A moderately permissive window so a non-trivial number of pairs accept.
+        let generation = generation_with(vectors, 250_000_000);
+
+        let bucketed = semantic_pairs(&nodes, &[], &generation);
+        let brute = brute_force_semantic_pairs(&nodes, &[], &generation);
+        assert_eq!(projected(&bucketed), brute);
+        assert!(!brute.is_empty(), "fixture must exercise accepted pairs");
     }
 
     #[test]
