@@ -383,15 +383,12 @@ fn compute_shingles(tokens: &[&str]) -> Vec<u32> {
     out
 }
 
-/// Jaccard similarity over two sorted/dedup'd shingle sets. Returns 1.0
-/// for two empty sets (vacuous match — they're both "no content").
-pub(crate) fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
+/// Size of the intersection of two sorted, dedup'd shingle sets.
+///
+/// Both body-similarity limbs — Jaccard and the body-vector cosine — are pure
+/// functions of this one count plus the two set sizes, so the pairwise scan
+/// pays the two-pointer merge once per pair instead of once per limb.
+fn shingle_intersection(a: &[u32], b: &[u32]) -> usize {
     // Two pointer merge over sorted sequences.
     let (mut i, mut j) = (0usize, 0usize);
     let mut inter = 0usize;
@@ -406,38 +403,51 @@ pub(crate) fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
             std::cmp::Ordering::Greater => j += 1,
         }
     }
-    let union = a.len() + b.len() - inter;
+    inter
+}
+
+/// Jaccard similarity from a precomputed intersection count. Returns 1.0
+/// for two empty sets (vacuous match — they're both "no content").
+fn jaccard_from_intersection(a_len: usize, b_len: usize, intersection: usize) -> f64 {
+    if a_len == 0 && b_len == 0 {
+        return 1.0;
+    }
+    if a_len == 0 || b_len == 0 {
+        return 0.0;
+    }
+    let union = a_len + b_len - intersection;
     if union == 0 {
         return 1.0;
     }
-    inter as f64 / union as f64
+    intersection as f64 / union as f64
 }
 
-/// Cosine similarity over sorted/dedup'd shingle vectors.
+/// Cosine similarity from a precomputed intersection count.
 ///
 /// This is the cheap vector-style body similarity signal used by the
 /// redundancy tool for candidate discovery and ranking. Unlike Jaccard, it is
 /// less harsh when two larger bodies share a strong core but differ in a few
 /// surrounding shingles.
-pub(crate) fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
-    if a.is_empty() || b.is_empty() {
+fn cosine_from_intersection(a_len: usize, b_len: usize, intersection: usize) -> f64 {
+    if a_len == 0 || b_len == 0 {
         return 0.0;
     }
-    let mut i = 0usize;
-    let mut j = 0usize;
-    let mut dot = 0usize;
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Equal => {
-                dot += 1;
-                i += 1;
-                j += 1;
-            }
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-        }
-    }
-    dot as f64 / ((a.len() as f64).sqrt() * (b.len() as f64).sqrt())
+    intersection as f64 / ((a_len as f64).sqrt() * (b_len as f64).sqrt())
+}
+
+/// Jaccard similarity over two sorted/dedup'd shingle sets. Returns 1.0
+/// for two empty sets (vacuous match — they're both "no content").
+pub(crate) fn jaccard_similarity(a: &[u32], b: &[u32]) -> f64 {
+    jaccard_from_intersection(a.len(), b.len(), shingle_intersection(a, b))
+}
+
+/// Cosine similarity over sorted/dedup'd shingle vectors. Production callers
+/// score a pair through [`redundancy_match_score`], which shares one shingle
+/// merge across both similarity limbs; this stays as the limb's direct
+/// property test surface.
+#[cfg(test)]
+pub(crate) fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
+    cosine_from_intersection(a.len(), b.len(), shingle_intersection(a, b))
 }
 
 // ---------------------------------------------------------------------------
@@ -526,9 +536,15 @@ pub fn redundancy_match_score(
         return None;
     }
 
-    let shingle_jaccard = jaccard_similarity(&a.shingles, &b.shingles);
+    // One shingle merge feeds both body-similarity limbs. Jaccard and the
+    // body-vector cosine differ only in their denominator, so computing the
+    // intersection twice was the single hottest redundant operation in the
+    // pairwise scan; the arithmetic below is the same, in the same order.
+    let intersection = shingle_intersection(&a.shingles, &b.shingles);
+    let shingle_jaccard =
+        jaccard_from_intersection(a.shingles.len(), b.shingles.len(), intersection);
     let similarity = composite_similarity_with_jaccard(a, b, shingle_jaccard);
-    let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
+    let vector_cosine = cosine_from_intersection(a.shingles.len(), b.shingles.len(), intersection);
     if similarity < threshold
         && vector_cosine < threshold
         && !same_name_rescue(a_name, b_name, vector_cosine, include_naming)
@@ -677,62 +693,135 @@ pub struct RedundantPair<'a> {
 /// `ranking_score` (a total order: ties fall through similarity, cosine, then
 /// names and node ids) and truncated to `max_pairs`.
 pub fn find_redundant_pairs<'a>(
-    mut scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
     threshold: f64,
     include_naming: bool,
     max_pairs: usize,
 ) -> Vec<RedundantPair<'a>> {
-    // Sort by body_tokens so the size-window check is a linear scan; break
-    // ties on node id so candidate enumeration never depends on DB row order.
-    scoped.sort_by(|(na, fa), (nb, fb)| {
-        fa.body_tokens
-            .cmp(&fb.body_tokens)
-            .then_with(|| na.id.cmp(&nb.id))
-    });
+    let mut scan = RedundancyPairScan::new(scoped, threshold, include_naming, max_pairs);
+    while scan.advance(usize::MAX) {}
+    scan.finish()
+}
 
-    let mut found = Vec::new();
-    for (i, (node_a, fp_a)) in scoped.iter().enumerate() {
-        let (lo, hi) = body_token_window(fp_a.body_tokens);
-        for (node_b, fp_b) in scoped.iter().skip(i + 1) {
-            if fp_b.body_tokens > hi {
-                break; // sorted, no need to scan further
-            }
-            if fp_b.body_tokens < lo {
-                continue;
-            }
-            if let Some(pair) =
-                redundant_pair(node_a, fp_a, node_b, fp_b, threshold, include_naming)
-            {
-                found.push(pair);
-            }
+/// The same scan as [`find_redundant_pairs`], resumable in bounded slices.
+///
+/// The scan is a long, uninterrupted CPU loop: run whole inside an async task
+/// it pins a runtime worker for its full duration and starves whatever else
+/// that worker was serving. This type exposes the identical enumeration as a
+/// cursor so an async caller can yield between slices. Enumeration order,
+/// scoring, ranking and truncation are unchanged — the cursor only decides
+/// *when* the loop pauses, never which pairs it visits or in what order — so
+/// a sliced run and a single-shot run return byte-identical results.
+pub struct RedundancyPairScan<'a> {
+    scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    threshold: f64,
+    include_naming: bool,
+    max_pairs: usize,
+    /// Index of the candidate whose window is being scanned.
+    outer: usize,
+    /// Next partner index inside that window. `0` means "window not started",
+    /// which is unambiguous because a live partner index is always `outer + 1`
+    /// or greater.
+    inner: usize,
+    found: Vec<RedundantPair<'a>>,
+}
+
+impl<'a> RedundancyPairScan<'a> {
+    pub fn new(
+        mut scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+        threshold: f64,
+        include_naming: bool,
+        max_pairs: usize,
+    ) -> Self {
+        // Sort by body_tokens so the size-window check is a linear scan; break
+        // ties on node id so candidate enumeration never depends on DB row order.
+        scoped.sort_by(|(na, fa), (nb, fb)| {
+            fa.body_tokens
+                .cmp(&fb.body_tokens)
+                .then_with(|| na.id.cmp(&nb.id))
+        });
+        Self {
+            scoped,
+            threshold,
+            include_naming,
+            max_pairs,
+            outer: 0,
+            inner: 0,
+            found: Vec::new(),
         }
     }
 
-    found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
-        b.score
-            .ranking_score
-            .partial_cmp(&a.score.ranking_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.score
-                    .similarity
-                    .partial_cmp(&a.score.similarity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                b.score
-                    .vector_cosine
-                    .partial_cmp(&a.score.vector_cosine)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.node_a.name.cmp(&b.node_a.name))
-            .then_with(|| a.node_b.name.cmp(&b.node_b.name))
-            .then_with(|| a.node_a.id.cmp(&b.node_a.id))
-            .then_with(|| a.node_b.id.cmp(&b.node_b.id))
-    });
-    found.truncate(max_pairs);
+    /// Score at most `budget` further candidate pairs.
+    ///
+    /// Returns `true` while the scan has more work, `false` once every pair has
+    /// been visited. The budget counts scored comparisons rather than
+    /// candidates so a cluster of same-sized bodies — where one candidate's
+    /// window spans thousands of partners — still pauses on schedule.
+    pub fn advance(&mut self, budget: usize) -> bool {
+        let mut spent = 0usize;
+        while self.outer < self.scoped.len() {
+            let (node_a, fp_a) = self.scoped[self.outer];
+            let (lo, hi) = body_token_window(fp_a.body_tokens);
+            if self.inner == 0 {
+                self.inner = self.outer + 1;
+            }
+            while self.inner < self.scoped.len() {
+                let (node_b, fp_b) = self.scoped[self.inner];
+                if fp_b.body_tokens > hi {
+                    break; // sorted, no need to scan further
+                }
+                if fp_b.body_tokens >= lo
+                    && let Some(pair) = redundant_pair(
+                        node_a,
+                        fp_a,
+                        node_b,
+                        fp_b,
+                        self.threshold,
+                        self.include_naming,
+                    )
+                {
+                    self.found.push(pair);
+                }
+                self.inner += 1;
+                spent += 1;
+                if spent >= budget {
+                    return true;
+                }
+            }
+            self.outer += 1;
+            self.inner = 0;
+        }
+        false
+    }
 
-    found
+    /// Rank the collected pairs and truncate to `max_pairs`.
+    pub fn finish(self) -> Vec<RedundantPair<'a>> {
+        let mut found = self.found;
+        found.sort_by(|a: &RedundantPair<'_>, b: &RedundantPair<'_>| {
+            b.score
+                .ranking_score
+                .partial_cmp(&a.score.ranking_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.score
+                        .similarity
+                        .partial_cmp(&a.score.similarity)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    b.score
+                        .vector_cosine
+                        .partial_cmp(&a.score.vector_cosine)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.node_a.name.cmp(&b.node_a.name))
+                .then_with(|| a.node_b.name.cmp(&b.node_b.name))
+                .then_with(|| a.node_a.id.cmp(&b.node_a.id))
+                .then_with(|| a.node_b.id.cmp(&b.node_b.id))
+        });
+        found.truncate(self.max_pairs);
+        found
+    }
 }
 
 /// The ±25 % `body_tokens` window used to bucket candidates before scoring.
