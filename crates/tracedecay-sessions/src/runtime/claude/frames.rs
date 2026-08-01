@@ -4,14 +4,14 @@ use serde_json::Value;
 use tracedecay_capture::claude::{normalize, stable_record_id};
 use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
 
-use tracedecay_runtime_core::privacy::{
-    MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
-    parse_normalized_observation_record_v1, protect_sensitive_structural_id,
-};
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
     JsonlFrameDeferral, JsonlResumeState, RawJsonlSkippedReason, TranscriptCursorCheckpoint,
     TranscriptCursorKey, TranscriptIngestResult, try_stream_new_jsonl_raw_strict_with_resume,
+};
+use tracedecay_runtime_core::privacy::{
+    MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
+    parse_normalized_observation_record_v1, protect_sensitive_structural_id,
 };
 
 use super::PROVIDER;

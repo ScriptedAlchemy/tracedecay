@@ -89,9 +89,7 @@ pub fn cooldown_active(boundary_skip_at: Option<i64>, now: i64) -> bool {
     }
 }
 
-pub fn condensation_policy_decision(
-    input: CondensationDecisionInput<'_>,
-) -> CondensationDecision {
+pub fn condensation_policy_decision(input: CondensationDecisionInput<'_>) -> CondensationDecision {
     if input.has_backlog {
         return CondensationDecision::Skip(CondensationSkipReason::BacklogPresent);
     }

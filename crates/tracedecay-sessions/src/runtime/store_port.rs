@@ -57,8 +57,7 @@ pub trait SessionStoreAuthority: Sync {
     fn read_snapshot(&self) -> impl Future<Output = Result<ReadSnapshot>> + Send;
 
     /// Opens a write transaction.
-    fn begin_write_transaction(&self)
-    -> impl Future<Output = Result<Self::WriteTxn<'_>>> + Send;
+    fn begin_write_transaction(&self) -> impl Future<Output = Result<Self::WriteTxn<'_>>> + Send;
 }
 
 /// Application boundary required by production transcript ingestion.

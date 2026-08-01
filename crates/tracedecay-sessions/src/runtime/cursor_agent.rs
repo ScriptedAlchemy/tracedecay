@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::runtime::codex_app_server::strip_reasoning_tags;
 use crate::runtime::lcm::LcmSummaryRequest;
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
 pub const CURSOR_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CURSOR_SUMMARY_CHILD";
 

@@ -96,7 +96,9 @@ pub mod lcm_redaction {
 
     /// Resolves the active policy, defaulting to "redaction off".
     pub fn resolve() -> LcmRedactionPolicy {
-        PROVIDER.get().map_or_else(LcmRedactionPolicy::default, |provider| provider())
+        PROVIDER
+            .get()
+            .map_or_else(LcmRedactionPolicy::default, |provider| provider())
     }
 }
 

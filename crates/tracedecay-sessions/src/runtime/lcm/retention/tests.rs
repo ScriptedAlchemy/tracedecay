@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
-use tracedecay_runtime_core::db::engine::{Connection, Executor, IntoParams, QueryExecutor, TestConnection, params};
 use crate::runtime::lcm::schema;
+use tracedecay_runtime_core::db::engine::{
+    Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
+};
 
 use super::*;
 

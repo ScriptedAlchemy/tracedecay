@@ -25,7 +25,6 @@ use crate::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 use crate::runtime::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
@@ -36,6 +35,7 @@ use crate::runtime::source::{
     JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptSource,
 };
+use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 
 pub const CLAUDE_TRANSCRIPT_RETENTION_CLASS: &str = "transcript.claude.v1";
 /// Every pass, including startup recovery, bounds its raw and parsed backlog.
@@ -908,16 +908,16 @@ mod tests {
     use std::future::Future;
 
     use crate::admission::{
-        HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-        HostProjectionDrainOutcome, HostAdmission, HostAdmission,
+        HostAdmission, HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
+        HostProjectionDrainOutcome,
     };
     use crate::observation::{
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
         ReplayObservationsRequest,
     };
-    use tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1;
     use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
     use tracedecay_domain::{ObservationSourceCursorV1, ObservationSourceIdentityV1};
+    use tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1;
     use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
     const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",

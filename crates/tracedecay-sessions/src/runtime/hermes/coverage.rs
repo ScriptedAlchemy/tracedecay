@@ -15,8 +15,8 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
-use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
 use crate::runtime::shared::TranscriptIngestStats;
+use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,

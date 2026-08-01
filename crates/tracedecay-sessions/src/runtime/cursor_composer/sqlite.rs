@@ -10,8 +10,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
+use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 
 /// Outcome of a length-gated `SQLite` text/blob fetch that never materializes
 /// oversized or over-budget payloads into `Rust`.

@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
 };
@@ -35,6 +34,7 @@ use crate::runtime::source::{
     TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
     collect_files_with_ext_bounded, path_byte_len,
 };
+use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
 mod canonical_projection;
 mod cursor;
 mod frames;

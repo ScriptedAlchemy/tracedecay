@@ -18,8 +18,8 @@
 //! `SQLite` row ids are generation-local ordering evidence only; native identity
 //! is derived from immutable Hermes session and message evidence.
 
-use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 use crate::runtime::source::STRICT_JSONL_BATCH_BYTES;
+use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 
 mod coverage;
 mod ingest;

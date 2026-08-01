@@ -12,7 +12,6 @@ use crate::admission::HostAdmission;
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
@@ -20,6 +19,7 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
+use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 
 #[derive(Clone, Copy)]
 pub(super) enum PersistedCursorUpdate {

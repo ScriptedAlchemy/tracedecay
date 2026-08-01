@@ -2,11 +2,11 @@ use std::fs;
 
 use serde_json::json;
 
+use crate::runtime::lcm::schema;
+use crate::runtime::lcm::util::{self, file_mtime_seconds};
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, Rows, TestConnection, TransactionBehavior,
 };
-use crate::runtime::lcm::schema;
-use crate::runtime::lcm::util::{self, file_mtime_seconds};
 
 use super::pending_delete::{PENDING_PAYLOAD_DELETE_ERROR_PREFIX, pending_payload_delete_key};
 use super::*;
@@ -18,7 +18,11 @@ const SECONDARY_REF: &str =
     "payload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.payload";
 
 impl QueryExecutor for TestConnection {
-    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -27,7 +31,11 @@ impl QueryExecutor for TestConnection {
 }
 
 impl Executor for TestConnection {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {

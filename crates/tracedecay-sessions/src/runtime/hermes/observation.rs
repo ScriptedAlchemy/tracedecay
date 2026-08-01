@@ -14,11 +14,11 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::observation::{CaptureObservationRequest, ObservationCancellation};
+use crate::runtime::shared::path_belongs_to_project;
 use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };
-use crate::runtime::shared::path_belongs_to_project;
 
 use super::ingest::HermesProfileSource;
 use super::rows::{HermesRow, hermes_native_payload_bytes};

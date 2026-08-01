@@ -22,7 +22,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::Serialize;
-use tracedecay_domain::{ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1};
+use tracedecay_domain::{
+    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+};
 use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 

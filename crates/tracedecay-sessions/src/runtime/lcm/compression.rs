@@ -3,9 +3,9 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::compatibility::projected_content_hash;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::message_storage_text;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::compression_decision::{
     self, AssemblyCapInput, CompressionPlanInput, CondensationCandidateDecision,
