@@ -640,25 +640,92 @@ fn reserved_flag_equals_value_form_accepted() {
 }
 
 #[test]
-fn bare_boolean_flag_error_states_the_fix() {
-    let d = def("context");
-    let err = parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("--include-code true") && msg.contains("--include-code false"),
-        "got: {msg}"
+fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
+    // Regression for the live-verified defect: `tracedecay tool fact_feedback
+    // --fact-id <id> --helpful --note <text>` used to fail with "expected a
+    // boolean, got --note" because the bare `--helpful` consumed `--note` as
+    // its own value. It must now bind `helpful=true` and let `--note` parse
+    // normally.
+    let d = def("fact_feedback");
+    let parsed = parse_invocation(
+        &d,
+        &[
+            "--fact-id".to_string(),
+            "5".to_string(),
+            "--helpful".to_string(),
+            "--note".to_string(),
+            "great context".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.tool_args,
+        json!({ "fact_id": "5", "helpful": true, "note": "great context" })
     );
 }
 
 #[test]
-fn boolean_swallowing_flag_error_states_the_fix() {
+fn bare_boolean_flag_at_end_of_args_defaults_to_true() {
+    let d = def("context");
+    let parsed =
+        parse_invocation(&d, &["how".to_string(), "--include-code".to_string()]).unwrap();
+    assert_eq!(
+        parsed.tool_args,
+        json!({ "task": "how", "include_code": true })
+    );
+}
+
+#[test]
+fn bare_boolean_flag_before_next_flag_does_not_swallow_it() {
+    // A bare `--include-code` immediately followed by another flag must not
+    // consume that flag as its own value (previously this produced a
+    // confusing "expected a boolean ... got --json" error and silently
+    // dropped `--json` from parsing). It now defaults to `true` and leaves
+    // `--json` to be parsed on its own.
+    let d = def("context");
+    let parsed = parse_invocation(
+        &d,
+        &[
+            "how".to_string(),
+            "--include-code".to_string(),
+            "--json".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(parsed.raw_json);
+    assert_eq!(
+        parsed.tool_args,
+        json!({ "task": "how", "include_code": true })
+    );
+}
+
+#[test]
+fn boolean_flag_with_explicit_value_after_it_is_still_consumed() {
+    let d = def("context");
+    let parsed = parse_invocation(
+        &d,
+        &[
+            "how".to_string(),
+            "--include-code".to_string(),
+            "false".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.tool_args,
+        json!({ "task": "how", "include_code": false })
+    );
+}
+
+#[test]
+fn boolean_flag_with_invalid_explicit_value_still_errors() {
     let d = def("context");
     let err = parse_invocation(
         &d,
         &[
             "how".to_string(),
             "--include-code".to_string(),
-            "--json".to_string(),
+            "maybe".to_string(),
         ],
     )
     .unwrap_err();
