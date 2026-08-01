@@ -34,7 +34,7 @@ const WORKTREE_ADMISSION_ID_NAMESPACE: &[u8] = b"tracedecay.repository-provenanc
 /// The project identity comes from the sanitized observation scope, never
 /// from this path-bearing context or mutable Git metadata.
 #[derive(Clone)]
-pub(crate) struct RepositoryProvenanceAdmissionContext {
+pub struct RepositoryProvenanceAdmissionContext {
     project_root: PathBuf,
     project_id: ProjectId,
     repository_id: RepositoryId,
@@ -46,7 +46,7 @@ pub(crate) struct RepositoryProvenanceAdmissionContext {
 
 impl RepositoryProvenanceAdmissionContext {
     #[cfg(test)]
-    pub(crate) fn new(
+    pub fn new(
         project_root: PathBuf,
         project_id: ProjectId,
         repository_id: RepositoryId,
@@ -66,7 +66,7 @@ impl RepositoryProvenanceAdmissionContext {
 
     /// Construct only from the daemon-authoritative project marker and typed
     /// project identity. The marker is an identity authority, never evidence.
-    pub(crate) fn from_authoritative_project_marker(
+    pub fn from_authoritative_project_marker(
         project_root: &Path,
         project_id: &ProjectId,
         marker: &tracedecay_runtime_core::storage::RepositoryIdentityMarker,
@@ -123,7 +123,7 @@ impl RepositoryProvenanceAdmissionContext {
         })
     }
 
-    pub(crate) fn matches_admitted_identity(
+    pub fn matches_admitted_identity(
         &self,
         project_id: &ProjectId,
         repository_id: &RepositoryId,
@@ -134,7 +134,7 @@ impl RepositoryProvenanceAdmissionContext {
             && self.worktree_id.as_ref() == Some(worktree_id)
     }
 
-    pub(crate) fn admitted_identity(&self) -> Option<(ProjectId, RepositoryId, WorktreeId)> {
+    pub fn admitted_identity(&self) -> Option<(ProjectId, RepositoryId, WorktreeId)> {
         Some((
             self.project_id.clone(),
             self.repository_id.clone(),
@@ -143,7 +143,7 @@ impl RepositoryProvenanceAdmissionContext {
     }
 
     /// Capture only after the observation has crossed the privacy boundary.
-    pub(crate) fn capture_after_sanitization(
+    pub fn capture_after_sanitization(
         &self,
         observation: &DurableObservationV1,
         projection_generation: &ProjectionGenerationId,
@@ -197,32 +197,32 @@ impl<'a> ObservationProjectId<'a> {
 
 /// Atomic-writer attachment prepared at the post-sanitization boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PreparedRepositoryProvenanceV1 {
+pub struct PreparedRepositoryProvenanceV1 {
     availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
     anchor: Option<RetrievalAnchorRecordV2>,
 }
 
 impl PreparedRepositoryProvenanceV1 {
-    pub(crate) const fn unavailable() -> Self {
+    pub const fn unavailable() -> Self {
         Self {
             availability: EvidenceAvailabilityV1::Unavailable,
             anchor: None,
         }
     }
 
-    pub(crate) fn availability(
+    pub fn availability(
         &self,
     ) -> &EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> {
         &self.availability
     }
 
-    pub(crate) fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+    pub fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
         self.anchor.as_ref()
     }
 }
 
 /// Authoritative identities and privacy material supplied by the admission boundary.
-pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
+pub struct RepositoryProvenanceProbeRequest<'a> {
     project_root: &'a Path,
     repository_id: &'a RepositoryId,
     project_id: Option<&'a ProjectId>,
@@ -233,7 +233,7 @@ pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
 }
 
 impl<'a> RepositoryProvenanceProbeRequest<'a> {
-    pub(crate) fn new(
+    pub fn new(
         project_root: &'a Path,
         repository_id: &'a RepositoryId,
         project_id: Option<&'a ProjectId>,
@@ -262,10 +262,10 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
 
 /// Fixed native-Git provenance probe. It never writes the index or object store.
 #[derive(Default)]
-pub(crate) struct NativeRepositoryProvenanceProbe;
+pub struct NativeRepositoryProvenanceProbe;
 
 impl NativeRepositoryProvenanceProbe {
-    pub(crate) fn capture(
+    pub fn capture(
         &self,
         request: &RepositoryProvenanceProbeRequest<'_>,
     ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
@@ -355,7 +355,7 @@ impl NativeRepositoryProvenanceProbe {
     }
 }
 
-pub(crate) fn capture_repository_provenance(
+pub fn capture_repository_provenance(
     request: &RepositoryProvenanceProbeRequest<'_>,
 ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
     NativeRepositoryProvenanceProbe.capture(request)

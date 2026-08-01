@@ -100,6 +100,44 @@ pub mod lcm_redaction {
     }
 }
 
+/// Builds an *unregistered* admission facade — one with no durable authority
+/// behind it, which fails closed on every capture.
+///
+/// Standalone callers (a CLI invocation with no daemon-owned registry mount)
+/// still need an admission handle to walk a transcript and count what it
+/// *would* admit. Only the composition root can build one, so it installs the
+/// factory here.
+pub mod unregistered_admission {
+    use super::OnceLock;
+    use crate::admission::HostAdmission;
+    use tracedecay_domain::ProjectId;
+
+    /// Scope an unregistered facade is nominally bound to.
+    #[derive(Clone, Debug)]
+    pub enum Scope {
+        /// Bound to one project identity, without a registered database.
+        Project(ProjectId),
+        /// Bound to the profile, without a registered database.
+        Profile,
+    }
+
+    /// Factory installed by the composition root.
+    pub type Factory = fn(Scope) -> Box<dyn HostAdmission>;
+
+    static FACTORY: OnceLock<Factory> = OnceLock::new();
+
+    /// Installs the unregistered-facade factory. First call wins.
+    pub fn register(factory: Factory) {
+        let _ = FACTORY.set(factory);
+    }
+
+    /// Builds an unregistered facade, or `None` when unwired.
+    #[must_use]
+    pub fn create(scope: Scope) -> Option<Box<dyn HostAdmission>> {
+        FACTORY.get().map(|factory| factory(scope))
+    }
+}
+
 /// VS Code user-data root for `home`.
 ///
 /// Cline, Roo Code, and the other VS Code-hosted providers store transcripts
