@@ -219,7 +219,7 @@ fn bounded_reason_code(value: &str) -> String {
 }
 
 impl HostAdmissionStatus {
-    pub(crate) const fn is_replay_progress(self) -> bool {
+    pub const fn is_replay_progress(self) -> bool {
         matches!(
             self,
             Self::Committed | Self::ExactDuplicate | Self::AcceptedForReplay

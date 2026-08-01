@@ -5,15 +5,15 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct DaemonConfigurationGrantAuthority {
     actor: ActorId,
-    policy_epoch: u64,
-    policy_digest: AccessPolicyDigest,
-    expires_at: UtcMicros,
+    pub(super) policy_epoch: u64,
+    pub(super) policy_digest: AccessPolicyDigest,
+    pub(super) expires_at: UtcMicros,
     direct_layers: Arc<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>>,
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
 
 impl DaemonConfigurationGrantAuthority {
-    fn issue_direct(
+    pub(super) fn issue_direct(
         &self,
         request_id: &str,
         mutation: &DirectConfigurationMutation,
@@ -65,7 +65,7 @@ impl DaemonConfigurationGrantAuthority {
         }
     }
 
-    fn issue(
+    pub(super) fn issue(
         &self,
         request_id: &str,
         operation: ConfigurationMutationOperationV1,
