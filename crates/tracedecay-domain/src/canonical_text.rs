@@ -265,6 +265,49 @@ mod tests {
         }
     }
 
+    /// The shared encoder is the exact loop the per-module copies spelled out,
+    /// over every byte value and over a full-width digest. The four call sites
+    /// this replaced fed it unchanged digest material, so byte-identical
+    /// encoding here is byte-identical derived identities there.
+    #[test]
+    fn encoder_matches_the_inlined_loop() {
+        fn inlined(tag: &str, bytes: &[u8]) -> String {
+            use std::fmt::Write as _;
+
+            let mut encoded = String::with_capacity(tag.len() + bytes.len() * 2);
+            encoded.push_str(tag);
+            for byte in bytes {
+                write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            encoded
+        }
+
+        let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+        for bytes in [&[][..], &[0][..], &[0xff][..], &every_byte[..]] {
+            for tag in ["", "sha256:", "blake3:"] {
+                assert_eq!(
+                    encode_tagged_lowercase_hex(tag, bytes),
+                    inlined(tag, bytes),
+                    "encoder diverged for tag {tag:?}"
+                );
+            }
+            assert_eq!(encode_lowercase_hex(bytes), inlined("", bytes));
+        }
+    }
+
+    /// Encoding and the acceptance predicate are inverses: every digest the
+    /// encoder produces is one the validators accept.
+    #[test]
+    fn encoded_digests_satisfy_the_predicate() {
+        let digest = [0xabu8; 32];
+        assert!(is_lowercase_hex(&encode_lowercase_hex(&digest), 64));
+        assert!(is_tagged_lowercase_hex(
+            &encode_tagged_lowercase_hex("sha256:", &digest),
+            "sha256:",
+            64
+        ));
+    }
+
     #[test]
     fn tagged_hex_requires_the_exact_tag() {
         let digest = format!("sha256:{}", "a".repeat(64));
