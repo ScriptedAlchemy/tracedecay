@@ -1,11 +1,12 @@
-use super::{
-    daemon_tool_json, hook_route_metadata_from_event, lock_test_env,
-    parse_daemon_tool_json_content, spawn_reaped_hook_child,
-};
+#[cfg(target_os = "linux")]
+use super::spawn_reaped_hook_child;
+#[cfg(unix)]
+use super::{daemon_tool_json, run_with_test_env_lock};
+use super::{hook_route_metadata_from_event, parse_daemon_tool_json_content};
 
 #[cfg(unix)]
-#[tokio::test]
-async fn daemon_tool_json_returns_project_warming_without_retrying() {
+#[test]
+fn daemon_tool_json_returns_project_warming_without_retrying() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     struct SocketEnvGuard(Option<std::ffi::OsString>);
@@ -21,63 +22,65 @@ async fn daemon_tool_json_returns_project_warming_without_retrying() {
         }
     }
 
-    let _env_lock = lock_test_env();
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let socket = dir.path().join("daemon.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
-    let previous = std::env::var_os(crate::daemon::SOCKET_ENV);
-    unsafe {
-        std::env::set_var(crate::daemon::SOCKET_ENV, &socket);
-    }
-    let _socket_env = SocketEnvGuard(previous);
+    run_with_test_env_lock(async {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+        let previous = std::env::var_os(crate::daemon::SOCKET_ENV);
+        unsafe {
+            std::env::set_var(crate::daemon::SOCKET_ENV, &socket);
+        }
+        let _socket_env = SocketEnvGuard(previous);
 
-    let daemon = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept hook client");
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read handshake")
-            .expect("handshake line");
-        let request_line = lines
-            .next_line()
-            .await
-            .expect("read request")
-            .expect("request line");
-        let request: serde_json::Value = serde_json::from_str(&request_line).expect("request JSON");
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "error": {
-                "code": -32603,
-                "message": "config error: project is warming in the background; retry the same tool shortly"
-            }
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept hook client");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            lines
+                .next_line()
+                .await
+                .expect("read handshake")
+                .expect("handshake line");
+            let request_line = lines
+                .next_line()
+                .await
+                .expect("read request")
+                .expect("request line");
+            let request: serde_json::Value =
+                serde_json::from_str(&request_line).expect("request JSON");
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "error": {
+                    "code": -32603,
+                    "message": "config error: project is warming in the background; retry the same tool shortly"
+                }
+            });
+            writer
+                .write_all(
+                    serde_json::to_string(&response)
+                        .expect("response JSON")
+                        .as_bytes(),
+                )
+                .await
+                .expect("write response");
+            writer.write_all(b"\n").await.expect("write newline");
+            writer.shutdown().await.expect("shutdown fake daemon");
         });
-        writer
-            .write_all(
-                serde_json::to_string(&response)
-                    .expect("response JSON")
-                    .as_bytes(),
-            )
-            .await
-            .expect("write response");
-        writer.write_all(b"\n").await.expect("write newline");
-        writer.shutdown().await.expect("shutdown fake daemon");
-    });
 
-    let error = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        daemon_tool_json(None, "tracedecay_fact_store", serde_json::json!({})),
-    )
-    .await
-    .expect("hook daemon call retried project warming")
-    .expect_err("warming should remain a typed hook failure");
-    assert!(
-        error.to_string().contains("warming in the background"),
-        "{error}"
-    );
-    daemon.await.expect("fake daemon task");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            daemon_tool_json(None, "tracedecay_fact_store", serde_json::json!({})),
+        )
+        .await
+        .expect("hook daemon call retried project warming")
+        .expect_err("warming should remain a typed hook failure");
+        assert!(
+            error.to_string().contains("warming in the background"),
+            "{error}"
+        );
+        daemon.await.expect("fake daemon task");
+    });
 }
 
 #[test]
