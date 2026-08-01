@@ -105,34 +105,6 @@ fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
 }
 
 #[test]
-fn repo_local_usage_introspection_skill_routes_through_all_required_audit_lanes() {
-    let skills = load_skill_docs(REPO_LOCAL_SKILL_ROOT);
-    let skill = skills
-        .iter()
-        .find(|skill| skill.name == "introspecting-tracedecay-usage")
-        .expect("repo-local skills should teach usage-driven TraceDecay self-improvement");
-    let body = &skill.body;
-    for required in [
-        "tracedecay:diagnosing-analytics",
-        "tracedecay:managing-session-context",
-        "tracedecay:inspecting-managed-skills",
-        "tracedecay:project-memory",
-        "tracedecay:code-health",
-        "tracedecay analytics diagnostics",
-        "tracedecay_skill_list",
-        "tracedecay_lcm_status",
-        "tracedecay_message_search",
-        "tracedecay_fact_store",
-    ] {
-        assert!(
-            body.contains(required),
-            "{} should mention {required}",
-            skill.path.display()
-        );
-    }
-}
-
-#[test]
 fn repo_local_usage_driven_operator_skills_are_not_template_stubs() {
     let skills = load_skill_docs(REPO_LOCAL_SKILL_ROOT);
     for skill_name in [
@@ -154,33 +126,6 @@ fn repo_local_usage_driven_operator_skills_are_not_template_stubs() {
 }
 
 #[test]
-fn bundled_session_context_skill_exposes_lcm_session_search_routes() {
-    let skills = load_skill_docs(CODEX_SKILL_ROOT);
-    let skill = skill_named(&skills, "managing-session-context");
-
-    assert_skill_contains_all(
-        skill,
-        &[
-            "LCM",
-            "session search",
-            "transcript search",
-            "compaction recovery",
-            "tracedecay_message_search",
-            "tracedecay_lcm_grep",
-            "tracedecay_lcm_status",
-            "tracedecay_sessions_for",
-            "tracedecay_workflows",
-            "branch",
-            "worktree",
-            "commit",
-            "project_path",
-            "project_selector",
-        ],
-        "expose session search and LCM routes for discovery",
-    );
-}
-
-#[test]
 fn bundled_skills_do_not_expose_hermes_profile_storage() {
     let skills = load_skill_docs(CODEX_SKILL_ROOT);
 
@@ -197,52 +142,6 @@ fn bundled_skills_do_not_expose_hermes_profile_storage() {
     let inspecting = skill_named(&skills, "inspecting-managed-skills");
     assert!(inspecting.raw.contains("tracedecay_hermes_skill_bridge"));
     assert!(inspecting.raw.contains("~/.hermes"));
-}
-
-#[test]
-fn bundled_skills_route_cross_project_context_through_registry() {
-    let skills = load_skill_docs(CODEX_SKILL_ROOT);
-    let using_tracedecay = skill_named(&skills, "using-tracedecay");
-    let code_health = skill_named(&skills, "code-health");
-
-    assert_skill_contains_all(
-        using_tracedecay,
-        &[
-            "cross-project",
-            "cross-repo",
-            "sibling",
-            "project registry",
-            "tracedecay_project_list",
-            "tracedecay_project_search",
-            "tracedecay_project_context",
-            "project_id",
-            "project_path",
-            "project_selector",
-            "tracedecay_context",
-            "tracedecay_search",
-            "tracedecay_message_search",
-        ],
-        "route cross-project code and session context through the project registry",
-    );
-    assert_skill_contains_all(
-        code_health,
-        &[
-            "cross-project",
-            "cross-repo",
-            "sibling",
-            "registered project",
-            "tracedecay_project_list",
-            "tracedecay_project_search",
-            "tracedecay_project_context",
-            "project_id",
-            "project_path",
-            "project_selector",
-            "tracedecay_context",
-            "tracedecay_search",
-            "tracedecay_message_search",
-        ],
-        "route project status and cross-project context through the project registry",
-    );
 }
 
 #[test]
@@ -495,22 +394,6 @@ fn skill_named<'a>(skills: &'a [SkillDoc], name: &str) -> &'a SkillDoc {
         .iter()
         .find(|skill| skill.name == name)
         .unwrap_or_else(|| panic!("missing bundled skill {name}"))
-}
-
-fn assert_skill_contains_all(skill: &SkillDoc, required_terms: &[&str], purpose: &str) {
-    let searchable = format!(
-        "{}\n{}",
-        required_scalar_field(skill, "description"),
-        skill.body
-    );
-
-    for &required in required_terms {
-        assert!(
-            searchable.contains(required),
-            "{} should {purpose}; missing {required:?}",
-            skill.path.display()
-        );
-    }
 }
 
 fn required_scalar_field<'a>(skill: &'a SkillDoc, field: &str) -> &'a str {

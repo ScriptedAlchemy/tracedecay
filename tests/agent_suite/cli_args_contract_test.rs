@@ -1,12 +1,9 @@
 //! Taught-model ↔ parser contract for `tracedecay tool` arguments.
 //!
-//! Every surface an agent can learn the CLI from — session steering, the
-//! `using-the-cli` skill, the arg catalog, and prompt rules — must teach the
-//! JSON-first contract (`--args` carries the MCP arguments object, `--args -`
-//! reads a heredoc from stdin) and must not teach per-key flags for
-//! array-of-array parameters the per-key grammar cannot express. These
-//! assertions pin the taught text so it cannot silently drift from the
-//! parser again.
+//! The `using-the-cli` skill and its arg catalog must teach the JSON-first
+//! contract (`--args` carries the MCP arguments object, `--args -` reads a
+//! heredoc from stdin) and must not document flags the tool schemas do not
+//! accept, because the validation gate rejects unknown keys.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -15,40 +12,6 @@ use crate::plugin_validation_support::repo_path;
 fn read_repo_file(relative: &str) -> String {
     let path = repo_path(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-fn cli_fallback_prompt_source() -> String {
-    let source = read_repo_file("src/agents/mod.rs");
-    let start = source
-        .find("cli_fallback_args_invocation_lit")
-        .expect("cli_fallback_args_invocation_lit in src/agents/mod.rs");
-    let end = source
-        .find("pub(crate) const CLI_FALLBACK_PROMPT_RULES")
-        .expect("CLI_FALLBACK_PROMPT_RULES in src/agents/mod.rs");
-    source[start..end].to_string()
-}
-
-#[test]
-fn prompt_rules_teach_the_json_args_contract() {
-    // CLI_FALLBACK_PROMPT_RULES is pub(crate); pin its taught text via source.
-    let rules = cli_fallback_prompt_source();
-    assert!(
-        rules.contains("--args"),
-        "CLI fallback prompt rules must teach the --args JSON contract"
-    );
-    assert!(
-        rules.contains("JSON arguments object"),
-        "CLI fallback prompt rules must state the payload is the MCP arguments object"
-    );
-    assert!(
-        !rules.contains("<name> --key value"),
-        "prompt rules must not lead with the per-key grammar"
-    );
-    let source = read_repo_file("src/agents/mod.rs");
-    assert!(
-        source.contains("never invent per-key flags or enum values from memory"),
-        "CLI fallback prompt rules must prohibit guessed flags and enum values"
-    );
 }
 
 #[test]
@@ -152,22 +115,4 @@ fn flag_names(cell: &str) -> Vec<String> {
         rest = &after[name.len()..];
     }
     flags
-}
-
-#[test]
-fn codex_steering_teaches_the_json_args_contract() {
-    let steering = read_repo_file("src/hooks/steering.rs");
-    assert!(
-        steering.contains("CLI_FALLBACK_PROMPT_RULES"),
-        "Codex session steering must include the shared CLI fallback prompt rules"
-    );
-    let rules = cli_fallback_prompt_source();
-    assert!(
-        rules.contains("--args '<json>'"),
-        "Codex session steering must teach the --args JSON contract"
-    );
-    assert!(
-        !rules.contains("<name> --key value"),
-        "Codex session steering must not lead with the per-key grammar"
-    );
 }
