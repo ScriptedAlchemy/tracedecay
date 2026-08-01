@@ -216,6 +216,39 @@ async fn run_startup_session_catch_up_with_home(
     }
 }
 
+async fn run_startup_session_post_ingest(
+    db: Arc<RegisteredGlobalDb>,
+    analytics_db: Option<Arc<RegisteredGlobalDb>>,
+    project_root: PathBuf,
+    cancellation: crate::application::observation::ObservationCancellation,
+) -> bool {
+    let git = crate::sessions::git_correlation::SystemGit;
+    let _ = crate::store::GlobalDbGitCorrelationStore::new(db.as_ref())
+        .run_incremental_backfill(
+            &git,
+            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+        )
+        .await;
+    if cancellation.is_cancelled() {
+        return false;
+    }
+    if let Some(analytics_db) = analytics_db {
+        let sources = crate::analytics_bridge::hook_import_sources(Some(&project_root));
+        let _ =
+            crate::analytics_bridge::import_hook_analytics(analytics_db.as_ref(), &sources).await;
+        let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
+        let now = crate::tracedecay::current_timestamp();
+        let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
+            analytics_db.as_ref(),
+            db.as_ref(),
+            project_id.as_str(),
+            now,
+        )
+        .await;
+    }
+    true
+}
+
 /// Shared compare-and-swap cooldown gate for the lazy staleness check,
 /// background read refresh, and automation-notice check below. Each
 /// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
@@ -461,17 +494,6 @@ impl McpServer {
                     // `sessions_for` silently returns nothing. Drain that
                     // history here — one bounded, watermarked pass per startup
                     // — so correlation self-heals without a manual invocation.
-                    let git = crate::sessions::git_correlation::SystemGit;
-                    let _ = crate::store::GlobalDbGitCorrelationStore::new(&db)
-                        .run_incremental_backfill(
-                            &git,
-                            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
-                        )
-                        .await;
-                    if cancellation.is_cancelled() {
-                        ingest_done_flag.store(true, Ordering::Release);
-                        return;
-                    }
                     // With transcripts freshly ingested into `db`'s
                     // session_messages, close the hint-efficacy loop: import
                     // any new hook telemetry into the durable analytics store
@@ -479,21 +501,16 @@ impl McpServer {
                     // that followed them. Best-effort and idempotent (own
                     // parse cursors + hint_outcome watermark), so it never
                     // blocks readiness and re-runs safely each startup.
-                    if let Some(analytics_db) = analytics_db.as_deref() {
-                        let sources =
-                            crate::analytics_bridge::hook_import_sources(Some(&project_root));
-                        let _ =
-                            crate::analytics_bridge::import_hook_analytics(analytics_db, &sources)
-                                .await;
-                        let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
-                        let now = crate::tracedecay::current_timestamp();
-                        let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
-                            analytics_db,
-                            db.as_ref(),
-                            &project_id,
-                            now,
-                        )
-                        .await;
+                    if !run_startup_session_post_ingest(
+                        db,
+                        analytics_db,
+                        project_root,
+                        cancellation.clone(),
+                    )
+                    .await
+                    {
+                        ingest_done_flag.store(true, Ordering::Release);
+                        return;
                     }
                 }
                 // Wake on the observed sweep, not on the authorities being
