@@ -16,8 +16,8 @@ use super::{
 pub(super) fn open_lock_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     {
-        return crate::windows_security::open_or_create_private_file(path)
-            .map_err(|error| access_io_error("open lock", path, &error));
+        crate::windows_security::open_or_create_private_file(path)
+            .map_err(|error| access_io_error("open lock", path, &error))
     }
 
     #[cfg(not(windows))]
