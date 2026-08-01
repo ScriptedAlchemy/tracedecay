@@ -1,7 +1,7 @@
 //! Root adapter for workflow-index storage.
 
 use std::borrow::Borrow;
-
+#[cfg(test)]
 use std::path::Path;
 
 use tracedecay_domain::ProjectId;
@@ -14,6 +14,7 @@ use crate::sessions::workflow_index::{
     WorkflowIngestSink, WorkflowIngestWriteTxn, WorkflowRun, read_ingest_watermark, upsert_agent,
     upsert_run,
 };
+#[cfg(test)]
 use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs_with_sink};
 use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
 
@@ -113,25 +114,10 @@ where
         Ok(RegisteredWorkflowIndexSnapshot::from_snapshot(snapshot))
     }
 
-    pub(crate) async fn ingest_workflow_runs(
-        &self,
-        project_id: &ProjectId,
-        project_root: &Path,
-    ) -> WorkflowIngestStats {
-        let Some(home) = crate::sessions::home_dir() else {
-            return WorkflowIngestStats::default();
-        };
-        self.ingest_workflow_runs_from(
-            project_id,
-            project_root,
-            &home.join(".claude").join("projects"),
-        )
-        .await
-    }
-
     /// Ingest sweep against an explicit Claude `projects` directory, so callers
     /// that already resolved (or must isolate) that root do not re-derive it
     /// from the operator's real home.
+    #[cfg(test)]
     pub(crate) async fn ingest_workflow_runs_from(
         &self,
         project_id: &ProjectId,
