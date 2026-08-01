@@ -1119,8 +1119,6 @@ impl SemanticNativeResourceEvidenceV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::load_candidate_workload;
     use tracedecay_domain::canonical_sha256;

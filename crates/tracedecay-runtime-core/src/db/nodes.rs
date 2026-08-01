@@ -391,7 +391,7 @@ impl Database {
         // path often enough that the per-id `format!` allocations showed up
         // on profiles.
         let placeholders = build_qmark_placeholders(ids.len());
-        let sql = format!("SELECT {NODE_SELECT_COLUMNS} FROM nodes WHERE id IN ({placeholders})",);
+        let sql = format!("SELECT {NODE_SELECT_COLUMNS} FROM nodes WHERE id IN ({placeholders})");
         let param_values: Vec<Value> = ids.iter().map(|id| Value::Text(id.clone())).collect();
         let mut rows = self
             .engine_conn()
