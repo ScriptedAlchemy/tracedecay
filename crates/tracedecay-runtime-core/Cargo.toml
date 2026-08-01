@@ -13,7 +13,6 @@ default = []
 test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 
 [dependencies]
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
