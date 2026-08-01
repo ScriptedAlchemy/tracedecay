@@ -24,6 +24,12 @@ pub fn profile_id(value: &str) -> ProfileId {
     ProfileId::new(value).unwrap()
 }
 
+/// A ceiling generous enough that tests which are not exercising the budget
+/// never trip it.
+pub fn ample_budget() -> ProfileBudget {
+    ProfileBudget::new(64, 12_000).unwrap()
+}
+
 pub fn schema(name: &str) -> SchemaRef {
     SchemaRef::new(SchemaId::new(name).unwrap(), 1).unwrap()
 }

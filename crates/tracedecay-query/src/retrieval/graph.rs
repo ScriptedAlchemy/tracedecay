@@ -11,7 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
     RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
@@ -20,13 +19,22 @@ use tracedecay_domain::{
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, RetrievalPortError,
-    contract_error,
+    CodeCandidateBindingV1, CompactCandidateLane, GraphEvidenceReadPort, LaneBoundEvidence,
+    LaneEvidenceRejections, RetrievalPortError, checkpoint_digest, contract_error,
+    lane_bound_evidence, lane_candidate_cap,
 };
 
 mod projection;
 
 pub use self::projection::{CodeGraphEvidenceAdapterV1, production_code_index_freshness};
+
+/// Wording the graph lane uses when a port-emitted batch fails the shared
+/// candidate/evidence binding checks.
+const GRAPH_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
+    foreign_candidate: "the graph lane cannot emit candidates from another lane",
+    missing_evidence: "graph lane evidence is missing for a returned occurrence",
+    unaddressed_binding: "graph lane binding does not address its candidate",
+};
 
 /// Typed graph-lane request for bounded traversal from generation-matched
 /// anchors.
@@ -118,6 +126,12 @@ pub struct GraphLaneEvidence {
     pub binding: CodeCandidateBindingV1,
     pub path: Vec<GraphPathSegmentV1>,
     pub weakest_authority: EdgeAuthorityV1,
+}
+
+impl LaneBoundEvidence for GraphLaneEvidence {
+    fn binding(&self) -> &CodeCandidateBindingV1 {
+        &self.binding
+    }
 }
 
 impl GraphLaneEvidence {
@@ -246,27 +260,9 @@ where
         let mut admitted: Vec<(CompactCandidate, GraphLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
         for candidate in &batch.candidates {
-            if candidate.retriever != RetrieverKind::Graph {
-                return Err(RetrievalPortError::Contract(
-                    "the graph lane cannot emit candidates from another lane".to_owned(),
-                ));
-            }
-            let evidence = batch
-                .evidence_by_occurrence
-                .get(&candidate.source_occurrence_id)
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(
-                        "graph lane evidence is missing for a returned occurrence".to_owned(),
-                    )
-                })?;
+            let evidence =
+                lane_bound_evidence(batch, candidate, RetrieverKind::Graph, &GRAPH_REJECTIONS)?;
             evidence.validate_against_validated_request(request)?;
-            if evidence.binding.candidate_anchor != candidate.anchor_id
-                || evidence.binding.source_occurrence != candidate.source_occurrence_id
-            {
-                return Err(RetrievalPortError::Contract(
-                    "graph lane binding does not address its candidate".to_owned(),
-                ));
-            }
             admitted.push((candidate.clone(), evidence.clone()));
         }
         admitted.sort_by(|left, right| {
@@ -285,10 +281,7 @@ where
                         .cmp(&right.0.retriever_evidence_anchor)
                 })
         });
-        let cap = request
-            .budget
-            .max_candidates_per_lane
-            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let truncated = admitted.len().saturating_sub(cap);
         admitted.truncate(cap);
         let mut candidates = Vec::with_capacity(admitted.len());
@@ -418,15 +411,12 @@ fn graph_checkpoint_digest(
             evidence.weakest_authority,
         ));
     }
-    let bytes = serde_json::to_vec(&(
+    checkpoint_digest(&(
         "tracedecay.retrieval-lane-checkpoint.v1",
         RetrieverKind::Graph.as_str(),
         generation.as_str(),
         prefix,
     ))
-    .map_err(contract_error)?;
-    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(contract_error)
 }
 
 #[cfg(test)]
