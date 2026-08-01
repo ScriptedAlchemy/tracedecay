@@ -1491,6 +1491,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
         cli.run(&["install", "--agent", case.id]),
     );
     let before_receipt = latest_receipt(&cli, case.host);
+    #[cfg(unix)]
     let permission_path = cli.home.path().join(
         &before_receipt
             .component_receipts
