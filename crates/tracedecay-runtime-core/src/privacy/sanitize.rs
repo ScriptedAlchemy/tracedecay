@@ -631,7 +631,6 @@ pub enum ClaudeSanitizationOutcomeV1 {
     },
 }
 
-pub(crate) type RecordSanitizerPolicyV1 = ClaudeSanitizerPolicyV1;
 pub type RecordSanitizerV1 = ClaudeRecordSanitizerV1;
 pub type SanitizedObservationRecordV1 = SanitizedClaudeRecordV1;
 pub type ObservationSanitizationOutcomeV1 = ClaudeSanitizationOutcomeV1;

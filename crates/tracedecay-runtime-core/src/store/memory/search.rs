@@ -72,6 +72,34 @@ fn compatibility_search_scores(
     ))
 }
 
+/// Orders a page highest-score first, breaking ties on most-recently-updated
+/// and then ascending fact id, and drops everything at or before `after`.
+///
+/// The comparator and the cursor predicate are one unit and must stay that
+/// way: a cursor is only resumable against the exact order it was cut from, so
+/// every paged compatibility search shares this single definition.
+fn rank_and_seek(
+    ranked: &mut Vec<(CompatibilityFactSearchHitV1, UtcMicros)>,
+    after: Option<&CompatibilityFactSearchCursorV1>,
+) {
+    ranked.sort_by(|(left, left_updated), (right, right_updated)| {
+        right
+            .score_millionths()
+            .cmp(&left.score_millionths())
+            .then_with(|| right_updated.cmp(left_updated))
+            .then_with(|| left.fact().fact_id().cmp(right.fact().fact_id()))
+    });
+    if let Some(after) = after {
+        ranked.retain(|(hit, updated_at)| {
+            hit.score_millionths() < after.score_millionths()
+                || (hit.score_millionths() == after.score_millionths()
+                    && (*updated_at < after.updated_at()
+                        || (*updated_at == after.updated_at()
+                            && hit.fact().fact_id() > after.fact_id())))
+        });
+    }
+}
+
 async fn compatibility_available_facts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
@@ -336,22 +364,7 @@ async fn compatibility_rank_facts_tx(
             }
         }
     }
-    ranked.sort_by(|(left, left_updated), (right, right_updated)| {
-        right
-            .score_millionths()
-            .cmp(&left.score_millionths())
-            .then_with(|| right_updated.cmp(left_updated))
-            .then_with(|| left.fact().fact_id().cmp(right.fact().fact_id()))
-    });
-    if let Some(after) = query.after() {
-        ranked.retain(|(hit, updated_at)| {
-            hit.score_millionths() < after.score_millionths()
-                || (hit.score_millionths() == after.score_millionths()
-                    && (*updated_at < after.updated_at()
-                        || (*updated_at == after.updated_at()
-                            && hit.fact().fact_id() > after.fact_id())))
-        });
-    }
+    rank_and_seek(&mut ranked, query.after());
     let has_more = ranked.len() > query.limit();
     ranked.truncate(query.limit());
     let next_after = if has_more {
@@ -591,22 +604,7 @@ pub(super) async fn related_compatibility_facts_tx(
             updated_at,
         ));
     }
-    ranked.sort_by(|(left, left_updated), (right, right_updated)| {
-        right
-            .score_millionths()
-            .cmp(&left.score_millionths())
-            .then_with(|| right_updated.cmp(left_updated))
-            .then_with(|| left.fact().fact_id().cmp(right.fact().fact_id()))
-    });
-    if let Some(after) = query.after() {
-        ranked.retain(|(hit, updated_at)| {
-            hit.score_millionths() < after.score_millionths()
-                || (hit.score_millionths() == after.score_millionths()
-                    && (*updated_at < after.updated_at()
-                        || (*updated_at == after.updated_at()
-                            && hit.fact().fact_id() > after.fact_id())))
-        });
-    }
+    rank_and_seek(&mut ranked, query.after());
     ranked.truncate(query.limit());
     // V1 related-fact traversal is one bounded, name-ordered co-occurrence
     // expansion rather than a cursorable global search. Exposing a cursor

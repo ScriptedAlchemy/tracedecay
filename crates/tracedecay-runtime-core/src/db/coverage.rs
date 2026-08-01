@@ -309,7 +309,11 @@ impl Database {
     }
 }
 
-#[cfg(test)]
+// `graph::queries` sits above this kernel, so the one test that drives a real
+// graph query through the writer lane is gated off here and must be re-homed in
+// the crate that owns `GraphQueryManager`. The whole module — helper included —
+// travels with that gate so it stays warning-free until the move happens.
+#[cfg(all(test, tracedecay_graph_query_tests))]
 mod tests {
     use std::future::Future;
     use std::time::Duration;
@@ -317,10 +321,6 @@ mod tests {
     use super::super::access::DatabaseAuthority;
     use super::*;
     use crate::db::TestDatabaseRuntimeMode;
-    // `graph::queries` sits above this kernel, so the one test that drives a
-    // real graph query through the writer lane is gated off here and must be
-    // re-homed in the crate that owns `GraphQueryManager`.
-    #[cfg(tracedecay_graph_query_tests)]
     use crate::graph::queries::GraphQueryManager;
 
     async fn assert_waits_for_writer<Operation, OperationFuture>(
@@ -354,7 +354,6 @@ mod tests {
             .unwrap();
     }
 
-    #[cfg(tracedecay_graph_query_tests)]
     #[tokio::test]
     async fn temp_table_lifecycle_uses_the_database_writer() {
         let temp = tempfile::tempdir().unwrap();

@@ -12,18 +12,6 @@ use crate::tracedecay::current_timestamp;
 use super::{MemoryStore, db_error, db_message, relations_conflict, to_json_string};
 
 impl MemoryStore<'_> {
-    pub(crate) async fn normalize_fact_tags(
-        &self,
-        fact_id: i64,
-        tags: &[String],
-    ) -> Result<Vec<String>> {
-        let tags = tags.to_vec();
-        self.with_immediate_tx("normalize_fact_tags", move |store| {
-            Box::pin(async move { store.normalize_fact_tags_inner(fact_id, &tags).await })
-        })
-        .await
-    }
-
     async fn normalize_fact_tags_inner(
         &self,
         fact_id: i64,
@@ -56,18 +44,6 @@ impl MemoryStore<'_> {
             .map_err(|e| db_error("normalize_fact_tags", e))?;
         self.mark_fact_banks_dirty(fact.category).await?;
         Ok(normalized)
-    }
-
-    pub(crate) async fn update_entity_aliases(
-        &self,
-        entity_id: i64,
-        aliases: &[String],
-    ) -> Result<Vec<String>> {
-        let aliases = aliases.to_vec();
-        self.with_immediate_tx("update_entity_aliases", move |store| {
-            Box::pin(async move { store.update_entity_aliases_inner(entity_id, &aliases).await })
-        })
-        .await
     }
 
     async fn update_entity_aliases_inner(

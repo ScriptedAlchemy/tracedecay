@@ -15,6 +15,7 @@ use super::detector_kernel::{
     JsonVisitMut, NormalizedSensitiveKey, SensitiveKeyPolicy, compile_credential_patterns,
     high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
 };
+use super::length_prefixed_sha256_hex;
 
 const REDACTED_EXACT: &str = "[TraceDecay redacted: exact credential]";
 const REDACTED_BEARER: &str = "[TraceDecay redacted: bearer token]";
@@ -537,22 +538,17 @@ pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1
         .map_err(|_| DetectionError::Receipt)?;
     let raw_digest = Sha256::digest(raw);
     let payload_len = payload_reference.byte_len().to_be_bytes();
-    let mut hasher = Sha256::new();
-    for value in [
-        CODE_SOURCE_RECEIPT_DOMAIN_V1,
-        sanitizer_version.as_str().as_bytes(),
-        disposition.as_str().as_bytes(),
-        sensitivity.as_str().as_bytes(),
-        raw_digest.as_slice(),
-        payload_reference.digest().as_str().as_bytes(),
-        payload_len.as_slice(),
-    ] {
-        hasher.update((value.len() as u64).to_be_bytes());
-        hasher.update(value);
-    }
     let receipt_id = SanitizationReceiptId::new(format!(
         "privacy.code-source.v1.{}",
-        hex::encode(hasher.finalize())
+        length_prefixed_sha256_hex(&[
+            CODE_SOURCE_RECEIPT_DOMAIN_V1,
+            sanitizer_version.as_str().as_bytes(),
+            disposition.as_str().as_bytes(),
+            sensitivity.as_str().as_bytes(),
+            raw_digest.as_slice(),
+            payload_reference.digest().as_str().as_bytes(),
+            payload_len.as_slice(),
+        ])
     ))
     .map_err(|_| DetectionError::Receipt)?;
     let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
@@ -619,21 +615,16 @@ pub fn sanitize_memory_fact_payload(
         PayloadReferenceV1::for_payload(&detected.payload).map_err(|_| DetectionError::Receipt)?;
     let sanitizer_version = ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1)
         .map_err(|_| DetectionError::Receipt)?;
-    let mut hasher = Sha256::new();
-    for value in [
-        MEMORY_FACT_RECEIPT_DOMAIN_V1,
-        sanitizer_version.as_str().as_bytes(),
-        disposition.as_str().as_bytes(),
-        sensitivity.as_str().as_bytes(),
-        payload_reference.digest().as_str().as_bytes(),
-        &payload_reference.byte_len().to_be_bytes(),
-    ] {
-        hasher.update((value.len() as u64).to_be_bytes());
-        hasher.update(value);
-    }
     let receipt_id = SanitizationReceiptId::new(format!(
         "memory-fact-receipt.v1.{}",
-        hex::encode(hasher.finalize())
+        length_prefixed_sha256_hex(&[
+            MEMORY_FACT_RECEIPT_DOMAIN_V1,
+            sanitizer_version.as_str().as_bytes(),
+            disposition.as_str().as_bytes(),
+            sensitivity.as_str().as_bytes(),
+            payload_reference.digest().as_str().as_bytes(),
+            &payload_reference.byte_len().to_be_bytes(),
+        ])
     ))
     .map_err(|_| DetectionError::Receipt)?;
     let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
