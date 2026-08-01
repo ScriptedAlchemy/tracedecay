@@ -1,4 +1,5 @@
 use crate::support::*;
+use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 
 #[test]
 fn session_reflector_options_have_no_storage_selector() {

@@ -37,7 +37,6 @@ pub(crate) use tracedecay::automation::runner::{
 };
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
-pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};

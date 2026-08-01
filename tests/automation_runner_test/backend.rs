@@ -19,6 +19,7 @@ use tracedecay::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay::sessions::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
+use tracedecay_agent_hosts::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
 
 use crate::common::{
     EnvVarGuard, fake_codex_bin, install_fake_codex_launcher, windows_python_launcher,
@@ -331,7 +332,7 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
 #[test]
 fn codex_app_server_backend_run_task_uses_injected_config() {
     let fake = FakeCodexAppServer::new_with_behavior("json");
-    let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
@@ -375,7 +376,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
 #[test]
 fn codex_app_server_backend_uses_first_schema_matching_json_object() {
     let fake = FakeCodexAppServer::new_with_behavior("json_after_echo");
-    let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
@@ -409,7 +410,7 @@ fn codex_app_server_backend_rejects_nested_schema_matching_json_object() {
 #[test]
 fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_model() {
     let fake = FakeCodexAppServer::new_with_behavior("no_model");
-    let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
@@ -664,7 +665,7 @@ struct FakeCodexAppServer {
 
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
-    let backend = CodexAppServerBackend::from_config(CodexAppServerSummaryConfig {
+    let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
         model: Some("configured-model".to_string()),
         timeout,
