@@ -680,6 +680,68 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
 }
 
 #[test]
+fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
+    // Equivalence guard for finding 14: the per-phrase n-gram candidate set is
+    // now intersected once and reused for both the document-frequency tally and
+    // the lexical document set. Two documents contain the phrase and one does
+    // not; the reused candidate set must still return exactly the two
+    // phrase-bearing documents, deterministically.
+    let generation = id::<CodeGenerationId>("generation.1");
+    let chunks = vec![
+        admitted_rust_chunk(
+            &generation,
+            1,
+            "pub fn reserve() {\n    // reserve stock inventory ledger\n}\n",
+            CodeSearchChunkGrainV1::SymbolBody,
+            "reserve",
+        ),
+        admitted_rust_chunk(
+            &generation,
+            2,
+            "pub fn hold() {\n    // reserve stock inventory ledger\n}\n",
+            CodeSearchChunkGrainV1::SymbolBody,
+            "hold",
+        ),
+        admitted_rust_chunk(
+            &generation,
+            3,
+            "pub fn unrelated() {\n    // nothing relevant lives here\n}\n",
+            CodeSearchChunkGrainV1::SymbolBody,
+            "unrelated",
+        ),
+    ];
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        chunks,
+    )
+    .expect("projection builds");
+
+    let phrase_request = lexical_request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
+    let first = complete(
+        LexicalLane::new(projection.clone())
+            .retrieve_lexical(&phrase_request)
+            .expect("phrase retrieval succeeds"),
+    );
+    let second = complete(
+        LexicalLane::new(projection)
+            .retrieve_lexical(&phrase_request)
+            .expect("phrase retrieval replays"),
+    );
+
+    // Reusing the shared candidate set is deterministic and drift-free.
+    assert_eq!(first, second);
+    // Exactly the two phrase-bearing documents are returned; the unrelated
+    // document is excluded.
+    assert_eq!(first.candidates.len(), 2);
+    for candidate in &first.candidates {
+        assert_eq!(
+            first.evidence_by_occurrence[&candidate.source_occurrence_id].matched_phrases,
+            vec!["reserve stock".to_owned()]
+        );
+    }
+}
+
+#[test]
 fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
     let generation = id::<CodeGenerationId>("generation.1");
     let chunks = vec![

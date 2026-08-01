@@ -448,6 +448,62 @@ fn exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence() {
 }
 
 #[test]
+fn bounded_scan_retains_the_cap_smallest_rows_by_tie_break_order() {
+    // Equivalence guard for the bounded ExactFlat scan (finding 15). Every row
+    // shares an identical distance, so the retained set is decided purely by the
+    // secondary tie-break key (`source_occurrence_id`). Rows are emitted in
+    // reverse tie-break order to prove the max-heap evicts the worst retained
+    // row regardless of emission order, exactly as a full sort followed by
+    // truncation to the cap would.
+    let query_view = query_view();
+    let projection = projection();
+    let request = request(&query_view, &projection, 2);
+    let rows = vec![
+        record(&request, "c", vec![0.0, 1.0]),
+        record(&request, "b", vec![0.0, 1.0]),
+        record(&request, "a", vec![0.0, 1.0]),
+    ];
+    let embedder = FakeQueryEmbedder::default();
+    let vectors = FakeVectorReadPort::new(&request, rows);
+    let control = FixedExecutionControl::default();
+    let retriever = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+
+    let outcome = Retriever::<SemanticRetrievalRequestV1<'_>, CodeSemanticEvidenceV1>::retrieve(
+        &retriever, &request,
+    )
+    .expect("semantic retrieval succeeds");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("expected a complete semantic batch");
+    };
+
+    // The two smallest by tie-break (a, b) are kept in ascending order; c is
+    // dropped even though it was emitted first.
+    assert_eq!(
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.source_occurrence_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["occurrence.a", "occurrence.b"]
+    );
+    assert_eq!(
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.ordinal_rank)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    // All three rows were still visited and accounted for; only retention is
+    // bounded.
+    assert_eq!(batch.coverage.examined, 3);
+    assert_eq!(batch.coverage.eligible, 3);
+    assert_eq!(batch.coverage.capped, 1);
+    let continuation = batch.continuation.expect("bounded continuation");
+    assert!(!continuation.exhausted);
+}
+
+#[test]
 fn privacy_identity_mismatch_fails_before_embedding_or_vector_reads() {
     let query_view = query_view();
     let projection = projection();

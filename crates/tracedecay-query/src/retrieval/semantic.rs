@@ -5,7 +5,8 @@
 //! performs no artifact admission, vector mutation, ANN lookup, fusion,
 //! reranking, hydration, activation, or calls into another retrieval lane.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
@@ -328,7 +329,19 @@ where
             return Err(RetrievalPortError::IncompatibleProjection);
         }
 
-        let mut ranked = Vec::new();
+        // Bound retention to the lane cap during the scan with a max-heap
+        // keyed by the final ranking order, instead of collecting every
+        // eligible row into an unbounded vec and sorting the whole set. The cap
+        // depends only on the request budgets, so it is known up front. Every
+        // eligible row is still visited (duplicate detection and coverage
+        // accounting run over all of them via `eligible_count`); only the
+        // retained set is bounded. Because `source_occurrence_id` is unique
+        // across retained rows, the ranking order is a strict total order with
+        // no ties, so the cap smallest rows and their order are identical to a
+        // full sort followed by truncation.
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
+        let mut ranked: BinaryHeap<SemanticRankedEntryV1> = BinaryHeap::new();
+        let mut eligible_count: usize = 0;
         let mut seen_occurrences = BTreeSet::new();
         let scan_request = SemanticVectorReadRequestV1 {
             vector_generation: &request.vector_generation,
@@ -351,7 +364,20 @@ where
                     "semantic vector generation contains duplicate source occurrences".to_owned(),
                 ));
             }
-            ranked.push((candidate, evidence));
+            eligible_count += 1;
+            if cap == 0 {
+                return Ok(());
+            }
+            let entry = SemanticRankedEntryV1 { candidate, evidence };
+            if ranked.len() < cap {
+                ranked.push(entry);
+            } else if ranked
+                .peek()
+                .is_some_and(|worst| entry.cmp(worst) == Ordering::Less)
+            {
+                ranked.pop();
+                ranked.push(entry);
+            }
             Ok(())
         });
         let summary = match scan {
@@ -359,7 +385,7 @@ where
             Err(error) => {
                 return port_error_outcome(
                     error,
-                    budget_usage(request, ranked.len() as u64, 0, self.control),
+                    budget_usage(request, eligible_count as u64, 0, self.control),
                 );
             }
         };
@@ -370,12 +396,12 @@ where
         if deadline_exhausted(request, self.control) {
             return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
                 request,
-                ranked.len() as u64,
+                eligible_count as u64,
                 0,
                 self.control,
             )));
         }
-        if summary.eligible != ranked.len() as u64 {
+        if summary.eligible != eligible_count as u64 {
             return Err(RetrievalPortError::Contract(
                 "semantic vector scan coverage does not match the visited eligible rows".to_owned(),
             ));
@@ -400,29 +426,19 @@ where
             ));
         }
 
-        ranked.sort_by(|left, right| {
-            left.1
-                .distance
-                .cmp(&right.1.distance)
-                .then_with(|| {
-                    left.0
-                        .source_occurrence_id
-                        .cmp(&right.0.source_occurrence_id)
-                })
-                .then_with(|| {
-                    left.0
-                        .retriever_evidence_anchor
-                        .cmp(&right.0.retriever_evidence_anchor)
-                })
-                .then_with(|| left.1.chunk_id.cmp(&right.1.chunk_id))
-        });
-        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let truncated = ranked.len().saturating_sub(cap);
-        ranked.truncate(cap);
+        // The heap already retained only the cap smallest rows; drain it in
+        // ascending ranking order (identical to sorting the full set and
+        // truncating to `cap`).
+        let ranked = ranked.into_sorted_vec();
+        let truncated = eligible_count.saturating_sub(cap);
 
         let mut candidates = Vec::with_capacity(ranked.len());
         let mut evidence_by_occurrence = BTreeMap::new();
-        for (ordinal, (mut candidate, evidence)) in ranked.into_iter().enumerate() {
+        for (ordinal, entry) in ranked.into_iter().enumerate() {
+            let SemanticRankedEntryV1 {
+                mut candidate,
+                evidence,
+            } = entry;
             candidate.ordinal_rank = ordinal as u32;
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
@@ -660,6 +676,55 @@ fn elapsed_micros<C: SemanticExecutionControl>(
 ) -> u64 {
     control.elapsed_micros()
 }
+
+/// One retained ExactFlat row, ordered by the deterministic semantic ranking
+/// key (ascending distance, then `source_occurrence_id`,
+/// `retriever_evidence_anchor`, `chunk_id`). `Ord` mirrors the former
+/// `ranked.sort_by` comparator exactly, so a max-heap of these keeps the cap
+/// smallest rows and `into_sorted_vec` yields the identical ascending order.
+struct SemanticRankedEntryV1 {
+    candidate: CompactCandidate,
+    evidence: CodeSemanticEvidenceV1,
+}
+
+impl SemanticRankedEntryV1 {
+    fn rank_cmp(&self, other: &Self) -> Ordering {
+        self.evidence
+            .distance
+            .cmp(&other.evidence.distance)
+            .then_with(|| {
+                self.candidate
+                    .source_occurrence_id
+                    .cmp(&other.candidate.source_occurrence_id)
+            })
+            .then_with(|| {
+                self.candidate
+                    .retriever_evidence_anchor
+                    .cmp(&other.candidate.retriever_evidence_anchor)
+            })
+            .then_with(|| self.evidence.chunk_id.cmp(&other.evidence.chunk_id))
+    }
+}
+
+impl Ord for SemanticRankedEntryV1 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank_cmp(other)
+    }
+}
+
+impl PartialOrd for SemanticRankedEntryV1 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SemanticRankedEntryV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.rank_cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for SemanticRankedEntryV1 {}
 
 fn budget_usage<C: SemanticExecutionControl>(
     request: &SemanticRetrievalRequestV1<'_>,
