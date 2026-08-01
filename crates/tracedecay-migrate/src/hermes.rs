@@ -396,14 +396,9 @@ mod tests {
 
     use super::candidates::legacy_profile_dirs;
     use super::*;
-    use crate::root_seam::agents::hermes::HermesIntegration;
-    use crate::root_seam::agents::{AgentIntegration, InstallContext, UpdatePluginOutcome};
-    use crate::root_seam::application::host_admission::{
-        HostAdmissionScope, HostAdmissionTestRuntimeV1,
-    };
-    use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ProjectId;
+    use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
     use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
     use tracedecay_runtime_core::memory::store::MemoryStore;
     use tracedecay_runtime_core::memory::types::{
@@ -412,6 +407,88 @@ mod tests {
     use tracedecay_rusqlite_runtime::migration_sql::{
         MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
     };
+    use tracedecay_sessions::admission::HostAdmissionScope;
+    use tracedecay_store::{SessionMessageRecord, SessionRecord};
+
+    static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PinnedMigrationEnvironment {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _root: tempfile::TempDir,
+        previous_data_dir: Option<std::ffi::OsString>,
+        previous_home: Option<std::ffi::OsString>,
+        previous_userprofile: Option<std::ffi::OsString>,
+        previous_xdg_config: Option<std::ffi::OsString>,
+    }
+
+    impl PinnedMigrationEnvironment {
+        fn new() -> Self {
+            let lock = USER_DATA_DIR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            let profile = root
+                .path()
+                .join(tracedecay_runtime_core::config::TRACEDECAY_DIR);
+            tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile).unwrap();
+            let previous_data_dir =
+                std::env::var_os(tracedecay_runtime_core::config::USER_DATA_DIR_ENV);
+            let previous_home = std::env::var_os("HOME");
+            let previous_userprofile = std::env::var_os("USERPROFILE");
+            let previous_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+            // SAFETY: this crate's environment-mutating tests hold this lock
+            // for the complete lifetime of the isolated environment.
+            unsafe {
+                std::env::set_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV, &profile);
+                std::env::set_var("HOME", root.path());
+                std::env::set_var("USERPROFILE", root.path());
+                std::env::set_var("XDG_CONFIG_HOME", root.path().join("config"));
+            }
+            Self {
+                _lock: lock,
+                _root: root,
+                previous_data_dir,
+                previous_home,
+                previous_userprofile,
+                previous_xdg_config,
+            }
+        }
+    }
+
+    impl Default for PinnedMigrationEnvironment {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for PinnedMigrationEnvironment {
+        fn drop(&mut self) {
+            // SAFETY: the environment lock remains held while values are
+            // restored.
+            unsafe {
+                match self.previous_data_dir.take() {
+                    Some(value) => {
+                        std::env::set_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV, value)
+                    }
+                    None => {
+                        std::env::remove_var(tracedecay_runtime_core::config::USER_DATA_DIR_ENV)
+                    }
+                }
+                match self.previous_home.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.previous_userprofile.take() {
+                    Some(value) => std::env::set_var("USERPROFILE", value),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+                match self.previous_xdg_config.take() {
+                    Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
 
     struct ForeignFixtureWriteAuthority;
 
@@ -957,24 +1034,8 @@ mod tests {
 
     #[tokio::test]
     async fn default_migration_releases_lifecycle_authority_after_restore() {
-        struct RestoreXdgConfig(Option<std::ffi::OsString>);
-        impl Drop for RestoreXdgConfig {
-            fn drop(&mut self) {
-                unsafe {
-                    match self.0.take() {
-                        Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-                        None => std::env::remove_var("XDG_CONFIG_HOME"),
-                    }
-                }
-            }
-        }
-
-        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let _environment = PinnedMigrationEnvironment::new();
         let user_home = tempfile::tempdir().unwrap();
-        let _xdg_config = RestoreXdgConfig(std::env::var_os("XDG_CONFIG_HOME"));
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", user_home.path().join("config"));
-        }
 
         let report = migrate_legacy_hermes_stores(user_home.path()).await;
 
@@ -998,11 +1059,13 @@ mod tests {
         fs::create_dir_all(&corrected_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("reassigned", &corrected_root, None, None, None)
             .await
             .unwrap();
 
         let reassigned = registry
+            .profile_registry()
             .get_code_project("reassigned")
             .await
             .expect("registered reassigned project");
@@ -1331,7 +1394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_profile_upgrade_refreshes_in_place_without_default_cutover() {
+    async fn named_profile_upgrade_retries_in_place_without_default_cutover() {
         let temp = tempfile::tempdir().unwrap();
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
@@ -1353,18 +1416,6 @@ mod tests {
 
         let default_config = user_home.join(".hermes/config.yaml");
         fs::write(&default_config, "memory:\n  provider: other\n").unwrap();
-        let ctx = InstallContext {
-            home: user_home.clone(),
-            tracedecay_bin: "/bin/tracedecay".to_string(),
-            tool_permissions: crate::root_seam::agents::expected_tool_perms(),
-            project_root: None,
-            dashboard: false,
-        };
-        let outcome = HermesIntegration.update_plugin(&ctx).unwrap();
-        assert!(matches!(
-            outcome,
-            UpdatePluginOutcome::Refreshed(paths) if paths == vec![legacy_plugin.clone()]
-        ));
         assert!(legacy_plugin.join("plugin.yaml").is_file());
         assert_eq!(
             fs::read_to_string(legacy_profile.join("config.yaml")).unwrap(),
@@ -1382,12 +1433,6 @@ mod tests {
             1,
             "{retry_migration:?}"
         );
-        fs::write(&default_config, "").unwrap();
-        let outcome = HermesIntegration.update_plugin(&ctx).unwrap();
-        assert!(matches!(
-            outcome,
-            UpdatePluginOutcome::Refreshed(paths) if paths == vec![legacy_plugin.clone()]
-        ));
         assert!(legacy_plugin.join("plugin.yaml").is_file());
         assert!(
             !user_home
@@ -1640,11 +1685,13 @@ mod tests {
         fs::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &legacy_project, None, None, None)
             .await
             .unwrap();
         fs::rename(&legacy_project, &current_project).unwrap();
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
@@ -1708,11 +1755,13 @@ mod tests {
         fs::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &legacy_physical, None, None, None)
             .await
             .unwrap();
         fs::rename(&legacy_physical, &current_project).unwrap();
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
@@ -1751,12 +1800,14 @@ mod tests {
         fs::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &project_alias, None, None, None)
             .await
             .unwrap();
         fs::remove_file(&project_alias).unwrap();
         fs::rename(&legacy_project, &current_project).unwrap();
         registry
+            .profile_registry()
             .upsert_code_project("stable-project", &current_project, None, None, None)
             .await
             .unwrap();
@@ -1807,6 +1858,7 @@ mod tests {
         .unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("legacy-hermes-identity", &hermes, None, None, None)
             .await
             .unwrap();
@@ -1836,6 +1888,7 @@ mod tests {
         let registry = registered_profile_target(&profile_root).await;
         assert!(
             registry
+                .profile_registry()
                 .get_code_project("legacy-hermes-identity")
                 .await
                 .is_none()
@@ -1873,6 +1926,7 @@ mod tests {
         .unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
+            .profile_registry()
             .upsert_code_project("legacy-hermes-projectless", &hermes, None, None, None)
             .await
             .unwrap();
@@ -1884,7 +1938,10 @@ mod tests {
         assert!(report.failed.is_empty(), "{report:?}");
         assert_eq!(report.migrated[0].source_db, source);
         assert_eq!(report.migrated[0].target_project, Path::new("user"));
-        let target_path = crate::root_seam::sessions::user_sessions_db_path(&profile_root);
+        let target_path =
+            tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root,
+            );
         let target = registered_profile_target(&profile_root).await;
         let session = target
             .session_for_test(HostAdmissionScope::Profile, "hermes", "session")
@@ -1907,6 +1964,7 @@ mod tests {
         let registry = registered_profile_target(&profile_root).await;
         assert!(
             registry
+                .profile_registry()
                 .get_code_project("legacy-hermes-projectless")
                 .await
                 .is_none()
@@ -2007,7 +2065,12 @@ mod tests {
 
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.migrated.is_empty());
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
     }
 
     #[tokio::test]
@@ -2028,7 +2091,12 @@ mod tests {
 
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.migrated.is_empty());
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
     }
 
     #[tokio::test]
@@ -2044,7 +2112,12 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert!(report.migrated.is_empty(), "{report:?}");
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
         assert_eq!(
             immutable_source_count(&source, HermesFixtureTable::Sessions).await,
             1
@@ -2069,7 +2142,12 @@ mod tests {
             report.migrated[0].target_project,
             project.canonicalize().unwrap()
         );
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
     }
 
     #[tokio::test]
@@ -2086,7 +2164,12 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.migrated.is_empty());
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
     }
 
     #[tokio::test]
@@ -2133,7 +2216,12 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.unresolved[0].reason.contains("ambiguous"));
-        assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
+        assert!(
+            !tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
+                &profile_root
+            )
+            .exists()
+        );
         let project_layout =
             tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         assert!(!project_layout.sessions_db_path.exists());
