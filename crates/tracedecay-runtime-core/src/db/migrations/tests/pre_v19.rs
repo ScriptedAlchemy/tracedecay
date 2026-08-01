@@ -725,22 +725,16 @@ async fn test_latest_schema_omits_legacy_memory_tables() {
 
 #[tokio::test]
 async fn test_v7_to_latest_upgrade_path() {
-    let (conn, _dir) = create_schema_db().await;
-
-    conn.execute("PRAGMA user_version = 7", ()).await.unwrap();
-    // Drop the v8+ tables to simulate a true v7 starting state
-    conn.execute("DROP TABLE IF EXISTS memory_decisions_fts", ())
+    // Build a genuine v7 schema by running the real migrations up to v7, rather
+    // than relabelling a latest-version database. A latest schema already
+    // carries v9+ objects (e.g. `nodes.parent_id`), which the fail-closed v9
+    // admission correctly rejects as precreated — so only a true historical v7
+    // fixture actually exercises the v7 → latest upgrade path.
+    let (conn, _dir) = create_raw_db().await;
+    crate::db::migrations::migrate_test_connection_to_version(&conn, 7)
         .await
-        .unwrap();
-    conn.execute("DROP TABLE IF EXISTS memory_decisions", ())
-        .await
-        .unwrap();
-    conn.execute("DROP TABLE IF EXISTS memory_code_areas", ())
-        .await
-        .unwrap();
-    conn.execute("DROP TABLE IF EXISTS read_cache", ())
-        .await
-        .unwrap();
+        .expect("build real v7 schema");
+    assert_eq!(get_user_version(&conn).await, 7);
 
     let did_migrate = migrate_connection(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");

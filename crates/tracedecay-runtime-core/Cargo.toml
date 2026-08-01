@@ -72,6 +72,11 @@ windows-sys = { version = "0.61", features = [
 # helper's wire protocol. Leaf crate (hex/serde/serde_json/sha2 only), so this
 # adds no crate-graph edge outside the test build.
 tracedecay-sqlite-parity-protocol = { path = "../tracedecay-sqlite-parity-protocol", version = "0.1.0" }
+# The kernel depends on `tracedecay-code-extraction` with `default-features =
+# false` (no grammars) for production. Redundancy fingerprint tests parse real
+# Rust, so the test build opts into the `lite` grammar tier to register the
+# bundled tree-sitter Rust grammar; production stays grammar-free.
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite"] }
 
 hex = "0.4"
 sha2 = "0.11"
