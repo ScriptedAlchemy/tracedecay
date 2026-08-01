@@ -44,11 +44,7 @@ fn validate_git_oid(value: &str, field: &'static str) -> Result<(), DomainError>
     if value.is_empty() {
         return Err(DomainError::Empty { field });
     }
-    let valid = matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if !valid {
+    if !crate::canonical_text::is_git_object_id(value) {
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())

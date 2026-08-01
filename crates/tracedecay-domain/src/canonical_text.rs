@@ -50,6 +50,15 @@ pub fn is_tagged_lowercase_hex(value: &str, tag: &str, length: usize) -> bool {
         .is_some_and(|encoded| is_lowercase_hex(encoded, length))
 }
 
+/// A native Git object id: lowercase hex at SHA-1 (40) or SHA-256 (64) width.
+///
+/// Git object ids are the one identity in these contracts that is legitimately
+/// two widths, so the pair is stated once here rather than at each validator.
+#[must_use]
+pub fn is_git_object_id(value: &str) -> bool {
+    is_lowercase_hex(value, 40) || is_lowercase_hex(value, 64)
+}
+
 /// Lowercase hex encoding of `bytes`, the inverse of [`is_lowercase_hex`].
 #[must_use]
 pub fn encode_lowercase_hex(bytes: &[u8]) -> String {
@@ -86,6 +95,18 @@ pub(crate) fn validate_canonical_string(
         return Err(DomainError::NonCanonical { field });
     }
     Ok(())
+}
+
+/// A native Git object id, rejected as non-canonical at any other shape.
+///
+/// This is the shared body behind the identically-specified per-module Git
+/// object-id validators (repository state, retrieval anchors).
+pub(crate) fn validate_git_object_id(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if is_git_object_id(value) {
+        Ok(())
+    } else {
+        Err(DomainError::NonCanonical { field })
+    }
 }
 
 /// Canonical bounded string that reports every rejection, empty included, as
@@ -306,6 +327,34 @@ mod tests {
             "sha256:",
             64
         ));
+    }
+
+    /// The Git object-id predicate is the exact conjunction the per-module
+    /// copies spelled out, including both accepted widths.
+    #[test]
+    fn git_object_id_matches_the_inlined_conjunction() {
+        for value in [
+            "",
+            &"a".repeat(39),
+            &"a".repeat(40),
+            &"a".repeat(41),
+            &"a".repeat(63),
+            &"a".repeat(64),
+            &"a".repeat(65),
+            &"A".repeat(40),
+            &"g".repeat(40),
+            &"0".repeat(64),
+        ] {
+            let inlined = matches!(value.len(), 40 | 64)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            assert_eq!(
+                is_git_object_id(value),
+                inlined,
+                "git object id predicate diverged for {value:?}"
+            );
+        }
     }
 
     #[test]
