@@ -1959,16 +1959,18 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
     additions
 }
 
-/// The tracked-agent list this crate backfills, as a port over the root
-/// crate's `user_config::UserConfig`.
+/// The tracked-agent list this crate backfills, as a port over
+/// `tracedecay_usecases::user_config::UserConfig`.
 ///
-/// `UserConfig` stays above this crate — it is the whole user-level profile,
-/// most of which host detection has no business seeing. The backfill below
-/// needs exactly three operations, so it takes them as a port rather than the
-/// concrete type.
+/// `UserConfig` stays in `tracedecay-usecases` — it is the whole user-level
+/// profile, most of which host detection has no business seeing. The
+/// backfill below needs exactly three operations, so it takes them as a port
+/// rather than the concrete type.
 ///
-/// Root wiring: the root implements this for `user_config::UserConfig`
-/// (`installed_agents` field reads/extends, and its existing `save`).
+/// This crate implements the port for `UserConfig` directly below (it
+/// already depends on `tracedecay-usecases`); the root crate's
+/// `user_config::UserConfig` is a re-export of the same type, so the impl
+/// applies there too without any root-side wiring.
 pub trait InstalledAgentsConfig {
     /// Agent ids currently recorded as installed.
     fn installed_agents(&self) -> &[String];
@@ -1979,6 +1981,24 @@ pub trait InstalledAgentsConfig {
     /// Persists the config. Failures are logged, never fatal: a lost backfill
     /// is retried on the next run.
     fn save(&self) -> Result<()>;
+}
+
+impl InstalledAgentsConfig for tracedecay_usecases::user_config::UserConfig {
+    fn installed_agents(&self) -> &[String] {
+        &self.installed_agents
+    }
+
+    fn extend_installed_agents(&mut self, additions: Vec<String>) {
+        self.installed_agents.extend(additions);
+    }
+
+    fn save(&self) -> Result<()> {
+        tracedecay_usecases::user_config::UserConfig::save(self).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })
+    }
 }
 
 /// Backfill `installed_agents` for users upgrading from older versions.
