@@ -13,7 +13,7 @@ use crate::db::DatabaseAuthority;
 /// Proof that one exact runtime reached `Closed` after all physical `SQLite`
 /// handles joined and before its registry entry was removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClosedStoreRuntime {
+pub struct ClosedStoreRuntime {
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     path: std::path::PathBuf,
@@ -21,19 +21,19 @@ pub(crate) struct ClosedStoreRuntime {
 }
 
 impl ClosedStoreRuntime {
-    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
     }
 
-    pub(crate) fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+    pub fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
         &self.verified_locator
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) const fn opened_file_identity(&self) -> u64 {
+    pub const fn opened_file_identity(&self) -> u64 {
         self.opened_file_identity
     }
 }
@@ -45,7 +45,7 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
-    pub(crate) async fn close_path(
+    pub async fn close_path(
         &self,
         path: &Path,
     ) -> Result<Option<ClosedStoreRuntime>, StoreRuntimeRegistryFailure> {
@@ -83,7 +83,7 @@ impl StoreRuntimeRegistry {
     /// The caller retains only the binding and originating authority. Any
     /// issued database facade, direct runtime reference, or client lease
     /// refuses the close before physical admission is fenced.
-    pub(crate) async fn close_exact(
+    pub async fn close_exact(
         &self,
         expected: &StoreRuntimeBindingV1,
         authority: &DatabaseAuthority,
@@ -324,14 +324,14 @@ mod tests {
     };
 
     use super::*;
-    use crate::daemon::store_runtime::registry::{
+    use crate::store_runtime::registry::{
         LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
         ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
         ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenMode,
         StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistryConfig,
         StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
-    use crate::daemon::store_runtime::shard::ShardRuntime;
+    use crate::store_runtime::shard::ShardRuntime;
 
     fn id<T>(value: &str) -> T
     where

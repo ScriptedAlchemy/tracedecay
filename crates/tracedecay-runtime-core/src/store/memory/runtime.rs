@@ -18,9 +18,9 @@ use tracedecay_store::{
 };
 
 use super::Database;
-// The daemon registry owns the physical runtime and sits above this
-// kernel; the fact store reaches it through the `StoreRuntimeSource` port.
-use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
+// The store-runtime registry moved into this kernel, so the fact store reaches
+// the concrete handle directly rather than through an erased port.
+use crate::store_runtime::registry::StoreRuntimeHandle;
 
 const COMMIT_OPERATION: &str = "commit fact through storage runtime";
 const CURRENT_OPERATION: &str = "query current fact through storage runtime";

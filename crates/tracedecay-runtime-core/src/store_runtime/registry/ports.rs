@@ -20,17 +20,17 @@ use super::{
     PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime, StoreRuntimeKey,
     StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
 };
-use crate::daemon::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
+use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedStoreLocator {
+pub struct ResolvedStoreLocator {
     verified: VerifiedStoreLocatorV1,
     path: PathBuf,
     prospective: bool,
 }
 
 impl ResolvedStoreLocator {
-    pub(crate) fn new(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
+    pub fn new(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
         Self {
             verified,
             path,
@@ -38,7 +38,7 @@ impl ResolvedStoreLocator {
         }
     }
 
-    pub(crate) fn prospective(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
+    pub fn prospective(verified: VerifiedStoreLocatorV1, path: PathBuf) -> Self {
         Self {
             verified,
             path,
@@ -46,15 +46,15 @@ impl ResolvedStoreLocator {
         }
     }
 
-    pub(crate) fn verified(&self) -> &VerifiedStoreLocatorV1 {
+    pub fn verified(&self) -> &VerifiedStoreLocatorV1 {
         &self.verified
     }
 
-    pub(crate) fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
-    pub(crate) const fn is_prospective(&self) -> bool {
+    pub const fn is_prospective(&self) -> bool {
         self.prospective
     }
 
@@ -64,7 +64,7 @@ impl ResolvedStoreLocator {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeLocatorRecord {
+pub struct RuntimeLocatorRecord {
     key: StoreRuntimeKey,
     locator: ResolvedStoreLocator,
 }
@@ -74,26 +74,26 @@ impl RuntimeLocatorRecord {
         Self { key, locator }
     }
 
-    pub(crate) fn key(&self) -> &StoreRuntimeKey {
+    pub fn key(&self) -> &StoreRuntimeKey {
         &self.key
     }
 
-    pub(crate) fn verified(&self) -> &VerifiedStoreLocatorV1 {
+    pub fn verified(&self) -> &VerifiedStoreLocatorV1 {
         self.locator.verified()
     }
 
-    pub(crate) fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         self.locator.path()
     }
 
-    pub(crate) const fn is_prospective(&self) -> bool {
+    pub const fn is_prospective(&self) -> bool {
         self.locator.is_prospective()
     }
 }
 
-pub(crate) type StoreRuntimeRegistryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type StoreRuntimeRegistryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-pub(crate) trait StoreRuntimeResolver: Send + Sync {
+pub trait StoreRuntimeResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
         key: &'a StoreRuntimeKey,
@@ -102,7 +102,7 @@ pub(crate) trait StoreRuntimeResolver: Send + Sync {
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>;
 }
 
-pub(crate) trait ShardRuntimePublisher: Send + Sync {
+pub trait ShardRuntimePublisher: Send + Sync {
     fn publish(
         &self,
         request: ShardRuntimeBuildRequest,
@@ -110,7 +110,7 @@ pub(crate) trait ShardRuntimePublisher: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct LifecycleShardRuntimePublisher;
+pub struct LifecycleShardRuntimePublisher;
 
 impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
     fn publish(
@@ -398,7 +398,7 @@ async fn migrate_before_publication(
         StoreShardScopeV1::Profile
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
-            crate::global_db::ensure_registered_schema(&connection)
+            crate::ports::registered_schema::ensure_registered_schema(&connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized global/session schema",
@@ -707,7 +707,7 @@ fn retained_storage_table_bytes(
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ShardRuntimeBuildRequest {
+pub struct ShardRuntimeBuildRequest {
     pub(super) binding: StoreRuntimeBindingV1,
     locator: RuntimeLocatorRecord,
     mode: StoreRuntimeOpenMode,
@@ -729,19 +729,19 @@ impl ShardRuntimeBuildRequest {
         }
     }
 
-    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
     }
 
-    pub(crate) fn locator(&self) -> &RuntimeLocatorRecord {
+    pub fn locator(&self) -> &RuntimeLocatorRecord {
         &self.locator
     }
 
-    pub(crate) const fn mode(&self) -> StoreRuntimeOpenMode {
+    pub const fn mode(&self) -> StoreRuntimeOpenMode {
         self.mode
     }
 
-    pub(crate) fn database_authority(&self) -> Option<&crate::db::DatabaseAuthority> {
+    pub fn database_authority(&self) -> Option<&crate::db::DatabaseAuthority> {
         self.database_authority.as_ref()
     }
 }

@@ -18,7 +18,7 @@ use tracedecay_store::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ShardRuntimeHealth {
+pub enum ShardRuntimeHealth {
     #[default]
     Unknown,
     Healthy,
@@ -27,7 +27,7 @@ pub(crate) enum ShardRuntimeHealth {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShardRuntimeResource {
+pub enum ShardRuntimeResource {
     Writer,
     Queue,
     GeneralReader,
@@ -39,7 +39,7 @@ pub(crate) enum ShardRuntimeResource {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShardRuntimeLeaseKind {
+pub enum ShardRuntimeLeaseKind {
     GeneralReader,
     HealthReader,
     Snapshot,
@@ -73,7 +73,7 @@ impl ShardRuntimeLeaseKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ShardRuntimeError {
+pub enum ShardRuntimeError {
     #[error("illegal shard runtime transition from {from:?} to {to:?}")]
     IllegalTransition {
         from: RuntimeMaintenanceStateV1,
@@ -110,27 +110,27 @@ pub(crate) enum ShardRuntimeError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ShardRuntimeHealthSnapshot {
-    pub(crate) binding: StoreRuntimeBindingV1,
-    pub(crate) state: RuntimeMaintenanceStateV1,
-    pub(crate) pinned_profile: bool,
-    pub(crate) writer_present: bool,
-    pub(crate) queued_operations: u32,
-    pub(crate) queued_bytes: u64,
-    pub(crate) general_reader_leases: u32,
-    pub(crate) health_reader_leases: u32,
-    pub(crate) snapshot_leases: u32,
-    pub(crate) watcher_leases: u32,
-    pub(crate) scheduler_leases: u32,
-    pub(crate) client_leases: u32,
-    pub(crate) wal_bytes: u64,
-    pub(crate) memory_estimate_bytes: u64,
-    pub(crate) idle_for: Duration,
-    pub(crate) health: ShardRuntimeHealth,
+pub struct ShardRuntimeHealthSnapshot {
+    pub binding: StoreRuntimeBindingV1,
+    pub state: RuntimeMaintenanceStateV1,
+    pub pinned_profile: bool,
+    pub writer_present: bool,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub general_reader_leases: u32,
+    pub health_reader_leases: u32,
+    pub snapshot_leases: u32,
+    pub watcher_leases: u32,
+    pub scheduler_leases: u32,
+    pub client_leases: u32,
+    pub wal_bytes: u64,
+    pub memory_estimate_bytes: u64,
+    pub idle_for: Duration,
+    pub health: ShardRuntimeHealth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShardRuntimeEvictionBlocker {
+pub enum ShardRuntimeEvictionBlocker {
     NotReady {
         state: RuntimeMaintenanceStateV1,
     },
@@ -165,27 +165,27 @@ pub(crate) enum ShardRuntimeEvictionBlocker {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ShardRuntimeEvictionEligibility {
-    pub(crate) idle_for: Duration,
-    pub(crate) blockers: Vec<ShardRuntimeEvictionBlocker>,
+pub struct ShardRuntimeEvictionEligibility {
+    pub idle_for: Duration,
+    pub blockers: Vec<ShardRuntimeEvictionBlocker>,
 }
 
 impl ShardRuntimeEvictionEligibility {
-    pub(crate) fn is_eligible(&self) -> bool {
+    pub fn is_eligible(&self) -> bool {
         self.blockers.is_empty()
     }
 }
 
 /// One internally consistent observation used by registry telemetry.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ShardRuntimeObservation {
-    pub(crate) health: ShardRuntimeHealthSnapshot,
-    pub(crate) eviction: ShardRuntimeEvictionEligibility,
+pub struct ShardRuntimeObservation {
+    pub health: ShardRuntimeHealthSnapshot,
+    pub eviction: ShardRuntimeEvictionEligibility,
 }
 
 /// The one concrete runtime object retained for a published binding.
 #[derive(Debug)]
-pub(crate) struct ShardRuntime {
+pub struct ShardRuntime {
     binding: StoreRuntimeBindingV1,
     state: Mutex<ShardRuntimeState>,
 }
@@ -211,7 +211,7 @@ struct ShardRuntimeState {
 }
 
 impl ShardRuntime {
-    pub(crate) fn new(binding: StoreRuntimeBindingV1, pinned_profile: bool) -> Self {
+    pub fn new(binding: StoreRuntimeBindingV1, pinned_profile: bool) -> Self {
         Self {
             binding,
             state: Mutex::new(ShardRuntimeState {
@@ -235,27 +235,27 @@ impl ShardRuntime {
         }
     }
 
-    pub(crate) fn binding(&self) -> &StoreRuntimeBindingV1 {
+    pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
     }
 
-    pub(crate) fn shard_id(&self) -> &StoreShardIdV1 {
+    pub fn shard_id(&self) -> &StoreShardIdV1 {
         &self.binding.shard_id
     }
 
-    pub(crate) fn incarnation(&self) -> StoreIncarnationV1 {
+    pub fn incarnation(&self) -> StoreIncarnationV1 {
         self.binding.incarnation
     }
 
-    pub(crate) fn authority_epoch(&self) -> StoreAuthorityEpochV1 {
+    pub fn authority_epoch(&self) -> StoreAuthorityEpochV1 {
         self.binding.authority_epoch
     }
 
-    pub(crate) fn maintenance_state(&self) -> RuntimeMaintenanceStateV1 {
+    pub fn maintenance_state(&self) -> RuntimeMaintenanceStateV1 {
         self.lock_state().maintenance_state
     }
 
-    pub(crate) fn transition(
+    pub fn transition(
         &self,
         to: RuntimeMaintenanceStateV1,
     ) -> Result<(), ShardRuntimeError> {
@@ -280,17 +280,17 @@ impl ShardRuntime {
         Ok(())
     }
 
-    pub(crate) fn set_pinned_profile(&self, pinned_profile: bool) {
+    pub fn set_pinned_profile(&self, pinned_profile: bool) {
         self.lock_state().pinned_profile = pinned_profile;
     }
 
-    pub(crate) fn record_storage_usage(&self, wal_bytes: u64, memory_estimate_bytes: u64) {
+    pub fn record_storage_usage(&self, wal_bytes: u64, memory_estimate_bytes: u64) {
         let mut state = self.lock_state();
         state.wal_bytes = wal_bytes;
         state.memory_estimate_bytes = memory_estimate_bytes;
     }
 
-    pub(crate) fn set_health(&self, health: ShardRuntimeHealth) -> Result<(), ShardRuntimeError> {
+    pub fn set_health(&self, health: ShardRuntimeHealth) -> Result<(), ShardRuntimeError> {
         let mut state = self.lock_state();
         if state.maintenance_state == RuntimeMaintenanceStateV1::Faulted {
             return Err(ShardRuntimeError::RuntimeFaulted);
@@ -302,12 +302,12 @@ impl ShardRuntime {
         Ok(())
     }
 
-    pub(crate) fn last_activity(&self) -> Instant {
+    pub fn last_activity(&self) -> Instant {
         self.lock_state().last_activity
     }
 
     /// Retains a contract runtime lease until explicit release or expiry.
-    pub(crate) fn acquire_runtime_lease(
+    pub fn acquire_runtime_lease(
         &self,
         lease: RuntimeLeaseV1,
         now: UtcMicros,
@@ -337,7 +337,7 @@ impl ShardRuntime {
         Ok(lease)
     }
 
-    pub(crate) fn release_runtime_lease(&self, lease_id: &RuntimeLeaseIdV1) -> bool {
+    pub fn release_runtime_lease(&self, lease_id: &RuntimeLeaseIdV1) -> bool {
         let mut state = self.lock_state();
         let released = state.runtime_leases.remove(lease_id).is_some();
         if released {
@@ -346,19 +346,19 @@ impl ShardRuntime {
         released
     }
 
-    pub(crate) fn prune_expired_runtime_leases(&self, now: UtcMicros) -> usize {
+    pub fn prune_expired_runtime_leases(&self, now: UtcMicros) -> usize {
         self.lock_state().prune_expired_runtime_leases(now)
     }
 
-    pub(crate) fn health_snapshot(&self) -> ShardRuntimeHealthSnapshot {
+    pub fn health_snapshot(&self) -> ShardRuntimeHealthSnapshot {
         self.health_snapshot_at(Instant::now())
     }
 
-    pub(crate) fn health_snapshot_at(&self, now: Instant) -> ShardRuntimeHealthSnapshot {
+    pub fn health_snapshot_at(&self, now: Instant) -> ShardRuntimeHealthSnapshot {
         self.lock_state().health_snapshot(&self.binding, now)
     }
 
-    pub(crate) fn eviction_eligibility(
+    pub fn eviction_eligibility(
         &self,
         required_idle: Duration,
     ) -> ShardRuntimeEvictionEligibility {
@@ -366,7 +366,7 @@ impl ShardRuntime {
             .eviction
     }
 
-    pub(crate) fn eviction_eligibility_at(
+    pub fn eviction_eligibility_at(
         &self,
         now: Instant,
         required_idle: Duration,
@@ -374,11 +374,11 @@ impl ShardRuntime {
         self.lock_state().eviction_eligibility(now, required_idle)
     }
 
-    pub(crate) fn observe(&self, required_idle: Duration) -> ShardRuntimeObservation {
+    pub fn observe(&self, required_idle: Duration) -> ShardRuntimeObservation {
         self.observe_at(Instant::now(), required_idle, utc_now())
     }
 
-    pub(crate) fn observe_at(
+    pub fn observe_at(
         &self,
         monotonic_now: Instant,
         required_idle: Duration,
@@ -392,7 +392,7 @@ impl ShardRuntime {
         }
     }
 
-    pub(crate) fn acquire_writer_presence(
+    pub fn acquire_writer_presence(
         &self,
     ) -> Result<ShardRuntimeWriterGuard<'_>, ShardRuntimeError> {
         let mut state = self.lock_state();
@@ -418,7 +418,7 @@ impl ShardRuntime {
         })
     }
 
-    pub(crate) fn acquire_lease(
+    pub fn acquire_lease(
         &self,
         kind: ShardRuntimeLeaseKind,
     ) -> Result<ShardRuntimeLease<'_>, ShardRuntimeError> {
@@ -432,7 +432,7 @@ impl ShardRuntime {
         })
     }
 
-    pub(crate) fn queue_work(
+    pub fn queue_work(
         &self,
         operations: u32,
         bytes: u64,
@@ -683,13 +683,13 @@ impl ShardRuntimeState {
 }
 
 #[must_use = "dropping the guard releases writer-presence accounting"]
-pub(crate) struct ShardRuntimeWriterGuard<'a> {
+pub struct ShardRuntimeWriterGuard<'a> {
     runtime: &'a ShardRuntime,
     active: bool,
 }
 
 impl ShardRuntimeWriterGuard<'_> {
-    pub(crate) fn release(mut self) {
+    pub fn release(mut self) {
         if self.active {
             self.runtime.release_writer_presence();
             self.active = false;
@@ -706,13 +706,13 @@ impl Drop for ShardRuntimeWriterGuard<'_> {
 }
 
 #[must_use = "dropping the guard releases the runtime lease"]
-pub(crate) struct ShardRuntimeLease<'a> {
+pub struct ShardRuntimeLease<'a> {
     runtime: &'a ShardRuntime,
     kind: Option<ShardRuntimeLeaseKind>,
 }
 
 impl ShardRuntimeLease<'_> {
-    pub(crate) fn release(mut self) {
+    pub fn release(mut self) {
         if let Some(kind) = self.kind.take() {
             self.runtime.release_lease(kind);
         }
@@ -728,7 +728,7 @@ impl Drop for ShardRuntimeLease<'_> {
 }
 
 #[must_use = "dropping the guard releases queued-work accounting"]
-pub(crate) struct ShardRuntimeQueuedWork<'a> {
+pub struct ShardRuntimeQueuedWork<'a> {
     runtime: &'a ShardRuntime,
     operations: u32,
     bytes: u64,
@@ -736,7 +736,7 @@ pub(crate) struct ShardRuntimeQueuedWork<'a> {
 }
 
 impl ShardRuntimeQueuedWork<'_> {
-    pub(crate) fn release(mut self) {
+    pub fn release(mut self) {
         if self.active {
             self.runtime
                 .release_queued_work(self.operations, self.bytes);

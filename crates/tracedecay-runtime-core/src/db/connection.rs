@@ -22,11 +22,11 @@ use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeRequestProbeV1,
 };
 
-// The daemon registry owns the physical runtime and sits above this
-// kernel; the facade retains it through the `StoreRuntimeSource` port.
-use crate::ports::StoreRuntimeSourceHandle as StoreRuntimeHandle;
+// The store-runtime registry moved into this kernel, so the facade retains the
+// concrete handle rather than an erased port.
+use crate::store_runtime::registry::StoreRuntimeHandle;
 #[cfg(any(test, feature = "test-transport"))]
-use crate::daemon::store_runtime::registry::{
+use crate::store_runtime::registry::{
     LifecycleShardRuntimePublisher, ProfileAuthorityPinResult, ResolvedStoreLocator,
     StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
