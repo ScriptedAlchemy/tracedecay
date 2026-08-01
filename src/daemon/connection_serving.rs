@@ -554,8 +554,6 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
@@ -565,6 +563,8 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let reserved_control_request = is_reserved_control_request(&first_request_line);
     if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);
