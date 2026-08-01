@@ -527,7 +527,8 @@ impl RetentionQueryExecutor<'_> {
         &self,
         sql: &str,
         params: Params,
-    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows> {
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
+    {
         match self {
             Self::Connection(connection) => connection.query(sql, params).await,
             Self::Transaction(transaction) => transaction.query(sql, params).await,

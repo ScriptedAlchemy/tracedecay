@@ -12,7 +12,6 @@ use crate::admission::HostAdmission;
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{
@@ -20,14 +19,15 @@ use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, preflight_strict_jsonl,
     try_stream_new_jsonl_raw_strict_with_resume,
 };
+use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 
 #[derive(Clone, Copy)]
-pub enum PersistedCursorUpdate {
+pub(super) enum PersistedCursorUpdate {
     Replace,
     Monotonic,
 }
 
-pub struct JsonlObservationAdmissionRequest<'request> {
+pub(super) struct JsonlObservationAdmissionRequest<'request> {
     provider: &'static str,
     path: &'request Path,
     admission: &'request dyn HostAdmission,
@@ -40,7 +40,7 @@ pub struct JsonlObservationAdmissionRequest<'request> {
 }
 
 impl<'request> JsonlObservationAdmissionRequest<'request> {
-    pub fn new(
+    pub(super) fn new(
         provider: &'static str,
         path: &'request Path,
         admission: &'request dyn HostAdmission,
@@ -61,12 +61,12 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         }
     }
 
-    pub fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
+    pub(super) fn with_max_new_bytes(mut self, max_new_bytes: Option<u64>) -> Self {
         self.max_new_bytes = max_new_bytes;
         self
     }
 
-    pub fn with_persisted_cursor_update(
+    pub(super) fn with_persisted_cursor_update(
         mut self,
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> Self {
@@ -74,13 +74,13 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
         self
     }
 
-    pub fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
+    pub(super) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
         self.cancellation = cancellation;
         self
     }
 }
 
-pub enum JsonlFrameAdmission {
+pub(super) enum JsonlFrameAdmission {
     Durable {
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
@@ -89,7 +89,7 @@ pub enum JsonlFrameAdmission {
 }
 
 impl JsonlFrameAdmission {
-    pub fn durable(
+    pub(super) fn durable(
         parsed_record: ParsedObservationRecordV1,
         native_record_id: ObservationId,
     ) -> Self {
@@ -99,19 +99,19 @@ impl JsonlFrameAdmission {
         }
     }
 
-    pub fn non_durable(reason: ObservationCoverageReason) -> Self {
+    pub(super) fn non_durable(reason: ObservationCoverageReason) -> Self {
         Self::NonDurable(reason)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JsonlObservationAdmissionProgress {
+pub(super) struct JsonlObservationAdmissionProgress {
     pub bytes_consumed: u64,
     pub source_deferred: bool,
 }
 
 #[derive(Clone, Copy)]
-pub struct JsonlObservationScan {
+pub(super) struct JsonlObservationScan {
     pub resumed: bool,
     /// True when a prior cursor existed but the scan restarted at offset 0
     /// (truncate/rename replacement). Callers use this to keep projected
@@ -321,7 +321,7 @@ impl ActiveAdmission<'_> {
     }
 }
 
-pub async fn admit_jsonl_observations<State>(
+pub(super) async fn admit_jsonl_observations<State>(
     request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
     mut normalize: impl FnMut(
@@ -539,7 +539,7 @@ fn skipped_reason(reason: RawJsonlSkippedReason) -> ObservationCoverageReason {
     }
 }
 
-pub fn namespace_replacement_message_ids(
+pub(super) fn namespace_replacement_message_ids(
     messages: &mut [SessionMessageRecord],
     generation: u64,
 ) {
@@ -548,7 +548,7 @@ pub fn namespace_replacement_message_ids(
     }
 }
 
-pub fn preflight_and_parse_new(
+pub(super) fn preflight_and_parse_new(
     provider: &'static str,
     path: &Path,
     prev: StoredCursor,

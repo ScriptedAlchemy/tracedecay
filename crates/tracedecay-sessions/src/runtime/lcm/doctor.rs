@@ -1252,9 +1252,9 @@ mod tests {
     #![allow(dead_code)]
 
     use super::*;
-    use tracedecay_runtime_core::db::engine::TestConnection;
     use rusqlite::Connection as RusqliteConnection;
     use std::path::{Path, PathBuf};
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     async fn open_clean_test_connection(
         project_root: &Path,

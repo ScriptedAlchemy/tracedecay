@@ -47,9 +47,7 @@ pub fn build_extraction_request(
     })
 }
 
-pub fn split_summary_route(
-    route: Option<&str>,
-) -> (Option<String>, Option<LcmExtractionResult>) {
+pub fn split_summary_route(route: Option<&str>) -> (Option<String>, Option<LcmExtractionResult>) {
     let route = route.and_then(non_empty).map(str::to_string);
     let Some(route) = route else {
         return (None, None);

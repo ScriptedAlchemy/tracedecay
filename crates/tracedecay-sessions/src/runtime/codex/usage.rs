@@ -154,10 +154,7 @@ pub fn merge_usage_counters(existing: &mut Value, add: &Value) {
 /// Attach the finished turn's summed usage to the most recent assistant
 /// message of the batch (the reply the turn's `token_count` events report
 /// on), merging additively when that message already carries usage.
-pub fn flush_turn_usage(
-    messages: &mut [SessionMessageRecord],
-    turn_usage: &mut CodexTurnUsage,
-) {
+pub fn flush_turn_usage(messages: &mut [SessionMessageRecord], turn_usage: &mut CodexTurnUsage) {
     let Some(usage) = turn_usage.take() else {
         return;
     };

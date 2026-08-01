@@ -39,9 +39,12 @@ pub(super) async fn backup_database(
     let staging_path = staging_dir.join("sessions.db");
     let backup_path = published_dir.join("sessions.db");
     let result = async {
-        tracedecay_runtime_core::sqlite_read_snapshot::backup_live_sqlite_database(db_path, &staging_path)
-            .await
-            .map_err(|error| LcmError::Io(error.to_string()))?;
+        tracedecay_runtime_core::sqlite_read_snapshot::backup_live_sqlite_database(
+            db_path,
+            &staging_path,
+        )
+        .await
+        .map_err(|error| LcmError::Io(error.to_string()))?;
         sync_file(&staging_path)?;
         let byte_count = fs::metadata(&staging_path)
             .map_err(|error| LcmError::Io(error.to_string()))?
@@ -167,8 +170,8 @@ async fn payload_metadata_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::db::engine::TestConnection;
     use rusqlite::Connection as RusqliteConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     #[tokio::test]
     async fn gc_backups_are_unique_verified_and_non_destructive() {

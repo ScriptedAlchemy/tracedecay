@@ -60,7 +60,7 @@ impl JsonlFrameDeferral {
 pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Default strict-scan budget keeps recovery bounded even without a hook cap.
 pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
-pub const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
+pub(super) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
 const JSONL_RESUME_FINGERPRINT_BYTES: usize = 4 * 1024;
 const JSONL_SNAPSHOT_SAMPLE_COUNT: u64 = 8;
 const JSONL_RESUME_HASH_BASE: u64 = 0x9e37_79b1_85eb_ca87;
@@ -262,10 +262,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         )
     }
 
-    pub fn next_frame_with_budget(
-        &mut self,
-        read_budget: u64,
-    ) -> std::io::Result<RawJsonlFrame> {
+    pub fn next_frame_with_budget(&mut self, read_budget: u64) -> std::io::Result<RawJsonlFrame> {
         self.record.clear();
         let mut byte_len = 0_u64;
         let mut oversized = false;
@@ -337,7 +334,7 @@ pub enum StrictJsonlOutcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum MalformedJsonlPolicy {
+pub(super) enum MalformedJsonlPolicy {
     Skip,
     Defer,
 }
@@ -410,7 +407,7 @@ pub fn stream_new_jsonl_strict(
     })
 }
 
-pub fn stream_new_jsonl_with_policy(
+pub(super) fn stream_new_jsonl_with_policy(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,

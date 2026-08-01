@@ -34,6 +34,7 @@ pub mod workflow_index;
 pub mod workflow_ingest;
 pub mod workflow_state;
 
+pub use crate::{ProviderScope, SessionProvider};
 pub use ingest::{
     TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
@@ -46,7 +47,6 @@ pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 /// Public because the snapshot capture entry points that return it are public.
 pub use snapshot_observation::SnapshotCaptureOutcome;
-pub use crate::{ProviderScope, SessionProvider};
 
 /// Search hit for session-message full-text lookup.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

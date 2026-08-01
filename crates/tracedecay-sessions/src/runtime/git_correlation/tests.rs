@@ -42,7 +42,11 @@ impl QueryExecutor for GitCorrelationTestDb {
 }
 
 impl Executor for GitCorrelationTestDb {
-    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
+    async fn execute<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: tracedecay_runtime_core::db::engine::IntoParams,
     {

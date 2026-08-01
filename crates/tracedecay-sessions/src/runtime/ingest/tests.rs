@@ -610,7 +610,9 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         .to_string();
 
     let store = tempfile::tempdir().unwrap();
-    let handle = tracedecay_runtime_core::db::engine::TestConnection::open(&store.path().join("sessions.db"));
+    let handle = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &store.path().join("sessions.db"),
+    );
     let conn: &tracedecay_runtime_core::db::engine::Connection = &handle;
     git_correlation::ensure_git_correlation_schema_in_transaction(conn)
         .await

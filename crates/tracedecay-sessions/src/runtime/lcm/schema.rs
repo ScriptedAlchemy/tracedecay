@@ -44,9 +44,7 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 
 /// Returns whether the raw-message FTS table and all three synchronization
 /// triggers use the v3 content-only contracts.
-pub async fn raw_fts_structure_is_current(
-    conn: &(impl QueryExecutor + ?Sized),
-) -> Option<bool> {
+pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
     let mut rows = conn
         .query(
             "SELECT type, name, tbl_name, COALESCE(sql, '')
@@ -451,10 +449,7 @@ pub async fn set_gc_meta(
     Ok(())
 }
 
-pub async fn clear_gc_meta(
-    conn: &(impl Executor + ?Sized),
-    key: &str,
-) -> Result<(), LcmError> {
+pub async fn clear_gc_meta(conn: &(impl Executor + ?Sized), key: &str) -> Result<(), LcmError> {
     conn.execute("DELETE FROM lcm_gc_meta WHERE key = ?1", params![key])
         .await?;
     Ok(())

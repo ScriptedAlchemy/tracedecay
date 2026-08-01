@@ -32,16 +32,16 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_store::StoreShardScopeV1;
 
-use tracedecay_runtime_core::db::engine::{
-    Error as EngineError, Executor, QueryExecutor, Result as EngineResult, params,
-};
-use crate::runtime::store_port::{SessionStoreAuthority, SessionWriteTxn};
 use crate::runtime::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::runtime::cursor::TimestampCarry;
 use crate::runtime::shared::usage_counters_from;
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, StoredCursor,
     TranscriptIngestResult, TranscriptSource,
+};
+use crate::runtime::store_port::{SessionStoreAuthority, SessionWriteTxn};
+use tracedecay_runtime_core::db::engine::{
+    Error as EngineError, Executor, QueryExecutor, Result as EngineResult, params,
 };
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
@@ -1205,9 +1205,7 @@ pub async fn write_structured_backfill_cursor_for_test<A: SessionStoreAuthority>
 
 /// Test-only accessor: reads the Codex structured-backfill watermark for `db`.
 #[doc(hidden)]
-pub async fn read_structured_backfill_cursor_for_test<A: SessionStoreAuthority>(
-    db: &A,
-) -> String {
+pub async fn read_structured_backfill_cursor_for_test<A: SessionStoreAuthority>(db: &A) -> String {
     let key = structured_cursor_key("codex", structured_backfill_target_version("codex"));
     let Ok(snapshot) = db.read_snapshot().await else {
         return String::new();
@@ -1320,8 +1318,9 @@ mod tests {
     #[tokio::test]
     async fn dogfood_recovery_transcript_fact_failure_rolls_back_entire_batch() {
         let directory = tempfile::tempdir().unwrap();
-        let connection =
-            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("sessions.db"),
+        );
         let transaction = connection.transaction().await.unwrap();
         transaction
             .execute_batch(

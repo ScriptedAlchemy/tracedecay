@@ -15,8 +15,8 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
-use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
 use crate::runtime::shared::TranscriptIngestStats;
+use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,
@@ -25,7 +25,7 @@ use super::observation::{
 use super::rows::HermesRow;
 use super::{MAX_HERMES_PROJECTIONS_PER_DRAIN, PROVIDER};
 
-pub fn sqlite_incarnation(
+pub(super) fn sqlite_incarnation(
     path: &Path,
 ) -> Result<(ObservationSourceGenerationV1, u64, u64), String> {
     let file_identity = sqlite_generation_identity(path).map_err(|error| {
@@ -93,7 +93,7 @@ fn host_admission_error(outcome: HostAdmissionOutcome) -> String {
     crate::runtime::snapshot_observation::host_admission_status_message("Hermes", outcome.status)
 }
 
-pub async fn drain_hermes_projections_with_admission(
+pub(super) async fn drain_hermes_projections_with_admission(
     facade: &dyn HostAdmission,
     scope: &ObservationScopeV1,
 ) -> Result<(), String> {
@@ -105,7 +105,7 @@ pub async fn drain_hermes_projections_with_admission(
     .await
 }
 
-pub async fn drain_hermes_projections_with_admission_and_cancellation(
+pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
     facade: &dyn HostAdmission,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -133,7 +133,7 @@ pub async fn drain_hermes_projections_with_admission_and_cancellation(
     }
 }
 
-pub async fn admit_rows_with_admission(
+pub(super) async fn admit_rows_with_admission(
     facade: &dyn HostAdmission,
     rows: &[HermesRow],
     scope: ObservationScopeV1,
@@ -156,7 +156,7 @@ pub async fn admit_rows_with_admission(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn admit_rows_with_admission_and_cancellation(
+pub(super) async fn admit_rows_with_admission_and_cancellation(
     facade: &dyn HostAdmission,
     rows: &[HermesRow],
     scope: ObservationScopeV1,

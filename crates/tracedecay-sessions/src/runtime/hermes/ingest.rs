@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project_root;
 use crate::admission::HostAdmission;
+use crate::host_ports::hermes_profile_pin::resolve as read_config_pinned_project_root;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{TranscriptIngestStats, path_belongs_to_project};
@@ -216,7 +216,7 @@ pub async fn ingest_homes_capped_with_admission(
     .await
 }
 
-pub async fn ingest_homes_capped_with_admission_and_cancellation(
+pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
@@ -441,7 +441,7 @@ pub async fn ingest_legacy_pinned_profile(
 /// profile is only a bounded candidate source and each session must carry a
 /// matching code-project cwd.
 ///
-pub struct HermesProfileSource {
+pub(super) struct HermesProfileSource {
     pub state_db: PathBuf,
     pub legacy_project_pin: Option<PathBuf>,
     pub profile: Option<String>,
@@ -481,7 +481,8 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
+    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root)
+        .is_some()
         || tracedecay_runtime_core::config::has_project_database(project_root);
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];

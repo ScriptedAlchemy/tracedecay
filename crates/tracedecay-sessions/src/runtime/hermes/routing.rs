@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::runtime::shared::{ProjectRootMatcher, path_belongs_to_project};
+use crate::runtime::shared::ProjectRootMatcher;
 
 use super::ingest::HermesProfileSource;
 use super::rows::HermesRow;
 
-pub fn user_turn_locations(
+pub(super) fn user_turn_locations(
     rows: &[HermesRow],
     source: &HermesProfileSource,
 ) -> HashSet<i64> {
@@ -52,7 +52,7 @@ fn assign_user_turn(rows: &[&HermesRow], has_fallback: bool, locations: &mut Has
     locations.extend(rows.iter().map(|row| row.id));
 }
 
-pub fn turn_project_locations(
+pub(super) fn turn_project_locations(
     rows: &[HermesRow],
     project_root: &Path,
     source: &HermesProfileSource,
@@ -61,11 +61,12 @@ pub fn turn_project_locations(
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
+    let project_matcher = ProjectRootMatcher::new(project_root);
     let mut locations = HashMap::new();
     for session_rows in by_session.into_values() {
         let has_fallback = session_rows
             .iter()
-            .any(|row| session_is_candidate_for_project(row, project_root, source));
+            .any(|row| session_is_candidate_for_project(row, &project_matcher, source));
         let fallback_provenance = source
             .legacy_project_pin
             .as_ref()
@@ -75,7 +76,7 @@ pub fn turn_project_locations(
             if row.role == "user" && !turn.is_empty() {
                 assign_turn_location(
                     &turn,
-                    project_root,
+                    &project_matcher,
                     has_fallback,
                     fallback_provenance,
                     &mut locations,
@@ -86,7 +87,7 @@ pub fn turn_project_locations(
         }
         assign_turn_location(
             &turn,
-            project_root,
+            &project_matcher,
             has_fallback,
             fallback_provenance,
             &mut locations,
@@ -95,11 +96,11 @@ pub fn turn_project_locations(
     locations
 }
 
-pub struct DestinationTurnLocations {
+pub(super) struct DestinationTurnLocations {
     pub by_row_id: HashMap<i64, &'static str>,
 }
 
-pub fn turn_project_locations_for_destinations(
+pub(super) fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
     source: &HermesProfileSource,
@@ -225,7 +226,7 @@ fn matching_destinations(
 
 fn assign_turn_location(
     rows: &[&HermesRow],
-    project_root: &Path,
+    project_matcher: &ProjectRootMatcher,
     has_fallback: bool,
     fallback_provenance: &'static str,
     locations: &mut HashMap<i64, &'static str>,
@@ -238,7 +239,7 @@ fn assign_turn_location(
     let explicit = !explicit_paths.is_empty()
         && explicit_paths
             .iter()
-            .any(|path| path_belongs_to_project(path, project_root));
+            .any(|path| project_matcher.contains(path));
     if explicit || (explicit_paths.is_empty() && has_fallback) {
         let provenance = if explicit {
             "tool_project_path"
@@ -293,12 +294,12 @@ fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
 
 fn session_is_candidate_for_project(
     row: &HermesRow,
-    project_root: &Path,
+    project_matcher: &ProjectRootMatcher,
     source: &HermesProfileSource,
 ) -> bool {
     source.legacy_project_pin.is_some()
         || row.session_cwd.as_deref().is_some_and(|cwd| {
             let cwd = Path::new(cwd.trim());
-            cwd.is_absolute() && path_belongs_to_project(cwd, project_root)
+            cwd.is_absolute() && project_matcher.contains(cwd)
         })
 }
