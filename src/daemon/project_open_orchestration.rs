@@ -123,6 +123,9 @@ pub(super) async fn ensure_registered_project_route(
         let project_path = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
+        if durable_enrollment_resolves_existing_store(store_administration, &project_path) {
+            return Ok(());
+        }
         let is_project_root = crate::worktree::git_worktree_root(&project_path)
             .is_none_or(|git_root| git_root == project_path);
         let owns_repository_identity =
@@ -133,6 +136,46 @@ pub(super) async fn ensure_registered_project_route(
         return Err(unenrolled_project_route_error(&project_path));
     }
     Ok(())
+}
+
+/// Whether this route's durable on-disk enrollment already resolves a real
+/// profile store, so admitting it mounts recovered data rather than
+/// manufacturing a new identity.
+///
+/// The profile registry is a *derived* index: the authoritative identity chain
+/// in [`crate::tracedecay::TraceDecay::resolve_registered_configuration_layout`]
+/// consults the project's own enrollment marker (and the repository-identity
+/// marker) BEFORE it ever asks the registry, and a successful open republishes
+/// the registry rows via `register_project_store_in_global_registry`. A guard
+/// that admits strictly less than the resolver behind it therefore refuses
+/// projects whose data is entirely intact.
+///
+/// That is exactly what strands a profile parked at a forward-only migration
+/// boundary: forward recovery can bring the daemon up on a fresh registry while
+/// every project keeps its in-repo enrollment marker and its profile store, and
+/// the first daemon-brokered call — including the post-update startup-health
+/// probe, which cannot pass `allow_init` — was rejected as "not enrolled". The
+/// existing store is required to be present on disk, so an ambient directory
+/// (a bare `$HOME`, a checkout whose store really is gone) is still rejected
+/// and no path-derived authority is minted here.
+fn durable_enrollment_resolves_existing_store(
+    store_administration: &StoreAdministration,
+    project_path: &Path,
+) -> bool {
+    let Ok(identity) = store_administration.profile_identity() else {
+        return false;
+    };
+    let Ok(Some(layout)) =
+        crate::storage::resolve_persisted_layout(project_path, identity.profile_root())
+    else {
+        return false;
+    };
+    layout.graph_db_path.is_file()
+        || layout.sessions_db_path.is_file()
+        || layout
+            .manifest_path
+            .as_deref()
+            .is_some_and(std::path::Path::is_file)
 }
 
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
