@@ -11,7 +11,7 @@ use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
 
-pub(crate) struct SourceReadRequest<'a> {
+pub struct SourceReadRequest<'a> {
     pub file: &'a str,
     pub mode: ReadMode,
     pub line_range: Option<LineRange>,
@@ -20,8 +20,9 @@ pub(crate) struct SourceReadRequest<'a> {
     pub project_id: &'a str,
 }
 
-pub(crate) struct SourceReadOutput {
+pub struct SourceReadOutput {
     pub file: String,
+    pub mode: ReadMode,
     pub mtime_ns: i64,
     pub digest: String,
     pub token_count: u32,
@@ -30,7 +31,7 @@ pub(crate) struct SourceReadOutput {
     pub context: Option<Value>,
 }
 
-pub(crate) async fn read_source(
+pub async fn read_source(
     graph: &TraceDecay,
     request: SourceReadRequest<'_>,
 ) -> Result<SourceReadOutput> {
@@ -77,6 +78,7 @@ pub(crate) async fn read_source(
             context: source_symbol_context(graph, &display_file, mode, line_range, include_symbols)
                 .await?,
             file: display_file,
+            mode,
             mtime_ns: cached.mtime_ns,
             digest: cached.digest,
             token_count: cached.token_count,
@@ -137,6 +139,7 @@ pub(crate) async fn read_source(
     }
     Ok(SourceReadOutput {
         file: display_file,
+        mode,
         mtime_ns,
         digest,
         token_count,
@@ -146,7 +149,7 @@ pub(crate) async fn read_source(
     })
 }
 
-pub(crate) async fn resolve_indexed_source_file(
+pub async fn resolve_indexed_source_file(
     graph: &TraceDecay,
     file: &str,
 ) -> Result<(PathBuf, String)> {
