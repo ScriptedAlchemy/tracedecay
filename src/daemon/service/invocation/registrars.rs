@@ -41,7 +41,7 @@ impl DaemonConfigurationGrantAuthority {
     }
 
     #[cfg(test)]
-    fn for_test(
+    pub(super) fn for_test(
         layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,
         expires_at: UtcMicros,
     ) -> Self {
