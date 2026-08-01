@@ -1,4 +1,5 @@
 use tempfile::TempDir;
+#[cfg(not(windows))]
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::SessionProvider;
@@ -8,8 +9,10 @@ use tracedecay::sessions::source::{StoredCursor, TranscriptIngestError, Transcri
 use tracedecay_store::ObservationProjectionStore;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
+#[cfg(not(windows))]
+use crate::restart_atomicity::durable_table_count;
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
+    ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks,
     ingest_global_sources_for_provider, mark_test_project, observation_source_cursor,
     open_project_session_db, set_projection_failure, try_ingest_source,
 };
