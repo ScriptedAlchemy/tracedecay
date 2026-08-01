@@ -1229,7 +1229,7 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
+        self.touch_branch_meta_synced(live_branch);
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
