@@ -407,6 +407,65 @@ pub(super) async fn dispatch_retained_application_tools(
     .await
 }
 
+/// Dispatch a retained memory operation (add/search/feedback/status) under one
+/// central deadline.
+///
+/// Mirrors [`dispatch_git_tools`]: every memory handler performs unbounded
+/// store-touching work — the add-path holographic encode, a serialized write
+/// transaction, an optional digest refresh — so an admission-carried client
+/// deadline bounds them all uniformly here, degrading a stalled store to a
+/// typed, retryable problem instead of pinning the MCP transport open. A
+/// standalone caller that carries no deadline stays unbounded; a carried
+/// deadline that has already elapsed is rejected rather than dispatched.
+pub(super) async fn dispatch_memory_operation(
+    operation: RetainedSurfaceOperation,
+    cg: &TraceDecay,
+    args: Value,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    let global_db = options.global_db.map(std::sync::Arc::as_ref);
+    let operation_label = match operation {
+        RetainedSurfaceOperation::FactStore => "fact_store",
+        RetainedSurfaceOperation::FactFeedback => "fact_feedback",
+        RetainedSurfaceOperation::MemoryStatus => "memory_status",
+        _ => unreachable!("dispatch_memory_operation handles memory operations only"),
+    };
+
+    let handler = async {
+        match operation {
+            RetainedSurfaceOperation::FactStore => {
+                memory::handle_fact_store(cg, args, global_db).await
+            }
+            RetainedSurfaceOperation::FactFeedback => {
+                memory::handle_fact_feedback(cg, args, global_db).await
+            }
+            RetainedSurfaceOperation::MemoryStatus => {
+                memory::handle_memory_status(cg, args, global_db).await
+            }
+            _ => unreachable!("dispatch_memory_operation handles memory operations only"),
+        }
+    };
+
+    let carried_deadline = options.application_deadline.as_ref();
+    let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
+    match (carried_deadline.is_some(), remaining) {
+        (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(memory::memory_deadline_error(operation_label, remaining)),
+        },
+        // `deadline_remaining` yields `None` for a non-positive budget, so a
+        // carried deadline that already elapsed must be rejected rather than
+        // dispatched unbounded.
+        (true, None) => Err(memory::memory_deadline_error(
+            operation_label,
+            std::time::Duration::ZERO,
+        )),
+        // Standalone / non-admission callers carry no deadline and stay
+        // unbounded.
+        (false, None) => handler.await,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_project_retained_application_tool(
     request: CatalogBoundRetainedMcpRequest,
@@ -417,29 +476,10 @@ pub(super) async fn execute_project_retained_application_tool(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match request.operation {
-        RetainedSurfaceOperation::FactStore => {
-            memory::handle_fact_store(
-                cg,
-                request.arguments,
-                options.global_db.map(std::sync::Arc::as_ref),
-            )
-            .await
-        }
-        RetainedSurfaceOperation::FactFeedback => {
-            memory::handle_fact_feedback(
-                cg,
-                request.arguments,
-                options.global_db.map(std::sync::Arc::as_ref),
-            )
-            .await
-        }
-        RetainedSurfaceOperation::MemoryStatus => {
-            memory::handle_memory_status(
-                cg,
-                request.arguments,
-                options.global_db.map(std::sync::Arc::as_ref),
-            )
-            .await
+        RetainedSurfaceOperation::FactStore
+        | RetainedSurfaceOperation::FactFeedback
+        | RetainedSurfaceOperation::MemoryStatus => {
+            dispatch_memory_operation(request.operation, cg, request.arguments, options).await
         }
         RetainedSurfaceOperation::SessionRefresh => {
             session::handle_session_refresh(
