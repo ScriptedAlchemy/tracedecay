@@ -2079,6 +2079,52 @@ fn drifted_host_component_warns_and_keeps_a_clean_exit() {
     .unwrap();
 }
 
+/// A host that activates only through its own UI leaves its staged components
+/// unmaterialised until the operator clicks through. No unattended command can
+/// converge that, so Doctor must report it as a pending user action and keep a
+/// clean exit — otherwise every such machine fails the strict gate forever.
+#[test]
+fn activation_deferred_host_component_warns_without_blocking() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let mut counters = DoctorCounters::new();
+    let component = host_component_result(
+        State::ActivationDeferred,
+        &[(".codex/plugins/tracedecay/.mcp.json", State::Missing)],
+    );
+
+    super::report_host_component_state(&mut counters, &component);
+
+    assert_eq!(
+        counters.issues, 0,
+        "a pending interactive activation must not fail the doctor run"
+    );
+    assert_eq!(counters.warnings, 1);
+    super::doctor_result(
+        &counters,
+        Ok(serde_json::json!({})),
+        &super::DatabaseHealth::Healthy,
+    )
+    .unwrap();
+}
+
+/// The same absent artifact under the blocking classification still fails, so
+/// the deferral above is a classification change, not a weaker doctor.
+#[test]
+fn missing_host_component_artifacts_still_fail_the_doctor_run() {
+    use crate::agents::host_bundle_v2::HostBundleComponentDoctorStateV1 as State;
+
+    let mut counters = DoctorCounters::new();
+    let component = host_component_result(
+        State::Missing,
+        &[(".codex/plugins/tracedecay/.mcp.json", State::Missing)],
+    );
+
+    super::report_host_component_state(&mut counters, &component);
+
+    assert_eq!(counters.issues, 1);
+}
+
 /// A contested path is not repairable without an operator decision, so it
 /// keeps failing — the distinction the `Drifted` state exists to preserve.
 #[test]

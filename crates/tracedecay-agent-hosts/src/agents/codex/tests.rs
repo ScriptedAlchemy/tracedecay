@@ -773,3 +773,34 @@ fn codex_skill_cross_references_resolve_to_shipped_skills() {
         "Codex skill bodies reference skills absent from the bundle: {dangling:?}"
     );
 }
+
+/// Doctor downgrades a never-activated Codex component from a blocking
+/// `Missing` to a pending user action purely on the strength of
+/// `interactive_activation_guidance`. That downgrade is only honest while the
+/// same adapter also refuses a non-interactive install, so the two must agree:
+/// a Codex whose preflight reported `Ready` would have a reinstall that really
+/// could converge the state, and doctor must keep failing for it.
+#[test]
+fn codex_activation_guidance_matches_its_non_interactive_deferral() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = InstallContext {
+        home: home.path().to_path_buf(),
+        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tool_permissions: Vec::new(),
+        project_root: None,
+        dashboard: false,
+    };
+
+    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = CodexIntegration
+        .preflight_non_interactive_install(&ctx)
+        .unwrap()
+    else {
+        panic!("Codex has no supported non-interactive activation surface");
+    };
+
+    assert_eq!(
+        CodexIntegration.interactive_activation_guidance(),
+        Some(deferred.remediation),
+        "the doctor-side capability probe must speak the adapter's own deferral"
+    );
+}

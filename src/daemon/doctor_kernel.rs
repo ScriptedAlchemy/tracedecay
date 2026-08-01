@@ -394,15 +394,17 @@ fn host_integration_read_from_report(
     }) {
         HostConformanceV1::ProtocolDrift
     } else if report.components.iter().any(|component| {
-        // `Drifted` and `OrphanedRegistration` are repairable conformance, not
-        // protocol drift: the component's ownership is intact and the ordinary
-        // reinstall converges it, so neither may escalate to `ProtocolDrift`.
+        // `Drifted`, `OrphanedRegistration`, and `ActivationDeferred` are
+        // repairable conformance, not protocol drift: the component's ownership
+        // is intact and either the ordinary reinstall or the host's own
+        // activation converges it, so none may escalate to `ProtocolDrift`.
         matches!(
             component.state,
             HostBundleComponentDoctorStateV1::Repairable
                 | HostBundleComponentDoctorStateV1::Missing
                 | HostBundleComponentDoctorStateV1::Drifted
                 | HostBundleComponentDoctorStateV1::OrphanedRegistration
+                | HostBundleComponentDoctorStateV1::ActivationDeferred
         )
     }) {
         HostConformanceV1::Drifted
