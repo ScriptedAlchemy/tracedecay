@@ -9,12 +9,12 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::http_detail;
-use crate::automation::managed_skills::list_managed_skills;
-use crate::automation::outcomes::{
+use tracedecay_agent_hosts::automation::managed_skills::list_managed_skills;
+use tracedecay_agent_hosts::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
     load_outcomes_snapshot,
 };
-use crate::automation::skill_usage::summarize_skill_usage;
+use tracedecay_agent_hosts::automation::skill_usage::summarize_skill_usage;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 

@@ -19,7 +19,7 @@ use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
-use crate::global_db::{
+use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
 use tracedecay_runtime_core::db::engine::params;
@@ -246,12 +246,12 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
 }
 
 fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    crate::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
+    tracedecay_agent_hosts::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
         let metadata: Value = serde_json::from_str(metadata_json).ok()?;
         ["agent_nickname", "agent_role"]
             .into_iter()
             .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-            .find_map(crate::automation::agent_targets::managed_agent_label)
+            .find_map(tracedecay_agent_hosts::automation::agent_targets::managed_agent_label)
     })
 }
 

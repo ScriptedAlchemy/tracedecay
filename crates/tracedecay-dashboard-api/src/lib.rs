@@ -107,14 +107,14 @@ use crate::application_surface::{
     dashboard_feedback_application_router_with_executor,
     dashboard_work_application_router_with_executor, http_application_router_with_executor,
 };
-use crate::automation::backend;
-use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
 use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
-use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_agent_hosts::automation::backend;
+use tracedecay_agent_hosts::automation::config::{self, AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::StorageMode;
@@ -465,7 +465,7 @@ async fn build_state_inner(
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
-        .or_else(|| crate::global_db::global_db_path().map(|path| path.display().to_string()))
+        .or_else(|| tracedecay_global_db::global_db_path().map(|path| path.display().to_string()))
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),

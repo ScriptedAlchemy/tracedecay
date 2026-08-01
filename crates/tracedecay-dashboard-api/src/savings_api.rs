@@ -54,7 +54,7 @@ use super::util::{
 };
 use super::{DashboardState, savings_pricing, token_count};
 use crate::accounting::metrics::parse_range;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{Value as DbValue, params, params_from_iter};
 
 /// Aggregate SELECT list shared by the per-session and per-model rollups.
@@ -391,7 +391,7 @@ fn tokenizer_block(model: &str) -> Value {
 /// a long-running MCP server predates ledger recording), the UI can explain
 /// an empty ledger instead of just saying "no events yet".
 fn recording_block() -> Value {
-    let mode = crate::global_db::global_accounting_mode();
+    let mode = tracedecay_global_db::global_accounting_mode();
     json!({
         "enabled": mode.enabled(),
         "mode": mode.as_str(),
@@ -606,7 +606,7 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         }
     };
 
-    let sum_json = |total: &crate::global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
+    let sum_json = |total: &tracedecay_global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
         "available": true,
         "db": db_path,
