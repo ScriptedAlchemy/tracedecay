@@ -3,15 +3,6 @@
 
 use super::*;
 
-fn unavailable_feedback_cycle(
-    observations: Arc<RecordingFeedbackCycleObservations>,
-) -> UnavailableFeedbackCycleRuntimeV1 {
-    UnavailableFeedbackCycleRuntimeV1::new(
-        ProjectId::new("project.feedback-cycle-unavailable").expect("project"),
-        observations,
-    )
-}
-
 #[tokio::test]
 async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtime() {
     let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));

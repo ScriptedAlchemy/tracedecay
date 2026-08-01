@@ -99,6 +99,15 @@ impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
     }
 }
 
+fn unavailable_feedback_cycle(
+    observations: Arc<RecordingFeedbackCycleObservations>,
+) -> UnavailableFeedbackCycleRuntimeV1 {
+    UnavailableFeedbackCycleRuntimeV1::new(
+        ProjectId::new("project.feedback-cycle-unavailable").expect("project"),
+        observations,
+    )
+}
+
 fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,

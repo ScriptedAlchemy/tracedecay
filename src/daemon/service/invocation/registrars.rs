@@ -330,7 +330,7 @@ impl DaemonFeedbackPublicationTestGate {
 pub(crate) struct DaemonFeedbackRuntimeRegistrar {
     service: DaemonInvocationService,
     #[cfg(test)]
-    producer_constructions: Arc<AtomicUsize>,
+    pub(super) producer_constructions: Arc<AtomicUsize>,
     #[cfg(test)]
     publication_gate: Option<Arc<DaemonFeedbackPublicationTestGate>>,
 }
@@ -347,7 +347,10 @@ impl DaemonFeedbackRuntimeRegistrar {
     }
 
     #[cfg(test)]
-    fn with_publication_gate(mut self, gate: Arc<DaemonFeedbackPublicationTestGate>) -> Self {
+    pub(super) fn with_publication_gate(
+        mut self,
+        gate: Arc<DaemonFeedbackPublicationTestGate>,
+    ) -> Self {
         self.publication_gate = Some(gate);
         self
     }
