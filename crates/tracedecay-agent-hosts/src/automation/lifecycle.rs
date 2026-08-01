@@ -683,31 +683,21 @@ mod tests {
 
     struct TestSessionsDb {
         db: Arc<RegisteredGlobalDb>,
-        _scope: crate::db::DaemonDatabaseScope,
-        _registry: crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        _runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
     }
 
     async fn test_sessions_db(root: &Path) -> TestSessionsDb {
         let nonce = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
         let profile_root = root.join(format!("profile-{nonce}"));
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let scope = crate::db::enter_daemon_database_scope(&profile_root, nonce, "automation")
-            .expect("daemon database scope");
-        let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("session runtime registry");
-        let db = registry
-            .profile_sessions()
-            .await
-            .expect("registered profile sessions");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            &profile_root,
+        )
+        .await
+        .expect("registered profile test runtime");
+        let db = runtime.profile_database_arc();
         TestSessionsDb {
             db,
-            _scope: scope,
-            _registry: registry,
+            _runtime: runtime,
         }
     }
 

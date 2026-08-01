@@ -597,6 +597,20 @@ fn project_automation_identity(
     ))
 }
 
+async fn registered_automation_retrieval_for_identity(
+    database: Arc<RegisteredGlobalDb>,
+    identity: ResolvedSessionIdentity,
+) -> Box<dyn AutomationSessionRetrieval> {
+    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
+        return unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
+    };
+    Box::new(ProductionAutomationSessionRetrieval {
+        database,
+        identity,
+        anchor_session_id,
+    })
+}
+
 #[cfg(test)]
 fn profile_automation_identity(
     shard: &StoreShardIdV1,
@@ -611,39 +625,6 @@ fn profile_automation_identity(
         ))
         .ok()?,
     ))
-}
-
-#[cfg(test)]
-pub(crate) async fn registered_profile_automation_retrieval(
-    database: Arc<RegisteredGlobalDb>,
-    profile_identity: &dyn ProfileIdentity,
-) -> Result<Box<dyn AutomationSessionRetrieval>> {
-    let shard = &database.binding().shard_id;
-    if !registered_scope_matches(
-        shard,
-        profile_identity.brain_id(),
-        profile_identity.profile_id(),
-        None,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: "registered profile session runtime authority mismatch".to_string(),
-        });
-    }
-    let Some(identity) = profile_automation_identity(shard, profile_identity) else {
-        return Err(TraceDecayError::Config {
-            message: "invalid registered profile session retrieval identity".to_string(),
-        });
-    };
-    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
-        return Ok(unavailable_automation_retrieval(
-            "session_evidence_retrieval_unavailable",
-        ));
-    };
-    Ok(Box::new(ProductionAutomationSessionRetrieval {
-        database,
-        identity,
-        anchor_session_id,
-    }))
 }
 
 pub async fn registered_project_automation_retrieval(
@@ -667,16 +648,7 @@ pub async fn registered_project_automation_retrieval(
             message: "invalid registered project session retrieval identity".to_string(),
         });
     };
-    let Some(anchor_session_id) = active_registered_automation_anchor(&database).await else {
-        return Ok(unavailable_automation_retrieval(
-            "session_evidence_retrieval_unavailable",
-        ));
-    };
-    Ok(Box::new(ProductionAutomationSessionRetrieval {
-        database,
-        identity,
-        anchor_session_id,
-    }))
+    Ok(registered_automation_retrieval_for_identity(database, identity).await)
 }
 
 pub(super) async fn production_project_automation_retrieval(
@@ -705,11 +677,34 @@ pub(super) async fn production_user_automation_retrieval(
 mod authority_tests {
     use tempfile::tempdir;
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
     use tracedecay_store::StoreShardIdV1;
 
     use super::*;
-    use crate::daemon::profile_identity::load_or_create;
-    use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+
+    struct FixtureProfileIdentity {
+        brain_id: BrainId,
+        profile_id: UserProfileId,
+    }
+
+    impl FixtureProfileIdentity {
+        fn new(brain_id: BrainId, profile_id: UserProfileId) -> Self {
+            Self {
+                brain_id,
+                profile_id,
+            }
+        }
+    }
+
+    impl ProfileIdentity for FixtureProfileIdentity {
+        fn brain_id(&self) -> &BrainId {
+            &self.brain_id
+        }
+
+        fn profile_id(&self) -> &UserProfileId {
+            &self.profile_id
+        }
+    }
 
     #[test]
     fn registered_automation_scope_rejects_profile_and_project_mismatches() {
@@ -802,20 +797,21 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn project_retrieval_rejects_profile_scope_without_fallback() {
+    async fn project_retrieval_rejects_non_project_scope_without_fallback() {
         let directory = tempdir().expect("temporary profile");
-        let identity = load_or_create(directory.path()).expect("profile identity");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path())
             .await
-            .expect("session registry");
-        let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
+            .expect("registered test runtime");
+        let database = runtime.profile_database_arc();
+        let shard = &database.binding().shard_id;
+        let identity =
+            FixtureProfileIdentity::new(shard.brain_id.clone(), shard.profile_id.clone());
         let project_id = ProjectId::new("project.automation.wrong-scope").expect("project id");
 
-        let error =
-            registered_project_automation_retrieval(profile_sessions, &identity, &project_id)
-                .await
-                .err()
-                .expect("profile authority must not become project retrieval");
+        let error = registered_project_automation_retrieval(database, &identity, &project_id)
+            .await
+            .err()
+            .expect("non-project authority must not become project retrieval");
 
         assert!(
             error
@@ -859,34 +855,33 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn registered_profile_and_project_keep_typed_unavailable_without_active_anchor() {
+    async fn registered_identities_keep_typed_unavailable_without_active_anchor() {
         let directory = tempdir().expect("temporary profile");
-        let identity = load_or_create(directory.path()).expect("profile identity");
-        let registry = std::sync::Arc::new(
-            DaemonSessionRuntimeRegistryV1::open(identity.clone())
-                .await
-                .expect("session registry"),
-        );
-
-        let profile_sessions = registry.profile_sessions().await.expect("profile sessions");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(directory.path())
+            .await
+            .expect("registered test runtime");
+        let database = runtime.profile_database_arc();
+        let brain_id = BrainId::new("brain.automation.parity").expect("brain id");
+        let profile_id = UserProfileId::new("profile.automation.parity").expect("profile id");
+        let identity = FixtureProfileIdentity::new(brain_id.clone(), profile_id.clone());
+        let profile_shard = StoreShardIdV1::profile_sessions(brain_id.clone(), profile_id.clone());
+        let profile_identity =
+            profile_automation_identity(&profile_shard, &identity).expect("profile identity");
         let profile_retrieval =
-            registered_profile_automation_retrieval(profile_sessions, &identity)
-                .await
-                .expect("profile retrieval");
+            registered_automation_retrieval_for_identity(Arc::clone(&database), profile_identity)
+                .await;
         assert_eq!(
             typed_reject_reason(profile_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"
         );
 
         let project_id = ProjectId::new("project.automation.parity").expect("project id");
-        let project_sessions = registry
-            .project_sessions(project_id.clone(), [directory.path().join("project")])
-            .await
-            .expect("project sessions");
+        let project_shard =
+            StoreShardIdV1::project_sessions(brain_id, profile_id, project_id.clone());
+        let project_identity = project_automation_identity(&project_shard, &identity, &project_id)
+            .expect("project identity");
         let project_retrieval =
-            registered_project_automation_retrieval(project_sessions, &identity, &project_id)
-                .await
-                .expect("project retrieval");
+            registered_automation_retrieval_for_identity(database, project_identity).await;
         assert_eq!(
             typed_reject_reason(project_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"

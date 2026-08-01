@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::{FactOwnerV1, SessionId, TemporalCoverageCountsV1};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 use super::*;
 use crate::application::memory::{MemoryApplication, MemoryOperationContext};
@@ -15,48 +17,253 @@ use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
     effective_user_automation_config,
 };
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::{DaemonDatabaseScope, Database};
-use crate::memory::types::{AddFactRequest, MemoryCategory};
-use crate::memory::user::open_user_memory_db;
+use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use crate::memory::types::{AddFactRequest, MemoryCategory, MemoryGroomingOperation};
+use crate::ports::project_runtime::{MemoryCurateOptions, ProfileRuntime, RuntimeFuture};
 use crate::store::memory::DatabaseFactStore;
 
-static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+struct FixtureProfileRuntime {
+    sessions: Arc<RegisteredGlobalDb>,
+    memory: Database,
+}
+
+impl ProfileRuntime for FixtureProfileRuntime {
+    fn profile_sessions(&self) -> RuntimeFuture<'_, Arc<RegisteredGlobalDb>> {
+        Box::pin(async { Ok(Arc::clone(&self.sessions)) })
+    }
+
+    fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
+        Box::pin(async { Ok(self.memory.clone()) })
+    }
+
+    fn curate_user_memory<'a>(
+        &'a self,
+        _profile_root: &'a std::path::Path,
+        _automation_root: &'a std::path::Path,
+        options: &'a MemoryCurateOptions,
+    ) -> RuntimeFuture<'a, Value> {
+        Box::pin(fixture_user_memory_curate(&self.memory, options))
+    }
+}
 
 struct UserRuntimeHarness {
     profile_root: PathBuf,
-    registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    _scope: DaemonDatabaseScope,
+    registry: Arc<dyn ProfileRuntime>,
+    _session_runtime: RegisteredGlobalDbTestRuntime,
     _directory: TempDir,
 }
 
 impl UserRuntimeHarness {
-    async fn open(label: &str) -> Self {
+    async fn open(_label: &str) -> Self {
         let directory = tempfile::tempdir().expect("user automation profile");
         let profile_root = directory.path().join("profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
-        let scope = crate::db::enter_daemon_database_scope(&profile_root, nonce, label)
-            .expect("daemon database scope");
-        let registry = Arc::new(
-            DaemonSessionRuntimeRegistryV1::open(identity)
-                .await
-                .expect("session runtime registry"),
-        );
+        let session_runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
+            .await
+            .expect("registered profile session runtime");
+        let memory_path = crate::memory::user::user_memory_db_path(&profile_root);
+        let authority =
+            DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
+                .expect("profile memory authority");
+        let (memory, _) = Database::publish_test_runtime(
+            &memory_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("registered profile memory");
+        let registry: Arc<dyn ProfileRuntime> = Arc::new(FixtureProfileRuntime {
+            sessions: session_runtime.profile_database_arc(),
+            memory,
+        });
         Self {
             profile_root,
             registry,
-            _scope: scope,
+            _session_runtime: session_runtime,
             _directory: directory,
         }
     }
 
     async fn memory(&self) -> Database {
-        open_user_memory_db(self.registry.as_ref())
+        self.registry
+            .open_user_memory_db()
             .await
             .expect("profile memory")
     }
+}
+
+async fn fixture_user_memory_curate(
+    database: &Database,
+    options: &MemoryCurateOptions,
+) -> crate::errors::Result<Value> {
+    let owner = FactOwnerV1::Profile;
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database)).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("initialize profile memory fixture: {error}"),
+        },
+    )?;
+    if options.llm {
+        let facts = memory
+            .list_facts_untracked_v1(None, None, 100)
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("read profile memory fixture: {error}"),
+            })?;
+        let allowed_fact_ids = facts.iter().map(|fact| fact.fact_id).collect::<Vec<_>>();
+        return Ok(json!({
+            "llm_review": {
+                "status": if facts.len() >= 2 {
+                    "needs_llm_review"
+                } else {
+                    "up_to_date"
+                },
+                "clusters_reviewed": usize::from(facts.len() >= 2),
+                "allowed_fact_ids": allowed_fact_ids,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Return strict JSON memory curation operations."
+                    },
+                    {
+                        "role": "user",
+                        "content": "Review the bounded profile memory fixture."
+                    }
+                ]
+            }
+        }));
+    }
+
+    let raw_ops = options
+        .llm_ops
+        .as_ref()
+        .and_then(|value| value.get("ops"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for operation in raw_ops {
+        let kind = operation.get("op").and_then(Value::as_str);
+        let confidence = operation
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if kind == Some("keep") {
+            continue;
+        }
+        let valid = confidence >= options.min_confidence
+            && match kind {
+                Some("delete") => operation.get("fact_id").and_then(Value::as_i64).is_some(),
+                Some("merge") => {
+                    operation.get("winner_id").and_then(Value::as_i64).is_some()
+                        && operation
+                            .get("loser_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|losers| !losers.is_empty())
+                }
+                Some(
+                    "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
+                    | "repair_vector",
+                ) => serde_json::from_value::<MemoryGroomingOperation>(operation.clone()).is_ok(),
+                _ => false,
+            };
+        if valid {
+            accepted.push(operation);
+        } else {
+            rejected.push(json!({
+                "op": operation,
+                "rejected_reason": "invalid fixture curation operation"
+            }));
+        }
+    }
+
+    let mut applied = 0usize;
+    if options.apply {
+        let mut grooming = Vec::new();
+        for operation in &accepted {
+            let context = MemoryOperationContext::generated(
+                &owner,
+                "apply profile memory fixture curation",
+                None,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("create profile memory fixture operation: {error}"),
+            })?;
+            match operation.get("op").and_then(Value::as_str) {
+                Some("delete") => {
+                    let fact_id = operation
+                        .get("fact_id")
+                        .and_then(Value::as_i64)
+                        .expect("validated delete fixture");
+                    applied += usize::from(memory.remove_fact_v1(fact_id, context).await.map_err(
+                        |error| TraceDecayError::Config {
+                            message: format!("delete profile memory fixture fact: {error}"),
+                        },
+                    )?);
+                }
+                Some("merge") => {
+                    let winner_id = operation
+                        .get("winner_id")
+                        .and_then(Value::as_i64)
+                        .expect("validated merge winner");
+                    let loser_ids = operation
+                        .get("loser_ids")
+                        .and_then(Value::as_array)
+                        .expect("validated merge losers")
+                        .iter()
+                        .filter_map(Value::as_i64)
+                        .collect();
+                    let merged_content = operation
+                        .get("merged_content")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    memory
+                        .dashboard_merge_fact_ids_v1(winner_id, loser_ids, merged_content, context)
+                        .await
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!("merge profile memory fixture facts: {error}"),
+                        })?;
+                    applied += 1;
+                }
+                Some(
+                    "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
+                    | "repair_vector",
+                ) => grooming.push(
+                    serde_json::from_value(operation.clone())
+                        .expect("validated grooming fixture operation"),
+                ),
+                _ => {}
+            }
+        }
+        if !grooming.is_empty() {
+            let context = MemoryOperationContext::generated(
+                &owner,
+                "apply profile memory fixture grooming",
+                None,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("create profile grooming fixture operation: {error}"),
+            })?;
+            let report = memory
+                .dashboard_apply_grooming_v1(grooming, options.min_confidence, context)
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("groom profile memory fixture: {error}"),
+                })?;
+            applied += report.normalized_tags
+                + report.merged_entities
+                + report.aliases_added
+                + report.facts_linked
+                + report.vectors_repaired;
+        }
+    }
+
+    Ok(json!({
+        "llm_apply": {
+            "ops": accepted,
+            "rejected_ops": rejected,
+            "applied": applied
+        }
+    }))
 }
 
 struct JsonBackend {
