@@ -158,7 +158,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub(crate) fn dashboard_test_authority(
+    pub fn dashboard_test_authority(
         self: &Arc<Self>,
     ) -> Result<crate::dashboard::DashboardHostAdmissionTestAuthorityV1> {
         let project_sessions =
