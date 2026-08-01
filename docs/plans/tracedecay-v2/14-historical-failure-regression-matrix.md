@@ -217,7 +217,7 @@ acceptance, effect success, or an independent outcome.
   separate ephemeral expertise, provider/runtime authority, execution
   topology, review, outcomes, handoff, replanning, and Git integration retain
   explicit versions, consent, lifecycle, receipts, and no auto-apply.
-- **PR18:** every supported public operation has Rust, TypeScript, and Python
+- **PR18:** every supported public operation has Rust and TypeScript
   behavioral/lifecycle conformance, including paging, streams, cancellation,
   retry directives, reconnect/resume, cross-version behavior, and the
   diagnostic handoff-token journey.

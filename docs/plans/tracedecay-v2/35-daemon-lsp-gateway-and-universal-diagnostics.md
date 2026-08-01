@@ -359,7 +359,7 @@ review, CI, proximity, or evidence data.
   projection; it cannot retrieve task history, mutate work, admit execution,
   or apply integration.
 - **PR18:** Plan 17 owns two public token-consumption operations plus their
-  Rust/TypeScript/Python SDK and compatibility contracts; this plan owns only
+  Rust/TypeScript SDK and compatibility contracts; this plan owns only
   negotiated LSP production/projection of their actions. A
   feedback/diagnostic cue produces an opaque
   `open_investigation_handoff` token that opens Plan 09's owning investigation
@@ -385,7 +385,7 @@ review, CI, proximity, or evidence data.
   `workspace/applyEdit`.
 
   **PR18 direct acceptance.** Real negotiated clients produce both action/token
-  kinds and consume each through Rust, TypeScript, and Python against a local
+  kinds and consume each through Rust and TypeScript against a local
   daemon and a PR16-enrolled remote authority. The investigation token opens
   only the owning investigation surface and the task token only the owning task
   surface, with identical application semantics/error taxonomy across local
