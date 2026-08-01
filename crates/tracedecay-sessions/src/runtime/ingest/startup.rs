@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 

@@ -17,8 +17,8 @@ pub use crate::application::session::lcm::contracts::{
     LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview,
 };
 
-impl From<crate::db::engine::Error> for LcmError {
-    fn from(err: crate::db::engine::Error) -> Self {
+impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {
+    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }

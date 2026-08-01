@@ -4,7 +4,7 @@ use std::future::Future;
 use tracedecay_domain::HydrationStateV1;
 
 use crate::application::session::compatibility::projected_content_hash;
-use crate::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{

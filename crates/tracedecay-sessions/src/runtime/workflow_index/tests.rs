@@ -4,9 +4,9 @@ use crate::runtime::git_correlation::{
     record_span_observation_in_transaction,
 };
 
-fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+fn test_conn() -> (tempfile::TempDir, tracedecay_runtime_core::db::engine::TestConnection) {
     let directory = tempfile::tempdir().unwrap();
-    let connection = crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
     (directory, connection)
 }
 
@@ -17,11 +17,11 @@ impl QueryExecutor for FailingQueryExecutor {
         &self,
         _sql: &str,
         _params: P,
-    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
     where
-        P: crate::db::engine::IntoParams,
+        P: tracedecay_runtime_core::db::engine::IntoParams,
     {
-        Err(crate::db::engine::Error::Runtime(
+        Err(tracedecay_runtime_core::db::engine::Error::Runtime(
             "injected workflow read failure".to_string(),
         ))
     }
@@ -282,7 +282,7 @@ async fn runs_for_git_scope_joins_through_parent_session_spans() {
 async fn registered_snapshot_preserves_workflow_query_semantics() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.db");
-    let conn = crate::db::engine::TestConnection::open(&path);
+    let conn = tracedecay_runtime_core::db::engine::TestConnection::open(&path);
     ensure_workflow_index_schema(&conn).await.unwrap();
 
     let mut older = sample_run("wf_old", "sess-branch");

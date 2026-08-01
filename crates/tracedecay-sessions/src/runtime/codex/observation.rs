@@ -20,7 +20,7 @@ use super::context::CodexContextState;
 use super::meta::session_meta_with_provenance;
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
     admit_jsonl_observations,

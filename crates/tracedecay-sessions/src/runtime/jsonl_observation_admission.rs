@@ -12,7 +12,7 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::ParsedObservationRecordV1;
+use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::StoredCursor;
 use crate::runtime::source::{

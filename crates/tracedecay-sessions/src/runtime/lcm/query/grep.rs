@@ -605,7 +605,7 @@ struct RawGrepCandidate {
 }
 
 fn raw_hit_candidate_from_row(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     like_terms: &[String],
 ) -> Result<RawGrepCandidate, LcmError> {
     let snippet: String = row.get(4)?;
@@ -641,7 +641,7 @@ fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit>
 }
 
 fn summary_hit_from_row(
-    row: &crate::db::engine::Row,
+    row: &tracedecay_runtime_core::db::engine::Row,
     like_terms: &[String],
 ) -> Result<LcmGrepHit, LcmError> {
     let summary_text: String = row.get(3)?;

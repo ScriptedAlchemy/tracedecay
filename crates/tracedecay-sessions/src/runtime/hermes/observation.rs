@@ -14,7 +14,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::application::observation::{CaptureObservationRequest, ObservationCancellation};
-use crate::privacy::{
+use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,
     parse_normalized_observation_record_v1,
 };

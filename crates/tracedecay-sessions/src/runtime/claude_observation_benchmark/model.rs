@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::baseline::HookTelemetryReadiness;
 use crate::runtime::claude_observation::ClaudeObservationIngestStats;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::timeutil::nearest_rank;
+use tracedecay_runtime_core::timeutil::nearest_rank;
 
 pub(super) const PROVIDER_PARSE_SCOPE: &str = "native_provider_format_decode";
 pub(super) const PROVIDER_COMMIT_SCOPE: &str =

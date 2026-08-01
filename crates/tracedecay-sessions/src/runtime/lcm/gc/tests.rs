@@ -2,7 +2,7 @@ use std::fs;
 
 use serde_json::json;
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, Rows, TestConnection, TransactionBehavior,
 };
 use crate::runtime::lcm::schema;
@@ -18,7 +18,7 @@ const SECONDARY_REF: &str =
     "payload_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.payload";
 
 impl QueryExecutor for TestConnection {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -27,14 +27,14 @@ impl QueryExecutor for TestConnection {
 }
 
 impl Executor for TestConnection {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
         Connection::execute(self, sql, params).await
     }
 
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         Connection::execute_batch(self, sql).await
     }
 }

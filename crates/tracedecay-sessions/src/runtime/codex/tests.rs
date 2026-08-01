@@ -155,7 +155,7 @@ mod goal_event_tests {
         let other = temp.path().join("other");
         std::fs::create_dir_all(&project_src).unwrap();
         std::fs::create_dir_all(&other).unwrap();
-        let status = std::process::Command::new(crate::git::git_program())
+        let status = std::process::Command::new(tracedecay_runtime_core::git::git_program())
             .args(["init", "--quiet"])
             .current_dir(&project_root)
             .status()

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, git_correlation};
@@ -177,7 +177,7 @@ async fn ingest_project_sources_for_provider_inner(
     let scope = ObservationScopeV1::Project {
         project_id: canonical_project_id.clone(),
     };
-    let repository_provenance = crate::storage::read_repository_identity_marker(project_root)
+    let repository_provenance = tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)
         .ok()
         .flatten()
         .and_then(|marker| {
@@ -341,7 +341,7 @@ pub(super) fn git_scan_commits(
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
-    let mut command = std::process::Command::new(crate::git::git_program());
+    let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
     command
         .current_dir(worktree)
         .arg("log")

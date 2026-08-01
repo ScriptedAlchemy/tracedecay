@@ -6,7 +6,7 @@ use tracedecay_domain::{
 };
 
 use crate::accounting::parser::parse_timestamp;
-use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
+use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{content_storage_text_and_tools, preview_truncated};
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};

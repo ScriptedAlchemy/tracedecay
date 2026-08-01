@@ -20,7 +20,7 @@
 use std::fmt::Write as _;
 pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
 use crate::runtime::git_correlation::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
@@ -58,8 +58,8 @@ impl std::fmt::Display for WorkflowIndexError {
 
 impl std::error::Error for WorkflowIndexError {}
 
-impl From<crate::db::engine::Error> for WorkflowIndexError {
-    fn from(err: crate::db::engine::Error) -> Self {
+impl From<tracedecay_runtime_core::db::engine::Error> for WorkflowIndexError {
+    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }
@@ -717,7 +717,7 @@ mod detail_coverage_tests {
     async fn bounded_prefix_keeps_exact_last_agent_and_total_count_queryable() {
         let directory = tempfile::tempdir().expect("tempdir");
         let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
         ensure_workflow_index_schema(&connection)
             .await
             .expect("workflow schema");

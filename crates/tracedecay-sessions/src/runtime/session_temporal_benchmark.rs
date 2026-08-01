@@ -48,15 +48,15 @@ use crate::application::session::{
     SessionTemporalQuery,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::runtime::codex;
-use crate::storage::{
+use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, read_repository_identity_marker, write_enrollment_marker,
     write_repository_identity_marker,
 };
 use crate::store::GlobalDbSessionTemporalStore;
-use crate::timeutil::nearest_rank;
+use tracedecay_runtime_core::timeutil::nearest_rank;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -237,7 +237,7 @@ struct PreparedRepetition {
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
     durable_progress: SessionRefreshProgressV1,
-    _daemon_scope: crate::db::DaemonDatabaseScope,
+    _daemon_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _env: IsolatedBenchmarkEnv,
 }
 
@@ -642,7 +642,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         .map_err(|error| format!("create benchmark profile identity: {error}"))?;
     let brain_id = profile_identity.brain_id().clone();
     let profile_id = profile_identity.profile_id().clone();
-    let _daemon_scope = crate::db::enter_daemon_database_scope(
+    let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile,
         u64::try_from(repetition).unwrap() + 1,
         &format!("pr8-bench-{repetition}"),

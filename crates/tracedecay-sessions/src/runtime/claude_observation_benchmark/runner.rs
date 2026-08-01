@@ -17,7 +17,7 @@ use crate::runtime::claude_observation::{
 };
 use crate::runtime::cline_like::{ClineLikeSource, capture_cline_like_snapshot_observations};
 use crate::runtime::{codex, cursor, hermes, kiro};
-use crate::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use tracedecay_runtime_core::storage::{read_repository_identity_marker, write_repository_identity_marker};
 
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
