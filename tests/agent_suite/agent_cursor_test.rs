@@ -330,6 +330,9 @@ fn test_local_install_cursor_removes_legacy_project_mcp_hooks_and_rule() {
     )
     .unwrap();
 
+    // Installed twice on purpose: the first run removes the legacy files, and
+    // the second must still succeed against the already-cleaned tree. Both
+    // calls spawn the real CLI, so this is not a duplicated assertion.
     assert_local_install_success("cursor", project.path(), home.path());
     assert_local_install_success("cursor", project.path(), home.path());
 
