@@ -7,11 +7,12 @@
 //! scheduling and cancellation are application-layer concerns.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkId, ExactTechnicalTermKindV1, FileOccurrenceId,
-    LanguageDescriptorRevision, RetrievalAnchorId, RetrieverBatch, RetrieverOutcome,
-    SourceOccurrenceId, SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkId, CompactCandidate, CursorPayloadDigest,
+    ExactTechnicalTermKindV1, FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SymbolOccurrenceId,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLaneRequest};
@@ -49,6 +50,90 @@ pub enum RetrievalPortError {
 /// this is the single conversion every `map_err` in the retrieval lanes uses.
 pub(crate) fn contract_error(error: impl std::fmt::Display) -> RetrievalPortError {
     RetrievalPortError::Contract(error.to_string())
+}
+
+/// Hash one lane's already-domain-separated checkpoint payload.
+///
+/// Every lane commits its admitted prefix under the same construction:
+/// canonical JSON of the lane's own payload tuple, SHA-256, then the
+/// `sha256:<hex>` spelling a cursor payload digest accepts. Only the payload
+/// differs between lanes, so only the payload is a lane's business.
+pub(crate) fn checkpoint_digest<T>(payload: &T) -> Result<CursorPayloadDigest, RetrievalPortError>
+where
+    T: Serialize + ?Sized,
+{
+    let bytes = serde_json::to_vec(payload).map_err(contract_error)?;
+    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+        .map_err(contract_error)
+}
+
+/// The `(occurrence, anchor, score)` triple lanes commit for each candidate in
+/// their checkpoint prefix.
+pub(crate) fn candidate_checkpoint_prefix(
+    candidates: &[CompactCandidate],
+) -> Vec<(&str, &str, u64)> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.source_occurrence_id.as_str(),
+                candidate.retriever_evidence_anchor.as_str(),
+                candidate.raw_score.micros(),
+            )
+        })
+        .collect()
+}
+
+/// Lane-specific wording for the three contract violations every lane rejects
+/// when it re-verifies a port-emitted batch.
+pub(crate) struct LaneEvidenceRejections {
+    /// The batch carried a candidate belonging to another lane.
+    pub foreign_candidate: &'static str,
+    /// The batch returned a candidate with no evidence for its occurrence.
+    pub missing_evidence: &'static str,
+    /// The evidence binding addresses a different candidate.
+    pub unaddressed_binding: &'static str,
+}
+
+/// Evidence a lane can bind back to the candidate it was emitted for.
+pub(crate) trait LaneBoundEvidence {
+    fn binding(&self) -> &CodeCandidateBindingV1;
+}
+
+/// Resolve the evidence a batch emitted for one candidate, rejecting a
+/// foreign-lane candidate, missing evidence, and a binding that addresses
+/// something other than this candidate.
+///
+/// A lane can only trust evidence that names the candidate it arrived with;
+/// this is the check every lane repeats before it applies its own admission
+/// rules, so it lives once and each lane supplies only its own wording.
+pub(crate) fn lane_bound_evidence<'batch, E>(
+    batch: &'batch RetrieverBatch<E>,
+    candidate: &CompactCandidate,
+    lane: RetrieverKind,
+    rejections: &LaneEvidenceRejections,
+) -> Result<&'batch E, RetrievalPortError>
+where
+    E: LaneBoundEvidence,
+{
+    if candidate.retriever != lane {
+        return Err(RetrievalPortError::Contract(
+            rejections.foreign_candidate.to_owned(),
+        ));
+    }
+    let evidence = batch
+        .evidence_by_occurrence
+        .get(&candidate.source_occurrence_id)
+        .ok_or_else(|| RetrievalPortError::Contract(rejections.missing_evidence.to_owned()))?;
+    let binding = evidence.binding();
+    if binding.candidate_anchor != candidate.anchor_id
+        || binding.source_occurrence != candidate.source_occurrence_id
+    {
+        return Err(RetrievalPortError::Contract(
+            rejections.unaddressed_binding.to_owned(),
+        ));
+    }
+    Ok(evidence)
 }
 
 /// Read-only port over whole-exact-term postings for one frozen code
