@@ -4,11 +4,15 @@
 //! owning crates. This crate defines the stable values exchanged across those
 //! boundaries.
 
+pub mod admission;
 mod authorization;
+pub mod compatibility;
 mod ingest;
 pub mod lcm;
+pub mod observation;
 mod orchestration;
 mod provider;
+pub mod repository_provenance;
 pub mod runtime;
 mod workflow;
 

@@ -4,8 +4,8 @@ use std::pin::Pin;
 
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{TranscriptDiscoveryBounds, TranscriptSource};
 use crate::runtime::{
@@ -39,7 +39,7 @@ fn codex_source_failure_saturates_pass(failure_count: usize, retryable: bool) ->
 pub(super) struct ProjectProviderRun<'a> {
     pub(super) project_root: &'a Path,
     pub(super) project_id: &'a ProjectId,
-    pub(super) facade: &'a HostAdmissionFacade<'a>,
+    pub(super) facade: &'a dyn HostAdmission,
     pub(super) scope: &'a ObservationScopeV1,
     pub(super) candidate: SessionProvider,
     pub(super) max_new_bytes: u64,
@@ -337,7 +337,7 @@ impl<'a> ProjectProviderRun<'a> {
 async fn ingest_project_claude_observations(
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: u64,
     cancellation: &ObservationCancellation,
 ) -> std::result::Result<

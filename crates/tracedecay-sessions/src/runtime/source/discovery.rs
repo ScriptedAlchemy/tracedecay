@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::application::host_admission::{
+use crate::admission::{
     DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_SPOOL_BYTES,
 };
 

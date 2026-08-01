@@ -18,7 +18,7 @@ use std::os::unix::process::CommandExt;
 use serde_json::{Value, json};
 use tracedecay_store::cursor_dispatch::CURSOR_MODEL_KEYS;
 
-use crate::application::host_admission::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
+use crate::admission::{MAX_WIRE_MESSAGE_BYTES, wire_oversized_io_error};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use crate::runtime::lcm::LcmSummaryRequest;
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader};

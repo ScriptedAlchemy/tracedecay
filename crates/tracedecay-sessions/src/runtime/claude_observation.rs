@@ -20,10 +20,10 @@ use tracedecay_store::{
     TranscriptStoreError,
 };
 
-use crate::application::host_admission::{
+use crate::admission::{
     ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
 };
-use crate::application::observation::{
+use crate::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
@@ -909,11 +909,11 @@ mod tests {
     use super::*;
     use std::future::Future;
 
-    use crate::application::host_admission::{
+    use crate::admission::{
         HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
         HostProjectionDrainOutcome, ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
     };
-    use crate::application::observation::{
+    use crate::observation::{
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
         ReplayObservationsRequest,
     };

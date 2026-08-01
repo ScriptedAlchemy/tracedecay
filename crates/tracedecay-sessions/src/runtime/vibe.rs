@@ -22,8 +22,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::jsonl_observation_admission::{
@@ -200,7 +200,7 @@ impl TranscriptSource for VibeSource {
 }
 
 pub async fn capture_vibe_observations(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     source: &VibeSource,
     project_root: &Path,
     scope: ObservationScopeV1,
@@ -245,7 +245,7 @@ pub async fn capture_vibe_observations(
 }
 
 async fn capture_vibe_path(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     source: &VibeSource,
     path: &Path,
     project_root: &Path,

@@ -1245,7 +1245,7 @@ async fn mark_structured_backfill_complete(
 /// Opaque registered ProjectSessions fixture for transcript-facts backfill tests.
 #[doc(hidden)]
 pub struct TranscriptFactsBackfillTestRuntimeV1 {
-    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    authority: crate::admission::HostAdmissionTestRuntimeV1,
 }
 
 impl TranscriptFactsBackfillTestRuntimeV1 {
@@ -1255,7 +1255,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
         project_id: ProjectId,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
-            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            authority: crate::admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -1267,7 +1267,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
     fn database(&self) -> &RegisteredGlobalDb {
         match self
             .authority
-            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+            .registered_database(crate::admission::HostAdmissionScope::Project)
         {
             Some(database) => database,
             None => panic!("transcript facts test runtime has ProjectSessions authority"),
@@ -1289,7 +1289,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
 }
 
 impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
-    type Target = crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    type Target = crate::admission::HostAdmissionTestRuntimeV1;
 
     fn deref(&self) -> &Self::Target {
         &self.authority
@@ -1299,7 +1299,7 @@ impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
 /// Opaque registered ProjectSessions fixture for structured-backfill integration tests.
 #[doc(hidden)]
 pub struct StructuredBackfillTestRuntimeV1 {
-    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    authority: crate::admission::HostAdmissionTestRuntimeV1,
 }
 
 impl StructuredBackfillTestRuntimeV1 {
@@ -1309,7 +1309,7 @@ impl StructuredBackfillTestRuntimeV1 {
         project_id: ProjectId,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
-            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            authority: crate::admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
                 project_root,
                 project_id,
@@ -1321,7 +1321,7 @@ impl StructuredBackfillTestRuntimeV1 {
     fn database(&self) -> &RegisteredGlobalDb {
         match self
             .authority
-            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+            .registered_database(crate::admission::HostAdmissionScope::Project)
         {
             Some(database) => database,
             None => panic!("structured backfill test runtime has ProjectSessions authority"),

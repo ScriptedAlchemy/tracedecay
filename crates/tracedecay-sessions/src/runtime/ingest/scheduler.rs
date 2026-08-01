@@ -2,7 +2,7 @@ use std::path::Path;
 
 use tracedecay_store::ParseOffset;
 
-use crate::application::host_admission::DEFAULT_MAX_RECORDS;
+use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::SessionProvider;
 use crate::runtime::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
 use crate::runtime::source::MAX_JSONL_RECORD_BYTES;

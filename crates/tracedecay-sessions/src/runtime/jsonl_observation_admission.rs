@@ -8,8 +8,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::{
+use crate::admission::HostAdmission;
+use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
 use tracedecay_runtime_core::privacy::ParsedObservationRecordV1;
@@ -30,7 +30,7 @@ pub enum PersistedCursorUpdate {
 pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
     provider: &'static str,
     path: &'request Path,
-    admission: &'request HostAdmissionFacade<'authority>,
+    admission: &'request dyn HostAdmission,
     source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
     retention_class: RetentionClass,
@@ -43,7 +43,7 @@ impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority
     pub fn new(
         provider: &'static str,
         path: &'request Path,
-        admission: &'request HostAdmissionFacade<'authority>,
+        admission: &'request dyn HostAdmission,
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
         retention_class: RetentionClass,
@@ -148,7 +148,7 @@ struct DurableJsonlFrame {
 
 struct ActiveAdmission<'request, 'authority> {
     provider: &'static str,
-    admission: &'request HostAdmissionFacade<'authority>,
+    admission: &'request dyn HostAdmission,
     source: ObservationSourceIdentityV1,
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,

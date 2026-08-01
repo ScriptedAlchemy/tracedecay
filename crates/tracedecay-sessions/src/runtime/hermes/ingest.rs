@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::agents::hermes::read_config_pinned_project_root;
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{TranscriptIngestStats, path_belongs_to_project};
 
@@ -39,7 +39,7 @@ pub struct HermesSweepOutcome {
 /// Discovery is bounded to the default user integration (`~/.hermes`) and its
 /// immediate named-profile children; environment overrides are ignored.
 pub async fn ingest_for_project(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_root: &Path,
     project_id: ProjectId,
 ) -> TranscriptIngestStats {
@@ -51,7 +51,7 @@ pub async fn ingest_for_project(
 /// [`ingest_for_project`] with one aggregate logical source-byte budget shared
 /// across every discovered Hermes profile.
 pub async fn ingest_for_project_capped(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
@@ -68,7 +68,7 @@ pub async fn ingest_for_project_capped(
 pub async fn ingest_for_project_capped_with_admission(
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     ingest_for_project_capped_with_admission_and_cancellation(
@@ -84,7 +84,7 @@ pub async fn ingest_for_project_capped_with_admission(
 pub async fn ingest_for_project_capped_with_admission_and_cancellation(
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> HermesSweepOutcome {
@@ -105,7 +105,7 @@ pub async fn ingest_for_project_capped_with_admission_and_cancellation(
 /// One project-store destination for a shared Hermes source sweep.
 #[derive(Clone)]
 pub struct ProjectIngestDestination<'a> {
-    pub admission: &'a HostAdmissionFacade<'a>,
+    pub admission: &'a dyn HostAdmission,
     pub project_root: &'a Path,
     pub project_id: ProjectId,
 }
@@ -171,7 +171,7 @@ pub async fn ingest_homes_for_projects(
 /// seam for pointing the sweep at a temporary home instead of the real
 /// `~/.hermes`.
 pub async fn ingest_homes(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
@@ -182,7 +182,7 @@ pub async fn ingest_homes(
 }
 
 pub async fn ingest_homes_capped(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
@@ -202,7 +202,7 @@ pub async fn ingest_homes_capped_with_admission(
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
     ingest_homes_capped_with_admission_and_cancellation(
@@ -220,7 +220,7 @@ pub async fn ingest_homes_capped_with_admission_and_cancellation(
     hermes_homes: &[PathBuf],
     project_root: &Path,
     project_id: ProjectId,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> HermesSweepOutcome {
@@ -276,7 +276,7 @@ pub async fn ingest_homes_capped_with_admission_and_cancellation(
 /// Hermes profile. Project ingestion separately admits each turn to every
 /// registered project it touched using the same stable message IDs.
 pub async fn ingest_user_sessions_capped(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
@@ -287,7 +287,7 @@ pub async fn ingest_user_sessions_capped(
 }
 
 pub async fn ingest_user_sessions_capped_with_admission(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
@@ -306,7 +306,7 @@ pub async fn ingest_user_sessions_capped_with_admission(
 }
 
 pub async fn ingest_user_homes(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
 ) -> TranscriptIngestStats {
@@ -316,7 +316,7 @@ pub async fn ingest_user_homes(
 }
 
 pub async fn ingest_user_homes_capped(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
@@ -332,7 +332,7 @@ pub async fn ingest_user_homes_capped(
 }
 
 async fn ingest_user_homes_capped_with_admission(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
@@ -387,7 +387,7 @@ async fn ingest_user_homes_capped_with_admission(
 /// resolved by the migration layer. Unlike the normal catch-up sweep, any
 /// open/query/write failure is returned so callers retain the pin and source.
 pub async fn ingest_legacy_pinned_profile(
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     profile_dir: &Path,
     project_root: &Path,
     project_id: ProjectId,

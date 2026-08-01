@@ -37,8 +37,8 @@ use crate::application::context::{
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionAuthorities, HostAdmission};
+use crate::observation::ObservationCancellation;
 use crate::application::session::{
     AuthorizationGrantId, SessionAuthorizationError, SessionAuthorizationGrant,
     SessionRefreshConfiguration, SessionRefreshOutcome, SessionRefreshSchedulerError,
@@ -657,7 +657,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         .map_err(|error| format!("mount benchmark project sessions: {error}"))?;
     let session_id = format!("benchmark-codex-session-{repetition}");
     let rollout = write_codex_rollout(env.home(), &project, &session_id)?;
-    let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
+    let admission = HostAdmission::new(HostAdmissionAuthorities::for_project(
         brain_id,
         profile_id,
         project_id.clone(),

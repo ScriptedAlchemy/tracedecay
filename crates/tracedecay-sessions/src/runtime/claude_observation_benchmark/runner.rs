@@ -9,8 +9,8 @@ use tracedecay_store::{
     ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::observation::ObservationCancellation;
 use crate::runtime::claude::ClaudeSource;
 use crate::runtime::claude_observation::{
     ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,

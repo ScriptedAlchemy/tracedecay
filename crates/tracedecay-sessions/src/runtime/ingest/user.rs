@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionAuthorities, HostAdmission};
+use crate::observation::ObservationCancellation;
 use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
@@ -63,7 +63,7 @@ pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
 ) -> source::TranscriptIngestResult<TranscriptIngestStats> {
     try_ingest_user_codex_sessions_with_db_bounded(
         profile_root,
@@ -81,7 +81,7 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_total_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
@@ -141,7 +141,7 @@ pub(super) struct BoundedProviderOutcome {
 
 pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     registered_roots: Vec<PathBuf>,
-    admission: &HostAdmissionFacade<'_>,
+    admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
@@ -199,7 +199,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
 }
 
 async fn drain_observation_projections(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     scope: &ObservationScopeV1,
     provider: &'static str,
     cancellation: &ObservationCancellation,
@@ -369,7 +369,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         .iter()
         .copied()
         .fold(0_u64, u64::saturating_add);
-    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::for_profile(
+    let facade = HostAdmission::new(HostAdmissionAuthorities::for_profile(
         brain_id.clone(),
         profile_id.clone(),
         registered,
