@@ -34,10 +34,10 @@ use serde_json::Value;
 use tracedecay_domain::ProjectId;
 use tracedecay_store::StoreShardScopeV1;
 
-use crate::db::engine::{
+use tracedecay_runtime_core::db::engine::{
     Error as EngineError, Executor, QueryExecutor, Result as EngineResult, params,
 };
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::runtime::cursor::TimestampCarry;
 use crate::runtime::shared::usage_counters_from;
@@ -138,7 +138,7 @@ impl std::error::Error for BackfillError {
 
 pub async fn transcript_facts_backfill_status(
     db: &RegisteredGlobalDb,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     if !matches!(
         &db.binding().shard_id.scope,
         StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions
@@ -164,14 +164,14 @@ pub async fn transcript_facts_backfill_status(
 
 pub async fn advance_transcript_facts_backfill(
     db: &RegisteredGlobalDb,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     advance_transcript_facts_backfill_with_limit(db, TRANSCRIPT_FACTS_BATCH).await
 }
 
 async fn advance_transcript_facts_backfill_with_limit(
     db: &RegisteredGlobalDb,
     limit: usize,
-) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
     let TranscriptFactsBackfillOutcome::Pending { cursor } =
         transcript_facts_backfill_status(db).await?
     else {
@@ -270,8 +270,8 @@ fn derive_candidate_updates(
 fn backfill_error(
     operation: &'static str,
     error: impl std::fmt::Display,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Database {
+) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::Database {
         operation: operation.to_string(),
         message: error.to_string(),
     }
@@ -501,7 +501,7 @@ async fn update_session_windows(conn: &(impl Executor + ?Sized)) -> EngineResult
 
 async fn mark_transcript_facts_backfill_complete(
     db: &RegisteredGlobalDb,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let transaction = db.begin_write_transaction().await?;
     let completed: EngineResult<()> = async {
         // Sessions ingested while messages were undated also have NULL
@@ -775,7 +775,7 @@ fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
 #[doc(hidden)]
 pub fn try_acquire_structured_backfill_lock(db_path: &Path) -> Option<std::fs::File> {
     let lock_path = structured_backfill_lock_path(db_path);
-    crate::storage::try_acquire_sidecar_lock(&lock_path)
+    tracedecay_runtime_core::storage::try_acquire_sidecar_lock(&lock_path)
         .ok()
         .flatten()
 }
@@ -1253,7 +1253,7 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
         profile_root: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
         project_id: ProjectId,
-    ) -> crate::errors::Result<Self> {
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
             authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
@@ -1276,14 +1276,14 @@ impl TranscriptFactsBackfillTestRuntimeV1 {
 
     pub async fn transcript_facts_backfill_status_for_test(
         &self,
-    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+    ) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
         transcript_facts_backfill_status(self.database()).await
     }
 
     pub async fn advance_transcript_facts_backfill_for_test(
         &self,
         limit: usize,
-    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+    ) -> tracedecay_runtime_core::errors::Result<TranscriptFactsBackfillOutcome> {
         advance_transcript_facts_backfill_with_limit(self.database(), limit).await
     }
 }
@@ -1307,7 +1307,7 @@ impl StructuredBackfillTestRuntimeV1 {
         profile_root: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
         project_id: ProjectId,
-    ) -> crate::errors::Result<Self> {
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
         Ok(Self {
             authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
                 profile_root,
@@ -1796,7 +1796,7 @@ mod tests {
     async fn dogfood_recovery_transcript_fact_failure_rolls_back_entire_batch() {
         let directory = tempfile::tempdir().unwrap();
         let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+            tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
         let transaction = connection.transaction().await.unwrap();
         transaction
             .execute_batch(

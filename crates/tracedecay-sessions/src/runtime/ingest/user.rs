@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use crate::application::observation::ObservationCancellation;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
 use crate::runtime::{SessionProvider, claude_observation, codex, cursor, cursor_composer};

@@ -21,7 +21,7 @@ use crate::application::host_admission::{
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
+use tracedecay_runtime_core::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;

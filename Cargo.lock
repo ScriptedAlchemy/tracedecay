@@ -5995,6 +5995,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracedecay-temporal-query",

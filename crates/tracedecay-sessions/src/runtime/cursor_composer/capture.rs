@@ -20,7 +20,7 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::privacy::parse_normalized_observation_record_v1;
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::source::TranscriptIngestError;
 
 use super::PROVIDER;

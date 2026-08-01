@@ -5,9 +5,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 #[cfg(test)]
-use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, Value as SqlValue, params};
-use crate::tracedecay::current_timestamp;
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, Value as SqlValue, params};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use super::{
     LCM_SCHEMA_VERSION, LcmCleanConfig, LcmError, LcmGcConfig, gc, maintenance, query, schema,
@@ -1252,7 +1252,7 @@ mod tests {
     #![allow(dead_code)]
 
     use super::*;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
     use rusqlite::Connection as RusqliteConnection;
     use std::path::{Path, PathBuf};
 

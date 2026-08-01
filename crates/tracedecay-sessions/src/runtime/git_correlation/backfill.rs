@@ -1,4 +1,4 @@
-use crate::db::engine::{QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
 
 use crate::store::GlobalDbGitCorrelationStore;
 
@@ -293,7 +293,7 @@ pub struct SystemGit;
 
 impl SystemGit {
     fn output(worktree: &std::path::Path, args: &[&str]) -> Option<String> {
-        let output = crate::git::git_output(worktree, args)?;
+        let output = tracedecay_runtime_core::git::git_output(worktree, args)?;
         String::from_utf8(output.stdout).ok()
     }
 }
@@ -566,7 +566,7 @@ async fn backfill_one_session(
         return Err(BackfillSkipReason::NotAWorktree);
     }
     let worktree_path = std::path::Path::new(row.project_path.trim());
-    let worktree_root = crate::worktree::git_worktree_root(worktree_path)
+    let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(worktree_path)
         .ok_or(BackfillSkipReason::NotAWorktree)?;
     let worktree = normalize_worktree(&worktree_root.to_string_lossy());
 

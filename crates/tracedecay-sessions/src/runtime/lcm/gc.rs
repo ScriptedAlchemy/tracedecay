@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::{
     LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS, LcmError, LcmGcConfig, maintenance, payload,

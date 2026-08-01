@@ -479,7 +479,7 @@ fn cursor_advance_receipt_collisions_are_permanent() {
 #[test]
 fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
     let privacy = source::TranscriptIngestError::Privacy(
-        crate::privacy::PrivacySanitizerError::InvalidPolicy,
+        tracedecay_runtime_core::privacy::PrivacySanitizerError::InvalidPolicy,
     );
     let privacy = classify_transcript_ingest_failure("claude", "hook", &privacy);
     assert_eq!(privacy.reason_code, "transcript_privacy_rejected");
@@ -610,15 +610,15 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
         .to_string();
 
     let store = tempfile::tempdir().unwrap();
-    let handle = crate::db::engine::TestConnection::open(&store.path().join("sessions.db"));
-    let conn: &crate::db::engine::Connection = &handle;
+    let handle = tracedecay_runtime_core::db::engine::TestConnection::open(&store.path().join("sessions.db"));
+    let conn: &tracedecay_runtime_core::db::engine::Connection = &handle;
     git_correlation::ensure_git_correlation_schema_in_transaction(conn)
         .await
         .unwrap();
 
     // A session recording "now" — the commit lands inside its span, exactly as
     // it does when an agent commits mid-session.
-    let now = crate::tracedecay::current_timestamp();
+    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let worktree = git_correlation::normalize_worktree(&repo.path().to_string_lossy());
     for ts in [now - 60, now] {
         git_correlation::record_span_observation_in_transaction(

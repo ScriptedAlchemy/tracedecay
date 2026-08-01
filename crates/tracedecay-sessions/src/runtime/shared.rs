@@ -174,8 +174,8 @@ impl ProjectRootMatcher {
     pub fn new(project_root: &Path) -> Self {
         Self {
             root: project_root.to_path_buf(),
-            worktree: crate::worktree::git_worktree_root(project_root),
-            common_dir: crate::worktree::git_common_dir(project_root),
+            worktree: tracedecay_runtime_core::worktree::git_worktree_root(project_root),
+            common_dir: tracedecay_runtime_core::worktree::git_common_dir(project_root),
         }
     }
 
@@ -188,13 +188,13 @@ impl ProjectRootMatcher {
         }
 
         if let (Some(path_worktree), Some(project_worktree)) = (
-            crate::worktree::git_worktree_root(path).as_ref(),
+            tracedecay_runtime_core::worktree::git_worktree_root(path).as_ref(),
             self.worktree.as_ref(),
         ) {
             if paths_equal(path_worktree, project_worktree) {
                 return true;
             }
-            return crate::worktree::git_common_dir(path)
+            return tracedecay_runtime_core::worktree::git_common_dir(path)
                 .as_ref()
                 .zip(self.common_dir.as_ref())
                 .is_some_and(|(path_common, project_common)| {
@@ -243,7 +243,7 @@ pub fn one_line_truncated(text: &str, max: usize) -> String {
 /// `…` only when truncation occurred. Unlike [`one_line_truncated`] this keeps
 /// internal newlines, so multi-line derived-row previews retain their structure.
 pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
-    let prefix = crate::text::utf8_prefix_at_or_before(text, max_bytes);
+    let prefix = tracedecay_runtime_core::text::utf8_prefix_at_or_before(text, max_bytes);
     if prefix.len() == text.len() {
         prefix.to_string()
     } else {
@@ -424,7 +424,7 @@ pub fn append_location_metadata(
         keys.cwd.to_string(),
         Value::String(cwd.to_string_lossy().to_string()),
     );
-    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+    if let Some(worktree) = tracedecay_runtime_core::worktree::git_worktree_root(cwd) {
         map.insert(
             keys.worktree.to_string(),
             Value::String(worktree.to_string_lossy().to_string()),

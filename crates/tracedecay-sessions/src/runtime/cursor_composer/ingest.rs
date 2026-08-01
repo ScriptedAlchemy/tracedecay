@@ -79,7 +79,7 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
 }
 
 pub fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
-    let identity = crate::db::sqlite_generation_identity(path).ok()?;
+    let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
 }
 

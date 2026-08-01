@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::Executor;
 
 use super::super::util;
 use super::{LcmError, LcmGcConfig, LcmGcReport, payload, stage_payload_delete};

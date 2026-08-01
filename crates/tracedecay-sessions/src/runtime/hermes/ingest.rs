@@ -481,7 +481,7 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let project_is_real = crate::worktree::git_worktree_root(project_root).is_some()
+    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
         || crate::config::has_project_database(project_root);
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];
@@ -534,7 +534,7 @@ fn source_is_candidate_for_project(source: &HermesProfileSource, project_root: &
         return false;
     }
     source.legacy_project_pin.is_some()
-        || crate::worktree::git_worktree_root(project_root).is_some()
+        || tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
         || crate::config::has_project_database(project_root)
 }
 

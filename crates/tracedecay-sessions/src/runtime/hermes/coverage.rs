@@ -15,7 +15,7 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::application::host_admission::{HostAdmissionFacade, HostAdmissionOutcome};
 use crate::application::observation::{CaptureObservationOutcome, ObservationCancellation};
-use crate::db::{SqliteFileIdentityError, sqlite_generation_identity};
+use tracedecay_runtime_core::db::{SqliteFileIdentityError, sqlite_generation_identity};
 use crate::runtime::shared::TranscriptIngestStats;
 
 use super::observation::{

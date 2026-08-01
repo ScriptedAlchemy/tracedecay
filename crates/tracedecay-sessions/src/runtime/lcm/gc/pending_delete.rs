@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use super::{LcmGcError, LcmGcPhaseReport, MAX_SAMPLES};
 use crate::runtime::lcm::{LcmError, payload, schema};

@@ -6,7 +6,7 @@
 
 use std::future::Future;
 
-use crate::db::engine::{Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 use super::WorkflowIndexError;
 

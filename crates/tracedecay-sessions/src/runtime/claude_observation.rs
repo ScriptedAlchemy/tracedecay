@@ -27,7 +27,7 @@ use crate::application::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use crate::privacy::PrivacySanitizerError;
+use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 use crate::runtime::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
@@ -917,7 +917,7 @@ mod tests {
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
         ReplayObservationsRequest,
     };
-    use crate::privacy::ClaudeRecordSanitizerV1;
+    use tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1;
     use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
     use tracedecay_domain::{ObservationSourceCursorV1, ObservationSourceIdentityV1};
     use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -1159,7 +1159,7 @@ mod tests {
             }
         }
 
-        fn registered(&self) -> &crate::global_db::RegisteredGlobalDb {
+        fn registered(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
             self.runtime
                 .registered_database(HostAdmissionScope::Profile)
                 .expect("registered profile session database")
@@ -1640,7 +1640,7 @@ mod tests {
     #[tokio::test]
     async fn registered_claude_ingest_api_routes_through_observation_authority() {
         let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().unwrap();
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
         let fixture = Fixture::new_in_home(
             "legacy-api-session",
             profile_root.parent().unwrap().to_path_buf(),
@@ -2070,7 +2070,7 @@ mod tests {
     async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
+            "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, frame) in [
             (
@@ -2090,7 +2090,7 @@ mod tests {
     async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
+            "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, suffix) in [
             (

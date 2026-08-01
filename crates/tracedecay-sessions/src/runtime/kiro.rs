@@ -32,7 +32,7 @@ use crate::application::host_admission::HostAdmissionFacade;
 use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::application::observation::ObservationCancellation;
 #[cfg(test)]
-use crate::privacy::parse_normalized_observation_record_v1;
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,

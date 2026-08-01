@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use crate::db::engine::TestConnection;
+use tracedecay_runtime_core::db::engine::TestConnection;
 
 use super::*;
 
@@ -33,23 +33,23 @@ impl QueryExecutor for GitCorrelationTestDb {
         &self,
         sql: &str,
         params: P,
-    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
     where
-        P: crate::db::engine::IntoParams,
+        P: tracedecay_runtime_core::db::engine::IntoParams,
     {
         self.connection.query(sql, params).await
     }
 }
 
 impl Executor for GitCorrelationTestDb {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
-        P: crate::db::engine::IntoParams,
+        P: tracedecay_runtime_core::db::engine::IntoParams,
     {
         self.connection.execute(sql, params).await
     }
 
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         self.connection.execute_batch(sql).await
     }
 }
