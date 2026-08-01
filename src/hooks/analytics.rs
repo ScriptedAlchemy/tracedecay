@@ -6,9 +6,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::application::host_admission::HostAdmissionTelemetryDisposition as HookDispositionTelemetry;
+#[cfg(test)]
 use crate::application::host_admission::{
     HostAdmissionDispositionClass as HookDispositionClass, HostAdmissionStatus,
-    HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };
 use crate::errors::TraceDecayError;
 use tracedecay_hooks::HookTransportDispositionV1;
@@ -26,12 +27,14 @@ enum HostHookTelemetryCoverage {
     HostMeasured,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct HookTimeoutTelemetry {
     budget_ms: Option<u64>,
     timed_out: Option<bool>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct HookCompletedTelemetry {
     schema_version: u32,
@@ -51,6 +54,7 @@ struct HookCompletedTelemetry {
     disposition: HookDispositionTelemetry,
 }
 
+#[cfg(test)]
 impl HookCompletedTelemetry {
     fn from_row(row: &Value) -> Option<(Self, bool)> {
         if row.get("event").and_then(Value::as_str) != Some("hook_completed") {
@@ -106,6 +110,7 @@ impl HookCompletedTelemetry {
     }
 }
 
+#[cfg(test)]
 fn optional_u64_field(value: &Value, field: &str) -> Option<u64> {
     value.get(field).and_then(Value::as_u64)
 }
@@ -132,6 +137,7 @@ pub(crate) struct HookTimingSpan {
 }
 
 impl HookTimingSpan {
+    #[cfg(test)]
     fn new(
         root: Option<&Path>,
         agent: HintAgent,
@@ -680,10 +686,12 @@ fn now_unix_millis() -> u64 {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 mod readiness;
 
 #[cfg(test)]
 pub(crate) use readiness::empty_hook_completed_readiness_distributions;
+#[cfg(test)]
 pub(crate) use readiness::{
     HookCompletedReadinessDistributions, aggregate_hook_completed_readiness,
 };
