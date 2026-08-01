@@ -1,34 +1,13 @@
-use crate::application::host_admission::{
-    HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
-    HostAdmissionStatus, SharedHostAdmissionBroker,
-};
-use crate::application::observation::{
-    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-};
+use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
 use crate::automation::config_error;
-use crate::automation::run_ledger::AutomationRunStatus;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
-use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
-use crate::sessions::claude_observation::ClaudeObservationIngestError;
-use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracedecay_domain::{
-    CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProjectId, ProviderId, RetentionClass, SessionId, UtcMicros,
-};
-use tracedecay_store::StoreShardScopeV1;
+use std::sync::Arc;
 
 use super::SessionAuthorities;
 use super::support::tool_json;
@@ -46,8 +25,7 @@ mod entry_tests;
 mod test_support;
 
 pub(crate) use admission::{
-    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_admission_ledger_root,
-    hook_v2_pending_work_envelopes, record_hook_v2_admission,
+    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
 };
 pub(crate) use errors::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;

@@ -1,15 +1,9 @@
-use std::io;
-
-use tracedecay_domain::{CanonicalObservationIdV1, ObservationCollisionOutcomeV1, PayloadDigestV1};
-use tracedecay_store::{ObservationStoreError, ProjectionStoreError};
-
-use super::super::*;
-use crate::application::observation::{
-    CaptureClaudeObservationRequestError, ObservationApplicationError,
-};
+use crate::application::host_admission::HostAdmissionStatus;
+use tracedecay_domain::UtcMicros;
 
 use super::super::ingest::complete_ingest_admission;
 use super::super::test_support::*;
+use super::super::*;
 use super::*;
 
 #[test]
