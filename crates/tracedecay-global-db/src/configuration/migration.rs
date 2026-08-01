@@ -690,31 +690,27 @@ mod tests {
     }
 
     impl ConfigurationMigrationStore for Store {
-        fn receipt(
+        async fn receipt(
             &self,
             _receipt_name: &'static str,
             _source_snapshot_digest: &ManifestDigest,
-        ) -> impl Future<
-            Output = Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError>,
-        > + Send {
-            async move { Ok(self.receipt.lock().unwrap().clone()) }
+        ) -> Result<Option<ConfigurationMigrationReceiptV1>, ConfigurationMigrationError> {
+            Ok(self.receipt.lock().unwrap().clone())
         }
 
-        fn commit_initial_migration(
+        async fn commit_initial_migration(
             &self,
             receipt: &ConfigurationMigrationReceiptV1,
             resolution: &ConfigurationResolutionV1,
             quarantine: &[ConfigurationMigrationQuarantineEntryV1],
-        ) -> impl Future<Output = Result<(), ConfigurationMigrationError>> + Send {
-            async move {
-                *self.receipt.lock().unwrap() = Some(receipt.clone());
-                self.quarantined
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(quarantine);
-                *self.resolution.lock().unwrap() = Some(resolution.clone());
-                Ok(())
-            }
+        ) -> Result<(), ConfigurationMigrationError> {
+            *self.receipt.lock().unwrap() = Some(receipt.clone());
+            self.quarantined
+                .lock()
+                .unwrap()
+                .extend_from_slice(quarantine);
+            *self.resolution.lock().unwrap() = Some(resolution.clone());
+            Ok(())
         }
     }
 
