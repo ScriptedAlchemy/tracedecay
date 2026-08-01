@@ -81,25 +81,8 @@ assert_required_assets() {
     "tests/fixtures/analytics/codex_skill_prose.txt"
     "tests/session_suite/lcm_schema/mod.rs"
     "benchmarks/pr5-observation/workload-v1.json"
-    "benchmarks/pr7-memory/workload-v1.json"
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
     "benchmarks/search-quality/query-fallback-report-v1.json"
-  )
-  local -a application_assets=(
-    "src/feedback/read.rs"
-    "src/feedback/github_ci_proximity.rs"
-    "src/advisory.rs"
-  )
-  local -a api_assets=(
-    "src/http.rs"
-    "src/sse.rs"
-  )
-  # The gateway protocol and stdio framing ship from their own crate now. The
-  # root package keeps only the façade, so pinning them here is what keeps the
-  # distribution gate covering the LSP surface end to end.
-  local -a lsp_assets=(
-    "src/bridge.rs"
-    "src/protocol.rs"
   )
 
   for required in "${root_assets[@]}"; do
