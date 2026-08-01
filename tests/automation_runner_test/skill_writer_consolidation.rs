@@ -1,5 +1,7 @@
+#[cfg(feature = "test-transport")]
 use crate::support::*;
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_auto_applies_safe_consolidations() {
     let _env_lock = ENV_LOCK.lock().await;

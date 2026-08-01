@@ -95,6 +95,7 @@ async fn skill_writer_fails_closed_on_denied_temporal_evidence() {
 
 // Every test below that reaches evidence building holds `ENV_LOCK` and pins
 // its profile database override at the isolated session store.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_default_provider_searches_all_providers() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -136,6 +137,7 @@ async fn skill_writer_default_provider_searches_all_providers() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -217,6 +219,7 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -280,6 +283,7 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     assert_eq!(backend.calls(), 1);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -464,6 +468,7 @@ async fn skill_writer_runner_creates_pending_skill_drafts_for_approval() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summarizing() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -548,6 +553,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -579,6 +585,7 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -697,6 +704,7 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
     assert!(updated.pending_update.is_none());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -912,6 +920,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_malformed_backend_output() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -962,6 +971,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_ledgers_missing_skills_array() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -1013,6 +1023,7 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails() {
     let _env_lock = ENV_LOCK.lock().await;
