@@ -42,20 +42,24 @@ where
 
 impl<D> SessionIngestAuthority for GlobalDbSessionIngestAuthority<D>
 where
-    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+    D: Borrow<RegisteredGlobalDb> + Clone + Send + Sync,
 {
+    // Each borrowed store carries this authority's own holder rather than a
+    // `&'store RegisteredGlobalDb`. With an owned (`Arc`) holder the projected
+    // types stay lifetime-free, so their trait impls apply for any lifetime and
+    // downstream `Send` proofs never go higher-ranked.
     type GitStore<'store>
-        = GlobalDbGitCorrelationStore<&'store RegisteredGlobalDb>
+        = GlobalDbGitCorrelationStore<D>
     where
         Self: 'store;
 
     type WorkflowSink<'store>
-        = GlobalDbWorkflowStore<&'store RegisteredGlobalDb>
+        = GlobalDbWorkflowStore<D>
     where
         Self: 'store;
 
     type TranscriptStore<'store>
-        = GlobalDbTranscriptStore<&'store RegisteredGlobalDb>
+        = GlobalDbTranscriptStore<D>
     where
         Self: 'store;
 
@@ -95,15 +99,15 @@ where
     }
 
     fn git_correlation_store(&self) -> Self::GitStore<'_> {
-        GlobalDbGitCorrelationStore::new(self.db())
+        GlobalDbGitCorrelationStore::new(self.db.clone())
     }
 
     fn workflow_sink(&self) -> Self::WorkflowSink<'_> {
-        GlobalDbWorkflowStore::new(self.db())
+        GlobalDbWorkflowStore::new(self.db.clone())
     }
 
     fn transcript_store(&self) -> Self::TranscriptStore<'_> {
-        GlobalDbTranscriptStore::new(self.db())
+        GlobalDbTranscriptStore::new(self.db.clone())
     }
 
     fn registered_project_roots(&self) -> impl Future<Output = Option<Vec<PathBuf>>> + Send {
