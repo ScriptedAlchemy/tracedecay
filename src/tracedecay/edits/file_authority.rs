@@ -293,18 +293,11 @@ impl SourceEditFileAuthority {
     }
 }
 
-pub(crate) fn read_source_edit_candidate(
+pub(super) fn read_source_edit_candidate(
     project_root: &Path,
     relative: &Path,
 ) -> Result<Option<Vec<u8>>> {
     SourceEditFileAuthority::open(project_root, relative)?.read_optional()
-}
-
-pub(crate) fn validate_source_edit_candidate_parent(
-    project_root: &Path,
-    relative: &Path,
-) -> Result<()> {
-    SourceEditFileAuthority::open(project_root, relative).map(|_| ())
 }
 
 pub(super) fn normalize_source_edit_relative_path(path: &Path) -> Result<PathBuf> {

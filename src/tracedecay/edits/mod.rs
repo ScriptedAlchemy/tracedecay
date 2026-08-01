@@ -68,10 +68,6 @@ mod reconcile_tests;
 #[cfg(test)]
 mod test_support;
 
-pub(crate) use file_authority::{
-    read_source_edit_candidate, validate_source_edit_candidate_parent,
-};
-
 // `move_symbol.rs` (a sibling of this module) imports these eight names via
 // `use super::edits::{...}` — the re-exports below keep that import path
 // stable across the split, resolving each name at `crate::tracedecay::edits`

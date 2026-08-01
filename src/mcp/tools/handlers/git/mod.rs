@@ -10,10 +10,8 @@ mod branch;
 mod context;
 mod shell;
 
+pub(crate) use affected::collect_affected_test_files;
 pub(super) use affected::handle_affected;
-pub(crate) use affected::{
-    affected_test_proximity, collect_affected_test_files, rank_affected_tests,
-};
 pub(super) use branch::{
     handle_admin_branch_add, handle_branch_diff, handle_branch_list, handle_branch_search,
 };

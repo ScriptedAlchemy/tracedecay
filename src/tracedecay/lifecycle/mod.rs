@@ -3,7 +3,9 @@
 
 #[cfg(not(test))]
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(test))]
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 #[cfg(not(test))]
 use std::sync::{LazyLock, Mutex, Weak};
@@ -20,6 +22,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 use tracedecay_code_extraction::LanguageRegistry;
+#[cfg(test)]
 use tracedecay_store::ProjectId;
 use tracedecay_usecases::config::{
     install_configuration_daemon_client_for_project,

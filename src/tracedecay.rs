@@ -31,7 +31,6 @@ mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
-pub(crate) use edits::{read_source_edit_candidate, validate_source_edit_candidate_parent};
 pub use indexing::{MigrationReindexAvailabilityV1, MigrationReindexStatusV1};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
