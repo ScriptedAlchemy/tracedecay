@@ -1105,21 +1105,16 @@ mod tests {
     use super::*;
     use crate::config::RetentionConfig;
     use crate::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
-    use crate::tracedecay::TraceDecay;
 
     async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
-        let (page_size, page_count, _) = cg
+        let (project, state) =
+            crate::events_api::dashboard_state_fixture("project.dashboard-storage-telemetry").await;
+        let (page_size, page_count, _) = state
+            .mem_db
             .storage_page_counts()
             .await
             .expect("authoritative graph page counts");
         let graph_total_bytes = page_size.saturating_mul(page_count);
-        let state = crate::build_state(&cg).await.expect("dashboard state");
         (project, state, graph_total_bytes)
     }
 
