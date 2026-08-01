@@ -42,6 +42,8 @@ impl TestConnection {
         Self::open_inner(path, Some(authority))
     }
 
+    // This test-only constructor turns fixture setup failures into immediate test failures.
+    #[allow(clippy::expect_used)]
     fn open_inner(path: &Path, authority: Option<Arc<dyn MigrationSqlWriteAuthority>>) -> Self {
         rusqlite::Connection::open(path).expect("create engine test database");
         let path = path
