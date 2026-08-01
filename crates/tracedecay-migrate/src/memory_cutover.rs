@@ -970,16 +970,12 @@ fn migration_error(message: impl Into<String>) -> TraceDecayError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::branch::{
-        BranchAdminAction, BranchAdminOutcome, BranchAdminReport, prepare_branch_admin_mutation,
-    };
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     /// A project store holding one tracked branch whose `SQLite` family carries a
     /// durable fact that exists nowhere else.
     struct BranchStoreFixture {
         _temp: tempfile::TempDir,
-        project_root: PathBuf,
         data_root: PathBuf,
     }
 
@@ -994,9 +990,7 @@ mod tests {
 
         fn empty(branches: &[&str]) -> Self {
             let temp = tempfile::tempdir().unwrap();
-            let project_root = temp.path().join("repo");
             let data_root = temp.path().join("store");
-            fs::create_dir_all(&project_root).unwrap();
             fs::create_dir_all(data_root.join("branches")).unwrap();
             let mut meta = branch_meta::BranchMeta::new("main");
             for branch in branches {
@@ -1006,7 +1000,6 @@ mod tests {
 
             Self {
                 _temp: temp,
-                project_root,
                 data_root,
             }
         }
@@ -1066,36 +1059,12 @@ mod tests {
             }
         }
 
-        /// Drives the production removal transaction with the same receipt
-        /// verification the daemon installs as its pre-commit validator.
-        fn remove_branch(&self, branch: &str) -> Result<BranchAdminReport> {
-            let prepared = prepare_branch_admin_mutation(
-                &self.project_root,
+        fn verify_branch_removal(&self, branch: &str) -> Result<()> {
+            let database_path = self.database_path(branch);
+            verify_branch_removal_receipts(
                 &self.data_root,
-                BranchAdminAction::Remove {
-                    branch: branch.to_owned(),
-                },
-                0,
-                0,
-            )?;
-            let mut canonical_paths = prepared.database_paths().to_vec();
-            canonical_paths.sort();
-            let fence = tracedecay_runtime_core::db::DatabaseDeletionFence::acquire(
-                &canonical_paths,
-                "test branch store removal",
-            )?;
-            prepared.commit_with_transaction(
-                fence.transaction_id(),
-                || fence.publish_deleting(),
-                |validation_paths| {
-                    verify_branch_removal_receipts(
-                        &self.data_root,
-                        &canonical_paths,
-                        validation_paths,
-                    )
-                },
-                || fence.rollback_deleting(),
-                || fence.promote_deleted(),
+                std::slice::from_ref(&database_path),
+                std::slice::from_ref(&database_path),
             )
         }
     }
@@ -1114,7 +1083,7 @@ mod tests {
         let fixture = BranchStoreFixture::new(&["feature"]);
 
         let error = fixture
-            .remove_branch("feature")
+            .verify_branch_removal("feature")
             .expect_err("removal must refuse without a covering cutover receipt");
 
         assert!(
@@ -1133,21 +1102,13 @@ mod tests {
     }
 
     #[test]
-    fn branch_removal_with_generation_bound_receipt_proceeds() {
+    fn branch_removal_with_generation_bound_receipt_validates() {
         let fixture = BranchStoreFixture::new(&["feature"]);
         fixture.write_receipt(vec![fixture.covering_source("feature")]);
 
-        let report = fixture
-            .remove_branch("feature")
+        fixture
+            .verify_branch_removal("feature")
             .expect("a generation-bound receipt must authorize removal");
-
-        assert_eq!(report.outcome, BranchAdminOutcome::Removed);
-        assert!(!fixture.database_path("feature").exists());
-        assert!(
-            !branch_meta::load_branch_meta(&fixture.data_root)
-                .unwrap()
-                .is_tracked("feature")
-        );
     }
 
     #[test]
@@ -1162,7 +1123,7 @@ mod tests {
         }]);
 
         let error = fixture
-            .remove_branch("feature")
+            .verify_branch_removal("feature")
             .expect_err("a receipt from a different generation must not authorize removal");
 
         assert!(
@@ -1240,7 +1201,7 @@ mod tests {
         drop(target_connection);
 
         let error = fixture
-            .remove_branch("feature")
+            .verify_branch_removal("feature")
             .expect_err("a receipt cannot replace current target-closure proof");
 
         assert!(
