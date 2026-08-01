@@ -152,6 +152,16 @@ impl TraceDecay {
         self.db.get_incoming_edges_bulk(target_ids, kinds).await
     }
 
+    /// Returns outgoing edges for many source nodes in one round-trip.
+    /// Empty `kinds` matches every edge kind.
+    pub async fn get_outgoing_edges_bulk(
+        &self,
+        source_ids: &[String],
+        kinds: &[EdgeKind],
+    ) -> Result<Vec<Edge>> {
+        self.db.get_outgoing_edges_bulk(source_ids, kinds).await
+    }
+
     /// Returns all nodes whose `qualified_name` matches `qname`.
     /// Cross-run lookup independent of the content-hash node IDs.
     pub async fn get_nodes_by_qualified_name(&self, qname: &str) -> Result<Vec<Node>> {
