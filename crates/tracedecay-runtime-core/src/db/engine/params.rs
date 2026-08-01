@@ -66,7 +66,10 @@ pub struct Params {
 }
 
 impl Params {
-    pub(crate) fn from_results(values: Vec<Result<Value>>) -> Self {
+    // Reached from outside the crate only through the exported `params!`
+    // expansion, so it must stay `pub` even though no caller names it.
+    #[doc(hidden)]
+    pub fn from_results(values: Vec<Result<Value>>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }
