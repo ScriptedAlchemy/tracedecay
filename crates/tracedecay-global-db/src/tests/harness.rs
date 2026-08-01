@@ -134,8 +134,12 @@ impl RegisteredGlobalDbHarness {
                 .expect("daemon database scope");
         let registry = profile_sessions::open(profile_root)
             .expect(UNWIRED_PROFILE_SESSIONS)
-            .await;
-        let registered = registry.mount().await;
+            .await
+            .expect("open registered profile-sessions runtime");
+        let registered = registry
+            .mount()
+            .await
+            .expect("mount registered profile-sessions runtime");
         Self {
             registered,
             _directory: directory,
@@ -153,7 +157,10 @@ impl RegisteredGlobalDbHarness {
     }
 
     pub async fn mount(&self) -> Arc<RegisteredGlobalDb> {
-        self.registry.mount().await
+        self.registry
+            .mount()
+            .await
+            .expect("remount registered profile-sessions runtime")
     }
 
     #[cfg(test)]
