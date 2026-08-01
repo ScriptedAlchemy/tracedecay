@@ -23,8 +23,25 @@ use super::{
     LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
-const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+/// Bounded daemon-wide concurrency for expensive background reconciles and
+/// mounts. A single global permit serialized EVERY project/worktree cold build
+/// across the whole daemon, turning independent opens into an N-way queue. The
+/// bound stays small enough to respect store write-lock / maintenance-lease
+/// pressure, so it is capped at 4 and scaled to half the available cores.
+///
+/// Same-store (same-worktree) exclusion does NOT depend on this bound: each
+/// mounted worktree owns exactly one reconcile worker task that dequeues wakes
+/// one at a time, and every reconcile additionally runs under that worktree's
+/// per-scheduler `Mutex`. Raising the global bound therefore only lets DISTINCT
+/// worktrees (which write to path-scoped stores) reconcile in parallel; it can
+/// never overlap two reconciles for the same worktree/store.
+fn bounded_daemon_admission_permits() -> usize {
+    std::thread::available_parallelism()
+        .map(|cores| (cores.get() / 2).clamp(1, 4))
+        .unwrap_or(1)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexGenerationPublishedV1 {
@@ -76,7 +93,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
-    mount_admission: Arc<tokio::sync::Mutex<()>>,
+    mount_admission: Arc<tokio::sync::Semaphore>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
@@ -101,14 +118,27 @@ impl CodeIndexSchedulerRegistryV1 {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            mount_admission: Arc::new(tokio::sync::Mutex::new(())),
+            mount_admission: Arc::new(tokio::sync::Semaphore::new(
+                bounded_daemon_admission_permits(),
+            )),
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
-                MAX_CONCURRENT_BACKGROUND_RECONCILES,
+                bounded_daemon_admission_permits(),
             )),
             generation_publications,
             cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
             test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    /// Construct a registry with an explicit background-reconcile permit count so
+    /// tests can deterministically exercise the bounded-admission behavior
+    /// (parallelism across distinct stores vs. serialization at a bound of one)
+    /// independent of the host's core count.
+    #[cfg(test)]
+    pub(super) fn with_background_reconcile_permits(max_worktrees: usize, permits: usize) -> Self {
+        let mut registry = Self::new(max_worktrees);
+        registry.background_reconcile_admission = Arc::new(tokio::sync::Semaphore::new(permits));
+        registry
     }
 
     fn pack_trigger(trigger: CodeIndexCadenceTriggerV1) -> u64 {
@@ -394,10 +424,16 @@ impl CodeIndexSchedulerRegistryV1 {
         >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        // Serialize expensive mounts without pinning the registry map. The
-        // initial reconcile can parse and hash an entire repository; holding
-        // `mounted` here blocks every foreground query across every project.
-        let _mount_admission = self.mount_admission.lock().await;
+        // Bound (not fully serialize) expensive mounts without pinning the
+        // registry map. Restoring a sealed generation for a distinct worktree is
+        // independent work, so a small bound lets concurrent opens proceed while
+        // still capping simultaneous store-open pressure. Holding `mounted` here
+        // would instead block every foreground query across every project.
+        let _mount_admission = self.mount_admission.acquire().await.map_err(|_| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "code-index mount admission semaphore is closed".to_owned(),
+            )
+        })?;
         let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
@@ -435,6 +471,13 @@ impl CodeIndexSchedulerRegistryV1 {
             opened.replace_semantic_schedule_hook(Some(hook));
         }
         let restored_generation = opened.latest_complete();
+        // When the restore-time freshness witness proved the retained generation
+        // still equals the on-disk source, the mount-time verification pass is
+        // redundant: skip it so an unchanged reopen costs a stat-scan, not a
+        // whole-repo read+hash+parse. Normal tier-1/tier-2 cadence still wakes
+        // the worker on the next git-mediated change or staleness window, so this
+        // never suppresses cadence indefinitely.
+        let restore_verified_fresh = opened.verified_against_source();
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
@@ -572,15 +615,20 @@ impl CodeIndexSchedulerRegistryV1 {
         if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
             let _ = hook(&latest.generation);
         }
-        // Always schedule a background verification pass. Retained generations
-        // keep queries non-blocking, but open-time clocks must not suppress
-        // cadence indefinitely (the live stale-index defect).
-        Self::note_wake(
-            &pending_wake_micros,
-            &pending_wake_trigger,
-            &wake,
-            CodeIndexCadenceTriggerV1::Mount,
-        );
+        // Schedule a background verification pass UNLESS the restore-time witness
+        // already proved this generation current. Retained-but-unverified
+        // generations keep queries non-blocking, but open-time clocks must not
+        // suppress cadence indefinitely (the live stale-index defect); a
+        // witness-verified generation carries the proof that pass would produce,
+        // so waking the worker would only repeat a whole-repo read for nothing.
+        if !restore_verified_fresh {
+            Self::note_wake(
+                &pending_wake_micros,
+                &pending_wake_trigger,
+                &wake,
+                CodeIndexCadenceTriggerV1::Mount,
+            );
+        }
         Ok(true)
     }
 

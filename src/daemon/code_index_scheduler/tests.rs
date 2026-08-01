@@ -1699,6 +1699,13 @@ fn restored_generation_abstains_and_schedules_background_truth() {
         published(scheduler.reconcile_now().expect("initial publish"));
     }
 
+    // Simulate a generation sealed WITHOUT a restore-time freshness witness (an
+    // older daemon, or a witness that never landed). With no witness the restore
+    // must fail closed: unproven bytes are not request-admissible until the
+    // background worker reconciles against gix truth.
+    std::fs::remove_file(store.path().join("freshness_witness.v1"))
+        .expect("remove restore-time freshness witness");
+
     let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
     assert!(
         restarted
@@ -1732,6 +1739,77 @@ fn restored_generation_abstains_and_schedules_background_truth() {
             .expect("ready check")
             .is_some(),
         "the unchanged restored generation becomes request-admissible after reconciliation"
+    );
+}
+
+#[test]
+fn unchanged_reopen_with_witness_skips_full_reconcile() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let baseline = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("initial publish"))
+    };
+    assert!(
+        store.path().join("freshness_witness.v1").is_file(),
+        "a successful reconcile persists the restore-time freshness witness"
+    );
+
+    // Reopen against the same store with the worktree unchanged. The witness
+    // proves the sealed generation is still current, so the scheduler adopts it
+    // as verified WITHOUT the forced whole-repo read+hash+parse.
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    assert!(
+        reopened.verified_against_source(),
+        "an unchanged reopen with a matching witness is verified without a scan"
+    );
+    assert!(
+        reopened
+            .ensure_fresh_for_query()
+            .expect("freshness ladder runs")
+            .is_none(),
+        "a witness-verified reopen skips the forced full reconcile"
+    );
+    let served = reopened
+        .latest_complete_ready_for_query()
+        .expect("ready check")
+        .expect("witness-verified restore serves immediately");
+    assert_eq!(
+        served.generation.manifest().generation_id,
+        baseline.generation_id,
+        "the witness-verified reopen serves the sealed generation"
+    );
+}
+
+#[test]
+fn edited_reopen_forces_full_reconcile_when_witness_mismatches() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let baseline = {
+        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("initial publish"))
+    };
+
+    // A working-tree edit changes the tier-2 stat signature, so the witness no
+    // longer matches. The reopen must fail closed and fully reconcile the change
+    // rather than serve the now-stale sealed generation.
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    assert!(
+        !reopened.verified_against_source(),
+        "a changed worktree must never be adopted as verified from a stale witness"
+    );
+    let outcome = reopened
+        .ensure_fresh_for_query()
+        .expect("freshness ladder runs")
+        .expect("a witness mismatch forces a reconcile");
+    assert_ne!(
+        published(outcome).generation_id,
+        baseline.generation_id,
+        "the edited source is captured in a freshly published generation"
     );
 }
 
@@ -2112,11 +2190,13 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn background_reconciles_are_globally_bounded_across_worktrees() {
+async fn background_reconciles_respect_a_single_admission_permit() {
+    // A bound of ONE serializes all worktrees: while the first worker holds the
+    // sole permit (blocked on its scheduler lock), the second cannot start.
     let first = GitFixture::new(&[("src/lib.rs", "pub fn first() -> u32 { 1 }\n")]);
     let second = GitFixture::new(&[("src/lib.rs", "pub fn second() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 1);
     for fixture in [&first, &second] {
         registry
             .mount_worktree(
@@ -2166,13 +2246,100 @@ async fn background_reconciles_are_globally_bounded_across_worktrees() {
     assert_eq!(
         registry.latest_generation_id(second.path()).await,
         Some(second_generation.clone()),
-        "a second worktree must wait behind the bounded background reconcile admission"
+        "with a single permit a second worktree must wait behind the first"
     );
 
     release_tx.send(()).expect("release first scheduler");
     lock_thread.join().expect("first lock thread joins");
     let _ = wait_for_generation_change(&registry, first.path(), &first_generation).await;
     let _ = wait_for_generation_change(&registry, second.path(), &second_generation).await;
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn distinct_stores_reconcile_in_parallel_under_bounded_admission() {
+    // With two permits, hold the FIRST worktree's scheduler lock so its worker
+    // takes one permit and blocks mid-reconcile (an in-flight reconcile analog).
+    // The SECOND worktree, writing to a different path-scoped store, must still
+    // acquire the remaining permit and publish — proving distinct stores are NOT
+    // serialized behind one another. (Same-store exclusion — that one worktree
+    // never runs two overlapping reconciles — is structural, from its single
+    // worker plus per-scheduler `Mutex`, and is covered by
+    // `scheduler_notifications_release_registry_while_reconcile_is_busy`.)
+    let first = GitFixture::new(&[("src/lib.rs", "pub fn first() -> u32 { 1 }\n")]);
+    let second = GitFixture::new(&[("src/lib.rs", "pub fn second() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 2);
+    for fixture in [&first, &second] {
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount worktree");
+    }
+    let first_generation = wait_for_initial_generation(&registry, first.path()).await;
+    let second_generation = wait_for_initial_generation(&registry, second.path()).await;
+
+    let first_handle = registry
+        .scheduler_handle(first.path())
+        .await
+        .expect("first scheduler");
+    let first_wake = {
+        let scheduler = first_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(&scheduler.wake)
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = first_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal first lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("first scheduler lock acquired");
+
+    // Wake the first worker: it takes one of the two permits, then blocks on the
+    // held scheduler lock. Its own store cannot advance while blocked, but it
+    // occupies exactly one permit.
+    first.edit("src/lib.rs", "pub fn first() -> u32 { 2 }\n");
+    first_wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The second worktree — a distinct path-scoped store — must proceed on the
+    // remaining permit and publish a new generation without the first releasing.
+    // (Note: the first scheduler lock is deliberately held here, so we must NOT
+    // query the first worktree via `latest_generation_id`, which would block on
+    // that lock while holding the registry map lock.)
+    second.edit("src/lib.rs", "pub fn second() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_path(second.path(), second.path().join("src/lib.rs"))
+            .await
+    );
+    let advanced_second =
+        wait_for_generation_change(&registry, second.path(), &second_generation).await;
+    assert_ne!(
+        advanced_second, second_generation,
+        "a distinct store must reconcile in parallel, not serialize behind the first"
+    );
+
+    // Release the first worktree and confirm it, too, reconciles the pending edit
+    // once its lock frees — it was blocked, never starved.
+    release_tx.send(()).expect("release first scheduler");
+    lock_thread.join().expect("first lock thread joins");
+    let advanced_first =
+        wait_for_generation_change(&registry, first.path(), &first_generation).await;
+    assert_ne!(
+        advanced_first, first_generation,
+        "the first worktree reconciles its pending edit once its lock is released"
+    );
     registry.shutdown().await;
 }
 
@@ -4594,9 +4761,16 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
         &fixture.path().canonicalize().expect("canonical fixture"),
     );
     {
-        let mut scheduler = scheduler(&fixture, scoped_store, Arc::clone(&bytes));
+        let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
         published(scheduler.reconcile_now().expect("seed generation"));
     }
+    // Exercise the mount-time verification of a restored generation that carries
+    // NO freshness witness (an older seal, or a witness that never landed): the
+    // mount must still schedule a verification pass that emits a no-op receipt.
+    // The witness-present fast path (mount skips the reconcile) is covered by
+    // `witness_verified_mount_skips_reconcile`.
+    std::fs::remove_file(scoped_store.join("freshness_witness.v1"))
+        .expect("remove restore-time freshness witness");
 
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
@@ -4646,6 +4820,56 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
     assert!(
         !read_model.event_to_ready_micros.p99.is_available(),
         "p99 must stay unavailable until 100 samples are retained"
+    );
+    registry.shutdown().await;
+}
+
+/// P2: a mount whose restored generation is proved current by its freshness
+/// witness must NOT schedule the mount-time verification reconcile. The whole
+/// point of the witness is to skip that whole-repo read on an unchanged reopen,
+/// so no reconcile runs and no event-to-ready receipt is emitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn witness_verified_mount_skips_reconcile() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let seeded = {
+        let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
+        published(scheduler.reconcile_now().expect("seed generation")).generation_id
+    };
+    assert!(
+        scoped_store.join("freshness_witness.v1").is_file(),
+        "seeding a generation persists its restore-time freshness witness"
+    );
+
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount retained");
+
+    // The witness proves the retained generation current, so the mount schedules
+    // no verification reconcile. Give any (incorrectly scheduled) reconcile ample
+    // time to land, then assert none did: no receipt, and the served generation
+    // is still the seeded one — never rebuilt.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        registry.latest_event_to_ready_receipt().is_none(),
+        "a witness-verified mount performs no reconcile, so emits no cadence receipt"
+    );
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(seeded),
+        "the witness-verified mount serves the sealed generation without rebuilding"
     );
     registry.shutdown().await;
 }

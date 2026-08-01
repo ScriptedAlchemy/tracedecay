@@ -1253,28 +1253,59 @@ pub(super) async fn register_project_open_dependent_owners(
     );
 
     if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
-        register_production_advisory_owner(
-            invocation,
-            project_root,
-            database,
-            Arc::clone(&session_db),
-            Arc::clone(&graph),
-            scope.clone(),
-            access,
-            feedback_scope,
-            feedback_cycle,
-            feedback_lsp_input,
-            lsp_session_factory,
-            scout_registry,
-            scout_configuration.clone(),
-            admitted_root_uri,
-            indexed_files,
-        )
-        .await?;
+        // P3: the advisory owner (Context Scout config install, GitHub provider
+        // resolution — potentially network — CI stores, and code-index-coupled
+        // anchors) is NOT required for the project to be servable: when the
+        // feedback cycle above resolves to `None`, advisory is skipped entirely
+        // and the project still fully publishes and answers queries. Awaiting it
+        // on the open critical path coupled open to the starved reconcile lane
+        // and to network stalls (observed 924 s). Register it as a background
+        // upgrade so open returns as soon as the graph is mounted; the advisory
+        // registrars are idempotent (AlreadyRegistered) and self-contained.
+        let advisory_invocation = invocation.clone();
+        let advisory_project_root = project_root.to_path_buf();
+        let advisory_session_db = Arc::clone(&session_db);
+        let advisory_graph = Arc::clone(&graph);
+        let advisory_scope = scope.clone();
+        let advisory_scout_configuration = scout_configuration.clone();
+        tokio::spawn(async move {
+            let outcome = register_production_advisory_owner(
+                &advisory_invocation,
+                &advisory_project_root,
+                database,
+                advisory_session_db,
+                advisory_graph,
+                advisory_scope,
+                access,
+                feedback_scope,
+                feedback_cycle,
+                feedback_lsp_input,
+                lsp_session_factory,
+                scout_registry,
+                advisory_scout_configuration,
+                admitted_root_uri,
+                indexed_files,
+            )
+            .await;
+            match outcome {
+                Ok(_) => tracing::info!(
+                    event = "project_open_owner_phase",
+                    project = %advisory_project_root.display(),
+                    phase = "advisory_owner_registered",
+                    deferred = true,
+                ),
+                Err(error) => tracing::warn!(
+                    event = "project_open_owner_phase",
+                    project = %advisory_project_root.display(),
+                    phase = "advisory_owner_deferred_failed",
+                    error = %error,
+                ),
+            }
+        });
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
-            phase = "advisory_owner_registered",
+            phase = "advisory_owner_scheduled",
         );
     }
 
