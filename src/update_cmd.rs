@@ -1103,10 +1103,10 @@ mod tests {
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
         dogfood_forward_only_target_state, health_pass_failure_result,
-        host_owns_canonical_component_set, normalize_bin_path, partition_reinstall_results,
-        post_update_binary, post_update_binary_from, prepare_post_update_lease,
-        refresh_generated_plugins_at, reinstall_failure_result, restart_daemon_service_with,
-        run_install_then_refresh,
+        host_owns_canonical_component_set, install_pass_covers_tracked_agents, normalize_bin_path,
+        partition_reinstall_results, post_update_binary, post_update_binary_from,
+        prepare_post_update_lease, refresh_generated_plugins_at, reinstall_failure_result,
+        restart_daemon_service_with, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
