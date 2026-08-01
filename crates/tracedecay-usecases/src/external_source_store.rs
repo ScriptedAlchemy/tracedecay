@@ -383,33 +383,6 @@ impl RuntimeExternalSourceStore {
         .await
     }
 
-    pub(crate) async fn read_host_observation_receipt(
-        &self,
-        receipt: &tracedecay_store::ObservationCommitReceipt,
-    ) -> Result<Option<SourceCommitReceiptV1>, RuntimeExternalSourceErrorV1> {
-        let observation = receipt.observation();
-        let definition = host_source_definition(observation.source().provider().clone())?;
-        let binding = host_source_binding(
-            &definition,
-            observation,
-            receipt
-                .retrieval_anchor()
-                .authorization()
-                .privacy_domain_id
-                .clone(),
-            self.runtime.binding(),
-        )?;
-        let idempotency_key = derive_logical_effect_idempotency(
-            LogicalEffectIdempotencyDomain::HostObservation,
-            observation.observation_id(),
-        )
-        .map_err(invalid)?;
-        Ok(self
-            .read_state(binding.immutable_identity().map_err(invalid)?)
-            .await?
-            .and_then(|state| state.receipt_by_idempotency_key(&idempotency_key).cloned()))
-    }
-
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,

@@ -214,26 +214,6 @@ pub async fn open_runtime_configuration_for_registered_database_read_only(
         .await
 }
 
-pub(crate) async fn resolve_runtime_configuration_for_registered_database(
-    project_root: &Path,
-    layout: &StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
-) -> Result<PinnedRuntimeConfiguration> {
-    runtime_configuration_authority()?
-        .resolve(project_root, layout, database)
-        .await
-}
-
-pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
-    project_root: &Path,
-    layout: &StoreLayout,
-    database: Arc<RegisteredGlobalDb>,
-) -> Result<PinnedRuntimeConfiguration> {
-    runtime_configuration_authority()?
-        .load_read_only(project_root, layout, database)
-        .await
-}
-
 #[cfg(test)]
 pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     project_root: &Path,
