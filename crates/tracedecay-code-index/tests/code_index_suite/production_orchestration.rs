@@ -377,6 +377,130 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
     );
 }
 
+/// The published-generation integrity gate is an amortized load-time check.
+/// Verifying once per loaded generation must reach exactly the verdict a fresh
+/// verification reaches, and must stay fail-closed for a generation that has
+/// never validated.
+#[test]
+fn published_generation_validation_is_amortized_per_loaded_generation() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(request("file.validation.memo", 1_300_000), &ActiveControl)
+        .expect("valid generation publishes");
+
+    // Publication already ran the full gate, so the generation carries a
+    // verified mark and later seals reuse it instead of re-verifying.
+    assert!(
+        generation.is_validated(),
+        "publishing a generation must run its integrity gate"
+    );
+    let sealed = generation.encode_sealed().expect("valid generation seals");
+    let resealed = generation
+        .encode_sealed()
+        .expect("an already-verified generation reseals");
+    assert_eq!(
+        sealed, resealed,
+        "the memoized gate must reach the same verdict and payload as the first check"
+    );
+
+    // Restoring re-reads bytes from the sealed store, so it must verify fresh
+    // rather than trust any carried mark.
+    let restored =
+        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
+    assert!(
+        restored.is_validated(),
+        "a restored generation must be fully verified before it can serve"
+    );
+    assert_eq!(restored.manifest(), generation.manifest());
+    assert_eq!(
+        restored
+            .encode_sealed()
+            .expect("restored generation reseals"),
+        sealed,
+        "a restored generation must reseal to identical bytes"
+    );
+
+    // Repeat exact admission is memoized and must stay byte-identical.
+    let first_admitted = restored
+        .admitted_chunks()
+        .expect("parser-backed exact authority");
+    let second_admitted = restored
+        .admitted_chunks()
+        .expect("repeat exact admission is amortized");
+    assert!(!first_admitted.is_empty());
+    assert_eq!(first_admitted.len(), second_admitted.len());
+    assert!(
+        first_admitted
+            .iter()
+            .zip(&second_admitted)
+            .all(|(first, second)| first.chunk() == second.chunk()),
+        "amortized admission must return the same chunks as the first admission"
+    );
+
+    // Repeat attribution reads are memoized and must stay identical.
+    let first_attribution = restored
+        .test_attribution_authority()
+        .expect("test attribution authority");
+    let second_attribution = restored
+        .test_attribution_authority()
+        .expect("repeat attribution read is amortized");
+    let generation_id = restored.manifest().generation_id.clone();
+    assert_eq!(
+        format!(
+            "{:?}",
+            first_attribution.read_test_attribution(&generation_id)
+        ),
+        format!(
+            "{:?}",
+            second_attribution.read_test_attribution(&generation_id)
+        ),
+        "amortized attribution must return the same evidence as the first read"
+    );
+}
+
+/// Corruption of chunk evidence must still be caught by the very first
+/// validation of a generation. Memoizing a verdict must never let a generation
+/// that has not validated serve.
+#[test]
+fn corrupted_chunk_evidence_fails_the_first_validation_of_a_restored_generation() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request("file.validation.corrupt", 1_400_000),
+            &ActiveControl,
+        )
+        .expect("valid generation publishes");
+    let sealed = generation.encode_sealed().expect("valid generation seals");
+
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&sealed).expect("sealed generation JSON");
+    let chunk = &mut envelope["generation"]["files"][0]["artifacts"]["chunks"]["chunks"][0];
+    assert!(
+        !chunk.is_null(),
+        "the fixture generation must contain at least one chunk"
+    );
+    // Break the chunk's canonical identity so it no longer matches the document
+    // membership its file artifact claims.
+    chunk["id"] = serde_json::Value::String("chunk.tampered".to_owned());
+    // Re-seal the envelope so the outer state digest cannot be what rejects it.
+    let state_digest =
+        canonical_sha256(&envelope["generation"]).expect("forged payload has canonical digest");
+    envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
+    let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
+
+    let error = CodeIndexPublishedGenerationV1::decode_sealed(&forged)
+        .expect_err("corrupted chunk evidence must fail the first validation");
+    let message = error.to_string();
+    assert!(
+        message.contains("chunk") || message.contains("digest") || message.contains("canonical"),
+        "unexpected corrupted-chunk error: {message}"
+    );
+}
+
 #[test]
 fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() {
     let store = SharedPublicationStore::default();
