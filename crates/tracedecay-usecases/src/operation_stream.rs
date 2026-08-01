@@ -89,6 +89,34 @@ impl fmt::Display for OperationId {
     }
 }
 
+/// Caller-owned controls used to reconstitute an operation request context.
+pub struct OperationRequestControls<'a> {
+    request_id: RequestId,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    observed_at: UtcMicros,
+    resume_token: Option<&'a ResumeToken>,
+}
+
+impl<'a> OperationRequestControls<'a> {
+    #[must_use]
+    pub fn new(
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+        observed_at: UtcMicros,
+        resume_token: Option<&'a ResumeToken>,
+    ) -> Self {
+        Self {
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+            resume_token,
+        }
+    }
+}
+
 /// Closed operation names prevent lifecycle metadata from becoming an
 /// arbitrary payload side channel.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -701,63 +729,38 @@ impl OperationEventAuthority {
         &self,
         operation_id: &OperationId,
         active_project_id: &ProjectId,
-        request_id: RequestId,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-        observed_at: UtcMicros,
-        resume_token: Option<&ResumeToken>,
+        controls: OperationRequestControls<'_>,
     ) -> Result<RequestContext, OperationEventError> {
-        self.resolve_invocation_context_inner(
-            operation_id,
-            Some(active_project_id),
-            None,
-            request_id,
-            deadline,
-            cancellation,
-            observed_at,
-            resume_token,
-        )
-        .await
+        self.resolve_invocation_context_inner(operation_id, Some(active_project_id), None, controls)
+            .await
     }
 
     /// Daemon invocation admission resolves authority from the retained
     /// operation and only revalidates a caller-carried exact scope.
-    #[allow(clippy::too_many_arguments)]
     pub async fn resolve_invocation_context(
         &self,
         operation_id: &OperationId,
         target: &InvocationTarget,
-        request_id: RequestId,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-        observed_at: UtcMicros,
-        resume_token: Option<&ResumeToken>,
+        controls: OperationRequestControls<'_>,
     ) -> Result<RequestContext, OperationEventError> {
-        self.resolve_invocation_context_inner(
-            operation_id,
-            None,
-            target.resolved(),
-            request_id,
-            deadline,
-            cancellation,
-            observed_at,
-            resume_token,
-        )
-        .await
+        self.resolve_invocation_context_inner(operation_id, None, target.resolved(), controls)
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn resolve_invocation_context_inner(
         &self,
         operation_id: &OperationId,
         expected_project_id: Option<&ProjectId>,
         expected_scope: Option<&ResolvedScope>,
-        request_id: RequestId,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-        observed_at: UtcMicros,
-        resume_token: Option<&ResumeToken>,
+        controls: OperationRequestControls<'_>,
     ) -> Result<RequestContext, OperationEventError> {
+        let OperationRequestControls {
+            request_id,
+            deadline,
+            cancellation,
+            observed_at,
+            resume_token,
+        } = controls;
         let state = self.inner.state.lock().await;
         let Some(record) = state.operations.get(operation_id) else {
             return Err(if resume_token.is_some() {

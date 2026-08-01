@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::application::operation_stream::OperationRequestControls;
 use crate::application_surface::ApplicationSurfaceOperation;
 use crate::errors::{Result, TraceDecayError};
 
@@ -371,11 +372,13 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         .resolve_invocation_context(
                             &operation_id,
                             &target,
-                            request_id,
-                            deadline,
-                            cancellation.context(),
-                            observed_at,
-                            None,
+                            OperationRequestControls::new(
+                                request_id,
+                                deadline,
+                                cancellation.context(),
+                                observed_at,
+                                None,
+                            ),
                         )
                         .await
                         .map_err(map_operation_event_invocation_error)?;
@@ -458,11 +461,13 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
                         .resolve_invocation_context(
                             &operation_id,
                             &target,
-                            request_id,
-                            deadline,
-                            cancellation.context(),
-                            observed_at,
-                            None,
+                            OperationRequestControls::new(
+                                request_id,
+                                deadline,
+                                cancellation.context(),
+                                observed_at,
+                                None,
+                            ),
                         )
                         .await
                         .map_err(map_operation_event_invocation_error)?;

@@ -75,6 +75,7 @@ use crate::application::feedback::observations::{
 };
 use crate::application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+    OperationRequestControls,
 };
 use crate::application::primitives::{
     CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
@@ -2209,11 +2210,13 @@ async fn resolve_authenticated_http_request_context(
         .resolve_request_context(
             operation_id,
             &state.active_project_id,
-            request_id,
-            deadline,
-            cancellation,
-            observed_at,
-            resume_token,
+            OperationRequestControls::new(
+                request_id,
+                deadline,
+                cancellation,
+                observed_at,
+                resume_token,
+            ),
         )
         .await
 }
