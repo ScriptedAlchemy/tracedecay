@@ -17,6 +17,7 @@ use crate::sessions::claude_observation::{
 };
 use crate::sessions::cline_like::{ClineLikeSource, capture_cline_like_snapshot_observations};
 use crate::sessions::{codex, cursor, hermes, kiro};
+use tracedecay_runtime_core::sqlite_read_snapshot::open_immutable_read_only;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
@@ -453,14 +454,8 @@ impl ProviderFixture {
             }
             ProviderKind::Hermes => {
                 let state_db = self.source_path.join("profiles/benchmark/state.db");
-                let uri = format!("file:{}?mode=ro&immutable=1", state_db.display());
-                let connection = rusqlite::Connection::open_with_flags(
-                    uri,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | rusqlite::OpenFlags::SQLITE_OPEN_URI
-                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .expect("open immutable Hermes parse-phase fixture database");
+                let connection = open_immutable_read_only(&state_db)
+                    .expect("open immutable Hermes parse-phase fixture database");
                 let count = connection
                     .query_row("SELECT COUNT(*) FROM messages", (), |row| {
                         row.get::<_, i64>(0)
