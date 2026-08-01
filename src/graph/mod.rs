@@ -13,5 +13,8 @@ pub mod health;
 /// Git integration helpers for churn analysis.
 pub mod git;
 
+/// AST-level functional-duplicate scanning over the code graph.
+pub mod redundancy_scan;
+
 pub use queries::GraphQueryManager;
 pub use traversal::GraphTraverser;

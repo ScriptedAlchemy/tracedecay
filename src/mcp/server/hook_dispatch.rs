@@ -54,6 +54,9 @@ impl McpServer {
                 }
             };
         let request = HookBranchWriteRequest {
+            // R4: resolve the live branch once, here, where the effect root is
+            // final; every gate this write crosses reads it from the request.
+            live_branch: crate::branch::BranchMemo::new(&root),
             graph: Arc::clone(cg),
             root,
             branch,
