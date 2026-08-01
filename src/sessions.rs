@@ -14,3 +14,6 @@ pub use tracedecay_sessions::runtime::*;
 
 #[cfg(test)]
 mod claude_observation_benchmark;
+
+#[cfg(test)]
+mod workflow_ingest_tests;
