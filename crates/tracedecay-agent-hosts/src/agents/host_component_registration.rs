@@ -1,5 +1,6 @@
 //! Receipt-backed host-native registration lifecycle shared by CLI and daemon owners.
 
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -107,6 +108,16 @@ pub struct HostComponentRegistrationDelegate {
     operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     should_apply: bool,
     confirmed_registration_revision: Option<[u8; 32]>,
+    /// Absolute paths the surrounding transaction declared it will write
+    /// itself. A host whose registration surface *is* a managed artifact
+    /// (Kiro's `~/.kiro/settings/mcp.json` is both) would otherwise read its
+    /// own declared write back as foreign drift.
+    declared_artifact_writes: BTreeSet<PathBuf>,
+    /// Revision of every registration path *outside* `declared_artifact_writes`
+    /// as observed at `stage`, i.e. the last moment before the transaction
+    /// writes its own artifacts. `apply` compares against this so that only a
+    /// genuinely foreign edit invalidates the transaction.
+    staged_foreign_registration_revision: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +182,8 @@ impl HostComponentRegistrationDelegate {
             operation,
             should_apply: false,
             confirmed_registration_revision: None,
+            declared_artifact_writes: BTreeSet::new(),
+            staged_foreign_registration_revision: None,
         })
     }
 
@@ -203,6 +216,8 @@ impl HostComponentRegistrationDelegate {
             operation,
             should_apply: false,
             confirmed_registration_revision: None,
+            declared_artifact_writes: BTreeSet::new(),
+            staged_foreign_registration_revision: None,
         })
     }
 
@@ -306,6 +321,18 @@ impl HostComponentRegistrationDelegate {
         });
         if self.project_path.is_some() {
             CompatibilityRegistrationMode::LegacyIntegration
+        } else if kiro_registration_is_the_artifact(component_set) {
+            // Kiro's `context_mcp` artifact *is* its MCP registration: the
+            // component set installs `~/.kiro/settings/mcp.json`, which is the
+            // exact file `install_mcp_server` would otherwise register into.
+            // Running both writers over one file gives it two owners — the
+            // native activation reserializes the document the artifact layer
+            // just wrote byte-for-byte, so the receipt's own artifact
+            // verification then fails with a content mismatch. The artifact
+            // write is the complete lifecycle here, which is what
+            // `supports_artifact_only_backup_restore` has always claimed for
+            // this set.
+            CompatibilityRegistrationMode::ArtifactOnly
         } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
@@ -340,10 +367,6 @@ impl HostComponentRegistrationDelegate {
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> bool {
         self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly
-            || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
-                && component_set.components.len() == 1
-                && component_set.components[0].manifest.component
-                    == crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp)
     }
 
     fn requires_competing_analyzer_preflight(
@@ -562,6 +585,28 @@ impl HostComponentRegistrationDelegate {
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
     ) -> Result<[u8; 32], crate::agents::host_bundle_v2::HostBundleError> {
+        self.registration_revision_excluding(component_set, &BTreeSet::new())
+    }
+
+    /// Revision of the registration surface with the transaction's own
+    /// declared writes held constant.
+    ///
+    /// Some hosts register themselves *through* a file this component set also
+    /// installs as a managed artifact — Kiro's `~/.kiro/settings/mcp.json` is
+    /// simultaneously the registration path and the `context_mcp` artifact. A
+    /// revision taken over the raw bytes of such a path necessarily changes the
+    /// moment the transaction performs its own declared write, so a post-write
+    /// recheck against the pre-write value can only ever fail.
+    ///
+    /// Excluded paths keep their position and name in the digest and
+    /// contribute a fixed marker instead of their observed content, so the
+    /// digest stays unambiguous: excluding a path is not the same as the path
+    /// being absent, and the set of registration paths is still covered.
+    fn registration_revision_excluding(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+        excluded: &BTreeSet<PathBuf>,
+    ) -> Result<[u8; 32], crate::agents::host_bundle_v2::HostBundleError> {
         if self.integration.id() == "claude" && self.project_path.is_none() {
             let claude_root = self.context.home.join(".claude");
             if fs::symlink_metadata(&claude_root)
@@ -582,6 +627,10 @@ impl HostComponentRegistrationDelegate {
                 digest.update((index as u64).to_be_bytes());
                 digest.update((path.as_os_str().len() as u64).to_be_bytes());
                 digest.update(path.as_os_str().as_encoded_bytes());
+                if excluded.contains(path) {
+                    digest.update(b"transaction-declared-write");
+                    continue;
+                }
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                         return Err(
@@ -1463,6 +1512,16 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         Ok(())
     }
 
+    fn declare_artifact_writes(
+        &mut self,
+        _component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+        _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+        paths: &[PathBuf],
+    ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
+        self.declared_artifact_writes = paths.iter().cloned().collect();
+        Ok(())
+    }
+
     fn preflight(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
@@ -1550,6 +1609,17 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         {
             return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
         }
+        // Last observation before the transaction writes its own artifacts.
+        // Everything outside the declared write set must still look like this
+        // when `apply` runs; anything else is a foreign mutation.
+        self.staged_foreign_registration_revision =
+            match self.confirmed_registration_revision {
+                Some(_) => Some(self.registration_revision_excluding(
+                    component_set,
+                    &self.declared_artifact_writes,
+                )?),
+                None => None,
+            };
         self.backup_registration(component_set, request.operation_id)?;
         Ok(())
     }
@@ -1563,10 +1633,34 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         if mode == CompatibilityRegistrationMode::ArtifactOnly {
             return Ok(());
         }
-        if let Some(expected) = self.confirmed_registration_revision
-            && self.current_registration_revision(component_set)? != expected
-        {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+        // `apply` runs *after* the transaction wrote its declared artifacts,
+        // so the drift check here is scoped to the registration paths this
+        // transaction did not claim. Comparing the full revision against the
+        // confirmed base at this point would make every host whose
+        // registration file is also a managed artifact (Kiro) invalidate its
+        // own write and roll back on every run. Foreign edits to a *declared*
+        // path are not lost: `verify_component_set_artifacts` re-digests
+        // exactly those files immediately after this step.
+        match self.staged_foreign_registration_revision {
+            Some(expected) => {
+                if self.registration_revision_excluding(
+                    component_set,
+                    &self.declared_artifact_writes,
+                )? != expected
+                {
+                    return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                }
+            }
+            // No staged observation (a caller driving the adapter directly
+            // rather than through the transaction): fall back to the confirmed
+            // base, which is the pre-write value.
+            None => {
+                if let Some(expected) = self.confirmed_registration_revision
+                    && self.current_registration_revision(component_set)? != expected
+                {
+                    return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                }
+            }
         }
         if !self.should_apply {
             return self.capture_applied_registration(component_set, request.operation_id);
@@ -1707,6 +1801,20 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         }
         self.restore_registration(component_set, request.operation_id)
     }
+}
+
+/// Whether this component set is Kiro's `context_mcp` set, whose single managed
+/// artifact (`~/.kiro/settings/mcp.json`) is simultaneously the file Kiro's
+/// native MCP registration writes. The artifact bytes are already a complete,
+/// valid registration document, so the artifact write is the whole lifecycle
+/// and the native activation must not run as a second writer.
+fn kiro_registration_is_the_artifact(
+    component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+) -> bool {
+    component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
+        && component_set.components.len() == 1
+        && component_set.components[0].manifest.component
+            == crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp
 }
 
 /// Languages the component set's own `OpenCode` analyzer registration declares.
