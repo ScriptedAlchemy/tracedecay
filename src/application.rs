@@ -17,3 +17,9 @@
 //! are catalogued in `crates/tracedecay-usecases/SEAMS.md`.
 
 pub use tracedecay_usecases::*;
+
+// The use-case crate owns transport-independent admission behavior. The root
+// composition crate augments that surface with the registered daemon-backed
+// fixture required by root and integration tests.
+#[path = "application/host_admission.rs"]
+pub mod host_admission;
