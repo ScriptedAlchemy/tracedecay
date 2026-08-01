@@ -657,6 +657,7 @@ pub async fn run_payload_gc_in_transaction(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn preview_unreferenced_metadata(
     conn: &(impl QueryExecutor + ?Sized),
     metadata_refs: &BTreeSet<String>,
@@ -697,6 +698,7 @@ async fn preview_unreferenced_metadata(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn preview_missing_metadata(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,

@@ -1569,6 +1569,7 @@ fn condensation_draft(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn condense_summary_nodes_if_ready(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
