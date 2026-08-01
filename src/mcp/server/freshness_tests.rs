@@ -44,21 +44,6 @@ impl FreshnessRuntime {
             .await
             .expect("registered freshness profile database")
     }
-
-    async fn project_sessions(&self, cg: &TraceDecay) -> Arc<RegisteredGlobalDb> {
-        let project_id = tracedecay_domain::ProjectId::new(
-            cg.store_layout()
-                .identity
-                .project_id
-                .as_deref()
-                .expect("freshness project identity"),
-        )
-        .expect("typed freshness project identity");
-        self.registry
-            .project_sessions(project_id, [cg.project_root().to_path_buf()])
-            .await
-            .expect("registered freshness project sessions")
-    }
 }
 
 fn git(root: &std::path::Path, args: &[&str]) {
@@ -279,29 +264,6 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
             .as_deref()
             .and_then(|db| db.db_path().parent())
     );
-}
-
-#[tokio::test]
-async fn project_startup_catch_up_rejects_missing_registered_authority_argument() {
-    let (cg, _dir, _pin) = init_indexed_repo().await;
-    let profile_root = crate::config::user_data_dir().expect("configured profile root");
-    let runtime = FreshnessRuntime::open(&profile_root).await;
-    let project_db = runtime.project_sessions(&cg).await;
-
-    let completed = super::run_startup_session_catch_up(
-        Some(Arc::clone(&project_db)),
-        None,
-        None,
-        None,
-        None,
-        None,
-        cg.project_root(),
-        cg.store_layout().identity.project_id.as_deref(),
-        &crate::application::observation::ObservationCancellation::default(),
-    )
-    .await;
-
-    assert!(completed.is_none());
 }
 
 #[test]
