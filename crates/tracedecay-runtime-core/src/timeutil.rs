@@ -25,18 +25,15 @@ pub fn nearest_rank(sorted: &[u64], percentile: usize) -> Option<u64> {
     sorted.get(rank.saturating_sub(1)).copied()
 }
 
-/// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
-/// UTC dates, `today`, `yesterday`, and relative forms like `last hour`.
-pub(crate) fn parse_search_time_filter(value: &str, now: i64) -> Option<i64> {
-    parse_search_time_filter_bound(value, now, SearchTimeBound::Start)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchTimeBound {
     Start,
     End,
 }
 
+/// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
+/// UTC dates, `today`, `yesterday`, and relative forms like `last hour`, with
+/// `bound` deciding which end of a whole-day value is returned.
 pub fn parse_search_time_filter_bound(
     value: &str,
     now: i64,
@@ -128,6 +125,12 @@ mod tests {
     use tracedecay_capture::days_from_civil;
 
     use super::*;
+
+    /// The start-of-day bound every assertion below defaults to; production
+    /// callers always name the bound they want at the call site.
+    fn parse_search_time_filter(value: &str, now: i64) -> Option<i64> {
+        parse_search_time_filter_bound(value, now, SearchTimeBound::Start)
+    }
 
     #[test]
     fn nearest_rank_uses_real_samples() {

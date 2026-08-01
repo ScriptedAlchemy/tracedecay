@@ -1952,28 +1952,31 @@ mod tests {
         );
     }
 
+    /// Writes a profile-sharded `CodeProject` manifest for `project_id`
+    /// pointing at `project_root`, the fixture every store-selection test
+    /// below builds its profile out of.
+    fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
+        let data_root = profile_root.join("projects").join(project_id);
+        fs::create_dir_all(&data_root).unwrap();
+        write_store_manifest_to_path(
+            &data_root.join(STORE_MANIFEST_FILENAME),
+            &StoreManifest {
+                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: Some(project_id.to_string()),
+                store_kind: StoreKind::CodeProject,
+                storage_mode: StorageMode::ProfileSharded,
+                project_root: project_root.to_path_buf(),
+                data_root,
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn exact_root_manifest_overrides_shared_git_discovery() {
-        fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
-            let data_root = profile_root.join("projects").join(project_id);
-            fs::create_dir_all(&data_root).unwrap();
-            write_store_manifest_to_path(
-                &data_root.join(STORE_MANIFEST_FILENAME),
-                &StoreManifest {
-                    schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-                    project_id: Some(project_id.to_string()),
-                    store_kind: StoreKind::CodeProject,
-                    storage_mode: StorageMode::ProfileSharded,
-                    project_root: project_root.to_path_buf(),
-                    data_root,
-                    graph_db_relpath: "tracedecay.db".into(),
-                    sessions_db_relpath: "sessions.db".into(),
-                    branch_meta_relpath: "branch-meta.json".into(),
-                },
-            )
-            .unwrap();
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("repo");
         let unrelated_root = dir.path().join("unrelated");
@@ -2073,26 +2076,6 @@ mod tests {
 
     #[test]
     fn non_exact_identity_retains_historical_git_discovery() {
-        fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
-            let data_root = profile_root.join("projects").join(project_id);
-            fs::create_dir_all(&data_root).unwrap();
-            write_store_manifest_to_path(
-                &data_root.join(STORE_MANIFEST_FILENAME),
-                &StoreManifest {
-                    schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-                    project_id: Some(project_id.to_string()),
-                    store_kind: StoreKind::CodeProject,
-                    storage_mode: StorageMode::ProfileSharded,
-                    project_root: project_root.to_path_buf(),
-                    data_root,
-                    graph_db_relpath: "tracedecay.db".into(),
-                    sessions_db_relpath: "sessions.db".into(),
-                    branch_meta_relpath: "branch-meta.json".into(),
-                },
-            )
-            .unwrap();
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let main_root = dir.path().join("repo");
         let worktree_root = dir.path().join("repo-worktree");

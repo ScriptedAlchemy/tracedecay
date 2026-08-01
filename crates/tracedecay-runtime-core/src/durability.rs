@@ -62,15 +62,12 @@ impl StoreDurabilityClass {
     /// Whether a failure to migrate/mount/repair data of this class is
     /// worth failing a `--strict` upgrade over. Only [`Self::Durable`] data
     /// qualifies -- it is the only class this model treats as irreplaceable.
+    ///
+    /// Every other class may be handled best-effort: skipped, retried later,
+    /// or (for [`Self::Derived`]) dropped and rebuilt outright, without
+    /// operator intervention.
     pub const fn may_block_upgrade(self) -> bool {
         matches!(self, Self::Durable)
-    }
-
-    /// Whether this class may be handled best-effort: skipped, retried
-    /// later, or (for [`Self::Derived`]) dropped and rebuilt outright,
-    /// without operator intervention.
-    pub(crate) const fn is_opportunistic(self) -> bool {
-        matches!(self, Self::Derived | Self::Recoverable)
     }
 }
 
@@ -265,13 +262,6 @@ mod tests {
         assert!(StoreDurabilityClass::Durable.may_block_upgrade());
         assert!(!StoreDurabilityClass::Derived.may_block_upgrade());
         assert!(!StoreDurabilityClass::Recoverable.may_block_upgrade());
-    }
-
-    #[test]
-    fn only_derived_and_recoverable_are_opportunistic() {
-        assert!(!StoreDurabilityClass::Durable.is_opportunistic());
-        assert!(StoreDurabilityClass::Derived.is_opportunistic());
-        assert!(StoreDurabilityClass::Recoverable.is_opportunistic());
     }
 
     #[test]

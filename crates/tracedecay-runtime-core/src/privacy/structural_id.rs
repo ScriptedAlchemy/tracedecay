@@ -1,6 +1,5 @@
-use sha2::{Digest, Sha256};
-
 use super::detect::sanitize_provider_metadata_text;
+use super::length_prefixed_sha256_hex;
 
 const PROTECTION_DOMAIN_V1: &[u8] = b"tracedecay.structural-identity-protection.v1";
 const PROTECTION_PREFIX_V1: &str = "privacy.structural-id.v1.";
@@ -38,14 +37,9 @@ pub fn protect_sensitive_structural_id(value: &str) -> Result<String, Structural
         return Ok(value.to_owned());
     }
 
-    let mut hasher = Sha256::new();
-    for part in [PROTECTION_DOMAIN_V1, value.as_bytes()] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part);
-    }
     Ok(format!(
         "{PROTECTION_PREFIX_V1}{}",
-        hex::encode(hasher.finalize())
+        length_prefixed_sha256_hex(&[PROTECTION_DOMAIN_V1, value.as_bytes()])
     ))
 }
 

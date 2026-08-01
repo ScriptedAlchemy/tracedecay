@@ -9,6 +9,24 @@ pub mod detector_kernel;
 mod sanitize;
 mod structural_id;
 
+/// Lowercase-hex SHA-256 over `parts`, each prefixed with its big-endian
+/// `u64` length.
+///
+/// The length prefix is what makes the concatenation unambiguous, so every
+/// receipt and protected identifier in this module derives its digest through
+/// this one function rather than re-spelling the loop: a copy that dropped or
+/// reordered the prefix would silently mint colliding ids.
+pub(crate) fn length_prefixed_sha256_hex(parts: &[&[u8]]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hex::encode(hasher.finalize())
+}
+
 pub use detect::{
     CODE_SOURCE_SANITIZER_VERSION_V1, DetectionConfidenceV1, PrivacyDetectorV1,
     SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
