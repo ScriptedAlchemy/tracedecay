@@ -31,6 +31,9 @@ url = "2"
 fastembed = { version = "=5.17.3", optional = true, default-features = false }
 hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq", "rustls-tls"] }
 
+[target.'cfg(windows)'.dependencies]
+fsys = "1.1.0"
+
 [features]
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally

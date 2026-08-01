@@ -5996,6 +5996,7 @@ dependencies = [
  "cap-std",
  "fastembed",
  "fs2",
+ "fsys",
  "getrandom 0.2.17",
  "hex",
  "hf-hub",
