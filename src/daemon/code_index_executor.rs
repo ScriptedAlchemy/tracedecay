@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use tracedecay_query::code_search;
 
-use super::*;
 use super::{code_index_scheduler, project_open_owners, query_mcp_admission};
 
 const MAX_CONCURRENT_CODE_INDEX_SEARCHES: usize = 1;

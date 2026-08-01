@@ -198,9 +198,9 @@ mod types;
 mod work;
 
 use configuration::*;
-use dispatch::*;
 use feedback::*;
 use git::*;
+#[cfg(test)]
 use lsp::*;
 use plan26::*;
 use primitive::*;
@@ -211,11 +211,7 @@ use work::*;
 pub(crate) use configuration::{
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
 };
-pub(crate) use feedback::{
-    DaemonFeedbackInvocationFuture, DaemonFeedbackInvocationOwner, DaemonFeedbackInvocationPort,
-    DaemonFeedbackInvocationRequest, DaemonFeedbackInvocationResult,
-    daemon_operation_event_authority,
-};
+pub(crate) use feedback::{DaemonFeedbackInvocationOwner, daemon_operation_event_authority};
 pub(crate) use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,

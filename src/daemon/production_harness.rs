@@ -7,6 +7,11 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+#[cfg(all(unix, any(test, feature = "test-transport")))]
+use super::bootstrap::set_owner_only_permissions;
+#[cfg(any(test, feature = "test-transport"))]
+use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
+#[cfg(any(test, feature = "test-transport"))]
 use super::*;
 
 /// Captures the daemon's exact native Git transaction precondition for

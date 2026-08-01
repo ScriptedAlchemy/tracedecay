@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::Result;
