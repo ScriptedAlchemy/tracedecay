@@ -157,6 +157,111 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
     );
 }
 
+/// Enrolls `project_root` on disk exactly as a previously-initialized project
+/// is enrolled — an in-repo enrollment marker plus a materialized profile store
+/// — without touching the profile registry. This is the on-disk shape a profile
+/// parked at the forward-only migration boundary recovers with: the derived
+/// registry is fresh, every project's durable enrollment survives.
+#[cfg(unix)]
+fn enroll_project_on_disk_only(
+    project_root: &std::path::Path,
+    profile_root: &std::path::Path,
+    project_id: &str,
+) -> crate::storage::StoreLayout {
+    let marker = crate::storage::EnrollmentMarker {
+        project_id: project_id.to_owned(),
+        storage_mode: crate::storage::StorageMode::ProfileSharded,
+    };
+    crate::storage::write_enrollment_marker(project_root, &marker).expect("enrollment marker");
+    let layout = crate::storage::profile_sharded_layout(project_root, profile_root, &marker)
+        .expect("layout");
+    std::fs::create_dir_all(&layout.data_root).expect("profile store root");
+    std::fs::write(&layout.graph_db_path, b"existing graph store").expect("graph store");
+    layout
+}
+
+/// Regression: a post-boundary post-update runs its startup-health probe as an
+/// ordinary daemon tool call, which cannot pass `allow_init`. Before this fix
+/// the pre-admission guard consulted only the profile registry, so a project
+/// whose store was fully intact on disk was refused as "not enrolled", the
+/// forward-only post-update treated that as fatal, and the boundary re-parked.
+/// Admission must instead honour the same durable enrollment the authoritative
+/// layout resolver consults first, so the existing store is mounted.
+#[cfg(unix)]
+#[tokio::test]
+async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_forward_boundary");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "post-boundary registry reset");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    // The registry is the fresh one forward recovery brought the daemon up on.
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    assert!(
+        registry
+            .project_registry_context_by_alias(&project)
+            .await
+            .expect("registry lookup")
+            .is_none(),
+        "fixture must reproduce the post-boundary fresh registry"
+    );
+
+    engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect("a durably enrolled project must be admitted without allow_init");
+
+    // Admission must mount the recovered store, never mint a replacement.
+    let marker = crate::storage::read_enrollment_marker(&project)
+        .expect("read enrollment marker")
+        .expect("enrollment marker retained");
+    assert_eq!(marker.project_id, "proj_forward_boundary");
+    assert!(
+        layout.graph_db_path.is_file(),
+        "the pre-existing store must be left intact"
+    );
+}
+
+/// The guard still refuses a project whose enrollment marker points at a store
+/// that is not on disk, so the widened admission cannot resurrect a route with
+/// nothing behind it.
+#[cfg(unix)]
+#[tokio::test]
+async fn enrollment_marker_without_a_store_is_still_rejected() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_store_absent");
+    std::fs::remove_dir_all(&layout.data_root).expect("remove profile store");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "enrollment marker without store");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+
+    let error = match engine
+        .ensure_registered_project_route(&project, false)
+        .await
+    {
+        Ok(()) => panic!("a marker with no store on disk must not be admitted"),
+        Err(error) => error,
+    };
+    assert_missing_enrollment_admission(&error);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
