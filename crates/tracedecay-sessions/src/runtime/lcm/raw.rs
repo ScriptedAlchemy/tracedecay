@@ -1128,25 +1128,21 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
 #[cfg(test)]
 mod ingest_protection_defaults_tests {
     use super::{BUILT_IN_SENSITIVE_PATTERNS, IngestProtectionDefaults, ingest_config};
-    use crate::user_config::UserConfig;
+    use crate::host_ports::LcmRedactionPolicy;
 
     fn profile(enabled: bool, patterns: &[&str]) -> IngestProtectionDefaults {
-        IngestProtectionDefaults::from_user_config(&UserConfig {
-            lcm_sensitive_redaction_enabled: enabled,
-            lcm_sensitive_redaction_patterns: patterns
+        IngestProtectionDefaults::from_policy(&LcmRedactionPolicy {
+            enabled,
+            patterns: patterns
                 .iter()
                 .map(|pattern| (*pattern).to_string())
                 .collect(),
-            ..UserConfig::default()
         })
     }
 
     #[test]
     fn default_profile_leaves_redaction_off() {
-        let config = ingest_config(
-            None,
-            &IngestProtectionDefaults::from_user_config(&UserConfig::default()),
-        );
+        let config = ingest_config(None, &IngestProtectionDefaults::default());
         assert!(!config.sensitive_patterns_enabled);
     }
 

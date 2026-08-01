@@ -905,11 +905,9 @@ mod tests {
     };
 
     use super::*;
-    use std::future::Future;
-
     use crate::admission::{
-        HostAdmission, HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-        HostProjectionDrainOutcome,
+        AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostAdmissionScope,
+        HostAdmissionTestRuntimeV1, HostProjectionDrainOutcome,
     };
     use crate::observation::{
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
@@ -942,38 +940,33 @@ mod tests {
     }
 
     impl HostAdmission for CapturePortSpy {
-        fn capture_observation(
-            &self,
+        fn capture_observation<'a>(
+            &'a self,
             _request: CaptureObservationRequest,
-        ) -> impl Future<Output = Result<CaptureObservationOutcome, HostAdmissionOutcome>> + Send
-        {
+        ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
             self.capture_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async {
+            Box::pin(async {
                 Err(HostAdmissionOutcome::retained_unavailable(
                     "capture_port_spy",
                 ))
-            }
+            })
         }
 
-        fn advance_non_durable_source_cursor(
-            &self,
+        fn advance_non_durable_source_cursor<'a>(
+            &'a self,
             _advance: ObservationCursorAdvance,
             _cancellation: ObservationCancellation,
-        ) -> impl Future<Output = Result<CursorAdvanceOutcome, HostAdmissionOutcome>> + Send
-        {
-            async { Err(HostAdmissionOutcome::retained_unavailable("unused")) }
+        ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
+            Box::pin(async { Err(HostAdmissionOutcome::retained_unavailable("unused")) })
         }
 
         fn get_source_cursor<'a>(
             &'a self,
             _source: &'a ObservationSourceIdentityV1,
             _scope: &'a ObservationScopeV1,
-        ) -> impl Future<
-            Output = Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome>,
-        > + Send
-        + 'a {
-            async { Ok(None) }
+        ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
+            Box::pin(async { Ok(None) })
         }
 
         fn drain_projection_queue<'a>(
@@ -982,8 +975,7 @@ mod tests {
             _scope: &'a ObservationScopeV1,
             _cancellation: &'a ObservationCancellation,
             max: usize,
-        ) -> impl Future<Output = Result<HostProjectionDrainOutcome, HostAdmissionOutcome>> + Send + 'a
-        {
+        ) -> AdmissionFuture<'a, HostProjectionDrainOutcome> {
             self.drain_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.last_drain_max
@@ -992,24 +984,30 @@ mod tests {
                 .last_drain_provider
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider.to_string());
-            async {
+            Box::pin(async {
                 Err(HostAdmissionOutcome::retained_unavailable(
                     "projection_drain_spy",
                 ))
-            }
+            })
         }
-    }
 
-    impl HostAdmission for CapturePortSpy {
+        fn has_session_message<'a>(
+            &'a self,
+            _scope: &'a ObservationScopeV1,
+            _provider: &'a str,
+            _message_id: &'a str,
+        ) -> AdmissionFuture<'a, bool> {
+            Box::pin(async { Ok(false) })
+        }
+
         fn get_parse_offset<'a>(
             &'a self,
             _scope: &'a ObservationScopeV1,
             _path: &'a str,
-        ) -> impl Future<Output = Result<Option<ParseOffset>, HostAdmissionOutcome>> + Send + 'a
-        {
+        ) -> AdmissionFuture<'a, Option<ParseOffset>> {
             self.cursor_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async { Ok(None) }
+            Box::pin(async { Ok(None) })
         }
 
         fn advance_parse_offset<'a>(
@@ -1017,8 +1015,8 @@ mod tests {
             _scope: &'a ObservationScopeV1,
             _path: &'a str,
             _offset: ParseOffset,
-        ) -> impl Future<Output = Result<(), HostAdmissionOutcome>> + Send + 'a {
-            async { Ok(()) }
+        ) -> AdmissionFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
         }
     }
 
