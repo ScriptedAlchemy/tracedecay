@@ -6,12 +6,14 @@ use super::artifacts::{
     record_sqlite_family_sidecars,
 };
 use super::sqlite::sqlite_quick_check;
-use crate::root_seam::config::{self, TRACEDECAY_DIR, db_filename};
-use crate::root_seam::errors::Result;
-use crate::root_seam::storage::{BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME};
 use crate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath,
     SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
+};
+use crate::root_seam::config::{self, TRACEDECAY_DIR, db_filename};
+use crate::root_seam::errors::Result;
+use crate::root_seam::storage::{
+    BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME,
 };
 
 #[derive(Clone, Copy)]

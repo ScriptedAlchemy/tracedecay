@@ -7,25 +7,22 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::DirectorySyncPolicy;
 
 use crate::inventory::{MigrationInventory, StoreStatus};
-use crate::registry::{
-    RegistryReconstructionReport, reconstruct_registry_from_store_manifest,
-};
+use crate::registry::{RegistryReconstructionReport, reconstruct_registry_from_store_manifest};
 use crate::root_seam::storage::{
     EnrollmentMarker, PrivateStoreIo, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
     has_sqlite_database_header, profile_sharded_data_root, profile_sharded_layout,
     read_enrollment_marker, read_store_manifest, validate_project_id, write_store_manifest,
 };
 
-/// `crate::manifest::*` used to expose the final-v2 vocabulary
-/// alongside the manifest plan, so the seam keeps re-exporting it here.
-pub use crate::final_v2::*;
 use super::{
-    ArtifactState, ArtifactStateTransitionError, CheckpointWriter, MigrationApplyReport,
-    MigrationArtifact, MigrationCleanupSourcesReport, MigrationDestination, MigrationEndpoint,
-    MigrationExportReport, MigrationManifest, MigrationPlanOptions, MigrationProtocol,
-    MigrationRollbackReport, MigrationRollbackState, StoreArtifactPath,
-    StoreArtifactPathValidationError, save_manifest as write_checkpoint, validate_migration_id,
+    ArtifactState, CheckpointWriter, MigrationApplyReport, MigrationArtifact,
+    MigrationCleanupSourcesReport, MigrationDestination, MigrationEndpoint, MigrationExportReport,
+    MigrationManifest, MigrationPlanOptions, MigrationProtocol, MigrationRollbackReport,
+    MigrationRollbackState, save_manifest as write_checkpoint, validate_migration_id,
 };
+/// `crate::migrate::manifest::*` used to expose the final-v2 vocabulary
+/// alongside the manifest plan, so this module keeps re-exporting it.
+pub use crate::final_v2::*;
 
 /// Satisfies the extracted checkpoint port with the root's owner-private store
 /// IO, so the manifest package never chooses permissions or temp-file policy.
@@ -582,11 +579,13 @@ pub fn export_profile_store(
     project_id: &str,
     target_dir: &Path,
 ) -> io::Result<MigrationExportReport> {
-    let lifecycle =
-        crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(profile_root, "profile store export")
-            .map_err(|error| {
-                invalid_manifest(&format!("could not isolate profile store export: {error}"))
-            })?;
+    let lifecycle = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+        profile_root,
+        "profile store export",
+    )
+    .map_err(|error| {
+        invalid_manifest(&format!("could not isolate profile store export: {error}"))
+    })?;
     export_profile_store_with_lease(profile_root, project_id, target_dir, &lifecycle)
 }
 
@@ -865,7 +864,8 @@ async fn copy_sqlite_snapshot(
     let _source_authority = source_authority
         .hold_for(source, operation)
         .map_err(io::Error::other)?;
-    let source_snapshot = crate::root_seam::sqlite_read_snapshot::open_in(source, scratch_root).await?;
+    let source_snapshot =
+        crate::root_seam::sqlite_read_snapshot::open_in(source, scratch_root).await?;
     let snapshot_result = source_snapshot.backup_to(&temporary).await;
     let source_validation = source_snapshot.validate_source();
     drop(source_snapshot);

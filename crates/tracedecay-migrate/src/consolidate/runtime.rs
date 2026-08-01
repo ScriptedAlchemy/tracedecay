@@ -16,7 +16,9 @@ use crate::root_seam::daemon::store_runtime::registry::{
     StoreRuntimeRegistryConfig, StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture,
     StoreRuntimeResolver,
 };
-use crate::root_seam::db::{Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope};
+use crate::root_seam::db::{
+    Database, DatabaseAccessMode, DatabaseAuthority, MaintenanceDatabaseScope,
+};
 use crate::root_seam::errors::{Result, TraceDecayError};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

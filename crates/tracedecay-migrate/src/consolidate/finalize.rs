@@ -23,9 +23,10 @@ pub(super) async fn verify_destination(
     let destination_graphs = graph_db_paths_for_root(destination, &meta)?;
     let mut destination_identities = sqlite::GraphLogicalIdentities::default();
     for path in &destination_graphs {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(path, resolved.scratch_root.path())
-            .await
-            .map_err(io_error)?;
+        let snapshot =
+            crate::root_seam::sqlite_read_snapshot::open_in(path, resolved.scratch_root.path())
+                .await
+                .map_err(io_error)?;
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
         if path == &graph {
             sqlite::extend_graph_identities(snapshot.connection(), &mut destination_identities)

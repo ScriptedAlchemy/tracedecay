@@ -103,7 +103,8 @@ pub(crate) fn legacy_store_candidates(
             }
             let shard = entry.path();
             let manifest_path = shard.join(crate::root_seam::storage::STORE_MANIFEST_FILENAME);
-            let Ok(manifest) = crate::root_seam::storage::read_store_manifest(&manifest_path) else {
+            let Ok(manifest) = crate::root_seam::storage::read_store_manifest(&manifest_path)
+            else {
                 continue;
             };
             let Some(profile_dir) = profiles

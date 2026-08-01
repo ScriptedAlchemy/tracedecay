@@ -2,7 +2,9 @@
 //! merge/rollback consolidation tests.
 
 use super::*;
-use crate::root_seam::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::root_seam::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 use crate::root_seam::global_db::RegisteredGlobalDb;
 
 struct ObservationDatabaseFixture {
@@ -779,9 +781,11 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
     }
 
     let writer = target.database().writer_connection().unwrap();
-    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(&writer)
-        .await
-        .unwrap();
+    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(
+        &writer,
+    )
+    .await
+    .unwrap();
     let canonical_receipt = serde_json::to_string(observation.receipt()).unwrap();
     let canonical_observation = serde_json::to_string(&observation).unwrap();
     let canonical_cursor = serde_json::to_string(&migration_cursor_for(
@@ -809,9 +813,11 @@ async fn typed_duplicate_authority_repairs_noncanonical_target_json() {
         )
         .await
         .unwrap();
-    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(&writer)
-        .await
-        .unwrap();
+    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(
+        &writer,
+    )
+    .await
+    .unwrap();
 
     let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await
@@ -1331,9 +1337,11 @@ async fn inconsistent_projection_alias_fails_authority_preflight_without_target_
     );
     let snapshot = source.database().read_snapshot().await.unwrap();
     let error =
-        crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(&snapshot)
-            .await
-            .unwrap_err();
+        crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(
+            &snapshot,
+        )
+        .await
+        .unwrap_err();
     let crate::root_seam::errors::TraceDecayError::Database { message, operation } = error else {
         panic!("authority preflight must return a typed database error");
     };

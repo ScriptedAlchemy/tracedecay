@@ -217,13 +217,13 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
 mod liveness {
     use std::path::{Path, PathBuf};
 
-    use crate::root_seam::global_db::{
-        CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
-        StoreInstanceRecord,
-    };
     use crate::registry::{
         RootLivenessV1, StaleRootScope, code_project_root_exists, probe_root,
         project_context_liveness, stale_project_contexts,
+    };
+    use crate::root_seam::global_db::{
+        CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
+        StoreInstanceRecord,
     };
 
     const GONE: &str = "/definitely/not/here/retired-checkout";

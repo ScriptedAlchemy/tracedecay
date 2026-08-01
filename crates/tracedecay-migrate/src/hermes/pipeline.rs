@@ -10,10 +10,10 @@ use super::fingerprint::logical_source_fingerprint;
 use super::memory::merge_memory_snapshot;
 use super::resolution::{ResolvedTargetProject, resolve_target_project, same_path};
 use super::session_merge::{MergeSnapshotRequest, merge_snapshot};
+use crate::hermes::{LegacyHermesMigration, LegacyHermesMigrationIssue};
 use crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
-use crate::hermes::{LegacyHermesMigration, LegacyHermesMigrationIssue};
 use crate::root_seam::sqlite_read_snapshot::{SnapshotConnection, SnapshotDatabase};
 
 pub(crate) async fn verify_source<Q>(source: &Q) -> Result<(), String>
@@ -181,15 +181,18 @@ async fn resolve_target_layout(
 ) -> crate::root_seam::errors::Result<ResolvedTargetLayout> {
     if target_project.user_scope {
         return Ok(ResolvedTargetLayout {
-            sessions_db_path: crate::root_seam::sessions::user_sessions_db_path(tracedecay_profile_root),
+            sessions_db_path: crate::root_seam::sessions::user_sessions_db_path(
+                tracedecay_profile_root,
+            ),
             graph_db_path: None,
             project_id: "user".to_string(),
         });
     }
     if let Some(project_id) = target_project.registry_project_id.as_deref() {
-        if let Some(layout) =
-            crate::root_seam::storage::resolve_persisted_layout(&target_project.root, tracedecay_profile_root)?
-        {
+        if let Some(layout) = crate::root_seam::storage::resolve_persisted_layout(
+            &target_project.root,
+            tracedecay_profile_root,
+        )? {
             if layout.identity.project_id.as_deref() != Some(project_id) {
                 return Err(crate::root_seam::errors::TraceDecayError::Config {
                     message: format!(
@@ -214,7 +217,10 @@ async fn resolve_target_layout(
     let production_profile = crate::root_seam::storage::default_profile_root()
         .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
     let layout = if production_profile {
-        crate::root_seam::tracedecay::TraceDecay::resolve_store_layout_for_identity(&target_project.root).await
+        crate::root_seam::tracedecay::TraceDecay::resolve_store_layout_for_identity(
+            &target_project.root,
+        )
+        .await
     } else {
         crate::root_seam::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
     }?;
@@ -622,7 +628,9 @@ mod tests {
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch(sql).unwrap();
         drop(connection);
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(&path).await.unwrap();
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open(&path)
+            .await
+            .unwrap();
         (temp, snapshot)
     }
 

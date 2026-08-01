@@ -132,7 +132,8 @@ async fn seed_legacy_observation_backfill_watermarks(conn: &impl Executor) -> Re
 pub(in super::super) async fn verify_observation_merge(conn: &impl Executor) -> Result<()> {
     verify_observation_union(conn, "target_input", "source").await?;
     projection::verify(conn).await?;
-    crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(conn).await
+    crate::root_seam::global_db::schema_stages::validate_observation_authority_connection(conn)
+        .await
 }
 
 struct AuthorityUnionSpec {
@@ -602,7 +603,8 @@ async fn canonicalize_equivalent_duplicate_authority(conn: &impl Executor) -> Re
     if receipt_repairs.is_empty() && observation_repairs.is_empty() {
         return Ok(());
     }
-    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(conn).await?;
+    crate::root_seam::global_db::schema_stages::begin_observation_authority_canonical_repair(conn)
+        .await?;
     for (receipt_id, receipt_json) in receipt_repairs {
         conn.execute(
             "UPDATE sanitization_receipts SET receipt_json = ?2 WHERE receipt_id = ?1",
@@ -621,7 +623,8 @@ async fn canonicalize_equivalent_duplicate_authority(conn: &impl Executor) -> Re
         .await
         .map_err(|error| db_error("canonicalize_duplicate_observation", error))?;
     }
-    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(conn).await
+    crate::root_seam::global_db::schema_stages::finish_observation_authority_canonical_repair(conn)
+        .await
 }
 
 pub(in super::super) async fn preflight_observation_merge(conn: &impl Executor) -> Result<()> {

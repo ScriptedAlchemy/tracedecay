@@ -17,7 +17,7 @@ pub(super) enum LegacyMappingPolicy {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(in crate) struct MemoryV2ArchiveMergeProof {
+pub(crate) struct MemoryV2ArchiveMergeProof {
     pub owner: FactOwnerV1,
     pub schema: String,
     pub source_digest: String,

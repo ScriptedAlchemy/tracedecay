@@ -6,13 +6,13 @@ use super::project::{
     InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate, push_integrity_issue,
 };
 use super::sqlite::sqlite_quick_check;
-use crate::root_seam::config::TRACEDECAY_DIR;
-use crate::root_seam::errors::Result;
-use tracedecay_automation::skill_frontmatter::decode_yaml_scalar;
 use crate::inventory::{
     InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
     StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
+use crate::root_seam::config::TRACEDECAY_DIR;
+use crate::root_seam::errors::Result;
+use tracedecay_automation::skill_frontmatter::decode_yaml_scalar;
 
 pub(super) async fn scan_hermes_sources(
     include_default_home: bool,

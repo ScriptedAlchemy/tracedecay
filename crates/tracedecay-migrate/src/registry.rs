@@ -111,7 +111,8 @@ pub struct RegistryReconstructionDiffReport {
 /// The command crate can request exact registry/session operations without
 /// receiving database handles or reopening owned paths.
 pub struct MigrationRegistryRuntime {
-    registry: crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    registry:
+        crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     profile_database: std::sync::Arc<RegisteredGlobalDb>,
 }
 
@@ -120,14 +121,15 @@ impl MigrationRegistryRuntime {
     ///
     /// Callers hold the profile's exclusive maintenance lease, so this
     /// existence check cannot race another authorized lifecycle mutation.
-    pub async fn try_open_existing(profile_root: &Path) -> crate::root_seam::errors::Result<Option<Self>> {
-        if !profile_root
-            .try_exists()
-            .map_err(|error| crate::root_seam::errors::TraceDecayError::Database {
+    pub async fn try_open_existing(
+        profile_root: &Path,
+    ) -> crate::root_seam::errors::Result<Option<Self>> {
+        if !profile_root.try_exists().map_err(|error| {
+            crate::root_seam::errors::TraceDecayError::Database {
                 operation: "inspect existing profile root".to_string(),
                 message: error.to_string(),
-            })?
-        {
+            }
+        })? {
             return Ok(None);
         }
         let profile_root = profile_root.canonicalize().map_err(|error| {
@@ -139,10 +141,12 @@ impl MigrationRegistryRuntime {
         if !profile_root
             .join("global.db")
             .try_exists()
-            .map_err(|error| crate::root_seam::errors::TraceDecayError::Database {
-                operation: "inspect existing profile registry".to_string(),
-                message: error.to_string(),
-            })?
+            .map_err(
+                |error| crate::root_seam::errors::TraceDecayError::Database {
+                    operation: "inspect existing profile registry".to_string(),
+                    message: error.to_string(),
+                },
+            )?
         {
             return Ok(None);
         }
@@ -1178,7 +1182,9 @@ async fn delete_registry_gc_candidates_in_transaction(
         let values = chunk
             .iter()
             .map(|path| {
-                crate::root_seam::db::engine::Value::Text(RegisteredGlobalDb::project_path_alias_key(path))
+                crate::root_seam::db::engine::Value::Text(
+                    RegisteredGlobalDb::project_path_alias_key(path),
+                )
             })
             .collect::<Vec<_>>();
         storage_projects =

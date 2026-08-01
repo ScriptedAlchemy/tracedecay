@@ -17,7 +17,7 @@ pub(super) mod projection;
 mod temporal;
 mod verify;
 
-pub(in crate) use memory_v2::MemoryV2ArchiveMergeProof;
+pub(crate) use memory_v2::MemoryV2ArchiveMergeProof;
 use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority, merge_memory_v2_owner_archives};
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
@@ -218,7 +218,7 @@ pub(super) async fn merge_registered_graph_facts(
 /// mutation. Legacy rows are unioned with remapped numeric identities; any
 /// Memory V2 authority is then merged by its stable owner-bound identities,
 /// including assertions, lineage, evidence, tombstones and feedback history.
-pub(in crate) async fn merge_branch_legacy_memory_snapshot(
+pub(crate) async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
     source: &crate::root_seam::sqlite_read_snapshot::SnapshotDatabase,
 ) -> Result<Vec<MemoryV2ArchiveMergeProof>> {
@@ -270,9 +270,7 @@ pub(in crate) async fn merge_branch_legacy_memory_snapshot(
     Ok(proofs)
 }
 
-pub(in crate) async fn rebuild_branch_cutover_memory_banks(
-    target: &Database,
-) -> Result<()> {
+pub(crate) async fn rebuild_branch_cutover_memory_banks(target: &Database) -> Result<()> {
     let transaction = target
         .begin_memory_write_transaction("rebuild branch-cutover memory banks")
         .await?;
@@ -803,9 +801,11 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
     crate::root_seam::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::root_seam::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
-        .await
-        .map_err(|error| db_error("normalize_sessions", error))?;
+    crate::root_seam::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(
+        &transaction,
+    )
+    .await
+    .map_err(|error| db_error("normalize_sessions", error))?;
     crate::root_seam::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
