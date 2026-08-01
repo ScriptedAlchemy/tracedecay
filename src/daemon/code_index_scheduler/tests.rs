@@ -1521,6 +1521,166 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     );
 }
 
+/// The generation record index must answer every point lookup exactly as the
+/// linear `.iter().find(..)` scans it replaced, including misses, and must be
+/// built once per generation rather than once per query.
+#[test]
+fn generation_record_index_matches_linear_scan_lookups() {
+    use std::fmt::Write as _;
+
+    let mut sources = Vec::new();
+    for file in 0..24 {
+        let mut body = String::new();
+        for symbol in 0..6 {
+            write!(
+                body,
+                "pub fn caller_{file}_{symbol}() {{ callee_{file}_{symbol}(); }}\n\
+                 pub fn callee_{file}_{symbol}() {{}}\n"
+            )
+            .expect("write to a string never fails");
+        }
+        sources.push((format!("src/module_{file}.rs"), body));
+    }
+    let files = sources
+        .iter()
+        .map(|(path, body)| (path.as_str(), body.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+
+    let generation = latest.generation();
+    let snapshot_files = &generation.snapshot().files;
+    let chunks = generation.chunks().chunks();
+    let symbols = &generation.symbols().symbols;
+    let edges = generation.edges();
+    assert!(
+        !snapshot_files.is_empty() && !chunks.is_empty() && !symbols.is_empty(),
+        "fixture must publish files, chunks, and symbols to compare"
+    );
+
+    let index = latest.record_index();
+
+    for file in snapshot_files {
+        let expected = snapshot_files
+            .iter()
+            .position(|candidate| candidate.file_occurrence_id == file.file_occurrence_id);
+        assert_eq!(
+            index.file_position(&file.file_occurrence_id),
+            expected,
+            "indexed file lookup must match the linear scan"
+        );
+    }
+
+    for chunk in chunks {
+        let expected = chunks.iter().position(|candidate| candidate.id == chunk.id);
+        assert_eq!(
+            index.chunk_position(&chunk.id),
+            expected,
+            "indexed chunk lookup must match the linear scan"
+        );
+    }
+
+    for record in symbols {
+        let expected = symbols
+            .iter()
+            .position(|candidate| candidate.occurrence == record.occurrence);
+        assert_eq!(
+            index.symbol_position(&record.occurrence),
+            expected,
+            "indexed symbol lookup must match the linear scan"
+        );
+    }
+
+    for chunk in chunks {
+        let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() else {
+            continue;
+        };
+        let file = &chunk.anchor.file_occurrence_id;
+        let expected_by_symbol = chunks
+            .iter()
+            .position(|candidate| candidate.anchor.symbol_occurrence_id.as_ref() == Some(symbol));
+        assert_eq!(
+            index.chunk_position_for_symbol(symbol),
+            expected_by_symbol,
+            "indexed symbol-anchored chunk lookup must match the linear scan"
+        );
+        let expected_by_pair = chunks.iter().position(|candidate| {
+            &candidate.anchor.file_occurrence_id == file
+                && candidate.anchor.symbol_occurrence_id.as_ref() == Some(symbol)
+        });
+        assert_eq!(
+            index.chunk_position_for_file_symbol(file, symbol),
+            expected_by_pair,
+            "indexed file+symbol chunk lookup must match the linear scan"
+        );
+    }
+
+    let incident_symbols = edges
+        .iter()
+        .flat_map(|edge| [edge.from_occurrence.clone(), edge.to_occurrence.clone()])
+        .collect::<BTreeSet<_>>();
+    for symbol in &incident_symbols {
+        for reverse in [false, true] {
+            let expected = edges
+                .iter()
+                .enumerate()
+                .filter(|(_, edge)| {
+                    if reverse {
+                        &edge.to_occurrence == symbol
+                    } else {
+                        &edge.from_occurrence == symbol
+                    }
+                })
+                .map(|(position, _)| position)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                index.incident_edge_positions(symbol, reverse),
+                expected.as_slice(),
+                "indexed adjacency must match the linear edge scan in order"
+            );
+        }
+    }
+
+    let missing_file = tracedecay_domain::FileOccurrenceId::new("absent-file-occurrence")
+        .expect("valid file occurrence id");
+    let missing_chunk =
+        tracedecay_domain::CodeSearchChunkId::new("absent-chunk").expect("valid chunk id");
+    let missing_symbol = tracedecay_domain::SymbolOccurrenceId::new("absent-symbol-occurrence")
+        .expect("valid symbol occurrence id");
+    assert_eq!(index.file_position(&missing_file), None);
+    assert_eq!(index.chunk_position(&missing_chunk), None);
+    assert_eq!(index.symbol_position(&missing_symbol), None);
+    assert_eq!(index.chunk_position_for_symbol(&missing_symbol), None);
+    assert_eq!(
+        index.chunk_position_for_file_symbol(&missing_file, &missing_symbol),
+        None
+    );
+    assert!(
+        index
+            .incident_edge_positions(&missing_symbol, false)
+            .is_empty()
+    );
+    assert!(
+        index
+            .incident_edge_positions(&missing_symbol, true)
+            .is_empty()
+    );
+
+    let same_generation = scheduler.latest_complete().expect("same latest generation");
+    assert!(
+        Arc::ptr_eq(&latest.record_index, &same_generation.record_index),
+        "repeated queries must reuse the generation-bound record index"
+    );
+    assert!(
+        same_generation.record_index.get().is_some(),
+        "the shared record index must stay built across queries"
+    );
+}
+
 #[tokio::test]
 async fn bundled_query_profile_composes_live_code_index_lanes() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);

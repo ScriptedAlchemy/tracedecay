@@ -170,23 +170,21 @@ where
         &self.generation
     }
 
-    // PERF/TODO(retrieval-batch-port): the four lane translators below each
-    // issue one `NativeRecordReadPortV1` lookup per candidate
-    // (`occurrence` / `occurrence_by_chunk` / `symbol`). That per-row shape is
-    // required here because every lookup is interleaved with per-record
-    // validation (`validate_occurrence`, `RecordIdentityMismatch`,
-    // `path_admitted`), so batching at this loop is not a low-risk change.
+    // PERF: the four lane translators below each issue one
+    // `NativeRecordReadPortV1` lookup per candidate (`occurrence` /
+    // `occurrence_by_chunk` / `symbol`). That per-row shape is deliberate:
+    // every lookup is interleaved with per-record validation
+    // (`validate_occurrence`, `RecordIdentityMismatch`, `path_admitted`), so
+    // batching at this loop would not be a low-risk change.
     //
-    // The actual cost lives in the port implementor, not this loop. The
+    // Keeping the per-row shape is only sound while each lookup is cheap. The
     // production port `LatestCompleteNativeRecordReadPortV1`
-    // (src/daemon/code_index_scheduler/queries.rs) resolves every lookup with a
-    // linear `.iter().find(..)` over the in-memory `files` / `chunks` /
-    // `symbols` snapshot vectors, so each lane is O(candidates x records). The
-    // safe fix is to add a batched `NativeRecordReadPortV1` method (e.g.
-    // `occurrences(&[binding])`) backed by prebuilt `HashMap` indices in that
-    // implementor, or to memoize those indices inside the implementor. Both
-    // touch the port trait plus all three implementors and are deliberately
-    // left out of this query-crate pass to avoid a cross-crate refactor.
+    // (src/daemon/code_index_scheduler/queries.rs) used to resolve every lookup
+    // with a linear `.iter().find(..)` over the in-memory `files` / `chunks` /
+    // `symbols` vectors, which made each lane O(candidates x records); it now
+    // answers them from `HashMap` indices memoized per sealed generation, so
+    // each lane is O(candidates). Any new port implementor must offer the same
+    // amortized-O(1) lookups rather than rescanning per candidate.
     pub fn exact(
         &self,
         outcome: RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>>,

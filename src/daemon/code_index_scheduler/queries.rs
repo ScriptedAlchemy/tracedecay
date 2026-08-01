@@ -4,7 +4,7 @@
 //! It selects one already-mounted worktree generation and translates the
 //! generic lane evidence into the typed application-operation records.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -577,6 +577,136 @@ fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQ
     crate::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
+/// One-time point-lookup indices over a sealed generation's in-memory record
+/// vectors.
+///
+/// Every map here replaces a linear `.iter().find(..)` scan that previously ran
+/// once per retrieval candidate, making each serving lane
+/// `O(candidates x records)`. Building the whole index costs a single
+/// `O(files + chunks + symbols + edges)` pass, and
+/// [`LatestCompleteCodeIndexV1::record_index`] memoizes it per generation so
+/// concurrent queries share one build.
+///
+/// Equivalence rule: `Iterator::find` returns the *first* match, so duplicate
+/// keys keep the lowest position (`or_insert` never overwrites) and the
+/// adjacency lists stay in ascending position order. Indexed lookups therefore
+/// return the same record the scan returned, and a key that is absent maps to
+/// the same miss the scan produced.
+pub(in crate::daemon) struct GenerationRecordIndexV1 {
+    files_by_occurrence: HashMap<FileOccurrenceId, usize>,
+    chunks_by_id: HashMap<CodeSearchChunkId, usize>,
+    symbols_by_occurrence: HashMap<SymbolOccurrenceId, usize>,
+    chunk_by_symbol: HashMap<SymbolOccurrenceId, usize>,
+    chunk_by_file_symbol: HashMap<(FileOccurrenceId, SymbolOccurrenceId), usize>,
+    edges_from: HashMap<SymbolOccurrenceId, Vec<usize>>,
+    edges_to: HashMap<SymbolOccurrenceId, Vec<usize>>,
+}
+
+impl GenerationRecordIndexV1 {
+    pub(in crate::daemon) fn build(
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    ) -> Self {
+        let files = &generation.snapshot().files;
+        let mut files_by_occurrence = HashMap::with_capacity(files.len());
+        for (position, file) in files.iter().enumerate() {
+            files_by_occurrence
+                .entry(file.file_occurrence_id.clone())
+                .or_insert(position);
+        }
+
+        let chunks = generation.chunks().chunks();
+        let mut chunks_by_id = HashMap::with_capacity(chunks.len());
+        let mut chunk_by_symbol = HashMap::new();
+        let mut chunk_by_file_symbol = HashMap::new();
+        for (position, chunk) in chunks.iter().enumerate() {
+            chunks_by_id.entry(chunk.id.clone()).or_insert(position);
+            if let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() {
+                chunk_by_symbol.entry(symbol.clone()).or_insert(position);
+                chunk_by_file_symbol
+                    .entry((chunk.anchor.file_occurrence_id.clone(), symbol.clone()))
+                    .or_insert(position);
+            }
+        }
+
+        let symbols = &generation.symbols().symbols;
+        let mut symbols_by_occurrence = HashMap::with_capacity(symbols.len());
+        for (position, record) in symbols.iter().enumerate() {
+            symbols_by_occurrence
+                .entry(record.occurrence.clone())
+                .or_insert(position);
+        }
+
+        let mut edges_from: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
+        let mut edges_to: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
+        for (position, edge) in generation.edges().iter().enumerate() {
+            edges_from
+                .entry(edge.from_occurrence.clone())
+                .or_default()
+                .push(position);
+            edges_to
+                .entry(edge.to_occurrence.clone())
+                .or_default()
+                .push(position);
+        }
+
+        Self {
+            files_by_occurrence,
+            chunks_by_id,
+            symbols_by_occurrence,
+            chunk_by_symbol,
+            chunk_by_file_symbol,
+            edges_from,
+            edges_to,
+        }
+    }
+
+    /// Position of the first snapshot file with this occurrence identity.
+    pub(super) fn file_position(&self, file: &FileOccurrenceId) -> Option<usize> {
+        self.files_by_occurrence.get(file).copied()
+    }
+
+    /// Position of the first chunk with this chunk identity.
+    pub(super) fn chunk_position(&self, chunk: &CodeSearchChunkId) -> Option<usize> {
+        self.chunks_by_id.get(chunk).copied()
+    }
+
+    /// Position of the first lineage symbol record with this occurrence.
+    pub(super) fn symbol_position(&self, symbol: &SymbolOccurrenceId) -> Option<usize> {
+        self.symbols_by_occurrence.get(symbol).copied()
+    }
+
+    /// Position of the first chunk anchored to this symbol occurrence.
+    pub(super) fn chunk_position_for_symbol(&self, symbol: &SymbolOccurrenceId) -> Option<usize> {
+        self.chunk_by_symbol.get(symbol).copied()
+    }
+
+    /// Position of the first chunk anchored to this file and symbol pair.
+    pub(super) fn chunk_position_for_file_symbol(
+        &self,
+        file: &FileOccurrenceId,
+        symbol: &SymbolOccurrenceId,
+    ) -> Option<usize> {
+        self.chunk_by_file_symbol
+            .get(&(file.clone(), symbol.clone()))
+            .copied()
+    }
+
+    /// Ascending positions of the edges incident to `symbol` in the requested
+    /// direction, preserving the order a full edge scan would have produced.
+    pub(super) fn incident_edge_positions(
+        &self,
+        symbol: &SymbolOccurrenceId,
+        reverse: bool,
+    ) -> &[usize] {
+        let adjacency = if reverse {
+            self.edges_to.get(symbol)
+        } else {
+            self.edges_from.get(symbol)
+        };
+        adjacency.map_or(&[][..], Vec::as_slice)
+    }
+}
+
 struct LatestCompleteNativeRecordReadPortV1<'a> {
     latest: &'a LatestCompleteCodeIndexV1,
 }
@@ -593,22 +723,16 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         if &binding.occurrence.generation != self.generation() {
             return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
-        let file = self
-            .latest
-            .generation
-            .snapshot()
-            .files
-            .iter()
-            .find(|file| file.file_occurrence_id == binding.occurrence.file)
+        let index = self.latest.record_index();
+        let file = index
+            .file_position(&binding.occurrence.file)
+            .map(|position| &self.latest.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = match binding.occurrence.chunk.as_ref() {
             Some(chunk_id) => Some(
-                self.latest
-                    .generation
-                    .chunks()
-                    .chunks()
-                    .iter()
-                    .find(|chunk| &chunk.id == chunk_id)
+                index
+                    .chunk_position(chunk_id)
+                    .map(|position| &self.latest.generation.chunks().chunks()[position])
                     .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?,
             ),
             None => None,
@@ -632,21 +756,14 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         chunk_id: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        let chunk = self
-            .latest
-            .generation
-            .chunks()
-            .chunks()
-            .iter()
-            .find(|chunk| &chunk.id == chunk_id)
+        let index = self.latest.record_index();
+        let chunk = index
+            .chunk_position(chunk_id)
+            .map(|position| &self.latest.generation.chunks().chunks()[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        let file = self
-            .latest
-            .generation
-            .snapshot()
-            .files
-            .iter()
-            .find(|file| file.file_occurrence_id == chunk.anchor.file_occurrence_id)
+        let file = index
+            .file_position(&chunk.anchor.file_occurrence_id)
+            .map(|position| &self.latest.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
         Ok(NativeCodeOccurrenceV1 {
             file: chunk.anchor.file_occurrence_id.clone(),
@@ -662,32 +779,18 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
     ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-        let lineage = self
-            .latest
-            .generation
-            .symbols()
-            .symbols
-            .iter()
-            .find(|record| &record.occurrence == symbol)
+        let index = self.latest.record_index();
+        let lineage = index
+            .symbol_position(symbol)
+            .map(|position| &self.latest.generation.symbols().symbols[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        let source = self
-            .latest
-            .generation
-            .snapshot()
-            .files
-            .iter()
-            .find(|source| &source.file_occurrence_id == file)
+        let source = index
+            .file_position(file)
+            .map(|position| &self.latest.generation.snapshot().files[position])
             .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        let chunk = self
-            .latest
-            .generation
-            .chunks()
-            .chunks()
-            .iter()
-            .find(|chunk| {
-                &chunk.anchor.file_occurrence_id == file
-                    && chunk.anchor.symbol_occurrence_id.as_ref() == Some(symbol)
-            });
+        let chunk = index
+            .chunk_position_for_file_symbol(file, symbol)
+            .map(|position| &self.latest.generation.chunks().chunks()[position]);
         let signature = chunk
             .and_then(|chunk| {
                 chunk
@@ -800,12 +903,8 @@ fn symbol_record_by_id(
     latest: &LatestCompleteCodeIndexV1,
     symbol: &SymbolOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
-    let chunk = latest
-        .generation
-        .chunks()
-        .chunks()
-        .iter()
-        .find(|chunk| chunk.anchor.symbol_occurrence_id.as_ref() == Some(symbol))?;
+    let position = latest.record_index().chunk_position_for_symbol(symbol)?;
+    let chunk = &latest.generation.chunks().chunks()[position];
     symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
 }
 
@@ -1022,6 +1121,8 @@ fn relation_records(
     maximum_depth: u32,
     scope: &tracedecay_application::CodeQueryScope,
 ) -> Vec<SymbolRelationRecord> {
+    let index = latest.record_index();
+    let edges = latest.generation.edges();
     let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
     let mut visited = BTreeSet::from([start.clone()]);
     let mut records = Vec::new();
@@ -1029,14 +1130,16 @@ fn relation_records(
         if depth >= maximum_depth {
             continue;
         }
-        for edge in latest.generation.edges().iter().filter(|edge| {
-            kinds.contains(&edge.kind)
-                && if reverse {
-                    edge.to_occurrence == current
-                } else {
-                    edge.from_occurrence == current
-                }
-        }) {
+        // Adjacency lookup replaces a full `edges()` scan per dequeued symbol,
+        // which made this traversal O(visited x edges). The positions arrive in
+        // ascending order and carry the same incidence test the scan applied,
+        // so the surviving `kinds` filter yields the identical edge sequence.
+        for edge in index
+            .incident_edge_positions(&current, reverse)
+            .iter()
+            .map(|position| &edges[*position])
+            .filter(|edge| kinds.contains(&edge.kind))
+        {
             let next = if reverse {
                 &edge.from_occurrence
             } else {
@@ -1464,11 +1567,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 return unavailable(finished_at);
             };
             let Some(chunk) = latest
-                .generation
-                .chunks()
-                .chunks()
-                .iter()
-                .find(|chunk| chunk.anchor.symbol_occurrence_id.as_ref() == Some(&symbol))
+                .record_index()
+                .chunk_position_for_symbol(&symbol)
+                .map(|position| &latest.generation.chunks().chunks()[position])
             else {
                 return unavailable(finished_at);
             };
