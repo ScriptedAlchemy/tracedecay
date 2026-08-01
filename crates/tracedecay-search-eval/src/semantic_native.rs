@@ -1122,12 +1122,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::search_eval::load_candidate_workload;
+    use crate::load_candidate_workload;
     use tracedecay_domain::canonical_sha256;
 
     fn checked_in_workload() -> CandidateWorkloadV1 {
         load_candidate_workload(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            &crate::checked_in_fixture_root()
                 .join("tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"),
         )
         .expect("checked-in Plan 15 workload")

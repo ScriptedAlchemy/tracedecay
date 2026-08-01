@@ -110,7 +110,6 @@ pub mod resolution;
 pub mod retention;
 pub mod runtime_identity;
 pub mod runtime_telemetry;
-#[path = "search_eval/direct.rs"]
 pub mod search_eval;
 mod semantic_code;
 pub mod serde_util;

@@ -118,6 +118,8 @@ pub use framed_log::{
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
+#[cfg(feature = "native-git")]
+pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,

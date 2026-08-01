@@ -1,0 +1,43 @@
+[package]
+name = "tracedecay-search-eval"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT"
+description = "TraceDecay search-quality evaluator: candidate generation, direct evaluation, and native semantic measurement"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+include = ["/src/**"]
+
+[dependencies]
+gix = { version = "0.81", default-features = false, features = [
+    "revision",
+    "blob-diff",
+    "sha1",
+    "status",
+] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = [
+    "native-git",
+] }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
+
+[features]
+# Language tiers forwarded to the code-index owner the evaluator mounts. Off by
+# default so a composing binary keeps its own tier selection authoritative; the
+# checked-in evaluator corpus is Rust, so the crate's own tests enable `lite`
+# through the self dev-dependency below.
+lite = ["tracedecay-code-index/lite"]
+lang-dockerfile = ["tracedecay-code-index/lang-dockerfile"]
+# Exactly the tiers the checked-in evaluator workload declares.
+evaluator-corpus-languages = ["lite", "lang-dockerfile"]
+
+[dev-dependencies]
+tempfile = "3"
+# Self dev-dependency: the crate's own test build needs the extraction tiers
+# the checked-in corpus declares. Composing binaries still choose their own.
+tracedecay-search-eval = { path = ".", features = ["evaluator-corpus-languages"] }

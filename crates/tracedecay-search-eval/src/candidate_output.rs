@@ -27,27 +27,22 @@ use super::semantic_native::{
     SemanticNativeSemanticInputV1, SemanticNativeStageMeasurementV1, SemanticNativeStageResultV1,
     SemanticProjectionCaseSampleV1, SemanticProjectionCaseV1, evaluate_native_query,
 };
-use crate::application::code_index::{
-    ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
+use tracedecay_application::historical_query::{
+    HistoricalGitQueryAdapter, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
+    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
-use crate::application::git_reads::{
-    GitReadAuthorityV1, HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
-    execute_historical_git_read,
+use tracedecay_application::{
+    NativeHistoricalBlobReaderV1, ResolvedScope, is_canonical_repository_relative_path,
 };
-use crate::code_index::chunks::content_digest;
-use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use crate::code_index::production::{
+use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
 };
-use crate::code_index::projection::{
+use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1, build_batch_receipt,
-};
-use crate::git_intelligence::is_canonical_repository_relative_path;
-use tracedecay_application::ResolvedScope;
-use tracedecay_application::historical_query::{
-    HistoricalQueryRequestV1, HistoricalRenameModeV1, HistoricalSourceAuthorizationV1,
 };
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
@@ -371,6 +366,9 @@ pub struct GenerateCandidateOutputsOptions<'a> {
     pub repo_root: &'a Path,
     pub workload_path: Option<&'a Path>,
     pub profile_ids: Option<&'a [String]>,
+    /// Authoritative identity for `repo_root`, injected by the composing
+    /// binary. See [`AdmittedCorpusScopeFn`].
+    pub admitted_scope: AdmittedCorpusScopeFn,
 }
 
 /// Immutable identity and request material prepared by the production QUERY
@@ -610,6 +608,22 @@ struct PublishedCorpus {
     eligible_chunks: u64,
     no_op_generation: CodeIndexPublishedGenerationV1,
     deletion_generation: CodeIndexPublishedGenerationV1,
+    admitted_scope: AdmittedCorpusScopeFn,
+}
+
+/// Root-injected authoritative identity for the checkout under evaluation.
+///
+/// Resolving a checkout's project/repository/worktree identity reads the
+/// repository identity marker and the provenance admission context, both owned
+/// by the composing binary. The evaluator owns everything downstream of the
+/// scope: corpus binding, source authorization, and evidence validation.
+/// Returning `None` means the checkout carries no authoritative identity, which
+/// the historical lane reports as a contract failure rather than guessing one.
+pub type AdmittedCorpusScopeFn = fn(&Path) -> Option<ResolvedScope>;
+
+/// Refuses every checkout. Used where historical evidence is out of scope.
+pub fn no_admitted_corpus_scope(_repo_root: &Path) -> Option<ResolvedScope> {
+    None
 }
 
 fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
@@ -1115,7 +1129,7 @@ pub fn generate_candidate_outputs(
             "no profiles selected for candidate generation".to_owned(),
         ));
     }
-    let published = publish_corpus(options.repo_root, &workload)?;
+    let published = publish_corpus(options.repo_root, &workload, options.admitted_scope)?;
 
     let mut outputs = Vec::new();
     for &profile in &profiles {
@@ -1130,7 +1144,8 @@ pub fn generate_candidate_outputs(
             outputs.push(output);
         }
     }
-    let ten_x_published = publish_corpus_with_scale(options.repo_root, &workload, 10)?;
+    let ten_x_published =
+        publish_corpus_with_scale(options.repo_root, &workload, 10, options.admitted_scope)?;
     let expected_ten_x_chunks = published.eligible_chunks.checked_mul(10).ok_or_else(|| {
         CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
     })?;
@@ -1183,8 +1198,9 @@ pub fn generate_candidate_outputs_with_native(
         Path::to_path_buf,
     );
     let workload = load_candidate_workload(&workload_path)?;
-    let published = publish_corpus(options.repo_root, &workload)?;
-    let ten_x_published = publish_corpus_with_scale(options.repo_root, &workload, 10)?;
+    let published = publish_corpus(options.repo_root, &workload, options.admitted_scope)?;
+    let ten_x_published =
+        publish_corpus_with_scale(options.repo_root, &workload, 10, options.admitted_scope)?;
     if ten_x_published.eligible_chunks
         != published.eligible_chunks.checked_mul(10).ok_or_else(|| {
             CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
@@ -1719,6 +1735,7 @@ pub fn retrieve_partition_query_bytes(
     workload: &CandidateWorkloadV1,
     profile_id: &str,
     query_id: &str,
+    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<Vec<u8>, CandidateOutputError> {
     validate_workload_for_tuning(workload)?;
     let profile = workload
@@ -1731,7 +1748,7 @@ pub fn retrieve_partition_query_bytes(
         .iter()
         .find(|query| query.query_id == query_id)
         .ok_or_else(|| CandidateOutputError::Contract(format!("unknown query {query_id}")))?;
-    let published = publish_corpus(repo_root, workload)?;
+    let published = publish_corpus(repo_root, workload, admitted_scope)?;
     let row = retrieve_one_query(&published, profile, query)?;
     canonical_json_bytes(&row)
 }
@@ -2380,6 +2397,33 @@ fn map_ranked_candidate_list(
     Ok(rows)
 }
 
+/// Mount the historical code-index join on one already-admitted checkout.
+///
+/// The scope arrives from the composing binary's identity authority; this
+/// function only refuses provider drift and projects adapter errors onto the
+/// typed unavailable reasons.
+fn read_historical_evidence(
+    repo_root: &Path,
+    scope: &ResolvedScope,
+    authorization: Option<&HistoricalSourceAuthorizationV1>,
+    request: &HistoricalQueryRequestV1,
+) -> HistoricalGitReadOutcomeV1 {
+    let reader = NativeHistoricalBlobReaderV1::new(
+        repo_root,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    );
+    match HistoricalGitQueryAdapter::new(&reader, scope.clone()).query(authorization, request) {
+        Ok(result) => HistoricalGitReadOutcomeV1::Complete {
+            scope: scope.clone(),
+            result,
+        },
+        Err(error) => HistoricalGitReadOutcomeV1::Unavailable {
+            reason: HistoricalGitReadUnavailableReasonV1::from_query_error(&error),
+        },
+    }
+}
+
 fn historical_candidates(
     published: &PublishedCorpus,
     query: &WorkloadQueryV1,
@@ -2396,28 +2440,11 @@ fn historical_candidates(
         return Ok((HistoricalQueryExecutionV1::NotRequested, Vec::new()));
     }
 
-    let marker = crate::storage::read_repository_identity_marker(&published.repo_root)
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "historical evaluator requires the authoritative repository identity marker"
-                    .to_owned(),
-            )
-        })?;
-    let project_id = ProjectId::new(marker.project_id.clone())
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let identity = crate::repository_provenance::RepositoryProvenanceAdmissionContext::
-        from_authoritative_project_marker(&published.repo_root, &project_id, &marker)
-        .and_then(|context| context.admitted_identity())
-        .ok_or_else(|| {
-            CandidateOutputError::Contract(
-                "historical evaluator could not resolve authoritative repository identity"
-                    .to_owned(),
-            )
-        })?;
-    let scope = ResolvedScope::new(identity.0, identity.1, identity.2, None)
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let authority = GitReadAuthorityV1::new(&published.repo_root, scope.clone());
+    let scope = (published.admitted_scope)(&published.repo_root).ok_or_else(|| {
+        CandidateOutputError::Contract(
+            "historical evaluator requires the authoritative repository identity marker".to_owned(),
+        )
+    })?;
     let source_commit = query
         .historical_commit
         .as_deref()
@@ -2456,7 +2483,12 @@ fn historical_candidates(
         max_blob_bytes: 8 * 1024 * 1024,
         max_total_bytes: 32 * 1024 * 1024,
     };
-    match execute_historical_git_read(Some(&authority), &scope, authorization.as_ref(), &request) {
+    match read_historical_evidence(
+        &published.repo_root,
+        &scope,
+        authorization.as_ref(),
+        &request,
+    ) {
         HistoricalGitReadOutcomeV1::Unavailable { reason } => {
             Ok((HistoricalQueryExecutionV1::Unavailable(reason), Vec::new()))
         }
@@ -2537,14 +2569,16 @@ fn merge_candidate_timelines(
 fn publish_corpus(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
+    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
-    publish_corpus_with_scale(repo_root, workload, 1)
+    publish_corpus_with_scale(repo_root, workload, 1, admitted_scope)
 }
 
 fn publish_corpus_with_scale(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
     copies: usize,
+    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<PublishedCorpus, CandidateOutputError> {
     if copies == 0 {
         return Err(CandidateOutputError::Contract(
@@ -2644,11 +2678,10 @@ fn publish_corpus_with_scale(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner =
-        open_production_code_index_owner_v1(config, store.clone(), ApplyingProjectionSink)
-            .map_err(|error| {
-                CandidateOutputError::Contract(format!("open production owner: {error}"))
-            })?;
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| {
+            CandidateOutputError::Contract(format!("open production owner: {error}"))
+        })?;
     let generation = owner
         .build_and_publish(request, &ActiveControl)
         .map_err(|error| CandidateOutputError::Contract(format!("publish generation: {error}")))?;
@@ -2925,12 +2958,13 @@ fn publish_corpus_with_scale(
         eligible_chunks,
         no_op_generation,
         deletion_generation,
+        admitted_scope,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_projection_source_generation(
-    owner: &mut ProductionCodeIndexOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
+    owner: &mut CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink>,
     mut snapshot: SanitizedCodeSnapshotV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
     changed_files: BTreeSet<String>,
@@ -3114,9 +3148,8 @@ fn prove_cancellation(
         max_snapshot_age_micros: None,
     };
     let store = SharedPublicationStore::default();
-    let mut owner =
-        open_production_code_index_owner_v1(config, store.clone(), ApplyingProjectionSink)
-            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let mut owner = CodeIndexProductionOwnerV1::new(config, store.clone(), ApplyingProjectionSink)
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let error = match owner.build_and_publish(request, &CancelledControl) {
         Err(error) => error,
         Ok(_) => {
@@ -3449,7 +3482,7 @@ fn hardware_fingerprint() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search_eval::semantic_native::SemanticNativePendingReasonV1;
+    use crate::semantic_native::SemanticNativePendingReasonV1;
 
     struct TestRepositoryFixture {
         _temp: tempfile::TempDir,
@@ -3457,7 +3490,7 @@ mod tests {
     }
 
     impl TestRepositoryFixture {
-        fn clone(authenticate: bool) -> Self {
+        fn clone() -> Self {
             let temp = tempfile::tempdir().expect("temporary repository fixture");
             let root = temp.path().join("repo");
             let output = std::process::Command::new("git")
@@ -3472,15 +3505,6 @@ mod tests {
                 "clone repository fixture: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            if authenticate {
-                assert!(
-                    crate::storage::write_repository_identity_marker(
-                        &root,
-                        "project.search-eval-fixture"
-                    )
-                    .expect("write repository fixture identity")
-                );
-            }
             Self { _temp: temp, root }
         }
     }
@@ -3495,13 +3519,27 @@ mod tests {
         if let Some(fixture) = fixture.upgrade() {
             return fixture;
         }
-        let replacement = Arc::new(TestRepositoryFixture::clone(true));
+        let replacement = Arc::new(TestRepositoryFixture::clone());
         *fixture = Arc::downgrade(&replacement);
         replacement
     }
 
+    /// Stands in for the composing binary's identity authority. The evaluator
+    /// only requires a self-consistent admitted scope; resolving one from the
+    /// on-disk repository identity marker is the root binary's contract and is
+    /// covered where that authority lives.
+    fn fixture_admitted_scope(_repo_root: &Path) -> Option<ResolvedScope> {
+        ResolvedScope::new(
+            ProjectId::new("project.search-eval-fixture").ok()?,
+            RepositoryId::new("repository.search-eval-fixture").ok()?,
+            tracedecay_domain::WorktreeId::new("worktree.search-eval-fixture").ok()?,
+            None,
+        )
+        .ok()
+    }
+
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        crate::checked_in_fixture_root()
     }
 
     fn workload() -> CandidateWorkloadV1 {
@@ -3619,10 +3657,11 @@ mod tests {
 
     #[test]
     fn historical_candidates_require_product_repository_identity() {
-        let fixture = TestRepositoryFixture::clone(false);
+        let fixture = authenticated_repo_fixture();
         let workload = load_candidate_workload(&fixture.root.join(WORKLOAD_RELATIVE))
             .expect("markerless workload");
-        let published = publish_corpus(&fixture.root, &workload).expect("markerless corpus");
+        let published = publish_corpus(&fixture.root, &workload, no_admitted_corpus_scope)
+            .expect("markerless corpus");
         let query = workload
             .queries
             .iter()
@@ -3755,6 +3794,7 @@ mod tests {
     fn candidate_generation_rejects_partially_unknown_profile_selection() {
         let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &repo_root(),
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned(), "unknown-profile".to_owned()]),
         })
@@ -3769,6 +3809,7 @@ mod tests {
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
         })
@@ -3862,7 +3903,8 @@ mod tests {
     fn published_corpus_maps_production_source_occurrences() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload).expect("publish corpus");
+        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+            .expect("publish corpus");
 
         for chunk in published.generation.chunks().chunks() {
             let chunk_occurrence = format!("code-chunk:{}", chunk.id.as_str());
@@ -3970,7 +4012,8 @@ mod tests {
     fn native_query_stages_and_late_hydration_emit_raw_measurements() {
         let fixture = authenticated_repo_fixture();
         let workload = workload();
-        let published = publish_corpus(&fixture.root, &workload).expect("published corpus");
+        let published = publish_corpus(&fixture.root, &workload, fixture_admitted_scope)
+            .expect("published corpus");
         let profile = workload
             .profile_matrix
             .iter()
@@ -4051,18 +4094,18 @@ mod tests {
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
         })
         .expect("generate");
         let report =
-            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &result)
-                .expect("evaluate");
+            crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
 
         let expected_status = if peak_rss_bytes().is_some() {
-            crate::search_eval::DirectEvaluationStatusV1::Pass
+            crate::DirectEvaluationStatusV1::Pass
         } else {
-            crate::search_eval::DirectEvaluationStatusV1::Pending
+            crate::DirectEvaluationStatusV1::Pending
         };
         let resources = result
             .outputs
@@ -4080,8 +4123,10 @@ mod tests {
                 .all(|profile| { profile.resource_status == expected_status })
         );
 
-        let current = publish_corpus(fixture_root, &workload).expect("current corpus");
-        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10).expect("10x corpus");
+        let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope)
+            .expect("current corpus");
+        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope)
+            .expect("10x corpus");
         assert_ne!(
             current.generation.manifest().generation_id,
             ten_x.generation.manifest().generation_id
@@ -4104,34 +4149,23 @@ mod tests {
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
-        let report = crate::search_eval::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &missing_resource,
-        )
-        .expect("evaluate");
-        assert_eq!(
-            report.status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
-        );
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &missing_resource)
+            .expect("evaluate");
+        assert_eq!(report.status, crate::DirectEvaluationStatusV1::Fail);
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Fail
         );
 
         let mut duplicate_query = result.clone();
         duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
-        let error = crate::search_eval::evaluate_generated_outputs(
-            &repo_root(),
-            &workload,
-            &duplicate_query,
-        )
-        .expect_err("duplicate query row");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &duplicate_query)
+            .expect_err("duplicate query row");
         assert!(error.to_string().contains("duplicate query row"));
 
         let mut duplicate_profile_partition = result.clone();
         duplicate_profile_partition.outputs[1] = duplicate_profile_partition.outputs[0].clone();
-        let error = crate::search_eval::evaluate_generated_outputs(
+        let error = crate::evaluate_generated_outputs(
             &repo_root(),
             &workload,
             &duplicate_profile_partition,
@@ -4141,38 +4175,33 @@ mod tests {
 
         let mut forged = result;
         forged.outputs[0].production_boundary = "lookalike".to_owned();
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged production boundary");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged production boundary");
         assert!(error.to_string().contains("production boundary"));
 
         forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
         forged.outputs[0].fixture_source_commit = "forged".to_owned();
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged source commit");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged source commit");
         assert!(error.to_string().contains("source commit"));
 
         forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
         forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("forged corpus digest");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("forged corpus digest");
         assert!(error.to_string().contains("byte-exact corpus"));
 
         forged.outputs[0].corpus_digest =
             compute_corpus_digest(&repo_root(), &workload).expect("corpus digest");
         forged.outputs[0].toolchain.clear();
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("missing environment");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("missing environment");
         assert!(error.to_string().contains("environment summary"));
 
         forged.outputs[0].toolchain = "rustc:test".to_owned();
         forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&repo_root(), &workload, &forged)
-                .expect_err("inconsistent abstention");
+        let error = crate::evaluate_generated_outputs(&repo_root(), &workload, &forged)
+            .expect_err("inconsistent abstention");
         assert!(error.to_string().contains("inconsistent abstention"));
     }
 
@@ -4188,15 +4217,15 @@ mod tests {
         let workload = workload();
         let mut result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &fixture.root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["hybrid-reranked".to_owned()]),
         })
         .expect("generate");
         result.outputs[0].optional_stages.semantic = OptionalStageMeasurementV1::NotRequested;
 
-        let error =
-            crate::search_eval::evaluate_generated_outputs(&fixture.root, &workload, &result)
-                .expect_err("configured semantic stage cannot be reported as not requested");
+        let error = crate::evaluate_generated_outputs(&fixture.root, &workload, &result)
+            .expect_err("configured semantic stage cannot be reported as not requested");
         assert!(error.to_string().contains("optional stage status"));
     }
 
@@ -4207,6 +4236,7 @@ mod tests {
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: fixture_root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
         })
@@ -4219,15 +4249,11 @@ mod tests {
             .expect("current resource");
         current.status = ResourceMeasurementStatusV1::Pending;
         current.pending_reason = None;
-        let report = crate::search_eval::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &invalid_pending,
-        )
-        .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &invalid_pending)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Fail
         );
 
         let mut wrong_scale = result.clone();
@@ -4241,12 +4267,11 @@ mod tests {
             .get_mut("10x")
             .expect("10x resource")
             .eligible_chunks = current_chunks;
-        let report =
-            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
-                .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Fail
         );
 
         let mut over_budget = result.clone();
@@ -4264,12 +4289,11 @@ mod tests {
                 .maximum_p99_latency_us
                 .saturating_add(1),
         );
-        let report =
-            crate::search_eval::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
-                .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &over_budget)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Fail
         );
 
         let mut extra_resource = result;
@@ -4281,15 +4305,11 @@ mod tests {
         extra_resource.outputs[0]
             .resources
             .insert("synthetic".to_owned(), synthetic);
-        let report = crate::search_eval::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &extra_resource,
-        )
-        .expect("evaluate");
+        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &extra_resource)
+            .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
-            crate::search_eval::DirectEvaluationStatusV1::Fail
+            crate::DirectEvaluationStatusV1::Fail
         );
     }
 
@@ -4299,6 +4319,7 @@ mod tests {
         let workload = workload();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &fixture.root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["query-fallback".to_owned()]),
         })
@@ -4314,6 +4335,7 @@ mod tests {
             &workload,
             "query-fallback",
             &probe.query_id,
+            fixture_admitted_scope,
         )
         .expect("direct retrieve");
         let generated = canonical_json_bytes(probe).expect("generated bytes");
@@ -4333,6 +4355,7 @@ mod tests {
                 &workload,
                 "query-fallback",
                 query_id,
+                fixture_admitted_scope,
             )
             .expect("direct retrieve");
             serde_json::from_slice::<QueryCandidateRowV1>(&bytes).expect("candidate row")
@@ -4387,6 +4410,7 @@ mod tests {
         let fixture = authenticated_repo_fixture();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &fixture.root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["hybrid-conservative".to_owned()]),
         })
@@ -4409,6 +4433,7 @@ mod tests {
         let fixture = authenticated_repo_fixture();
         let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &fixture.root,
+            admitted_scope: fixture_admitted_scope,
             workload_path: None,
             profile_ids: Some(&["hybrid-reranked".to_owned()]),
         })

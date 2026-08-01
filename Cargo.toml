@@ -19,6 +19,7 @@ members = [
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",
+    "crates/tracedecay-search-eval",
     "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
     "crates/tracedecay-temporal-query",
@@ -237,7 +238,7 @@ tower = "0.5"
 tree-sitter = "0.26"
 tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
-tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0" }
+tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "crates/tracedecay-automation", version = "0.1.0" }
 tracedecay-capture = { path = "crates/tracedecay-capture", version = "0.1.0" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", version = "0.1.0", default-features = false }
@@ -253,6 +254,7 @@ tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0" }
+tracedecay-search-eval = { path = "crates/tracedecay-search-eval", version = "0.1.0" }
 tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }

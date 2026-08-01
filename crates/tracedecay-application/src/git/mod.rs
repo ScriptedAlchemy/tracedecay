@@ -1,11 +1,15 @@
 //! Git index transaction application boundary.
 
 mod catalog;
+#[cfg(feature = "native-git")]
+mod historical_blob;
 mod read;
 mod surface_catalog;
 mod transactions;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
+#[cfg(feature = "native-git")]
+pub use historical_blob::NativeHistoricalBlobReaderV1;
 pub use read::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
