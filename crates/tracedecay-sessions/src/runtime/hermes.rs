@@ -42,15 +42,15 @@ pub use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_
 #[cfg(all(test, windows))]
 pub(super) use coverage::sqlite_incarnation;
 #[cfg(test)]
-pub use observation::{
+use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,
     native_observation_record, normalize_native_observation, observation_source,
     prepare_observation_row, stable_native_id,
 };
 #[cfg(test)]
-pub use rows::HermesRow;
+use rows::HermesRow;
 #[cfg(test)]
-pub use state_db::{
+use state_db::{
     message_columns, open_read_only_strict, read_new_rows_strict, select_new_messages_sql,
     table_columns, validate_required_schema,
 };
