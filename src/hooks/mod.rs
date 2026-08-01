@@ -807,6 +807,55 @@ fn event_cwd_from_parsed(parsed: &Value) -> Option<PathBuf> {
     }
 }
 
+/// Resolves the tracedecay project root named by a hook event's `cwd`.
+///
+/// Claude, Codex, and Kiro all send the session working directory under the
+/// same key, so this resolver is host-neutral and lives beside the other
+/// event-field readers rather than in any one host's module.
+fn event_project_root(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    crate::config::discover_project_root(&cwd)
+}
+
+/// [`event_project_root`] for callers that hold only the raw event JSON.
+fn event_project_root_from_json(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    event_project_root(&parsed)
+}
+
+/// The project root of the hook process's own working directory. Used by the
+/// surfaces whose payload carries no `cwd` at all.
+fn process_cwd_project_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    crate::config::discover_project_root(&cwd)
+}
+
+/// Resolves the project root from the event `cwd`, falling back to the hook
+/// process's working directory when the event omits one entirely. A present but
+/// non-project `cwd` still resolves to nothing: the event named a directory, and
+/// silently re-attributing it to wherever the hook happens to run would route the
+/// event into an unrelated project.
+fn event_project_root_or_process_cwd(parsed: &Value) -> Option<PathBuf> {
+    match event_cwd_from_parsed(parsed) {
+        Some(cwd) => crate::config::discover_project_root(&cwd),
+        None => process_cwd_project_root(),
+    }
+}
+
+/// Identity-aware [`event_project_root`]: consults the registry so a
+/// global-store-only checkout still resolves. Shared by every host whose session
+/// events carry `cwd`.
+async fn event_project_root_with_identity(parsed: &Value) -> Option<PathBuf> {
+    let cwd = event_cwd_from_parsed(parsed)?;
+    crate::config::discover_project_root_with_identity(&cwd).await
+}
+
+/// [`event_project_root_with_identity`] for callers that hold only the raw JSON.
+async fn event_project_root_with_identity_from_json(event_json: &str) -> Option<PathBuf> {
+    let parsed: Value = serde_json::from_str(event_json).ok()?;
+    event_project_root_with_identity(&parsed).await
+}
+
 fn format_tool_hint(hint: &ToolHint) -> String {
     format!("tracedecay hint: {}\n{}", hint.message, hint.context)
 }

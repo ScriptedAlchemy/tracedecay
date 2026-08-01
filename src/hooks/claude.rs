@@ -5,7 +5,7 @@
 use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
-use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
+use super::codex::codex_additional_context_json;
 use super::memory_inject;
 use super::post_tool_use::{
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
@@ -19,9 +19,10 @@ use super::steering::{
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
 use super::{
-    deduped_project_hint, event_cwd_from_parsed, event_session_id, format_tool_hint,
-    is_project_like_workspace, prompt_like_text, read_hook_event, record_hook_analytics,
-    record_hook_invoked, research_block_reason,
+    deduped_project_hint, event_cwd_from_parsed, event_project_root,
+    event_project_root_with_identity, event_project_root_with_identity_from_json, event_session_id,
+    format_tool_hint, is_project_like_workspace, process_cwd_project_root, prompt_like_text,
+    read_hook_event, record_hook_analytics, record_hook_invoked, research_block_reason,
 };
 
 /// `PreToolUse` hook handler for Claude Code's Agent tool matcher.
@@ -30,11 +31,7 @@ pub fn hook_pre_tool_use() {
     let parsed: Value = serde_json::from_str(&tool_input).unwrap_or(Value::Null);
     // TOOL_INPUT has no `cwd`; Claude Code runs hooks with the project as the
     // process working directory, so fall back to it for attribution.
-    let root = codex_project_root_from_parsed_event(&parsed).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|cwd| crate::config::discover_project_root(&cwd))
-    });
+    let root = event_project_root(&parsed).or_else(process_cwd_project_root);
     let _hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Claude,
@@ -150,7 +147,7 @@ pub async fn hook_claude_session_start() -> i32 {
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     // Resolve the project root the same identity-aware way the printed context
     // does, including global-only stores and fresh harness-created worktrees.
-    let root = claude_session_project_root(&parsed).await;
+    let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
     let mut context = claude_session_context_for_event(&event).await;
@@ -211,7 +208,7 @@ symbol->search, concept->context";
 /// nothing to steer toward). Analytics are fire-and-forget like `SessionStart`.
 pub async fn hook_claude_subagent_start() -> i32 {
     let event = read_hook_event!();
-    let root = claude_project_root_from_event_with_identity(&event).await;
+    let root = event_project_root_with_identity_from_json(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, "SubagentStart", &event);
     if let Some(context) = claude_subagent_start_context(&event).await {
@@ -231,7 +228,7 @@ pub async fn hook_claude_subagent_start() -> i32 {
 /// global-store-only project still steers correctly.
 async fn claude_subagent_start_context(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let root = claude_session_project_root(&parsed).await?;
+    let root = event_project_root_with_identity(&parsed).await?;
     let (staleness, _) = cursor_index_signals_for_root(&root).await;
     let mut context = index_status_line(true, staleness.as_deref());
     context.push_str(CLAUDE_SUBAGENT_START_CONTEXT);
@@ -245,7 +242,7 @@ fn claude_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
 /// Builds the Claude `SessionStart` context for code workspaces.
 pub async fn claude_session_context_for_event(event_json: &str) -> String {
     let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    match claude_session_project_root(&parsed).await {
+    match event_project_root_with_identity(&parsed).await {
         Some(root) => {
             let (staleness, _) = cursor_index_signals_for_root(&root).await;
             let mut context = index_status_line(true, staleness.as_deref());
@@ -260,22 +257,6 @@ pub async fn claude_session_context_for_event(event_json: &str) -> String {
         }
         None => String::new(),
     }
-}
-
-/// Resolves the tracedecay project root for a Claude session event.
-///
-/// Uses the same identity-aware cwd resolver as Codex and Cursor so global-only
-/// git worktrees do not get a false "no project index found" init nudge.
-async fn claude_session_project_root(parsed: &Value) -> Option<std::path::PathBuf> {
-    let cwd = event_cwd_from_parsed(parsed)?;
-    crate::config::discover_project_root_with_identity(&cwd).await
-}
-
-async fn claude_project_root_from_event_with_identity(
-    event_json: &str,
-) -> Option<std::path::PathBuf> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    claude_session_project_root(&parsed).await
 }
 
 /// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler used to keep
@@ -298,7 +279,7 @@ pub async fn hook_claude_post_tool_use() -> i32 {
     } else {
         "PostToolUse"
     };
-    let root = claude_project_root_from_event_with_identity(&event).await;
+    let root = event_project_root_with_identity_from_json(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, hook_event_name, &event);
     if let Some(root) = root.as_deref()
@@ -340,7 +321,7 @@ fn claude_post_tool_use_hint_context(event_json: &str) -> Option<String> {
     // `deduped_project_hint` mints its own candidate id and records the
     // terminal analytics row; the Claude post-tool-use surface does not emit a
     // separate `hint_candidate`, per its documented contract.
-    let root = codex_project_root_from_parsed_event(&parsed);
+    let root = event_project_root(&parsed);
     let session_id = event_session_id(&parsed);
     let hint = deduped_project_hint(root.as_deref(), HintAgent::Claude, session_id, hint)?;
     Some(format_tool_hint(&hint))
@@ -407,7 +388,7 @@ pub async fn hook_prompt_submit() {
         }
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = claude_session_project_root(&parsed).await;
+    let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked(
         root.as_deref(),
         HintAgent::Claude,
@@ -470,7 +451,7 @@ pub async fn hook_stop() {
         Err(_) => String::new(),
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = claude_session_project_root(&parsed).await;
+    let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
     if let Some(root) = root.as_deref()
         && let Some(guidance) = super::v2::dispatch(
@@ -852,7 +833,7 @@ mod tests {
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
         let event = serde_json::json!({ "cwd": nested.to_string_lossy() });
-        let resolved = claude_session_project_root(&event).await;
+        let resolved = event_project_root_with_identity(&event).await;
         assert_eq!(
             resolved
                 .as_deref()
@@ -864,7 +845,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let outside_root = outside.path().canonicalize().unwrap();
         assert!(
-            claude_session_project_root(
+            event_project_root_with_identity(
                 &serde_json::json!({ "cwd": outside_root.to_string_lossy() })
             )
             .await
@@ -874,7 +855,7 @@ mod tests {
 
         std::fs::remove_file(graph_db_path).unwrap();
         assert!(
-            claude_session_project_root(&event).await.is_none(),
+            event_project_root_with_identity(&event).await.is_none(),
             "a registered project without a real graph db must not resolve"
         );
     }

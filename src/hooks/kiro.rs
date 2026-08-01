@@ -10,11 +10,11 @@ use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
 use super::claude::is_code_research_prompt;
-use super::codex::codex_project_root_from_event;
 use super::memory_inject;
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
-    event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
+    event_cwd, event_cwd_from_parsed, event_project_root, event_project_root_from_json,
+    event_project_root_or_process_cwd, event_session_id, hook_route_metadata_from_event,
     read_hook_event, record_hook_invoked, rel_under_root, research_block_reason,
 };
 
@@ -28,7 +28,7 @@ const KIRO_HOT_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_mi
 /// Blocks with exit code 2 and stderr, per Kiro's hook contract.
 pub fn hook_kiro_pre_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = event_project_root_from_json(&event);
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "preToolUse", &event);
     if let Some(reason) = evaluate_kiro_pre_tool_use(&event) {
@@ -136,7 +136,7 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = event_project_root_from_json(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
     if let Some(root) = root.as_deref()
@@ -180,7 +180,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
 /// fail-open.
 pub async fn hook_kiro_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    let root = codex_project_root_from_event(&event);
+    let root = event_project_root_from_json(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "postToolUse", &event);
     notify_kiro_post_tool_use(&event, &hook_telemetry).await;
@@ -267,7 +267,7 @@ async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
     let prompt = super::prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
-    match codex_project_root_from_event(event_json) {
+    match event_project_root(&parsed) {
         Some(root) => {
             Box::pin(memory_inject::combined_prompt_memory_recall(
                 &root,
@@ -347,9 +347,14 @@ fn collect_event_path_fields(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Kiro write events may omit `cwd`, so the hook falls back to its own working
+/// directory before resolving. Shares the host-neutral resolver with every other
+/// `cwd`-carrying host.
 fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
-    let cwd = event_cwd(event_json).or_else(|| std::env::current_dir().ok())?;
-    crate::config::discover_project_root(&cwd)
+    // An unreadable payload names no directory, so it takes the same
+    // process-cwd fallback a payload without `cwd` does.
+    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
+    event_project_root_or_process_cwd(&parsed)
 }
 
 #[cfg(test)]
