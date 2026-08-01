@@ -57,6 +57,10 @@ fn stable_occurrence_order(
         })
 }
 
+/// Reference cycle-membership oracle: an independent reachability DFS from every
+/// node, O(V * (V + E)). Retained only as the equivalence baseline for
+/// [`cycle_members_among`]; production uses the linear SCC pass below.
+#[cfg(test)]
 fn node_reaches_self(
     start: &RetrievalAnchorId,
     nodes: &BTreeSet<RetrievalAnchorId>,
@@ -93,7 +97,8 @@ fn node_reaches_self(
     Ok(false)
 }
 
-fn cycle_members_among(
+#[cfg(test)]
+fn cycle_members_among_reference(
     nodes: &BTreeSet<RetrievalAnchorId>,
     descendants: &BTreeMap<RetrievalAnchorId, BTreeSet<RetrievalAnchorId>>,
     control: &ExecutionControl,
@@ -104,6 +109,122 @@ fn cycle_members_among(
         checkpoint(control, hook, ResolutionCheckpoint::Evolution)?;
         if node_reaches_self(start, nodes, descendants, control, hook)? {
             cyclic.insert(start.clone());
+        }
+    }
+    Ok(cyclic)
+}
+
+/// Iterative Tarjan work-stack frame: `node`, its in-subgraph successors, and
+/// how many we have already descended into.
+struct SccFrame {
+    node: RetrievalAnchorId,
+    children: Vec<RetrievalAnchorId>,
+    next_child: usize,
+}
+
+/// Nodes that lie on a cycle within the subgraph induced by `nodes`.
+///
+/// A node reaches itself iff it belongs to a strongly connected component of
+/// size greater than one, or it carries a self-edge — precisely the set the
+/// former per-node reachability DFS ([`cycle_members_among_reference`])
+/// computed, but in a single linear O(V + E) Tarjan pass instead of
+/// O(V * (V + E)). Recursion is expressed with an explicit work stack so deep
+/// chains cannot overflow the call stack.
+fn cycle_members_among(
+    nodes: &BTreeSet<RetrievalAnchorId>,
+    descendants: &BTreeMap<RetrievalAnchorId, BTreeSet<RetrievalAnchorId>>,
+    control: &ExecutionControl,
+    hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
+) -> Result<BTreeSet<RetrievalAnchorId>, TemporalPortError> {
+    let children_in_subgraph = |node: &RetrievalAnchorId| -> Vec<RetrievalAnchorId> {
+        descendants
+            .get(node)
+            .map(|set| {
+                set.iter()
+                    .filter(|child| nodes.contains(*child))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut index_of = BTreeMap::<RetrievalAnchorId, usize>::new();
+    let mut lowlink = BTreeMap::<RetrievalAnchorId, usize>::new();
+    let mut on_stack = BTreeSet::<RetrievalAnchorId>::new();
+    let mut component_stack = Vec::<RetrievalAnchorId>::new();
+    let mut next_index = 0_usize;
+    let mut cyclic = BTreeSet::new();
+
+    for root in nodes {
+        checkpoint(control, hook, ResolutionCheckpoint::Evolution)?;
+        if index_of.contains_key(root) {
+            continue;
+        }
+        index_of.insert(root.clone(), next_index);
+        lowlink.insert(root.clone(), next_index);
+        next_index += 1;
+        component_stack.push(root.clone());
+        on_stack.insert(root.clone());
+        let mut work = vec![SccFrame {
+            node: root.clone(),
+            children: children_in_subgraph(root),
+            next_child: 0,
+        }];
+
+        while let Some(frame) = work.last_mut() {
+            checkpoint(control, hook, ResolutionCheckpoint::Evolution)?;
+            if frame.next_child < frame.children.len() {
+                let child = frame.children[frame.next_child].clone();
+                frame.next_child += 1;
+                if let Some(&child_index) = index_of.get(&child) {
+                    if on_stack.contains(&child) {
+                        let node = frame.node.clone();
+                        let low = lowlink[&node].min(child_index);
+                        lowlink.insert(node, low);
+                    }
+                } else {
+                    index_of.insert(child.clone(), next_index);
+                    lowlink.insert(child.clone(), next_index);
+                    next_index += 1;
+                    component_stack.push(child.clone());
+                    on_stack.insert(child.clone());
+                    work.push(SccFrame {
+                        node: child.clone(),
+                        children: children_in_subgraph(&child),
+                        next_child: 0,
+                    });
+                }
+            } else {
+                let node = frame.node.clone();
+                let node_low = lowlink[&node];
+                if node_low == index_of[&node] {
+                    // SCC root: pop its members off the component stack.
+                    let mut component = Vec::new();
+                    while let Some(member) = component_stack.pop() {
+                        on_stack.remove(&member);
+                        let is_node = member == node;
+                        component.push(member);
+                        if is_node {
+                            break;
+                        }
+                    }
+                    let multi = component.len() > 1;
+                    for member in component {
+                        let self_loop = descendants
+                            .get(&member)
+                            .is_some_and(|set| set.contains(&member));
+                        if multi || self_loop {
+                            cyclic.insert(member);
+                        }
+                    }
+                }
+                work.pop();
+                if let Some(parent) = work.last() {
+                    let parent_node = parent.node.clone();
+                    let low = lowlink[&parent_node].min(node_low);
+                    lowlink.insert(parent_node, low);
+                }
+            }
         }
     }
     Ok(cyclic)
@@ -142,6 +263,10 @@ fn copy_sources(
     Ok(sources)
 }
 
+/// Reference copy-root walk: an independent chain traversal per occurrence,
+/// O(n^2) on a shared chain. Retained only as the equivalence baseline for
+/// [`copy_root_memoized`], which production uses.
+#[cfg(test)]
 pub fn copy_root(
     occurrence_id: &MessageOccurrenceIdV1,
     sources: &BTreeMap<MessageOccurrenceIdV1, MessageOccurrenceIdV1>,
@@ -161,6 +286,60 @@ pub fn copy_root(
         }
         current = parent.clone();
     }
+    Ok(current)
+}
+
+/// Memoized equivalent of [`copy_root`]. Resolving every occurrence's copy root
+/// independently re-walks shared copy chains, which is O(n^2) on a long chain;
+/// caching each acyclically-resolved root lets a shared chain be traversed once
+/// overall (path compression).
+///
+/// Cyclic chains are deliberately left out of the cache: [`copy_root`] returns
+/// the first occurrence revisited on that particular walk, which depends on the
+/// start node, so folding it into the shared memo would corrupt other starts.
+/// Those chains fall back to a full per-start walk, so the resolved root is
+/// byte-for-byte identical to the reference implementation for every input.
+fn copy_root_memoized(
+    occurrence_id: &MessageOccurrenceIdV1,
+    sources: &BTreeMap<MessageOccurrenceIdV1, MessageOccurrenceIdV1>,
+    eligible_ids: &BTreeSet<MessageOccurrenceIdV1>,
+    memo: &mut BTreeMap<MessageOccurrenceIdV1, MessageOccurrenceIdV1>,
+    control: &ExecutionControl,
+    hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
+) -> Result<MessageOccurrenceIdV1, TemporalPortError> {
+    let mut path = Vec::new();
+    let mut on_path = BTreeSet::new();
+    let mut current = occurrence_id.clone();
+    loop {
+        checkpoint(control, hook, ResolutionCheckpoint::Copy)?;
+        if let Some(root) = memo.get(&current) {
+            // A cached root is always the terminus of an acyclic chain, so every
+            // occurrence walked to reach it shares that same root.
+            let root = root.clone();
+            for node in path {
+                memo.insert(node, root.clone());
+            }
+            return Ok(root);
+        }
+        if !on_path.insert(current.clone()) {
+            // Cycle: `current` is the first occurrence revisited on this walk,
+            // exactly what `copy_root` returns. Start-dependent -> not cached.
+            return Ok(current);
+        }
+        match sources.get(&current) {
+            Some(parent) if eligible_ids.contains(parent) => {
+                path.push(current.clone());
+                current = parent.clone();
+            }
+            _ => break,
+        }
+    }
+    // Natural terminus: `current` has no eligible parent and is the root of every
+    // occurrence walked to reach it.
+    for node in &path {
+        memo.insert(node.clone(), current.clone());
+    }
+    memo.insert(current.clone(), current.clone());
     Ok(current)
 }
 
@@ -447,15 +626,17 @@ pub fn resolve_temporal_with_checkpoints(
     }
 
     let mut resolved = Vec::with_capacity(eligible.len());
+    let mut copy_root_memo = BTreeMap::new();
     for occurrence in eligible {
         checkpoint(control, hook, ResolutionCheckpoint::Materialization)?;
         if suppressed_anchors.contains(&occurrence.anchor_id) {
             continue;
         }
-        let representative_id = copy_root(
+        let representative_id = copy_root_memoized(
             &occurrence.occurrence_id,
             &copy_sources,
             &eligible_ids,
+            &mut copy_root_memo,
             control,
             hook,
         )?;
@@ -571,4 +752,136 @@ pub fn resolve_temporal(
         mode,
         &ExecutionControl::default(),
     )
+}
+
+#[cfg(test)]
+mod algorithmic_equivalence_tests {
+    //! Findings 9 and 10 equivalence: the memoized copy-root walk and the linear
+    //! SCC cycle-membership pass must return byte-identical results to the
+    //! quadratic reference implementations they replace, across randomized
+    //! graphs that exercise chains, cycles, rho shapes, self-loops, branching,
+    //! and disconnected components.
+    use super::*;
+
+    /// Deterministic xorshift64* PRNG so the sweep is reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next_u64() % bound as u64) as usize
+        }
+
+        fn chance(&mut self, denominator: usize) -> bool {
+            self.below(denominator) == 0
+        }
+    }
+
+    fn oid(index: usize) -> MessageOccurrenceIdV1 {
+        MessageOccurrenceIdV1::new(format!("sha256:{index:064x}")).expect("valid occurrence id")
+    }
+
+    fn aid(index: usize) -> RetrievalAnchorId {
+        serde_json::from_str(&format!("\"anchor-{index}\"")).expect("valid anchor")
+    }
+
+    fn noop_hook() -> impl FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError> {
+        |_checkpoint| Ok(())
+    }
+
+    #[test]
+    fn memoized_copy_root_matches_reference() {
+        let control = ExecutionControl::default();
+        for seed in 1..=600_u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+            let node_count = 2 + rng.below(6);
+
+            // Functional parent map: every occurrence has at most one source, as
+            // produced by `copy_sources`. Parents may point anywhere (including
+            // self), yielding chains, cycles, and rho shapes.
+            let mut sources = BTreeMap::new();
+            for index in 0..node_count {
+                if rng.chance(4) {
+                    continue; // root: no source
+                }
+                let parent = rng.below(node_count);
+                sources.insert(oid(index), oid(parent));
+            }
+            let eligible_ids = (0..node_count)
+                .filter(|_| !rng.chance(5))
+                .map(oid)
+                .collect::<BTreeSet<_>>();
+
+            // Shared memo mirrors production: it accumulates across every start.
+            let mut memo = BTreeMap::new();
+            for index in 0..node_count {
+                let start = oid(index);
+                let mut reference_hook = noop_hook();
+                let expected =
+                    copy_root(&start, &sources, &eligible_ids, &control, &mut reference_hook)
+                        .expect("reference copy root");
+                let mut memo_hook = noop_hook();
+                let actual = copy_root_memoized(
+                    &start,
+                    &sources,
+                    &eligible_ids,
+                    &mut memo,
+                    &control,
+                    &mut memo_hook,
+                )
+                .expect("memoized copy root");
+                assert_eq!(
+                    actual, expected,
+                    "seed {seed} start {index}: sources={sources:?} eligible={eligible_ids:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scc_cycle_members_match_reference() {
+        let control = ExecutionControl::default();
+        for seed in 1..=800_u64 {
+            let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03).wrapping_add(7));
+            let universe = 3 + rng.below(5);
+
+            let mut descendants = BTreeMap::<RetrievalAnchorId, BTreeSet<RetrievalAnchorId>>::new();
+            for parent in 0..universe {
+                let mut children = BTreeSet::new();
+                for child in 0..universe {
+                    if rng.chance(3) {
+                        children.insert(aid(child)); // self-edges allowed
+                    }
+                }
+                if !children.is_empty() {
+                    descendants.insert(aid(parent), children);
+                }
+            }
+            // Induced subgraph: a random subset of the universe.
+            let nodes = (0..universe)
+                .filter(|_| !rng.chance(4))
+                .map(aid)
+                .collect::<BTreeSet<_>>();
+
+            let mut reference_hook = noop_hook();
+            let expected =
+                cycle_members_among_reference(&nodes, &descendants, &control, &mut reference_hook)
+                    .expect("reference cycle members");
+            let mut scc_hook = noop_hook();
+            let actual = cycle_members_among(&nodes, &descendants, &control, &mut scc_hook)
+                .expect("scc cycle members");
+            assert_eq!(
+                actual, expected,
+                "seed {seed}: nodes={nodes:?} descendants={descendants:?}"
+            );
+        }
+    }
 }
