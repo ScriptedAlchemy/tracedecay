@@ -681,3 +681,34 @@ fn cancellation_bounds_query_return_even_when_the_executor_is_still_running() {
     drop(lease);
     assert!(drop_started.elapsed() < Duration::from_millis(100));
 }
+
+#[test]
+fn acquire_drives_burst_worker_retirement_on_entry() {
+    // `acquire_lane` no longer retires on every bounded poll tick, only on entry
+    // and after a notified wake. This guards that the entry retirement still
+    // fires: a burst worker aged past the idle window must be shed when the next
+    // acquisition walks the pool, shrinking back toward the floor.
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    budget.max_per_hot_shard = 3;
+    budget.idle_burst_retire_ms = 1;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+
+    let leases = (0..3)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    drop(leases);
+    assert_eq!(pool.snapshot().general_workers, 3);
+    // Let the returned burst worker age past the 1ms idle window.
+    std::thread::sleep(Duration::from_millis(10));
+
+    // A fresh acquisition retires the aged burst worker on entry, then leases a
+    // survivor. The floor (min_per_hot_shard = 2) is never breached.
+    let lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let state = pool.snapshot();
+    assert_eq!(state.general_workers, 2);
+    assert_eq!(state.leased_general, 1);
+    drop(lease);
+}
