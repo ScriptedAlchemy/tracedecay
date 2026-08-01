@@ -270,6 +270,97 @@ fn orphan_respects_retention_window() {
     assert!(plan.retained_immature.is_empty());
 }
 
+/// Delete the on-disk data directories for every store in `plan.collect`.
+/// Re-linkable and immature stores are left untouched. A directory that is
+/// already gone counts as collected (idempotent). Best-effort: a failed
+/// removal is recorded in `errors` and does not abort the rest.
+///
+/// Production collects through [`execute_registered_collection`], which
+/// re-proves registry, manifest, and payload identity before removing
+/// anything. This is the unverified core, kept here so the two tests below can
+/// pin the profile containment fence and the idempotent-delete contract on
+/// their own.
+fn execute_collection(plan: &CollectionPlan, profile_root: &Path) -> CollectionOutcome {
+    let mut outcome = CollectionOutcome::default();
+    let canonical_profile = match profile_root.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            outcome
+                .errors
+                .extend(plan.collect.iter().map(|finding| CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::InspectFailed,
+                }));
+            return outcome;
+        }
+    };
+    for finding in &plan.collect {
+        let canonical_target = match finding.data_root.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let is_profile_child = finding
+                    .data_root
+                    .parent()
+                    .and_then(|parent| parent.canonicalize().ok())
+                    .is_some_and(|parent| {
+                        parent.starts_with(&canonical_profile) && parent != canonical_profile
+                    });
+                if !is_profile_child {
+                    outcome.errors.push(CollectionFailure {
+                        store_id: finding.store_id.clone(),
+                        kind: CollectionFailureKind::OutsideProfile,
+                    });
+                    continue;
+                }
+                outcome.reclaimed_bytes =
+                    outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
+                outcome.collected.push(CollectedStore {
+                    project_id: finding.project_id.clone(),
+                    store_id: finding.store_id.clone(),
+                    data_root: finding.data_root.clone(),
+                    size_bytes: finding.size_bytes,
+                });
+                continue;
+            }
+            Err(_) => {
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::InspectFailed,
+                });
+                continue;
+            }
+        };
+        if canonical_target == canonical_profile
+            || !canonical_target.starts_with(&canonical_profile)
+        {
+            outcome.errors.push(CollectionFailure {
+                store_id: finding.store_id.clone(),
+                kind: CollectionFailureKind::OutsideProfile,
+            });
+            continue;
+        }
+        match std::fs::remove_dir_all(&finding.data_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                outcome.errors.push(CollectionFailure {
+                    store_id: finding.store_id.clone(),
+                    kind: CollectionFailureKind::RemoveFailed,
+                });
+                continue;
+            }
+        }
+        outcome.reclaimed_bytes = outcome.reclaimed_bytes.saturating_add(finding.size_bytes);
+        outcome.collected.push(CollectedStore {
+            project_id: finding.project_id.clone(),
+            store_id: finding.store_id.clone(),
+            data_root: finding.data_root.clone(),
+            size_bytes: finding.size_bytes,
+        });
+    }
+    outcome
+}
+
 #[test]
 fn execute_collection_deletes_only_collect_set() {
     let tmp = tempfile::TempDir::new().unwrap();
