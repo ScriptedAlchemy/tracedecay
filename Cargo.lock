@@ -5752,6 +5752,7 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror",
+ "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",

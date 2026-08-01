@@ -15,6 +15,7 @@ use tracedecay_domain::{
     AuthorizationRevision, BrainId, CapabilityId, PrincipalId, ProjectId, UserProfileId, UtcMicros,
     canonical_sha256,
 };
+use tracedecay_query::code_search;
 
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 
@@ -181,8 +182,8 @@ fn admit_query_mcp_read_at(
 }
 
 impl QueryMcpReadAdmissionV1 {
-    pub(crate) fn search_authority(&self) -> crate::mcp::server::CodeIndexSearchAuthorityV1 {
-        crate::mcp::server::CodeIndexSearchAuthorityV1 {
+    pub(crate) fn search_authority(&self) -> code_search::CodeIndexSearchAuthorityV1 {
+        code_search::CodeIndexSearchAuthorityV1 {
             principal: self.principal.clone(),
             authorization_revision: self.authorization_revision.clone(),
         }
@@ -191,20 +192,18 @@ impl QueryMcpReadAdmissionV1 {
     pub(crate) fn authorize(
         &self,
         scope: &ResolvedScope,
-        supplied: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
-    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1>
-    {
+        supplied: Option<&code_search::CodeIndexSearchAuthorityV1>,
+    ) -> Result<code_search::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1> {
         self.authorize_at(scope, supplied, QUERY_MCP_READ_CAPABILITY_V1, now_micros())
     }
 
     fn authorize_at(
         &self,
         scope: &ResolvedScope,
-        supplied: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
+        supplied: Option<&code_search::CodeIndexSearchAuthorityV1>,
         requested_capability: &str,
         observed_at: UtcMicros,
-    ) -> Result<crate::mcp::server::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1>
-    {
+    ) -> Result<code_search::CodeIndexSearchAuthorityV1, QueryMcpAdmissionUnavailableV1> {
         if !self.route_registered.load(Ordering::Acquire) {
             return Err(QueryMcpAdmissionUnavailableV1::Revoked);
         }
@@ -248,6 +247,7 @@ mod tests {
         AuthorizationRevision, BrainId, ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros,
         WorktreeId,
     };
+    use tracedecay_query::code_search;
 
     use super::{QueryMcpAdmissionUnavailableV1, admit_query_mcp_read_at};
 
@@ -323,7 +323,7 @@ mod tests {
         let scope = scope("project.one", "worktree.one");
         let admission = admission(&scope);
         let authority = admission.search_authority();
-        let stale = crate::mcp::server::CodeIndexSearchAuthorityV1 {
+        let stale = code_search::CodeIndexSearchAuthorityV1 {
             principal: authority.principal.clone(),
             authorization_revision: id::<AuthorizationRevision>("authorization.stale"),
         };

@@ -12,6 +12,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
+use tracedecay_query::code_search;
 
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
@@ -266,12 +267,12 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
     );
     assert_eq!(
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
-        Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::TimedOut)
+        Some(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
     );
     cancellation.cancel(tracedecay_domain::UtcMicros(8));
     assert_eq!(
         super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
-        Some(crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Cancelled)
+        Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
     );
 }
 
@@ -279,10 +280,9 @@ fn search_request_controls_distinguish_cancellation_and_timeout() {
 fn search_scope_resolution_failure_is_authority_unavailable() {
     assert!(matches!(
         super::code_index_scope_unavailable(),
-        crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
-            crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                reason:
-                    crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+        code_search::CodeIndexSearchOutcomeV1::Unavailable(
+            code_search::CodeIndexSearchUnavailableV1 {
+                reason: code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                 ..
             }
         )
