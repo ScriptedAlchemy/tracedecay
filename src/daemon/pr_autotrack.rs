@@ -829,7 +829,15 @@ async fn remove_pr_store(
         administration
             .daemon
             .with_writer(|| async {
-                crate::migrate::memory_cutover::apply_for_retained_project(graph).await
+                let profile_root = graph.retained_profile_root()?;
+                let target = graph.project_memory_db().await?;
+                crate::migrate::memory_cutover::apply_for_retained_project(
+                    graph.project_root(),
+                    &profile_root,
+                    graph.store_layout(),
+                    target.as_db(),
+                )
+                .await
             })
             .await
             .map_err(|error| format!("project-memory cutover failed: {error}"))?;
