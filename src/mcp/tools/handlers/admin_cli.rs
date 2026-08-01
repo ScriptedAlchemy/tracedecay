@@ -1,6 +1,7 @@
 //! Unadvertised daemon-owned operations used by one-shot CLI commands.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -79,20 +80,20 @@ const fn default_storage_report_page_limit() -> usize {
 }
 
 struct AdminCliContext<'a> {
-    global_db: &'a RegisteredGlobalDb,
+    global_db: &'a Arc<RegisteredGlobalDb>,
     accounting_db: Option<&'a RegisteredGlobalDb>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
-    project_session_db: Option<&'a RegisteredGlobalDb>,
-    registered_project_session_db: Option<&'a RegisteredGlobalDb>,
-    registered_user_session_db: Option<&'a RegisteredGlobalDb>,
+    project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
+    registered_project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
+    registered_user_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
     profile_identity: Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
 }
 
 impl<'a> AdminCliContext<'a> {
     fn with_project(
         cg: &'a TraceDecay,
-        global_db: &'a RegisteredGlobalDb,
+        global_db: &'a Arc<RegisteredGlobalDb>,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
@@ -102,7 +103,7 @@ impl<'a> AdminCliContext<'a> {
             accounting_db,
             profile_root,
             project: Some(cg),
-            project_session_db: session_authorities.project.map(AsRef::as_ref),
+            project_session_db: session_authorities.project,
             registered_project_session_db: session_authorities.project_registered,
             registered_user_session_db: session_authorities.profile_registered,
             profile_identity: session_authorities.profile_identity,
@@ -110,7 +111,7 @@ impl<'a> AdminCliContext<'a> {
     }
 
     fn projectless(
-        global_db: &'a RegisteredGlobalDb,
+        global_db: &'a Arc<RegisteredGlobalDb>,
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: &'a Path,
     ) -> Self {
@@ -148,21 +149,21 @@ impl<'a> AdminCliContext<'a> {
         self.project.map(TraceDecay::project_root)
     }
 
-    fn require_project_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
+    fn require_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
         self.project_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon project session database is unavailable".to_string(),
             })
     }
 
-    fn require_registered_project_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
+    fn require_registered_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
         self.registered_project_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon registered project session database is unavailable".to_string(),
             })
     }
 
-    fn require_registered_user_session_db(&self) -> Result<&'a RegisteredGlobalDb> {
+    fn require_registered_user_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
         self.registered_user_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon registered user session database is unavailable".to_string(),
@@ -182,7 +183,7 @@ impl<'a> AdminCliContext<'a> {
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&RegisteredGlobalDb>,
+    global_db: Option<&Arc<RegisteredGlobalDb>>,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
@@ -206,7 +207,7 @@ pub(super) async fn handle_admin_cli(
 
 pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
-    global_db: &RegisteredGlobalDb,
+    global_db: &Arc<RegisteredGlobalDb>,
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: &Path,
 ) -> Result<ToolResult> {
@@ -271,8 +272,8 @@ async fn dispatch_admin_cli(
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
             crate::analytics_bridge::analytics_diagnostics_with_db(
                 context.require_accounting_db()?,
-                context.registered_project_session_db,
-                context.registered_user_session_db,
+                context.registered_project_session_db.map(Arc::as_ref),
+                context.registered_user_session_db.map(Arc::as_ref),
                 context.project_root(),
                 all,
                 no_sync,
@@ -573,14 +574,16 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Result<Val
 
 async fn sessions_ingest(
     cg: &TraceDecay,
-    registry_db: &RegisteredGlobalDb,
-    registered_project_db: &RegisteredGlobalDb,
-    registered_user_db: &RegisteredGlobalDb,
+    registry_db: &Arc<RegisteredGlobalDb>,
+    registered_project_db: &Arc<RegisteredGlobalDb>,
+    registered_user_db: &Arc<RegisteredGlobalDb>,
     profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
 ) -> Result<Value> {
     let profile_root = profile_identity.profile_root();
-    let user_authority = crate::store::GlobalDbSessionIngestAuthority::new(registered_user_db);
-    let registry_authority = crate::store::GlobalDbSessionIngestAuthority::new(registry_db);
+    let user_authority =
+        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registered_user_db));
+    let registry_authority =
+        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registry_db));
     let user_outcome = crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
@@ -597,7 +600,7 @@ async fn sessions_ingest(
         .as_deref()
         .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_authority =
-        crate::store::GlobalDbSessionIngestAuthority::new(registered_project_db);
+        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registered_project_db));
     let project_outcome = crate::sessions::ingest_project_sources_for_provider(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
@@ -632,7 +635,7 @@ async fn sessions_ingest(
 async fn sessions_git_backfill(
     cg: &TraceDecay,
     global_db: &RegisteredGlobalDb,
-    session_db: &RegisteredGlobalDb,
+    session_db: &Arc<RegisteredGlobalDb>,
     since: i64,
     limit_sessions: usize,
     dry_run: bool,
@@ -651,7 +654,7 @@ async fn sessions_git_backfill(
         })
         .await
         .unwrap_or_default();
-    let stats = crate::store::GlobalDbGitCorrelationStore::new(session_db)
+    let stats = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(session_db))
         .run_backfill(
             &analytics_events,
             &SystemGit,
@@ -679,8 +682,8 @@ async fn sessions_git_backfill(
     }))
 }
 
-async fn sessions_unfinished(db: &RegisteredGlobalDb, limit: usize) -> Result<Value> {
-    let items = crate::store::GlobalDbWorkflowStore::new(db)
+async fn sessions_unfinished(db: &Arc<RegisteredGlobalDb>, limit: usize) -> Result<Value> {
+    let items = crate::store::GlobalDbWorkflowStore::new(Arc::clone(db))
         .list_unfinished_workflows(limit)
         .await
         .map_err(|message| TraceDecayError::Config { message })?;

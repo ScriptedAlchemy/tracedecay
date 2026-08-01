@@ -79,7 +79,7 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub requester: ActorId,
     pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
     pub graph: Arc<TraceDecay>,
-    pub(crate) project_runtime_db: Arc<RegisteredGlobalDb>,
+    pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:

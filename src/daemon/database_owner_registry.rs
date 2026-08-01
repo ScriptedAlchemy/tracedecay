@@ -16,7 +16,7 @@ use super::*;
 // Fields are `pub(super)`: the entry was private inside the flat `daemon.rs`,
 // which made it visible to every `crate::daemon` descendant — `branch_admin`
 // reads `server` directly, so the split must preserve that reach.
-struct DatabaseOwnerEntry<Server> {
+pub(super) struct DatabaseOwnerEntry<Server> {
     pub(super) server: Server,
     pub(super) last_used: Instant,
     pub(super) publication: ProjectServerPublication,
