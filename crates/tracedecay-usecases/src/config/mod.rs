@@ -16,6 +16,8 @@ pub use tracedecay_global_db::configuration::semantic::{
     SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
 };
 pub use tracedecay_global_db::configuration::{registry, resolver};
+#[cfg(test)]
+pub use tracedecay_runtime_core::config::PinnedUserDataDir;
 
 use std::collections::BTreeMap;
 use std::future::Future;

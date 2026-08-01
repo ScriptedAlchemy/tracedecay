@@ -6,6 +6,8 @@
 //! every item declared here, so `crate::config::<item>` keeps resolving on
 //! both sides of the split.
 
+#[cfg(any(test, feature = "test-helpers"))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Name of the hidden directory used to store `TraceDecay` metadata.
@@ -229,4 +231,79 @@ pub const GENERATED_DIR_SEGMENTS: &[&str] = &[
 #[must_use]
 pub fn is_generated_dir_segment(segment: &str) -> bool {
     GENERATED_DIR_SEGMENTS.contains(&segment)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serializes tests that mutate process-wide profile discovery variables.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
+    USER_DATA_DIR_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Pins profile discovery to an isolated directory for the guard's lifetime.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct PinnedUserDataDir {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _root: tempfile::TempDir,
+    previous: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl PinnedUserDataDir {
+    pub fn new() -> Self {
+        let lock = lock_user_data_dir_test_env();
+        let root = tempfile::TempDir::new()
+            .unwrap_or_else(|error| panic!("failed to create temp profile dir: {error}"));
+        let profile = root.path().join(TRACEDECAY_DIR);
+        crate::storage::PrivateStoreIo::create_dir_all(&profile)
+            .unwrap_or_else(|error| panic!("failed to create isolated profile root: {error}"));
+        let previous = std::env::var_os(USER_DATA_DIR_ENV);
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+        unsafe {
+            std::env::set_var(USER_DATA_DIR_ENV, &profile);
+            std::env::set_var("HOME", root.path());
+            std::env::set_var("USERPROFILE", root.path());
+        }
+        Self {
+            _lock: lock,
+            _root: root,
+            previous,
+            previous_home,
+            previous_userprofile,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Default for PinnedUserDataDir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for PinnedUserDataDir {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
+                None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
+            match self.previous_home.take() {
+                Some(previous) => std::env::set_var("HOME", previous),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(previous) => std::env::set_var("USERPROFILE", previous),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
 }
