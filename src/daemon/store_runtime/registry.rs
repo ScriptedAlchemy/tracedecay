@@ -562,6 +562,141 @@ impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeHandle {
     }
 }
 
+/// Kernel-facing view of a registered runtime.
+///
+/// `tracedecay_runtime_core` retains runtimes as `Arc<dyn StoreRuntimeSource>`
+/// because this registry depends on `db::DatabaseAuthority`, a kernel type, and
+/// therefore cannot live below it. Registry failures cross as strings: every
+/// kernel call site only `Debug`-formats them.
+impl tracedecay_runtime_core::ports::StoreRuntimeSource for StoreRuntimeHandle {
+    fn opened_file_identity(&self) -> Option<u64> {
+        StoreRuntimeHandle::opened_file_identity(self)
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        self.locator().path()
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.locator().verified()
+    }
+
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        StoreRuntimeHandle::binding(self)
+    }
+
+    fn schema_migrated(&self) -> bool {
+        StoreRuntimeHandle::schema_migrated(self)
+    }
+
+    fn writer_present(&self) -> bool {
+        self.physical_snapshot().writer_present
+    }
+
+    fn validate_registered_read(&self, operation: &'static str) -> Result<(), String> {
+        StoreRuntimeHandle::validate_registered_read(self, operation)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn telemetry_read_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
+        StoreRuntimeHandle::telemetry_read_handle(self).map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn authorized_migration_sql_handle(
+        &self,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
+        StoreRuntimeHandle::authorized_migration_sql_handle(self, authority)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn database_authority(
+        &self,
+        operation: &'static str,
+    ) -> Result<crate::db::DatabaseAuthority, String> {
+        StoreRuntimeHandle::database_authority(self, operation)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
+        StoreRuntimeHandle::storage_page_counts(self, reader_wait)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn run_bounded_incremental_compaction<'a>(
+        &'a self,
+        max_pages: u64,
+        authority: crate::db::DatabaseAuthority,
+    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            StoreRuntimeHandle::run_bounded_incremental_compaction(self, max_pages, authority)
+                .await
+                .map_err(|failure| format!("{failure:?}"))
+        })
+    }
+
+    fn run_checkpoint<'a>(
+        &'a self,
+        request: tracedecay_rusqlite_runtime::CheckpointRequest,
+        authority: crate::db::DatabaseAuthority,
+    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
+        'a,
+        Result<tracedecay_rusqlite_runtime::CheckpointOutcome, String>,
+    > {
+        Box::pin(async move {
+            StoreRuntimeHandle::run_checkpoint(self, request, authority)
+                .await
+                .map_err(|failure| format!("{failure:?}"))
+        })
+    }
+
+    fn snapshot_to<'a>(
+        &'a self,
+        destination: PathBuf,
+        authority: crate::db::DatabaseAuthority,
+    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
+        'a,
+        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, String>,
+    > {
+        Box::pin(async move {
+            StoreRuntimeHandle::snapshot_to(self, destination, authority)
+                .await
+                .map_err(|failure| format!("{failure:?}"))
+        })
+    }
+
+    fn dispatch_submit_authorized<'a>(
+        &'a self,
+        request: tracedecay_store::RuntimeSubmitRequestV1,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+        authority: crate::db::DatabaseAuthority,
+    ) -> tracedecay_runtime_core::ports::StoreRuntimeFuture<
+        'a,
+        Result<tracedecay_store::RuntimeSubmitOutcomeV1, String>,
+    > {
+        Box::pin(async move {
+            StoreRuntimeHandle::dispatch_submit_authorized(self, request, probe, authority)
+                .await
+                .map_err(|failure| format!("{failure:?}"))
+        })
+    }
+
+    fn dispatch_read(
+        &self,
+        request: tracedecay_store::RuntimeReadRequestV1,
+        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
+    ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, String> {
+        StoreRuntimeHandle::dispatch_read(self, request, probe)
+            .map_err(|failure| format!("{failure:?}"))
+    }
+
+    fn runtime_identity(&self) -> usize {
+        Arc::as_ptr(self.runtime()).cast::<()>() as usize
+    }
+}
+
 impl fmt::Debug for StoreRuntimeHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

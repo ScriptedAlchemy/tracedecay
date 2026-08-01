@@ -294,12 +294,11 @@ pub struct SyncResult {
 }
 
 /// Returns the current UNIX timestamp in seconds.
-pub fn current_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
+///
+/// Defined in `tracedecay_runtime_core::tracedecay` because the memory and
+/// `memory_v2` writers stamp records with it and those layers moved into the
+/// kernel crate.
+pub use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 /// Returns `true` if the file path looks like a test file.
 ///

@@ -1,0 +1,1032 @@
+//! Query, entity, and contradiction retrieval over stored memory facts.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use super::encoding::HolographicEncoder;
+use super::entities::normalize_entity;
+use super::store::MemoryStore;
+use super::trust::DEFAULT_MIN_TRUST;
+use super::types::{
+    ContradictionResult, EntityRecord, FactRecord, FactSearchResult, MemoryCategory,
+};
+use crate::db::engine::{Value, params};
+use crate::errors::{Result, TraceDecayError};
+use crate::tracedecay::current_timestamp;
+
+const DEFAULT_LIMIT: usize = 10;
+const FTS_SCORE_WEIGHT: f64 = 0.40;
+const JACCARD_SCORE_WEIGHT: f64 = 0.30;
+const HOLOGRAPHIC_SCORE_WEIGHT: f64 = 0.30;
+const RETRIEVAL_REINFORCEMENT_WEIGHT: f64 = 0.02;
+const RETRIEVAL_REINFORCEMENT_CAP: f64 = 0.5;
+
+pub struct FactRetriever<'a> {
+    store: MemoryStore<'a>,
+    encoder: HolographicEncoder,
+}
+
+impl<'a> FactRetriever<'a> {
+    pub const fn new_runtime(conn: &'a crate::db::engine::Connection) -> Self {
+        Self {
+            store: MemoryStore::new_runtime(conn),
+            encoder: HolographicEncoder::new(),
+        }
+    }
+
+    pub async fn search(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        self.search_with_tracking(query, category, min_trust, limit, true)
+            .await
+    }
+
+    pub async fn search_untracked(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        self.search_with_tracking(query, category, min_trust, limit, false)
+            .await
+    }
+
+    async fn search_with_tracking(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+        track_recalls: bool,
+    ) -> Result<Vec<FactSearchResult>> {
+        let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
+        let limit = normalized_limit(limit);
+        let query_tokens = tokenize(query);
+        let fts_scores = self
+            .fts_candidates(query, category, min_trust, limit.saturating_mul(5))
+            .await?;
+        let entity_candidate_ids = self
+            .entity_candidates(
+                query,
+                &query_tokens,
+                category,
+                min_trust,
+                limit.saturating_mul(10),
+            )
+            .await?;
+        let direct_ids: HashSet<i64> = fts_scores
+            .keys()
+            .copied()
+            .chain(entity_candidate_ids)
+            .collect();
+        let related_ids: HashSet<i64> = self
+            .store
+            .related_fact_ids(
+                &direct_ids.iter().copied().collect::<Vec<_>>(),
+                limit.saturating_mul(5),
+            )
+            .await?
+            .into_iter()
+            .collect();
+        let mut candidates = self
+            .store
+            .list_facts(category, Some(min_trust), limit.saturating_mul(10))
+            .await?;
+        let mut candidate_ids: HashSet<i64> = candidates.iter().map(|fact| fact.fact_id).collect();
+        // Collect the union of ids surfaced by FTS and entity matching that the
+        // `list_facts` baseline did not already include, then hydrate them with a
+        // single batched `get_facts` call instead of one round-trip per id.
+        let mut missing_ids: Vec<i64> = Vec::new();
+        for fact_id in direct_ids.iter().chain(&related_ids).copied() {
+            if candidate_ids.insert(fact_id) {
+                missing_ids.push(fact_id);
+            }
+        }
+        if !missing_ids.is_empty() {
+            let mut hydrated = self.store.get_facts(&missing_ids).await?;
+            for fact_id in &missing_ids {
+                if let Some(fact) = hydrated.remove(fact_id) {
+                    candidates.push(fact);
+                }
+            }
+        }
+        candidates.retain(|fact| {
+            fact.trust_score >= min_trust && category.is_none_or(|value| fact.category == value)
+        });
+
+        if !query_tokens.is_empty() {
+            candidates.retain(|fact| {
+                direct_ids.contains(&fact.fact_id)
+                    || related_ids.contains(&fact.fact_id)
+                    || token_overlap(&query_tokens, &fact_search_tokens(fact)) > 0
+            });
+        }
+
+        // Preload every candidate's stored vector in one batched query so the
+        // scoring loop never makes a per-fact round-trip. Facts without a stored
+        // vector are absent from the map and fall back to on-the-fly encoding.
+        let candidate_vectors = self
+            .store
+            .fact_vectors(
+                &candidates
+                    .iter()
+                    .map(|fact| fact.fact_id)
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+
+        let mut results = Vec::with_capacity(candidates.len());
+        for fact in candidates {
+            let fact_tokens = fact_search_tokens(&fact);
+            let coverage = term_coverage(&query_tokens, &fact_tokens);
+            // Weight raw BM25 by distinct-term coverage: a document matching
+            // every query term must not lose to a shorter document matching
+            // one term on length normalization alone.
+            let fts_score =
+                fts_scores.get(&fact.fact_id).copied().unwrap_or(0.0) * (0.5 + 0.5 * coverage);
+            let jaccard_score = jaccard(&query_tokens, &fact_tokens);
+            let holographic_score =
+                self.holographic_score_with(query, &fact, candidate_vectors.get(&fact.fact_id));
+            let trust_score = fact.trust_score;
+            let temporal_decay = temporal_decay_factor(fact.updated_at);
+            let retrieval_count = fact.retrieval_count;
+            let score = combined_score(
+                fts_score,
+                jaccard_score,
+                holographic_score,
+                trust_score,
+                temporal_decay,
+                retrieval_count,
+            );
+            results.push(FactSearchResult {
+                fact,
+                score,
+                fts_score,
+                jaccard_score,
+                holographic_score,
+                trust_score,
+                why: Some(format!(
+                    "fts={fts_score:.3}, coverage={coverage:.3}, jaccard={jaccard_score:.3}, holographic={holographic_score:.3}, trust={trust_score:.3}, temporal_decay={temporal_decay:.3}, retrieval_count={retrieval_count}"
+                )),
+            });
+        }
+
+        results.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| right.fact.updated_at.cmp(&left.fact.updated_at))
+        });
+        results.truncate(limit);
+
+        if track_recalls {
+            // Access tracking for the facts actually RETURNED to the caller —
+            // candidates scanned and dropped above never count, and the other
+            // retrieval modes (probe/list/related/reason) deliberately do not
+            // bump access_count. Batched single UPDATE, fire-and-forget: a
+            // tracking failure must never fail the search itself.
+            let returned_ids: Vec<i64> = results.iter().map(|result| result.fact.fact_id).collect();
+            let _ = self.store.record_fact_recalls(&returned_ids).await;
+        }
+
+        Ok(results)
+    }
+
+    pub async fn probe(
+        &self,
+        entity: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        let fact_ids = self
+            .fact_ids_for_entity(entity, category, min_trust, normalized_limit(limit))
+            .await?;
+        self.results_for_fact_ids(&fact_ids, "entity probe").await
+    }
+
+    pub async fn related(&self, entity: &str, limit: usize) -> Result<Vec<EntityRecord>> {
+        let normalized = normalize_entity(entity).to_ascii_lowercase();
+        let mut rows = self
+            .store
+            .query(
+                "related",
+                "SELECT DISTINCT related.entity_id, related.name, related.normalized_name,
+                        related.entity_type, related.created_at, related.updated_at
+                 FROM memory_entities source
+                 JOIN memory_fact_entities source_fe ON source_fe.entity_id = source.entity_id
+                 JOIN memory_fact_entities related_fe ON related_fe.fact_id = source_fe.fact_id
+                 JOIN memory_entities related ON related.entity_id = related_fe.entity_id
+                 WHERE (source.normalized_name = ?1 OR EXISTS (
+                           SELECT 1 FROM json_each(source.aliases)
+                           WHERE lower(json_each.value) = ?1
+                       ))
+                   AND related.normalized_name != ?1
+                 ORDER BY related.name
+                 LIMIT ?2",
+                params![normalized, normalized_limit(limit) as i64],
+            )
+            .await?;
+
+        let mut entities = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| db_error("related", e))? {
+            let created_at = row.get::<i64>(4).map_err(|e| db_error("related", e))?;
+            entities.push(EntityRecord {
+                entity_id: row.get::<i64>(0).map_err(|e| db_error("related", e))?,
+                name: row.get::<String>(1).map_err(|e| db_error("related", e))?,
+                normalized_name: row.get::<String>(2).map_err(|e| db_error("related", e))?,
+                entity_type: Some(row.get::<String>(3).map_err(|e| db_error("related", e))?),
+                created_at,
+                updated_at: row.get::<i64>(5).map_err(|e| db_error("related", e))?,
+            });
+        }
+        Ok(entities)
+    }
+
+    pub async fn reason(
+        &self,
+        entities: &[String],
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>> {
+        if entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut seen_entities = HashSet::new();
+        let normalized: Vec<String> = entities
+            .iter()
+            .filter_map(|entity| {
+                let normalized = normalize_entity(entity).to_ascii_lowercase();
+                if normalized.is_empty() || !seen_entities.insert(normalized.clone()) {
+                    None
+                } else {
+                    Some(normalized)
+                }
+            })
+            .collect();
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = normalized
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let required_count = normalized.len() as i64;
+        let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
+        let limit_usize = normalized_limit(limit);
+        let limit_i64 = limit_usize as i64;
+        // Bind the entity names (and the trailing scalars) as anonymous `?`
+        // placeholders in positional order rather than interpolating them.
+        let mut values: Vec<Value> = normalized
+            .iter()
+            .map(|entity| Value::Text(entity.clone()))
+            .collect();
+        let sql = if let Some(category) = category {
+            values.push(Value::Text(category.as_str().to_string()));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(required_count));
+            values.push(Value::Integer(limit_i64));
+            format!(
+                "SELECT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE e.normalized_name IN ({placeholders})
+                   AND f.category = ?
+                   AND f.trust_score >= ?
+                 GROUP BY f.fact_id
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        } else {
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(required_count));
+            values.push(Value::Integer(limit_i64));
+            format!(
+                "SELECT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE e.normalized_name IN ({placeholders})
+                   AND f.trust_score >= ?
+                 GROUP BY f.fact_id
+                 HAVING COUNT(DISTINCT e.normalized_name) = ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        };
+        let mut rows = self.store.query("reason", &sql, values).await?;
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| db_error("reason", e))? {
+            fact_ids.push(row.get::<i64>(0).map_err(|e| db_error("reason", e))?);
+        }
+        let mut results = self
+            .results_for_fact_ids(&fact_ids, "entity reasoning")
+            .await?;
+        results.truncate(limit_usize);
+        Ok(results)
+    }
+
+    pub async fn contradict(
+        &self,
+        category: MemoryCategory,
+        threshold: f64,
+        limit: usize,
+    ) -> Result<Vec<ContradictionResult>> {
+        let facts = self.all_facts_for_category(category).await?;
+        let mut results = Vec::new();
+        for (index, left) in facts.iter().enumerate() {
+            for right in facts.iter().skip(index + 1) {
+                if !has_shared_entity(left, right) {
+                    continue;
+                }
+                let left_tokens = fact_search_tokens(left);
+                let right_tokens = fact_search_tokens(right);
+                let content_similarity = jaccard(&left_tokens, &right_tokens);
+                let divergence = 1.0 - content_similarity;
+                if divergence >= threshold || polarity_conflicts(&left_tokens, &right_tokens) {
+                    let (existing_fact, new_content) = if has_negative_marker(&left_tokens) {
+                        (right.clone(), left.content.clone())
+                    } else {
+                        (left.clone(), right.content.clone())
+                    };
+                    results.push(ContradictionResult {
+                        existing_fact,
+                        new_content,
+                        score: divergence,
+                        why: Some(format!(
+                            "shared entities with content divergence={divergence:.3}"
+                        )),
+                    });
+                    if results.len() >= normalized_limit(limit) {
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn all_facts_for_category(&self, category: MemoryCategory) -> Result<Vec<FactRecord>> {
+        const PAGE_SIZE: i64 = 512;
+
+        let mut facts = Vec::new();
+        let mut updated_at_cursor: Option<i64> = None;
+        let mut fact_id_cursor: Option<i64> = None;
+        loop {
+            let mut rows = self
+                .store
+                .query(
+                    "contradict",
+                    "SELECT fact_id, updated_at
+                     FROM memory_facts
+                     WHERE category = ?1 AND trust_score >= ?2
+                       AND (
+                           ?3 IS NULL
+                           OR updated_at < ?3
+                           OR (updated_at = ?3 AND fact_id < ?4)
+                       )
+                     ORDER BY updated_at DESC, fact_id DESC
+                     LIMIT ?5",
+                    params![
+                        category.as_str(),
+                        0.0,
+                        updated_at_cursor,
+                        fact_id_cursor,
+                        PAGE_SIZE
+                    ],
+                )
+                .await?;
+            let mut page = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| db_error("contradict", error))?
+            {
+                let fact_id = row
+                    .get::<i64>(0)
+                    .map_err(|error| db_error("contradict", error))?;
+                let updated_at = row
+                    .get::<i64>(1)
+                    .map_err(|error| db_error("contradict", error))?;
+                updated_at_cursor = Some(updated_at);
+                fact_id_cursor = Some(fact_id);
+                page.push(fact_id);
+            }
+            let page_len = page.len();
+            let mut hydrated = self.store.get_facts(&page).await?;
+            for fact_id in page {
+                if let Some(fact) = hydrated.remove(&fact_id) {
+                    facts.push(fact);
+                }
+            }
+            if page_len < PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(facts)
+    }
+
+    async fn fts_candidates(
+        &self,
+        query: &str,
+        category: Option<MemoryCategory>,
+        min_trust: f64,
+        limit: usize,
+    ) -> Result<HashMap<i64, f64>> {
+        let Some(fts_query) = build_fts_query(query) else {
+            return Ok(HashMap::new());
+        };
+
+        let sql = if category.is_some() {
+            "SELECT f.fact_id, bm25(memory_facts_fts) AS rank
+             FROM memory_facts_fts
+             JOIN memory_facts f ON f.rowid = memory_facts_fts.rowid
+             WHERE memory_facts_fts MATCH ?1
+               AND f.category = ?2
+               AND f.trust_score >= ?3
+             ORDER BY rank
+             LIMIT ?4"
+        } else {
+            "SELECT f.fact_id, bm25(memory_facts_fts) AS rank
+             FROM memory_facts_fts
+             JOIN memory_facts f ON f.rowid = memory_facts_fts.rowid
+             WHERE memory_facts_fts MATCH ?1
+               AND f.trust_score >= ?2
+             ORDER BY rank
+             LIMIT ?3"
+        };
+
+        let mut rows = if let Some(category) = category {
+            self.store
+                .query(
+                    "fts_candidates",
+                    sql,
+                    params![
+                        fts_query,
+                        category.as_str(),
+                        min_trust,
+                        normalized_limit(limit) as i64
+                    ],
+                )
+                .await
+        } else {
+            self.store
+                .query(
+                    "fts_candidates",
+                    sql,
+                    params![fts_query, min_trust, normalized_limit(limit) as i64],
+                )
+                .await
+        }?;
+
+        let mut ranked = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("fts_candidates", e))?
+        {
+            let rank = row
+                .get::<f64>(1)
+                .map_err(|e| db_error("fts_candidates", e))?;
+            ranked.push((
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("fts_candidates", e))?,
+                rank,
+            ));
+        }
+        Ok(normalize_fts5_ranks(ranked))
+    }
+
+    async fn entity_candidates(
+        &self,
+        query: &str,
+        query_tokens: &[String],
+        category: Option<MemoryCategory>,
+        min_trust: f64,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let mut terms = Vec::new();
+        let normalized_query = normalize_entity(query).to_ascii_lowercase();
+        if !normalized_query.is_empty() {
+            terms.push(normalized_query);
+        }
+        terms.extend(query_tokens.iter().cloned());
+        terms.sort();
+        terms.dedup();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Bind each term's exact and LIKE values as anonymous `?` placeholders in
+        // positional order. `escape_like` still governs wildcard semantics on the
+        // LIKE value, but the value is bound rather than interpolated.
+        let mut values: Vec<Value> = Vec::with_capacity(terms.len() * 4 + 3);
+        let predicates = terms
+            .iter()
+            .map(|term| {
+                values.push(Value::Text(term.clone()));
+                values.push(Value::Text(format!("%{}%", escape_like(term))));
+                values.push(Value::Text(term.clone()));
+                values.push(Value::Text(format!("%{}%", escape_like(term))));
+                "(e.normalized_name = ? OR e.normalized_name LIKE ? ESCAPE '\\' OR EXISTS (
+                    SELECT 1 FROM json_each(e.aliases) alias
+                    WHERE lower(alias.value) = ? OR lower(alias.value) LIKE ? ESCAPE '\\'
+                 ))"
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let sql = if let Some(category) = category {
+            values.push(Value::Text(category.as_str().to_string()));
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(normalized_limit(limit) as i64));
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.category = ?
+                   AND f.trust_score >= ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        } else {
+            values.push(Value::Real(min_trust));
+            values.push(Value::Integer(normalized_limit(limit) as i64));
+            format!(
+                "SELECT DISTINCT f.fact_id
+                 FROM memory_facts f
+                 JOIN memory_fact_entities fe ON fe.fact_id = f.fact_id
+                 JOIN memory_entities e ON e.entity_id = fe.entity_id
+                 WHERE ({predicates})
+                   AND f.trust_score >= ?
+                 ORDER BY f.updated_at DESC, f.fact_id DESC
+                 LIMIT ?"
+            )
+        };
+
+        let mut rows = self
+            .store
+            .query("entity_candidates", sql.as_str(), values)
+            .await?;
+
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_candidates", e))?
+        {
+            fact_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("entity_candidates", e))?,
+            );
+        }
+        Ok(fact_ids)
+    }
+
+    async fn fact_ids_for_entity(
+        &self,
+        entity: &str,
+        category: Option<MemoryCategory>,
+        min_trust: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        let normalized = normalize_entity(entity).to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sql = if category.is_some() {
+            "SELECT fe.fact_id
+             FROM memory_entities e
+             JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
+             JOIN memory_facts f ON f.fact_id = fe.fact_id
+             WHERE (e.normalized_name = ?1 OR EXISTS (
+                       SELECT 1 FROM json_each(e.aliases)
+                       WHERE lower(json_each.value) = ?1
+                   ))
+               AND f.category = ?2
+               AND f.trust_score >= ?3
+             ORDER BY f.updated_at DESC
+             LIMIT ?4"
+        } else {
+            "SELECT fe.fact_id
+             FROM memory_entities e
+             JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
+             JOIN memory_facts f ON f.fact_id = fe.fact_id
+             WHERE (e.normalized_name = ?1 OR EXISTS (
+                       SELECT 1 FROM json_each(e.aliases)
+                       WHERE lower(json_each.value) = ?1
+                   ))
+               AND f.trust_score >= ?2
+             ORDER BY f.updated_at DESC
+             LIMIT ?3"
+        };
+        let min_trust = min_trust.unwrap_or(DEFAULT_MIN_TRUST);
+
+        let mut rows = if let Some(category) = category {
+            self.store
+                .query(
+                    "fact_ids_for_entity",
+                    sql,
+                    params![
+                        normalized,
+                        category.as_str(),
+                        min_trust,
+                        normalized_limit(limit) as i64
+                    ],
+                )
+                .await
+        } else {
+            self.store
+                .query(
+                    "fact_ids_for_entity",
+                    sql,
+                    params![normalized, min_trust, normalized_limit(limit) as i64],
+                )
+                .await
+        }?;
+
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("fact_ids_for_entity", e))?
+        {
+            fact_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("fact_ids_for_entity", e))?,
+            );
+        }
+        Ok(fact_ids)
+    }
+
+    async fn results_for_fact_ids(
+        &self,
+        fact_ids: &[i64],
+        why: &str,
+    ) -> Result<Vec<FactSearchResult>> {
+        if fact_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One batched fetch, then iterate the ORIGINAL `fact_ids` order so the
+        // ordering callers rely on (probe/reason) is preserved exactly.
+        let facts = self.store.get_facts(fact_ids).await?;
+        let mut results = Vec::with_capacity(fact_ids.len());
+        for fact_id in fact_ids {
+            if let Some(fact) = facts.get(fact_id).cloned() {
+                let trust_score = fact.trust_score;
+                results.push(FactSearchResult {
+                    score: trust_score,
+                    fts_score: 0.0,
+                    jaccard_score: 0.0,
+                    holographic_score: 1.0,
+                    trust_score,
+                    why: Some(why.to_string()),
+                    fact,
+                });
+            }
+        }
+        Ok(results)
+    }
+
+    /// Holographic similarity between `query` and `fact`, using `stored_vector`
+    /// when present and otherwise encoding the fact's vector on the fly. This is
+    /// the pure form of the former `holographic_score`: callers preload vectors
+    /// in bulk via [`MemoryStore::fact_vectors`] and pass the result in here.
+    fn holographic_score_with(
+        &self,
+        query: &str,
+        fact: &FactRecord,
+        stored_vector: Option<&Vec<f64>>,
+    ) -> f64 {
+        let query_entities: Vec<String> = tokenize(query);
+        let query_vector = self.encoder.encode_fact(query, &query_entities);
+        let similarity = if let Some(vector) = stored_vector {
+            self.encoder.similarity(&query_vector, vector)
+        } else {
+            let fact_vector = self.encoder.encode_fact(&fact.content, &fact.entities);
+            self.encoder.similarity(&query_vector, &fact_vector)
+        };
+        f64::midpoint(similarity, 1.0).clamp(0.0, 1.0)
+    }
+}
+
+fn build_fts_query(query: &str) -> Option<String> {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(
+        tokens
+            .into_iter()
+            .map(|token| {
+                let quoted = format!("\"{}\"", token.replace('"', "\"\""));
+                // Prefix-match longer terms so simple morphology reaches the
+                // index ("install" finds "installing"); short tokens stay
+                // exact to avoid over-matching.
+                if token.chars().count() >= PREFIX_MATCH_MIN_CHARS {
+                    format!("{quoted}*")
+                } else {
+                    quoted
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
+}
+
+/// Minimum token length for prefix-form FTS terms and coverage prefix
+/// matching. Below this, prefixes over-match ("in" would swallow "install").
+const PREFIX_MATCH_MIN_CHARS: usize = 4;
+
+/// Fraction of distinct query tokens the fact's tokens cover, using the same
+/// exact-or-prefix semantics as [`build_fts_query`]. BM25 length
+/// normalization can rank a short one-term document above a longer document
+/// matching every query term; weighting the fts component by coverage keeps
+/// multi-term relevance ahead of single-term brevity.
+fn term_coverage(query_tokens: &[String], fact_tokens: &[String]) -> f64 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let matched = query_tokens
+        .iter()
+        .filter(|q| {
+            fact_tokens.iter().any(|t| {
+                t == *q
+                    || (q.chars().count() >= PREFIX_MATCH_MIN_CHARS && t.starts_with(q.as_str()))
+            })
+        })
+        .count();
+    matched as f64 / query_tokens.len() as f64
+}
+
+fn normalize_fts5_ranks(ranked: Vec<(i64, f64)>) -> HashMap<i64, f64> {
+    let max_relevance = ranked
+        .iter()
+        .map(|(_, rank)| fts5_rank_relevance(*rank))
+        .fold(0.0_f64, f64::max);
+    if max_relevance <= f64::EPSILON {
+        return ranked
+            .into_iter()
+            .map(|(fact_id, _)| (fact_id, 0.0))
+            .collect();
+    }
+    ranked
+        .into_iter()
+        .map(|(fact_id, rank)| {
+            (
+                fact_id,
+                (fts5_rank_relevance(rank) / max_relevance).clamp(0.0, 1.0),
+            )
+        })
+        .collect()
+}
+
+fn fts5_rank_relevance(rank: f64) -> f64 {
+    if rank.is_finite() {
+        (-rank).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | ':' | '.') {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            push_token(&mut tokens, &mut current);
+        }
+    }
+    if !current.is_empty() {
+        push_token(&mut tokens, &mut current);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn push_token(tokens: &mut Vec<String>, current: &mut String) {
+    if current.len() >= 2 {
+        tokens.push(std::mem::take(current));
+    } else {
+        current.clear();
+    }
+}
+
+fn fact_search_tokens(fact: &FactRecord) -> Vec<String> {
+    let mut tokens = tokenize(&fact.content);
+    for tag in &fact.tags {
+        tokens.extend(tokenize(tag));
+    }
+    for entity in &fact.entities {
+        tokens.extend(tokenize(entity));
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn token_overlap(left: &[String], right: &[String]) -> usize {
+    let right_set: HashSet<&str> = right.iter().map(String::as_str).collect();
+    left.iter()
+        .filter(|token| right_set.contains(token.as_str()))
+        .count()
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn jaccard(left: &[String], right: &[String]) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let left_set: HashSet<&str> = left.iter().map(String::as_str).collect();
+    let right_set: HashSet<&str> = right.iter().map(String::as_str).collect();
+    let intersection = left_set.intersection(&right_set).count();
+    let union = left_set.union(&right_set).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Recall ranking: relevance (FTS + Jaccard + holographic) weighted by trust,
+/// temporal decay, and a bounded log-scaled `retrieval_count` boost.
+///
+/// `access_count` is deliberately NOT an input. Folding access frequency into
+/// the ranking would create a rich-get-richer feedback loop: frequently
+/// recalled facts rank higher, get recalled even more, and crowd out newer or
+/// niche-but-correct facts. Access stats exist for *curation* signals
+/// (delete-reluctance for actively used facts), never for retrieval order.
+fn combined_score(
+    fts: f64,
+    jaccard: f64,
+    holographic: f64,
+    trust: f64,
+    temporal_decay: f64,
+    retrieval_count: i64,
+) -> f64 {
+    let relevance = fts.mul_add(
+        FTS_SCORE_WEIGHT,
+        jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
+    );
+    let usage_boost = 1.0
+        + (RETRIEVAL_REINFORCEMENT_WEIGHT * (retrieval_count.max(0) as f64).ln_1p())
+            .min(RETRIEVAL_REINFORCEMENT_CAP);
+    relevance * trust * temporal_decay.clamp(0.0, 1.0) * usage_boost
+}
+
+fn temporal_decay_factor(updated_at: i64) -> f64 {
+    if updated_at <= 0 {
+        return 1.0;
+    }
+    let age_secs = current_timestamp().saturating_sub(updated_at).max(0) as f64;
+    let age_days = age_secs / 86_400.0;
+    0.5_f64.powf(age_days / 365.0).clamp(0.10, 1.0)
+}
+
+fn has_shared_entity(left: &FactRecord, right: &FactRecord) -> bool {
+    let right_entities: HashSet<String> = right
+        .entities
+        .iter()
+        .map(|entity| entity.to_ascii_lowercase())
+        .collect();
+    left.entities
+        .iter()
+        .any(|entity| right_entities.contains(&entity.to_ascii_lowercase()))
+}
+
+fn polarity_conflicts(left: &[String], right: &[String]) -> bool {
+    has_negative_marker(left) != has_negative_marker(right)
+}
+
+fn has_negative_marker(tokens: &[String]) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "not" | "no" | "never" | "avoid" | "dont" | "don't"
+        )
+    })
+}
+
+fn normalized_limit(limit: usize) -> usize {
+    if limit == 0 {
+        DEFAULT_LIMIT
+    } else {
+        limit.min(i64::MAX as usize)
+    }
+}
+
+fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: operation.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_fts_query_prefixes_long_tokens_only() {
+        let q = build_fts_query("install dependencies in db").unwrap();
+        assert!(q.contains("\"install\"*"), "{q}");
+        assert!(q.contains("\"dependencies\"*"), "{q}");
+        // Short tokens stay exact so prefixes cannot over-match.
+        assert!(!q.contains("\"db\"*"), "{q}");
+    }
+
+    #[test]
+    fn term_coverage_counts_distinct_terms_with_prefix_reach() {
+        let query = vec!["install".to_string(), "dependencies".to_string()];
+        let both = vec!["installing".to_string(), "dependencies".to_string()];
+        let one = vec!["install".to_string(), "packages".to_string()];
+        assert!((term_coverage(&query, &both) - 1.0).abs() < f64::EPSILON);
+        assert!((term_coverage(&query, &one) - 0.5).abs() < f64::EPSILON);
+        // Short query tokens never prefix-match.
+        let short = vec!["db".to_string()];
+        let fact = vec!["dbx".to_string()];
+        assert!(term_coverage(&short, &fact).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fts5_ranks_are_normalized_without_losing_small_matches() {
+        let scores = normalize_fts5_ranks(vec![
+            (1, -0.000_002),
+            (2, -0.000_001),
+            (3, 0.0),
+            (4, f64::NAN),
+        ]);
+
+        assert!((scores[&1] - 1.0).abs() < f64::EPSILON);
+        assert!((scores[&2] - 0.5).abs() < f64::EPSILON);
+        assert!(scores[&3].abs() < f64::EPSILON);
+        assert!(scores[&4].abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lone_common_term_match_keeps_full_fts_weight() {
+        let scores = normalize_fts5_ranks(vec![(1, -0.000_001)]);
+        assert!((scores[&1] - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retrieval_reinforcement_boosts_frequently_retrieved_facts() {
+        let fts = 0.5;
+        let jaccard = 0.4;
+        let holographic = 0.6;
+        let trust = 0.8;
+        let temporal_decay = 0.9;
+
+        let baseline = combined_score(fts, jaccard, holographic, trust, temporal_decay, 0);
+        let boosted = combined_score(fts, jaccard, holographic, trust, temporal_decay, 200);
+
+        assert!(
+            boosted > baseline,
+            "expected retrieval_count=200 to score higher than retrieval_count=0 \
+             (boosted={boosted}, baseline={baseline})"
+        );
+
+        let relevance = fts.mul_add(
+            FTS_SCORE_WEIGHT,
+            jaccard.mul_add(JACCARD_SCORE_WEIGHT, holographic * HOLOGRAPHIC_SCORE_WEIGHT),
+        );
+        let unboosted = relevance * trust * temporal_decay.clamp(0.0, 1.0);
+        assert!(
+            (baseline - unboosted).abs() < 1e-12,
+            "retrieval_count=0 must leave the score unchanged (boost==1.0): \
+             baseline={baseline}, unboosted={unboosted}"
+        );
+
+        let saturated = combined_score(fts, jaccard, holographic, trust, temporal_decay, i64::MAX);
+        let max_boosted = unboosted * (1.0 + RETRIEVAL_REINFORCEMENT_CAP);
+        assert!(
+            saturated <= max_boosted + 1e-12,
+            "usage boost must be capped at +{:.0}% (saturated={saturated}, cap={max_boosted})",
+            RETRIEVAL_REINFORCEMENT_CAP * 100.0
+        );
+    }
+}

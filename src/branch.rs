@@ -12,36 +12,29 @@ pub use admin::{
 };
 pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
 
-/// Bounded-retry policy for a briefly-contended branch-add lock: a concurrent
-/// branch add only holds the lock for the duration of a DB clone, so a short
-/// spin lets a contender through instead of failing immediately. Shared by the
-/// async [`prepare_branch_tracking_in_layout`] and the synchronous
-/// administrative path; only the sleep primitive differs.
-const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
-const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// Resolves the current branch name using `gix`. Linked worktrees use
-/// `git symbolic-ref HEAD` because gix can resolve their shared repository's
-/// primary HEAD instead of the worktree-specific HEAD.
+/// Installs the root-owned pending branch-admin recovery gate into the kernel
+/// lock primitives.
 ///
-/// Returns `None` for detached HEAD or if the repository cannot be opened.
-pub fn current_branch(project_root: &Path) -> Option<String> {
-    if crate::worktree::is_linked_worktree(project_root) {
-        return current_branch_git(project_root);
-    }
-    match current_branch_gix(project_root) {
-        GixHead::Branch(branch) => Some(branch),
-        // A readable repo answered with a detached HEAD; `git symbolic-ref`
-        // would fail the same way, so don't spawn it.
-        GixHead::Detached => None,
-        GixHead::Unavailable => {
-            if !crate::worktree::git_may_resolve_repo(project_root) {
-                return None;
-            }
-            current_branch_git(project_root)
-        }
-    }
+/// The gate reads `branch::admin::transaction`'s journal, which stayed in this
+/// crate, so the kernel calls back through
+/// `tracedecay_runtime_core::ports::branch_admin_recovery`. Idempotent; every
+/// process entry point that can take a branch lock must call it before doing
+/// so.
+pub fn register_branch_admin_recovery_gate() {
+    tracedecay_runtime_core::ports::branch_admin_recovery::register(
+        admin::ensure_no_pending_branch_admin_recovery,
+    );
 }
+
+/// The shared branch-add lock, its retry policy, and the current-branch read
+/// moved into `tracedecay_runtime_core::branch`: `branch_meta` and `worktree`
+/// depend on them and now live in that crate. Re-exported so every historical
+/// `crate::branch::<item>` path keeps resolving.
+pub use tracedecay_runtime_core::branch::{
+    BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, acquire_branch_add_lock_blocking_raw,
+    acquire_branch_lock_blocking, current_branch, try_acquire_branch_add_lock,
+    try_acquire_branch_add_lock_raw,
+};
 
 /// Returns true if `branch` exists as a local `refs/heads/*` branch.
 pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
@@ -63,53 +56,6 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
         .current_dir(project_root)
         .status()
         .is_ok_and(|status| status.success())
-}
-
-/// What gix could learn about HEAD without spawning `git`.
-enum GixHead {
-    /// HEAD points at a local branch.
-    Branch(String),
-    /// A readable repo whose HEAD is detached (or on a non-branch ref).
-    Detached,
-    /// No repo could be opened at this path or its HEAD was unreadable;
-    /// the `git` subprocess fallback should decide.
-    Unavailable,
-}
-
-fn current_branch_gix(project_root: &Path) -> GixHead {
-    let Ok(repo) = gix::open(project_root) else {
-        return GixHead::Unavailable;
-    };
-    let Ok(head) = repo.head() else {
-        return GixHead::Unavailable;
-    };
-    // `Head::name()` is always the literal "HEAD"; the branch HEAD points
-    // to (if any) is the referent.
-    let Some(name) = head.referent_name() else {
-        return GixHead::Detached;
-    };
-    let Ok(name_str) = std::str::from_utf8(name.as_bstr()) else {
-        return GixHead::Unavailable;
-    };
-    match name_str.strip_prefix("refs/heads/") {
-        Some(branch) => GixHead::Branch(branch.to_string()),
-        None => GixHead::Detached,
-    }
-}
-
-fn current_branch_git(project_root: &Path) -> Option<String> {
-    let output = std::process::Command::new(crate::git::git_program())
-        .args(["symbolic-ref", "-q", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = std::str::from_utf8(&output.stdout).ok()?;
-    name.strip_prefix("refs/heads/")
-        .and_then(|s| s.strip_suffix('\n'))
-        .map(std::string::ToString::to_string)
 }
 
 fn git_rev_list_count(project_root: &Path, from_ref: &str, to_ref: &str) -> Option<usize> {
@@ -854,37 +800,6 @@ fn prune_missing_branch_dbs(
         meta.remove_branch(&name);
     }
     changed
-}
-
-fn try_acquire_branch_add_lock_raw(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
-    use fs2::FileExt;
-
-    std::fs::create_dir_all(tracedecay_dir)?;
-    let lock_path = tracedecay_dir.join(".branch-add.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    file.try_lock_exclusive()
-        .map_err(|e| crate::errors::TraceDecayError::SyncLock {
-            message: format!("branch add already running at {}: {e}", lock_path.display()),
-        })?;
-    Ok(file)
-}
-
-pub(crate) fn try_acquire_branch_add_lock(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    let file = try_acquire_branch_add_lock_raw(tracedecay_dir)?;
-    admin::ensure_no_pending_branch_admin_recovery(tracedecay_dir)?;
-    Ok(file)
-}
-
-pub(crate) fn acquire_branch_lock_blocking(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
-    admin::acquire_branch_add_lock_blocking(tracedecay_dir)
 }
 
 async fn create_consistent_branch_snapshot(
