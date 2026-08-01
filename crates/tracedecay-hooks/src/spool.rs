@@ -410,22 +410,20 @@ impl HookSpoolV1 {
         self.lease
     }
 
-    pub fn open_report(&self) -> HookSpoolOpenReportV1 {
-        HookSpoolOpenReportV1 {
-            pending_records: self.pending.len() as u32,
-            pending_bytes: self.pending_bytes(),
-            committed_through: self.meta.committed_through,
-            next_sequence: self.meta.next_sequence,
-            truncated_partial_tail_bytes: 0,
-            corrupted_at_offset: match self.meta.integrity {
-                SpoolIntegrityV1::Healthy => None,
-                SpoolIntegrityV1::Corrupted { at_offset } => Some(at_offset),
-            },
-        }
-    }
-
     /// Refresh a still-owned writer lease. Expired or replaced leases fail
     /// closed; no caller may continue appending after that point.
+    ///
+    /// DECISION NEEDED: this method has zero callers today, but it is the
+    /// only lease-renewal path in this crate. A long-lived spool writer
+    /// (e.g. a daemon replay loop that keeps a `HookSpoolV1` open across
+    /// many `append` calls) never renews its lease, so `writer_lease_micros`
+    /// after acquisition, `ensure_live_lease` (see below) starts rejecting
+    /// every subsequent append with `HookSpoolError::WriterLeaseExpired`
+    /// (or similar), even though nothing else holds the lease. Either wire
+    /// this into the daemon replay loop so long-lived writers renew before
+    /// expiry, or explicitly document spool writer leases as single-shot
+    /// (acquire, do bounded work, drop) and size `writer_lease_micros`
+    /// accordingly. Left in place pending that decision; do not delete.
     pub fn renew_writer_lease(&mut self, now: UtcMicros) -> Result<(), HookSpoolError> {
         self.ensure_live_lease(now)?;
         let renewed = HookSpoolWriterLeaseV1 {
