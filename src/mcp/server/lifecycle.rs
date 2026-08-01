@@ -89,6 +89,22 @@ fn log_startup_transcript_ingest_failure(
     );
 }
 
+/// What one startup catch-up pass actually did, per scope.
+///
+/// Both fields report observed outcomes, never intent: the user scope in
+/// particular is skipped by several paths (missing authority, an early
+/// return before the sweep, cancellation, or session storage with no profile
+/// root), and callers that wake the temporal refresh scheduler must not fire
+/// on a sweep that never ran.
+#[derive(Default)]
+pub(super) struct StartupSessionCatchUpOutcome {
+    /// The project session authority, present only when the project sweep
+    /// completed successfully.
+    pub(super) project_sessions: Option<Arc<RegisteredGlobalDb>>,
+    /// True only when the user transcript sweep actually ran to completion.
+    pub(super) user_sweep_completed: bool,
+}
+
 pub(super) async fn run_startup_session_catch_up(
     sessions: Option<Arc<RegisteredGlobalDb>>,
     user_sessions: Option<Arc<RegisteredGlobalDb>>,
@@ -97,20 +113,20 @@ pub(super) async fn run_startup_session_catch_up(
     project_root: &Path,
     project_id: Option<&str>,
     cancellation: &crate::application::observation::ObservationCancellation,
-) -> Option<Arc<RegisteredGlobalDb>> {
+) -> StartupSessionCatchUpOutcome {
     let Some(sessions) = sessions else {
         tracing::warn!(
             project_root = %project_root.display(),
             "startup project transcript ingest skipped because authoritative session storage is unavailable"
         );
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     };
     let Some(profile_identity) = profile_identity else {
         tracing::warn!(
             project_root = %project_root.display(),
             "startup transcript ingest skipped because durable profile identity is unavailable"
         );
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
     let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
@@ -128,8 +144,9 @@ pub(super) async fn run_startup_session_catch_up(
         log_startup_transcript_ingest_failure("project", failure);
     }
     if cancellation.is_cancelled() {
-        return None;
+        return StartupSessionCatchUpOutcome::default();
     }
+    let mut user_sweep_completed = false;
     if let (Some(user_sessions), Some(registry_db)) = (user_sessions, registry_db) {
         if let Some(profile_root) = user_sessions.db_path().parent() {
             let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
@@ -144,6 +161,7 @@ pub(super) async fn run_startup_session_catch_up(
             for failure in &outcome.failures {
                 log_startup_transcript_ingest_failure("user", failure);
             }
+            user_sweep_completed = true;
         } else {
             tracing::warn!(
                 "startup user transcript ingest skipped because session storage has no profile root"
@@ -154,7 +172,10 @@ pub(super) async fn run_startup_session_catch_up(
             "startup user transcript ingest skipped because session or registry storage is unavailable"
         );
     }
-    project_outcome.is_success().then_some(sessions)
+    StartupSessionCatchUpOutcome {
+        project_sessions: project_outcome.is_success().then_some(sessions),
+        user_sweep_completed,
+    }
 }
 
 async fn run_startup_session_catch_up_with_home(
@@ -166,7 +187,7 @@ async fn run_startup_session_catch_up_with_home(
     project_root: PathBuf,
     project_id: Option<String>,
     cancellation: crate::application::observation::ObservationCancellation,
-) -> Option<Arc<RegisteredGlobalDb>> {
+) -> StartupSessionCatchUpOutcome {
     // Own every capture inside the future passed to
     // `with_transcript_source_home`: `task_local::scope` returns
     // `impl Future + Send`, and the auto-trait leak check cannot prove Send
@@ -402,8 +423,6 @@ impl McpServer {
             let user_sessions = self.user_session_db.clone();
             let registry_db = self.registry_db.clone();
             let profile_identity = self.profile_identity.clone();
-            let user_ingest_requested =
-                user_sessions.is_some() && registry_db.is_some() && profile_identity.is_some();
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
@@ -411,7 +430,7 @@ impl McpServer {
             let analytics_db = self.accounting_db.clone();
             let transcript_source_home = self.transcript_source_home.clone();
             let task = tokio::spawn(async move {
-                if let Some(db) = run_startup_session_catch_up_with_home(
+                let catch_up = run_startup_session_catch_up_with_home(
                     transcript_source_home,
                     sessions,
                     user_sessions,
@@ -421,8 +440,8 @@ impl McpServer {
                     project_id,
                     cancellation.clone(),
                 )
-                .await
-                {
+                .await;
+                if let Some(db) = catch_up.project_sessions {
                     if cancellation.is_cancelled() {
                         ingest_done_flag.store(true, Ordering::Release);
                         return;
@@ -472,7 +491,13 @@ impl McpServer {
                         .await;
                     }
                 }
-                if user_ingest_requested && let Some(wake) = &user_session_refresh_wake {
+                // Wake on the observed sweep, not on the authorities being
+                // present: every skip path above (missing authority, early
+                // return, cancellation, absent profile root) leaves nothing
+                // new for the temporal refresh scheduler to pick up.
+                if catch_up.user_sweep_completed
+                    && let Some(wake) = &user_session_refresh_wake
+                {
                     wake.wake();
                 }
                 ingest_done_flag.store(true, Ordering::Release);
