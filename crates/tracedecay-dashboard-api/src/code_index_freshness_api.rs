@@ -148,40 +148,16 @@ pub async fn freshness(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::read_model::DashboardDomainStateV1;
-    use tracedecay_domain::ProjectId;
 
-    async fn state_for_test() -> (
-        tempfile::TempDir,
-        HostAdmissionTestRuntimeV1,
-        DashboardState,
-    ) {
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let runtime = HostAdmissionTestRuntimeV1::project(
-            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-            project.path(),
-            ProjectId::new("project.dashboard-code-index").expect("project id"),
-        )
-        .await
-        .expect("registered test runtime");
-        let cg = runtime
-            .initialize_project_graph_for_test(
-                project.path(),
-                crate::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .expect("project init");
-        let state = crate::build_state(&cg).await.expect("dashboard state");
-        (project, runtime, state)
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+        crate::events_api::dashboard_state_fixture("project.dashboard-code-index").await
     }
 
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, state) = state_for_test().await;
+        let (_project, state) = state_for_test().await;
         let Json(envelope) = freshness(State(state)).await;
 
         assert_eq!(envelope.schema_revision, 1);
@@ -193,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn freshness_route_projects_exact_live_scheduler_identity() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
                 Some(CodeIndexWorktreeFreshnessV1 {
@@ -229,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
                 Some(CodeIndexWorktreeFreshnessV1 {
@@ -257,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let (_project, _runtime, mut state) = state_for_test().await;
+        let (_project, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
 
         let Json(envelope) = freshness(State(state)).await;

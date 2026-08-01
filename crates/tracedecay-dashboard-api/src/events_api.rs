@@ -832,10 +832,111 @@ async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Optio
 }
 
 #[cfg(test)]
+pub(crate) async fn dashboard_state_fixture(
+    project_id: &str,
+) -> (tempfile::TempDir, DashboardState) {
+    use std::sync::Arc;
+
+    use tokio::sync::RwLock;
+    use tracedecay_domain::{FactOwnerV1, ProjectId};
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_usecases::configuration::ProductionUserSettingsDaemonClient;
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
+    let database_path = project.path().join("dashboard.db");
+    let authority = DatabaseAuthority::acquire_test(&database_path, "dashboard API state fixture")
+        .expect("fixture database authority");
+    let (database, _) = Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("fixture database");
+    let database = Arc::new(database);
+    let project_identity = ProjectId::new(project_id).expect("fixture project id");
+    let project_root = project.path().to_path_buf();
+    let store_root = project_root.join("store");
+    let dashboard_root = store_root.join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).expect("fixture dashboard root");
+
+    let state = DashboardState {
+        project_id: Some(project_identity.as_str().to_owned()),
+        resolved_scope: crate::scope::resolve_dashboard_scope(
+            &project_root,
+            Some(project_identity.as_str()),
+        ),
+        project_graph: None,
+        project_graph_resolver: None,
+        memory_owner: FactOwnerV1::Project {
+            project_id: project_identity,
+        },
+        graph_conn: database.engine_conn(),
+        _database_guards: vec![Arc::clone(&database)],
+        graph_telemetry_handle: database.storage_telemetry_handle().ok(),
+        graph_db_path: database_path.display().to_string(),
+        mem_db: Arc::clone(&database),
+        mem_db_path: database_path.display().to_string(),
+        lcm_db: None,
+        lcm_db_path: String::new(),
+        lcm_scope: "unavailable".to_owned(),
+        savings_db: None,
+        savings_db_path: String::new(),
+        project_root,
+        code_index_freshness_reader: None,
+        feedback_status_reader: None,
+        storage_mode: "profile_sharded".to_owned(),
+        store_root,
+        config_path: project.path().join("config.json"),
+        dashboard_root,
+        retention_config: crate::config::RetentionConfig::default(),
+        user_settings: Arc::new(ProductionUserSettingsDaemonClient),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
+        token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
+        code_diagnostics_authority: None,
+        automation_scheduler_reconciler: None,
+        automation_writer: crate::standalone_dashboard_automation_writer(),
+        doctor_report_reader: None,
+        doctor_remediation_dispatcher: None,
+        application_invocation_executor: None,
+    };
+    (project, state)
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tracedecay::TraceDecay;
+
+    async fn registered_database_for_test(
+        path: &Path,
+    ) -> std::sync::Arc<tracedecay_global_db::RegisteredGlobalDb> {
+        use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+
+        let authority = DatabaseAuthority::acquire_test(path, "dashboard registry fixture")
+            .expect("registry authority");
+        let (database, _) =
+            Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .expect("registry database");
+        tracedecay_global_db::ensure_registered_schema(database.conn())
+            .await
+            .expect("registered schema");
+        let runtime = database.retained_runtime().clone();
+        let binding = runtime.binding().clone();
+        let locator = runtime.locator().verified().clone();
+        let authority = runtime
+            .database_authority("attach dashboard registry fixture")
+            .expect("registered runtime authority");
+        std::sync::Arc::new(
+            tracedecay_global_db::RegisteredGlobalDb::migrate_and_attach(
+                runtime, binding, locator, authority,
+            )
+            .await
+            .expect("registered dashboard fixture"),
+        )
+    }
 
     fn scope() -> DashboardScopeV1 {
         DashboardScopeV1 {
@@ -1247,40 +1348,10 @@ mod tests {
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
         let _pin = crate::test_support::PinnedUserDataDir::new();
-        let profile_root =
-            tracedecay_runtime_core::storage::default_profile_root().expect("test profile root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
-                .expect("secure test profile root");
-        }
-        let project = tempfile::tempdir().expect("project tempdir");
-        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
-            .expect("fixture source");
-        let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile_root,
-            "dashboard event source fixture",
-        )
-        .expect("fixture lifecycle authority");
-        let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-            &lifecycle,
-            &profile_root,
-            "dashboard event source fixture",
-        )
-        .expect("fixture database authority");
-        let cg = TraceDecay::init_with_exclusive_maintenance(
-            project.path(),
-            crate::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(profile_root),
-                global_db_path: None,
-            },
-            &lifecycle,
-        )
-        .await
-        .expect("project init");
-        let mut dash = crate::build_state(&cg).await.expect("dashboard state");
-        dash.savings_db = Some(std::sync::Arc::clone(cg.profile_database()));
+        let (project, mut dash) = dashboard_state_fixture("project.dashboard-events").await;
+        let registry = registered_database_for_test(&project.path().join("registry.db")).await;
+        dash.savings_db_path = registry.db_path().display().to_string();
+        dash.savings_db = Some(registry);
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());
 
