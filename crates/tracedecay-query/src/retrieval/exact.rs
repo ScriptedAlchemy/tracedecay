@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EphemeralSanitizedQueryViewV1,
     ExactAdmissionProof, ExactAdmissionRuleRevision, ExactAdmissionValidator, ExactFieldV1,
@@ -20,8 +19,17 @@ use tracedecay_domain::{
 };
 
 use super::ports::{
-    CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, RetrievalPortError,
-    contract_error,
+    CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, LaneBoundEvidence,
+    LaneEvidenceRejections, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
+    contract_error, lane_bound_evidence,
+};
+
+/// Wording the exact lane uses when a port-emitted batch fails the shared
+/// candidate/evidence binding checks.
+const EXACT_REJECTIONS: LaneEvidenceRejections = LaneEvidenceRejections {
+    foreign_candidate: "the exact lane cannot emit non-exact candidates",
+    missing_evidence: "exact lane evidence is missing for a returned occurrence",
+    unaddressed_binding: "exact lane binding does not address its candidate",
 };
 
 /// Typed exact-lane request.
@@ -92,6 +100,12 @@ pub struct ExactLaneEvidence {
     /// The validated admission proof minted centrally; the lane attaches it,
     /// it never constructs it.
     pub admission_proof: ExactAdmissionProof,
+}
+
+impl LaneBoundEvidence for ExactLaneEvidence {
+    fn binding(&self) -> &CodeCandidateBindingV1 {
+        &self.binding
+    }
 }
 
 impl ExactLaneEvidence {
@@ -626,27 +640,13 @@ where
         let mut admitted: Vec<(CompactCandidate, ExactLaneEvidence)> =
             Vec::with_capacity(batch.candidates.len());
         for candidate in &batch.candidates {
-            if candidate.retriever != RetrieverKind::ExactLiteral {
-                return Err(RetrievalPortError::Contract(
-                    "the exact lane cannot emit non-exact candidates".to_owned(),
-                ));
-            }
-            let evidence = batch
-                .evidence_by_occurrence
-                .get(&candidate.source_occurrence_id)
-                .ok_or_else(|| {
-                    RetrievalPortError::Contract(
-                        "exact lane evidence is missing for a returned occurrence".to_owned(),
-                    )
-                })?;
+            let evidence = lane_bound_evidence(
+                batch,
+                candidate,
+                RetrieverKind::ExactLiteral,
+                &EXACT_REJECTIONS,
+            )?;
             evidence.validate_against_validated_request(request)?;
-            if evidence.binding.candidate_anchor != candidate.anchor_id
-                || evidence.binding.source_occurrence != candidate.source_occurrence_id
-            {
-                return Err(RetrievalPortError::Contract(
-                    "exact lane binding does not address its candidate".to_owned(),
-                ));
-            }
             let proof = candidate.exact_admission_proof.clone().ok_or_else(|| {
                 RetrievalPortError::Contract(
                     "exact lane candidate is missing its admission proof".to_owned(),
@@ -816,25 +816,12 @@ fn exact_checkpoint_digest(
     generation: &CodeGenerationId,
     candidates: &[CompactCandidate],
 ) -> Result<CursorPayloadDigest, RetrievalPortError> {
-    let prefix: Vec<(String, String, u64)> = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.source_occurrence_id.as_str().to_owned(),
-                candidate.retriever_evidence_anchor.as_str().to_owned(),
-                candidate.raw_score.micros(),
-            )
-        })
-        .collect();
-    let bytes = serde_json::to_vec(&(
+    checkpoint_digest(&(
         "tracedecay.retrieval-lane-checkpoint.v1",
         RetrieverKind::ExactLiteral.as_str(),
         generation.as_str(),
-        prefix,
+        candidate_checkpoint_prefix(candidates),
     ))
-    .map_err(contract_error)?;
-    CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-        .map_err(contract_error)
 }
 
 #[cfg(test)]
