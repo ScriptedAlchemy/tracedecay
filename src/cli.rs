@@ -117,8 +117,9 @@ pub struct Cli {
     /// from unrelated subcommands (e.g. `branch gc`, `migrate registry-gc`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
-    /// Confirm a first-party component mutation. Scope is enforced in dispatch,
-    /// not by a global clap `requires`, so it does not leak onto other commands.
+    /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
+    /// in dispatch, not by a global clap `requires`, so it does not leak onto
+    /// other commands.
     #[arg(long, global = true)]
     pub yes: bool,
     /// Additionally confirm taking ownership of an existing file that no
@@ -486,6 +487,7 @@ pub enum Commands {
         no_reinstall: bool,
     },
     /// Install this source-built executable into the live user environment.
+    #[command(long_about = DOGFOOD_LONG_ABOUT, after_help = DOGFOOD_AFTER_HELP)]
     Dogfood,
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]

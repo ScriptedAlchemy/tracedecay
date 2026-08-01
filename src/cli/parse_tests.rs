@@ -90,6 +90,29 @@ fn every_visible_top_level_subcommand_ships_rich_help() {
     }
 }
 
+/// `dogfood` is how a source checkout reaches the live user environment
+/// without cutting a release, so it must stay discoverable in `--help`. The
+/// machine-invoked plumbing around it stays hidden.
+#[test]
+fn dogfood_is_discoverable_while_plumbing_stays_hidden() {
+    let command = Cli::command();
+    let visible: Vec<String> = command
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .map(|sub| sub.get_name().to_string())
+        .collect();
+    assert!(
+        visible.iter().any(|name| name == "dogfood"),
+        "`dogfood` must appear in top-level help; visible: {visible:?}"
+    );
+    for hidden in ["post-update", "extract-worker", "hook-stop"] {
+        assert!(
+            !visible.iter().any(|name| name == hidden),
+            "`{hidden}` is machine-invoked plumbing and must stay hidden"
+        );
+    }
+}
+
 #[test]
 fn every_visible_nested_subcommand_has_a_purpose_line() {
     let command = Cli::command();

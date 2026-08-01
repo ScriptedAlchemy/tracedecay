@@ -38,6 +38,7 @@ fn top_level_subcommands_accept_help() {
         "daemon",
         "upgrade",
         "update",
+        "dogfood",
         "channel",
         "current-counter",
         "reset-counter",

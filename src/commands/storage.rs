@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::global;
@@ -110,7 +110,12 @@ mod wipe_target_tests {
 }
 
 /// Handles the `wipe` and `wipe --all` commands.
-pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
+///
+/// `assume_yes` carries the global `--yes` confirmation flag. It is the same
+/// non-interactive acceptance every other destructive first-party command
+/// takes, so a scripted caller no longer has to feed `go!` through a pipe on
+/// stdin to reach the wipe.
+pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::errors::Result<()> {
     use std::fs;
     let profile_root = tracedecay::storage::default_profile_root()?;
     let home_tracedecay = Some(profile_root.clone());
@@ -156,17 +161,24 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
 
     global::print_flash_warning(all, &targets);
 
-    eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
-    io::stderr().flush().ok();
-    let mut answer = String::new();
-    io::stdin().lock().read_line(&mut answer).map_err(|e| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to read stdin: {e}"),
+    if assume_yes {
+        eprintln!("\x1b[33m--yes supplied — proceeding without the interactive prompt.\x1b[0m");
+    } else {
+        eprint!("Type \x1b[1;32mgo!\x1b[0m to confirm (anything else aborts): ");
+        io::stderr().flush().ok();
+        let mut answer = String::new();
+        io::stdin().lock().read_line(&mut answer).map_err(|e| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to read stdin: {e}"),
+            }
+        })?;
+        if answer.trim() != "go!" {
+            eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
+            if !io::stdin().is_terminal() {
+                eprintln!("(no terminal on stdin — pass --yes to confirm a scripted wipe)");
+            }
+            return Ok(());
         }
-    })?;
-    if answer.trim() != "go!" {
-        eprintln!("\x1b[33mAborted — nothing was wiped.\x1b[0m");
-        return Ok(());
     }
 
     let mut removed = 0usize;
