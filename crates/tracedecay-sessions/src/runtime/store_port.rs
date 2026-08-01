@@ -13,10 +13,50 @@
 use std::future::Future;
 use std::path::Path;
 
-use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, ReadSnapshot};
+use tracedecay_runtime_core::errors::Result;
+use tracedecay_store::{
+    ParseOffset, StoreShardIdV1, TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch,
+};
 
 use crate::runtime::SessionRecord;
 use crate::runtime::git_correlation::{CommitSessionRecord, SpanObservation};
+
+/// A write transaction opened on a registered session authority.
+pub trait SessionWriteTxn: QueryExecutor + Executor + Sized + Send {
+    /// Commits the transaction, releasing the writer.
+    fn commit(self) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// The already-open registered session database a backfill sweep operates on.
+///
+/// This is the inverted seam for `tracedecay_global_db::RegisteredGlobalDb`.
+/// Backfill needs the shard identity it is bound to, the on-disk path (for the
+/// sweep lock), a read snapshot, and a write transaction — none of which
+/// require the registry, enrollment, or projection surfaces that make the
+/// registered database a composition-root type.
+///
+/// Root wiring: `impl SessionStoreAuthority for RegisteredGlobalDb` alongside
+/// the other root store adapters in `src/store/`.
+pub trait SessionStoreAuthority: Sync {
+    /// Write transaction this authority hands out.
+    type WriteTxn<'txn>: SessionWriteTxn
+    where
+        Self: 'txn;
+
+    /// Shard identity this authority is bound to.
+    fn shard_id(&self) -> &StoreShardIdV1;
+
+    /// On-disk database path, used to scope the single-writer sweep lock.
+    fn db_path(&self) -> &Path;
+
+    /// Opens a read snapshot.
+    fn read_snapshot(&self) -> impl Future<Output = Result<ReadSnapshot>> + Send;
+
+    /// Opens a write transaction.
+    fn begin_write_transaction(&self)
+    -> impl Future<Output = Result<Self::WriteTxn<'_>>> + Send;
+}
 
 /// Application boundary required by production transcript ingestion.
 pub trait TranscriptIngestStore: TranscriptStore {
