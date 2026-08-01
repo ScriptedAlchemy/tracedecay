@@ -346,6 +346,7 @@ pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     )
 }
 
+#[cfg(any(not(unix), test))]
 pub(crate) fn daemon_shutdown_response(request_line: &str) -> Option<JsonRpcResponse> {
     let request = serde_json::from_str::<JsonRpcRequest>(request_line.trim()).ok()?;
     let id = request.id.filter(|id| !id.is_null())?;

@@ -1359,6 +1359,7 @@ pub fn which_tracedecay_path() -> Option<PathBuf> {
     )
 }
 
+#[cfg(test)]
 fn which_tracedecay_from(
     current_exe: Option<&Path>,
     path_var: Option<&std::ffi::OsStr>,
