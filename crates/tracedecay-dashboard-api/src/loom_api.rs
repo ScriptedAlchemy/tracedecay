@@ -385,35 +385,35 @@ async fn read_temporal(
         .and_then(Value::as_i64);
 
     let statuses = vec![
-        source_status(
-            "session_commit",
-            "Session ↔ commit",
-            relation_state(commit_eligible, commits.len()),
-            Some("commit_sessions"),
-            "commit attribution",
-            &commits,
-            None,
-            None,
-            relation_coverage(
+        source_status(SourceStatusInput {
+            id: "session_commit",
+            label: "Session ↔ commit",
+            state: relation_state(commit_eligible, commits.len()),
+            authority: Some("commit_sessions"),
+            granularity: "commit attribution",
+            rows: &commits,
+            reason: None,
+            required_authority: None,
+            coverage: relation_coverage(
                 commit_eligible,
                 commits.len(),
                 "provider-qualified commit_sessions rows for the displayed session page",
             ),
-        ),
-        source_status(
-            "session_file",
-            "Session → edited file",
-            DashboardDomainStateV1::Partial,
-            Some("sessions.metadata_json $.edited_files[]"),
-            "recorded file rollup",
-            &edited_files,
-            Some(
+        }),
+        source_status(SourceStatusInput {
+            id: "session_file",
+            label: "Session → edited file",
+            state: DashboardDomainStateV1::Partial,
+            authority: Some("sessions.metadata_json $.edited_files[]"),
+            granularity: "recorded file rollup",
+            rows: &edited_files,
+            reason: Some(
                 "edited-file coverage is provider-native metadata; sessions without an \
                  edited_files array are omitted, never treated as no edits"
                     .to_string(),
             ),
-            None,
-            LoomSourceCoverageV1 {
+            required_authority: None,
+            coverage: LoomSourceCoverageV1 {
                 completeness: "partial",
                 eligible: Some(examined_sessions),
                 examined: Some(edited_examined),
@@ -423,22 +423,22 @@ async fn read_temporal(
                 reason: "only sessions carrying a recorded edited_files array are examined"
                     .to_string(),
             },
-        ),
-        source_status(
-            "branch_worktree",
-            "Branch & worktree spans",
-            relation_state(branch_eligible, branch_spans.len()),
-            Some("session_git_spans"),
-            "coalesced activity span",
-            &branch_spans,
-            None,
-            None,
-            relation_coverage(
+        }),
+        source_status(SourceStatusInput {
+            id: "branch_worktree",
+            label: "Branch & worktree spans",
+            state: relation_state(branch_eligible, branch_spans.len()),
+            authority: Some("session_git_spans"),
+            granularity: "coalesced activity span",
+            rows: &branch_spans,
+            reason: None,
+            required_authority: None,
+            coverage: relation_coverage(
                 branch_eligible,
                 branch_spans.len(),
                 "provider-qualified session_git_spans rows for the displayed session page",
             ),
-        ),
+        }),
         LoomSourceStatusV1 {
             id: "delivery_outcomes",
             label: "Pull request, review, CI & release outcomes",
@@ -548,28 +548,30 @@ fn relation_coverage(eligible: u64, returned: usize, reason: &str) -> LoomSource
     }
 }
 
-fn source_status(
+struct SourceStatusInput<'a> {
     id: &'static str,
     label: &'static str,
     state: DashboardDomainStateV1,
     authority: Option<&'static str>,
     granularity: &'static str,
-    rows: &[Value],
+    rows: &'a [Value],
     reason: Option<String>,
     required_authority: Option<&'static str>,
     coverage: LoomSourceCoverageV1,
-) -> LoomSourceStatusV1 {
+}
+
+fn source_status(input: SourceStatusInput<'_>) -> LoomSourceStatusV1 {
     LoomSourceStatusV1 {
-        id,
-        label,
-        state,
-        authority,
-        granularity,
-        providers: providers(rows),
-        item_count: Some(rows.len() as u64),
-        reason,
-        required_authority,
-        coverage,
+        id: input.id,
+        label: input.label,
+        state: input.state,
+        authority: input.authority,
+        granularity: input.granularity,
+        providers: providers(input.rows),
+        item_count: Some(input.rows.len() as u64),
+        reason: input.reason,
+        required_authority: input.required_authority,
+        coverage: input.coverage,
     }
 }
 
