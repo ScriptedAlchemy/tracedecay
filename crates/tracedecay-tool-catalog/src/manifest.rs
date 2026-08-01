@@ -442,7 +442,13 @@ impl AvailabilityContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnavailabilityReason {
+    /// The capability has no shipped implementation behind it.
     NotImplemented,
+    /// The capability is implemented and reachable, but only through another
+    /// callable capability that owns its transport surface. The entry is
+    /// retained so a direct route resolves to a typed unavailable decision
+    /// instead of an unknown-capability rejection.
+    ReachedThroughAnotherCapability,
 }
 
 /// Versioned agent-routing metadata. This is description data only and never

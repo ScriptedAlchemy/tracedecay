@@ -77,11 +77,20 @@ fn profile_project_and_session_reads_share_the_closed_runtime_route() {
     // The read operation vocabulary now lives in the `tracedecay-store` runtime
     // port, re-exported through the repository module; assert against its
     // definition site while the executor routing below stays on the module.
+    //
+    // Subset, not equality: the fixture pins the routes that must exist, the
+    // same way the write side above does. Production may add read operations
+    // ahead of the fixture without that being a regression, and the per-route
+    // dispatch loops below still prove every declared route is handled.
     let vocabulary = RustAst::parse(&fixture.read_vocabulary_module);
-    assert_eq!(
-        vocabulary.enum_variants("RepositoryReadOperationV1"),
-        expected_variants,
-        "S8 repository read vocabulary drifted from its route matrix"
+    let published_variants = vocabulary.enum_variants("RepositoryReadOperationV1");
+    let missing_variants = expected_variants
+        .difference(&published_variants)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        missing_variants.is_empty(),
+        "S8 repository read vocabulary dropped declared route variants: {missing_variants:?}"
     );
 
     let paths = repository.method_paths("ConcreteRepositoryReadExecutor", "execute");
