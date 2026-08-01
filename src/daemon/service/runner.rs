@@ -471,7 +471,7 @@ fn launchd_start_preserving_enablement(
     if !was_disabled {
         return start_result;
     }
-    let restore_result = run_launchctl(&["disable", target]);
+    let restore_result = run_launchctl(&["disable", target]).map(|_| ());
     match (start_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
