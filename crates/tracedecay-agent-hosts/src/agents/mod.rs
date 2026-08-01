@@ -1942,6 +1942,28 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
     additions
 }
 
+/// The tracked-agent list this crate backfills, as a port over the root
+/// crate's `user_config::UserConfig`.
+///
+/// `UserConfig` stays above this crate — it is the whole user-level profile,
+/// most of which host detection has no business seeing. The backfill below
+/// needs exactly three operations, so it takes them as a port rather than the
+/// concrete type.
+///
+/// Root wiring: the root implements this for `user_config::UserConfig`
+/// (`installed_agents` field reads/extends, and its existing `save`).
+pub trait InstalledAgentsConfig {
+    /// Agent ids currently recorded as installed.
+    fn installed_agents(&self) -> &[String];
+
+    /// Appends newly detected agent ids to the tracked list.
+    fn extend_installed_agents(&mut self, additions: Vec<String>);
+
+    /// Persists the config. Failures are logged, never fatal: a lost backfill
+    /// is retried on the next run.
+    fn save(&self) -> Result<()>;
+}
+
 /// Backfill `installed_agents` for users upgrading from older versions.
 ///
 /// Always scans every agent and adds any that have tracedecay configured
@@ -1950,12 +1972,12 @@ pub fn detect_missing_installed_agents(home: &Path, current: &[String]) -> Vec<S
 /// agent A first and agent B later would have only A in the list, so
 /// `tracedecay reinstall` would silently skip B and its tool permissions
 /// would never be refreshed when new tools ship.
-pub fn migrate_installed_agents(home: &Path, config: &mut crate::user_config::UserConfig) {
-    let additions = detect_missing_installed_agents(home, &config.installed_agents);
+pub fn migrate_installed_agents(home: &Path, config: &mut dyn InstalledAgentsConfig) {
+    let additions = detect_missing_installed_agents(home, config.installed_agents());
     if additions.is_empty() {
         return;
     }
-    config.installed_agents.extend(additions);
+    config.extend_installed_agents(additions);
     if let Err(err) = config.save() {
         tracing::warn!(%err, "could not save tracedecay config");
     }
