@@ -1537,14 +1537,22 @@ fn message_search_digest(
     digest.finalize().into()
 }
 
+/// Message-search policy digest.
+///
+/// The digested value is a pair of compile-time constants, so it is the same
+/// bytes for every request. It is derived once and reused instead of running a
+/// canonical encode plus SHA-256 on each message-search request.
 fn message_search_policy_digest() -> Option<[u8; 32]> {
-    let encoded = PayloadReferenceV1::for_payload(&json!({
-        "domain": "tracedecay.observation-anchor.authorization.v1",
-        "authority": "observation-capture.v1",
-    }))
-    .ok()?;
-    let digest = encoded.digest().as_str().strip_prefix("sha256:")?;
-    hex::decode(digest).ok()?.try_into().ok()
+    static POLICY_DIGEST: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+    *POLICY_DIGEST.get_or_init(|| {
+        let encoded = PayloadReferenceV1::for_payload(&json!({
+            "domain": "tracedecay.observation-anchor.authorization.v1",
+            "authority": "observation-capture.v1",
+        }))
+        .ok()?;
+        let digest = encoded.digest().as_str().strip_prefix("sha256:")?;
+        hex::decode(digest).ok()?.try_into().ok()
+    })
 }
 
 fn complete_page_outcome(

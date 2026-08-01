@@ -170,6 +170,7 @@ pub(super) async fn write_workflow_fact_transition(
     let projection = transition.projection();
     let provenance = projection.provenance();
     let fact = transition.fact();
+    let output_digest = projection.output_digest()?.as_str();
     conn.execute(
         target.sql(),
         params![
@@ -197,7 +198,7 @@ pub(super) async fn write_workflow_fact_transition(
             fact.ordering_domain.as_str(),
             content_json,
             fact.content_text.as_str(),
-            projection.output_digest().as_str(),
+            output_digest,
         ],
     )
     .await
