@@ -86,11 +86,18 @@ rather than by serving stale data.
 
 | Principle | State |
 |---|---|
-| 1 validation memoization | in flight |
-| 1 snapshot hash indices | in flight |
-| 2 redundancy pacing + pressure signal | in flight |
+| 1 validation/admission/attribution memoization + generation LRU | merged |
+| 1 snapshot hash indices (record port + relation BFS adjacency) | merged |
+| 2 redundancy comparison-budget pacing + shared shingle merge | merged |
 | 2 reconcile semaphore + retention round-robin | merged |
-| 3 ingest-side digest audit | open |
-| 4 idna/derived-value caching | in flight |
+| 3 lazy output digests + threaded projections + constant-digest memo | merged |
+| 4 idna/remote-normalization memoization | merged |
 | 5 paging/bounded heaps/batch IN | merged (20-finding wave) |
 | 6 carried-deadline central wrap (git, memory) | merged |
+| CI perf gate (self-index + 6-worker load, budget verdicts) | merged |
+
+First post-wave measurement (2026-08-01, release build, 96-core host): index
+149,226 nodes in 76.7s; 724 calls / 0 errors at 6 workers; warm p50 — search
+151ms, callers 65ms, context 197ms, grep 195ms (baseline before the wave: one
+search took 6+ minutes at 670% daemon CPU). Open tails: grep p95 4.6s / max
+25s; daemon peak RSS 4.4GB.
