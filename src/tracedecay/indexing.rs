@@ -1645,7 +1645,6 @@ impl TraceDecay {
                 removed_paths: removed,
             });
         }
-        let _ = stat_map; // worker re-stats internally
         let (sync_extractions, sync_skipped): (Vec<_>, Vec<_>) =
             extract_files_isolated(project_root, registry, to_index.clone());
         // Surface extractor timeouts/crashes in `SyncResult.skipped_paths`
@@ -1671,97 +1670,56 @@ impl TraceDecay {
         }
         let total_edges = queued_edges.len();
 
-        if checkpoint_writes {
-            for path in &mtime_only_changed {
-                if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path))
-                {
-                    self.db
-                        .upsert_file(&FileRecord {
+        // Only the non-checkpointed path reaches here: the `checkpoint_writes`
+        // block above returns unconditionally.
+        let transaction = self.db.begin_write_transaction("sync index").await?;
+        for path in &mtime_only_changed {
+            if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path)) {
+                self.db
+                    .upsert_file_unguarded(
+                        &transaction,
+                        &FileRecord {
                             modified_at: mtime,
                             size,
                             ..record.clone()
-                        })
-                        .await?;
-                }
-            }
-            for path in &removed {
-                on_progress(0, 0, &format!("removing {path}"));
-                self.db.delete_file(path).await?;
-            }
-            for (file_path, _, _, _, _) in &sync_extractions {
-                self.db.delete_nodes_by_file(file_path).await?;
-            }
-            for ((_, result, _, _, _), file_record) in sync_extractions.iter().zip(&file_records) {
-                for page in result.nodes.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
-                    self.db.insert_nodes(page).await?;
-                }
-                self.db
-                    .insert_unresolved_refs(&result.unresolved_refs)
-                    .await?;
-                self.db.upsert_file(file_record).await?;
-            }
-            for page in queued_edges.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
-                self.db.insert_edges(page).await?;
-            }
-            if built_from_empty {
-                self.db
-                    .set_metadata(
-                        UNRESOLVED_REFS_PERSISTED_KEY,
-                        UNRESOLVED_REFS_PERSISTED_VALUE,
+                        },
                     )
                     .await?;
             }
-        } else {
-            let transaction = self.db.begin_write_transaction("sync index").await?;
-            for path in &mtime_only_changed {
-                if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path))
-                {
-                    self.db
-                        .upsert_file_unguarded(
-                            &transaction,
-                            &FileRecord {
-                                modified_at: mtime,
-                                size,
-                                ..record.clone()
-                            },
-                        )
-                        .await?;
-                }
-            }
-            for path in &removed {
-                on_progress(0, 0, &format!("removing {path}"));
-                self.db.delete_file_unguarded(&transaction, path).await?;
-            }
-            for ((file_path, result, _, _, _), file_record) in
-                sync_extractions.iter().zip(&file_records)
-            {
-                self.db
-                    .delete_nodes_by_file_unguarded(&transaction, file_path)
-                    .await?;
-                self.db
-                    .insert_nodes_unguarded(&transaction, &result.nodes)
-                    .await?;
-                self.db
-                    .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
-                    .await?;
-                self.db
-                    .upsert_file_unguarded(&transaction, file_record)
-                    .await?;
-            }
-            self.db
-                .insert_edges_unguarded(&transaction, &queued_edges)
-                .await?;
-            if built_from_empty {
-                self.db
-                    .set_metadata_unguarded(
-                        &transaction,
-                        UNRESOLVED_REFS_PERSISTED_KEY,
-                        UNRESOLVED_REFS_PERSISTED_VALUE,
-                    )
-                    .await?;
-            }
-            transaction.commit().await?;
         }
+        for path in &removed {
+            on_progress(0, 0, &format!("removing {path}"));
+            self.db.delete_file_unguarded(&transaction, path).await?;
+        }
+        for ((file_path, result, _, _, _), file_record) in
+            sync_extractions.iter().zip(&file_records)
+        {
+            self.db
+                .delete_nodes_by_file_unguarded(&transaction, file_path)
+                .await?;
+            self.db
+                .insert_nodes_unguarded(&transaction, &result.nodes)
+                .await?;
+            self.db
+                .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
+                .await?;
+            self.db
+                .upsert_file_unguarded(&transaction, file_record)
+                .await?;
+        }
+        self.db
+            .insert_edges_unguarded(&transaction, &queued_edges)
+            .await?;
+        if built_from_empty {
+            self.db
+                .set_metadata_unguarded(
+                    &transaction,
+                    UNRESOLVED_REFS_PERSISTED_KEY,
+                    UNRESOLVED_REFS_PERSISTED_VALUE,
+                )
+                .await?;
+        }
+        transaction.commit().await?;
 
         if !to_index.is_empty() {
             on_verbose(&format!(

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
@@ -84,7 +85,7 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
-    if let Some(decision) = cursor_post_tool_use_decision_for_hook(&event).await {
+    if let Some(decision) = cursor_post_tool_use_decision(&event) {
         println!("{decision}");
     }
     0
@@ -324,7 +325,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         return 0;
     }
     notify_cursor_after_file_edit(&event, &hook_telemetry).await;
-    if let Some(decision) = cursor_after_file_edit_decision_for_hook(&event).await {
+    if let Some(decision) = cursor_after_file_edit_decision(&event) {
         println!("{decision}");
     }
     0
@@ -374,10 +375,8 @@ pub async fn hook_cursor_session_start() -> i32 {
     0
 }
 
-fn cursor_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
-    cursor_event_cwd(parsed).map(|cwd| {
-        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Cursor, cwd)
-    })
+fn cursor_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
+    cursor_event_cwd(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Cursor, cwd))
 }
 
 /// Builds the lean Cursor `sessionStart` context for a resolved project root.
@@ -486,12 +485,6 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
-async fn cursor_post_tool_use_decision_for_hook(event_json: &str) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
-    let hint = deduped_cursor_hint_for_initialized_store(event_json, &hint_id, hint).await?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
 /// Suppresses hints that were already emitted for this session.
 ///
 /// The `(session_id, category)` pairs are persisted in
@@ -533,26 +526,6 @@ fn cursor_hint_root(
 }
 
 fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
-    let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
-        record_hint_analytics(
-            Some(&root),
-            "suppressed_uninitialized",
-            HintAgent::Cursor,
-            session_id.as_deref(),
-            hint_id,
-            &hint,
-        );
-        return None;
-    }
-    deduped_project_hint_with_id(Some(&root), HintAgent::Cursor, session_id, hint_id, hint)
-}
-
-async fn deduped_cursor_hint_for_initialized_store(
-    event_json: &str,
-    hint_id: &str,
-    hint: ToolHint,
-) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         record_hint_analytics(
@@ -758,7 +731,7 @@ async fn notify_cursor_after_file_edit(
     }
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_file_edit(rels)
+        DaemonHookEvent::cursor_after_file_edit(rels)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -782,7 +755,7 @@ async fn notify_cursor_after_shell_event(
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(cwd)
+        DaemonHookEvent::cursor_after_shell_execution(cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -802,7 +775,7 @@ async fn notify_cursor_workspace_open(
     }
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_workspace_open(root.clone())
+        DaemonHookEvent::cursor_workspace_open(root.clone())
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )
@@ -1016,12 +989,6 @@ pub fn cursor_after_file_edit_decision(event_json: &str) -> Option<String> {
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
-async fn cursor_after_file_edit_decision_for_hook(event_json: &str) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
-    let hint = deduped_cursor_hint_for_initialized_store(event_json, &hint_id, hint).await?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -1065,7 +1032,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(event.agent, crate::daemon::HookAgent::Cursor.as_wire());
+        assert_eq!(event.agent, HookAgent::Cursor.as_wire());
         assert_eq!(event.event, "sessionStart");
         assert_eq!(
             event.cwd.as_deref(),

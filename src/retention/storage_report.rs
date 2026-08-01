@@ -694,14 +694,7 @@ fn sample_store_size(graph_db_path: &Path) -> Option<StoreSizeSample> {
 fn database_family_bytes(database_path: &Path) -> u64 {
     let mut total_bytes = 0u64;
     for suffix in ["", "-wal", "-shm"] {
-        let member = if suffix.is_empty() {
-            database_path.to_path_buf()
-        } else {
-            let mut name = database_path.as_os_str().to_os_string();
-            name.push(suffix);
-            std::path::PathBuf::from(name)
-        };
-        if let Ok(metadata) = std::fs::metadata(&member) {
+        if let Ok(metadata) = std::fs::metadata(sqlite_family_member(database_path, suffix)) {
             total_bytes = total_bytes.saturating_add(metadata.len());
         }
     }
