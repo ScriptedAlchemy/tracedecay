@@ -85,7 +85,7 @@ pub async fn hook_cursor_post_tool_use() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "postToolUse", &event);
-    if let Some(decision) = cursor_post_tool_use_decision_for_hook(&event).await {
+    if let Some(decision) = cursor_post_tool_use_decision(&event) {
         println!("{decision}");
     }
     0
@@ -325,7 +325,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         return 0;
     }
     notify_cursor_after_file_edit(&event, &hook_telemetry).await;
-    if let Some(decision) = cursor_after_file_edit_decision_for_hook(&event).await {
+    if let Some(decision) = cursor_after_file_edit_decision(&event) {
         println!("{decision}");
     }
     0
@@ -485,12 +485,6 @@ pub fn cursor_post_tool_use_decision(event_json: &str) -> Option<String> {
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
-async fn cursor_post_tool_use_decision_for_hook(event_json: &str) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_post_tool_use_hint(event_json)?;
-    let hint = deduped_cursor_hint_for_initialized_store(event_json, &hint_id, hint).await?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
 /// Suppresses hints that were already emitted for this session.
 ///
 /// The `(session_id, category)` pairs are persisted in
@@ -532,26 +526,6 @@ fn cursor_hint_root(
 }
 
 fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
-    let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
-    if !crate::tracedecay::TraceDecay::is_initialized(&root) {
-        record_hint_analytics(
-            Some(&root),
-            "suppressed_uninitialized",
-            HintAgent::Cursor,
-            session_id.as_deref(),
-            hint_id,
-            &hint,
-        );
-        return None;
-    }
-    deduped_project_hint_with_id(Some(&root), HintAgent::Cursor, session_id, hint_id, hint)
-}
-
-async fn deduped_cursor_hint_for_initialized_store(
-    event_json: &str,
-    hint_id: &str,
-    hint: ToolHint,
-) -> Option<ToolHint> {
     let (root, session_id) = cursor_hint_root(event_json, hint_id, &hint)?;
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         record_hint_analytics(
@@ -1012,12 +986,6 @@ fn prepare_cursor_after_file_edit_hint(event_json: &str) -> Option<(String, Tool
 pub fn cursor_after_file_edit_decision(event_json: &str) -> Option<String> {
     let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
     let hint = deduped_cursor_hint(event_json, &hint_id, hint)?;
-    Some(format_cursor_post_tool_use_decision(&hint))
-}
-
-async fn cursor_after_file_edit_decision_for_hook(event_json: &str) -> Option<String> {
-    let (hint_id, hint) = prepare_cursor_after_file_edit_hint(event_json)?;
-    let hint = deduped_cursor_hint_for_initialized_store(event_json, &hint_id, hint).await?;
     Some(format_cursor_post_tool_use_decision(&hint))
 }
 
