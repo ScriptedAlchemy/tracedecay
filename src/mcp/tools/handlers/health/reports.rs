@@ -19,75 +19,31 @@ pub(crate) async fn handle_gini(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let all_nodes = cg.get_all_nodes().await?;
-    let all_edges = if metric == "fan_in" || metric == "fan_out" {
-        cg.get_all_edges().await?
+    // The file-level aggregates (`complexity`, `lines`, `fan_in`, `fan_out`,
+    // and the default) are folded inside SQLite so the whole node/edge tables
+    // never materialize in the process. Only the node-level `members` and
+    // per-symbol metrics still read node rows, so load them lazily.
+    let needs_nodes = metric == "members";
+    let scoped_nodes = if needs_nodes {
+        cg.get_all_nodes()
+            .await?
+            .into_iter()
+            .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
+            .collect::<Vec<_>>()
     } else {
-        vec![]
+        Vec::new()
     };
-
-    // Apply path filter
-    let nodes: Vec<_> = all_nodes
-        .into_iter()
-        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
-        .collect();
+    let nodes = &scoped_nodes;
 
     let named_values: Vec<(String, f64)> = match (metric, scope) {
         ("complexity", "file") => {
-            let mut per_file: HashMap<String, f64> = HashMap::new();
-            for n in &nodes {
-                let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
-                *per_file.entry(n.file_path.clone()).or_insert(0.0) += c;
-            }
-            per_file.into_iter().collect()
+            scope_filter_pairs(cg.db().complexity_sum_by_file().await?, path_prefix)
         }
         ("lines", "file") => {
-            let mut per_file: HashMap<String, f64> = HashMap::new();
-            for n in &nodes {
-                let lines = f64::from(n.end_line.saturating_sub(n.start_line) + 1);
-                *per_file.entry(n.file_path.clone()).or_insert(0.0) += lines;
-            }
-            per_file.into_iter().collect()
+            scope_filter_pairs(cg.db().line_span_sum_by_file().await?, path_prefix)
         }
-        ("fan_in", "file") => {
-            let node_to_file: HashMap<String, String> = nodes
-                .iter()
-                .map(|n| (n.id.clone(), n.file_path.clone()))
-                .collect();
-            let mut per_file: HashMap<String, f64> = HashMap::new();
-            // Initialize all files
-            for n in &nodes {
-                per_file.entry(n.file_path.clone()).or_insert(0.0);
-            }
-            for e in &all_edges {
-                if let (Some(src_file), Some(tgt_file)) =
-                    (node_to_file.get(&e.source), node_to_file.get(&e.target))
-                    && src_file != tgt_file
-                {
-                    *per_file.entry(tgt_file.clone()).or_insert(0.0) += 1.0;
-                }
-            }
-            per_file.into_iter().collect()
-        }
-        ("fan_out", "file") => {
-            let node_to_file: HashMap<String, String> = nodes
-                .iter()
-                .map(|n| (n.id.clone(), n.file_path.clone()))
-                .collect();
-            let mut per_file: HashMap<String, f64> = HashMap::new();
-            for n in &nodes {
-                per_file.entry(n.file_path.clone()).or_insert(0.0);
-            }
-            for e in &all_edges {
-                if let (Some(src_file), Some(tgt_file)) =
-                    (node_to_file.get(&e.source), node_to_file.get(&e.target))
-                    && src_file != tgt_file
-                {
-                    *per_file.entry(src_file.clone()).or_insert(0.0) += 1.0;
-                }
-            }
-            per_file.into_iter().collect()
-        }
+        ("fan_in", "file") => gini_fan_values(cg, path_prefix, true).await?,
+        ("fan_out", "file") => gini_fan_values(cg, path_prefix, false).await?,
         ("members", _) => {
             // Count members of each Class/Struct via parent_id (v9+).
             let class_nodes: HashSet<String> = nodes
@@ -100,7 +56,7 @@ pub(crate) async fn handle_gini(
                 .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct))
                 .map(|n| (n.id.clone(), (n.name.clone(), 0.0)))
                 .collect();
-            for n in &nodes {
+            for n in nodes {
                 if let Some(parent) = n.parent_id.as_deref()
                     && class_nodes.contains(parent)
                     && let Some(entry) = per_class.get_mut(parent)
@@ -111,24 +67,21 @@ pub(crate) async fn handle_gini(
             per_class.into_values().collect()
         }
         (_, "symbol") => {
-            // Per-function/method complexity
-            nodes
-                .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
-                .map(|n| {
-                    let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
-                    (format!("{}:{}", n.file_path, n.name), c)
+            // Per-function/method complexity, projected in SQL and scope-filtered
+            // in rowid order — the same order (and tie-break) as the node fold.
+            cg.db()
+                .symbol_complexity()
+                .await?
+                .into_iter()
+                .filter(|(file, _, _)| {
+                    crate::path_scope::path_matches_scope(file, path_prefix)
                 })
+                .map(|(file, name, value)| (format!("{file}:{name}"), value))
                 .collect()
         }
         _ => {
-            // Default: file-level complexity
-            let mut per_file: HashMap<String, f64> = HashMap::new();
-            for n in &nodes {
-                let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
-                *per_file.entry(n.file_path.clone()).or_insert(0.0) += c;
-            }
-            per_file.into_iter().collect()
+            // Default: file-level complexity.
+            scope_filter_pairs(cg.db().complexity_sum_by_file().await?, path_prefix)
         }
     };
 
@@ -173,6 +126,52 @@ pub(crate) async fn handle_gini(
         &output,
         vec![],
     ))
+}
+
+/// Keeps only the `(name, value)` pairs whose file path is in scope.
+///
+/// Filtering the SQL-grouped per-file rows here is byte-identical to filtering
+/// nodes before the per-file fold: every node in a file shares that file's
+/// path, so a scope predicate keyed on `file_path` partitions whole groups and
+/// never splits a per-file sum.
+fn scope_filter_pairs(
+    pairs: Vec<(String, f64)>,
+    path_prefix: Option<&str>,
+) -> Vec<(String, f64)> {
+    pairs
+        .into_iter()
+        .filter(|(file, _)| crate::path_scope::path_matches_scope(file, path_prefix))
+        .collect()
+}
+
+/// Per-file cross-file fan computed from SQL aggregates. `fan_in` counts
+/// incoming cross-file edges per target file, `fan_out` counts outgoing per
+/// source file. Every in-scope file seeds a zero entry, then each cross-file
+/// directed pair with both endpoints in scope adds its edge count to the
+/// target (`fan_in`) or source (`fan_out`). This mirrors the previous
+/// `node → file` map + whole-edge-table fold exactly (both endpoints of a
+/// counted edge had to be in-scope nodes, i.e. in-scope files).
+async fn gini_fan_values(
+    cg: &TraceDecay,
+    path_prefix: Option<&str>,
+    fan_in: bool,
+) -> Result<Vec<(String, f64)>> {
+    let mut per_file: HashMap<String, f64> = HashMap::new();
+    for file in cg.db().distinct_node_file_paths().await? {
+        if crate::path_scope::path_matches_scope(&file, path_prefix) {
+            per_file.entry(file).or_insert(0.0);
+        }
+    }
+    for (src, tgt, count) in cg.db().cross_file_edge_pair_counts().await? {
+        if src != tgt
+            && crate::path_scope::path_matches_scope(&src, path_prefix)
+            && crate::path_scope::path_matches_scope(&tgt, path_prefix)
+        {
+            let key = if fan_in { tgt } else { src };
+            *per_file.entry(key).or_insert(0.0) += count as f64;
+        }
+    }
+    Ok(per_file.into_iter().collect())
 }
 
 /// Handles `tracedecay_dependency_depth` tool calls.
