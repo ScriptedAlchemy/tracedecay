@@ -1,12 +1,12 @@
 //! Lifecycle: init/open/branch-tracking entry points plus the profile-store
 //! registration helpers they rely on.
 
-#[cfg(not(any(test, feature = "test-transport")))]
+#[cfg(not(test))]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(not(any(test, feature = "test-transport")))]
-use std::sync::{LazyLock, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock};
+#[cfg(not(test))]
+use std::sync::{LazyLock, Mutex, Weak};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
@@ -36,13 +36,13 @@ use recovery::{OpenHealthOutcome, active_graph_layout};
 pub(crate) use recovery::is_fts_only_corruption;
 pub(crate) use registry::git_remote_url;
 
-#[cfg(not(any(test, feature = "test-transport")))]
+#[cfg(not(test))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
     Mutex<HashMap<PathBuf, Weak<crate::db::OwnedMaintenanceDatabaseScope>>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl TraceDecay {
-    #[cfg(not(any(test, feature = "test-transport")))]
+    #[cfg(not(test))]
     fn standalone_maintenance_scope(
         open_options: &TraceDecayOpenOptions,
         operation: &'static str,
@@ -68,7 +68,7 @@ impl TraceDecay {
         Ok(scope)
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     fn standalone_test_open_options(
         project_root: &Path,
         mut open_options: TraceDecayOpenOptions,
@@ -82,7 +82,7 @@ impl TraceDecay {
         open_options
     }
 
-    #[cfg(any(test, feature = "test-transport"))]
+    #[cfg(test)]
     async fn standalone_test_runtime(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
@@ -168,7 +168,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        #[cfg(any(test, feature = "test-transport"))]
+        #[cfg(test)]
         {
             let open_options = Self::standalone_test_open_options(project_root, open_options);
             let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
@@ -178,7 +178,7 @@ impl TraceDecay {
             graph.test_runtime_guard = Some(runtime);
             Ok(graph)
         }
-        #[cfg(not(any(test, feature = "test-transport")))]
+        #[cfg(not(test))]
         {
             let maintenance =
                 Self::standalone_maintenance_scope(&open_options, "direct project initialization")?;
@@ -351,7 +351,7 @@ impl TraceDecay {
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
         };
@@ -482,7 +482,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        #[cfg(any(test, feature = "test-transport"))]
+        #[cfg(test)]
         {
             let open_options = Self::standalone_test_open_options(project_root, open_options);
             let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
@@ -492,7 +492,7 @@ impl TraceDecay {
             graph.test_runtime_guard = Some(runtime);
             Ok(graph)
         }
-        #[cfg(not(any(test, feature = "test-transport")))]
+        #[cfg(not(test))]
         {
             let maintenance =
                 Self::standalone_maintenance_scope(&open_options, "direct project open")?;
@@ -705,7 +705,7 @@ impl TraceDecay {
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
         };
@@ -756,7 +756,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        #[cfg(any(test, feature = "test-transport"))]
+        #[cfg(test)]
         {
             let open_options = Self::standalone_test_open_options(project_root, open_options);
             let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
@@ -766,7 +766,7 @@ impl TraceDecay {
             graph.test_runtime_guard = Some(runtime);
             Ok(graph)
         }
-        #[cfg(not(any(test, feature = "test-transport")))]
+        #[cfg(not(test))]
         {
             let maintenance =
                 Self::standalone_maintenance_scope(&open_options, "direct read-only project open")?;
@@ -781,7 +781,7 @@ impl TraceDecay {
         }
     }
 
-    #[cfg(not(any(test, feature = "test-transport")))]
+    #[cfg(not(test))]
     async fn open_read_only_with_exclusive_maintenance(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -903,14 +903,14 @@ impl TraceDecay {
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(any(test, feature = "test-transport"))]
+            #[cfg(test)]
             test_runtime_guard: None,
             standalone_maintenance_scope: None,
         })
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 fn configuration_runtime_unavailable() -> TraceDecayError {
     TraceDecayError::Config {
         message:
