@@ -241,8 +241,9 @@ fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Optio
 
 /// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
 /// Proxy-only `serve` no longer emits it, but older logs remain actionable.
-pub const DEGRADED_SERVE_STDERR_MARKER: &str =
-    "[tracedecay] serve: staying alive in degraded MCP mode";
+/// Canonical copy lives beside its reader in
+/// `tracedecay_agent_hosts::agents::cursor_diagnostics` (see SEAMS.md).
+pub use tracedecay_agent_hosts::agents::DEGRADED_SERVE_STDERR_MARKER;
 
 #[cfg(test)]
 mod tests {
