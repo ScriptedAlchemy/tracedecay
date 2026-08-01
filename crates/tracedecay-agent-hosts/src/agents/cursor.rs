@@ -249,16 +249,36 @@ impl AgentIntegration for CursorIntegration {
 
 const CURSOR_BRANCH_ADD_TOOL: &str = "tracedecay_admin_branch_add";
 
+/// Decoded `tracedecay_admin_branch_add` daemon response.
+///
+/// The root crate's `branch::BranchAddOutcome` is the *producer* side of this
+/// contract and stays above this crate with the branch store it mutates. What
+/// crosses the daemon boundary is the JSON `outcome` string below, so the
+/// install path decodes it into its own value instead of taking a dependency
+/// edge on the producer. The wire strings are the shared contract; the two
+/// enums must keep the same variant set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchAddOutcome {
+    /// The project has no `.tracedecay/` index; nothing was done.
+    NotIndexed,
+    /// The branch was already tracked; no copy/sync was performed.
+    AlreadyTracked,
+    /// A new branch DB was created from the nearest ancestor and synced.
+    Added,
+    /// Another process was adding or syncing; catch-up sync was deferred.
+    Deferred,
+}
+
 fn cursor_branch_add_arguments(branch_name: &str) -> Value {
     json!({ "branch": branch_name })
 }
 
-fn parse_cursor_branch_add_outcome(response: &Value) -> Result<crate::branch::BranchAddOutcome> {
+fn parse_cursor_branch_add_outcome(response: &Value) -> Result<BranchAddOutcome> {
     match response.get("outcome").and_then(Value::as_str) {
-        Some("not_indexed") => Ok(crate::branch::BranchAddOutcome::NotIndexed),
-        Some("already_tracked") => Ok(crate::branch::BranchAddOutcome::AlreadyTracked),
-        Some("added") => Ok(crate::branch::BranchAddOutcome::Added),
-        Some("deferred") => Ok(crate::branch::BranchAddOutcome::Deferred),
+        Some("not_indexed") => Ok(BranchAddOutcome::NotIndexed),
+        Some("already_tracked") => Ok(BranchAddOutcome::AlreadyTracked),
+        Some("added") => Ok(BranchAddOutcome::Added),
+        Some("deferred") => Ok(BranchAddOutcome::Deferred),
         Some(outcome) => Err(TraceDecayError::Config {
             message: format!("daemon Cursor branch add returned unknown outcome: {outcome}"),
         }),
@@ -271,8 +291,8 @@ fn parse_cursor_branch_add_outcome(response: &Value) -> Result<crate::branch::Br
 async fn add_cursor_branch_via_daemon(
     project_path: &Path,
     branch_name: &str,
-) -> Result<crate::branch::BranchAddOutcome> {
-    let response = match crate::hooks::daemon_tool_json(
+) -> Result<BranchAddOutcome> {
+    let response = match crate::ports::hook_runtime::daemon_tool_json(
         Some(project_path),
         CURSOR_BRANCH_ADD_TOOL,
         cursor_branch_add_arguments(branch_name),
@@ -284,7 +304,7 @@ async fn add_cursor_branch_via_daemon(
             eprintln!(
                 "\x1b[33mwarning:\x1b[0m deferred Cursor branch tracking for '{branch_name}' because the TraceDecay daemon request was unavailable: {err}"
             );
-            return Ok(crate::branch::BranchAddOutcome::Deferred);
+            return Ok(BranchAddOutcome::Deferred);
         }
     };
     parse_cursor_branch_add_outcome(&response)
@@ -309,15 +329,15 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
         return;
     };
     match add_cursor_branch_via_daemon(project_path, &branch_name).await {
-        Ok(crate::branch::BranchAddOutcome::Added) => {
+        Ok(BranchAddOutcome::Added) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
             );
         }
         Ok(
-            crate::branch::BranchAddOutcome::AlreadyTracked
-            | crate::branch::BranchAddOutcome::Deferred
-            | crate::branch::BranchAddOutcome::NotIndexed,
+            BranchAddOutcome::AlreadyTracked
+            | BranchAddOutcome::Deferred
+            | BranchAddOutcome::NotIndexed,
         ) => {}
         Err(err) => {
             eprintln!(
@@ -1142,7 +1162,7 @@ fn report_cursor_session_ingest<'a>(
             dc.info(&format!("  - {path}"));
         }
     }
-    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
+    if health.max_transcript_pending_bytes > crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
@@ -1152,7 +1172,7 @@ fn report_cursor_session_ingest<'a>(
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,
-            crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+            crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes(),
             project_path.display(),
         ));
     } else {
@@ -1602,7 +1622,7 @@ mod tests {
     /// tool the bundle legitimately references).
     fn registered_tool_names() -> std::collections::BTreeSet<String> {
         let mut names: std::collections::BTreeSet<String> =
-            crate::mcp::tools::get_tool_definitions()
+            crate::ports::mcp_tools::advertised_tools()
                 .into_iter()
                 .map(|definition| definition.name)
                 .collect();
@@ -1707,7 +1727,7 @@ mod tests {
         listed.sort();
         listed.dedup();
 
-        let mut read_only: Vec<String> = crate::mcp::tools::get_tool_definitions()
+        let mut read_only: Vec<String> = crate::ports::mcp_tools::advertised_tools()
             .into_iter()
             .filter(|definition| {
                 definition
@@ -2072,8 +2092,8 @@ mod tests {
         let health = CursorSessionIngestHealth {
             tracked_transcripts: 2,
             pending_transcripts: 1,
-            pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
-            max_transcript_pending_bytes: crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES + 1,
+            pending_bytes: crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
+            max_transcript_pending_bytes: crate::ports::hook_runtime::cursor_catch_up_ingest_max_bytes() + 1,
         };
 
         report_cursor_session_ingest(
@@ -2116,13 +2136,13 @@ mod tests {
     #[test]
     fn cursor_branch_add_outcomes_are_strictly_decoded() {
         for (name, expected) in [
-            ("not_indexed", crate::branch::BranchAddOutcome::NotIndexed),
+            ("not_indexed", BranchAddOutcome::NotIndexed),
             (
                 "already_tracked",
-                crate::branch::BranchAddOutcome::AlreadyTracked,
+                BranchAddOutcome::AlreadyTracked,
             ),
-            ("added", crate::branch::BranchAddOutcome::Added),
-            ("deferred", crate::branch::BranchAddOutcome::Deferred),
+            ("added", BranchAddOutcome::Added),
+            ("deferred", BranchAddOutcome::Deferred),
         ] {
             assert_eq!(
                 parse_cursor_branch_add_outcome(&serde_json::json!({ "outcome": name }))

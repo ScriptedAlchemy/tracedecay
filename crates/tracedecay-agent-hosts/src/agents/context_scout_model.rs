@@ -8,7 +8,7 @@ use super::context_scout_v2::{
     ContextScoutModelProposalV1, ContextScoutModelReceiptV1, ContextScoutModelRequestV1,
     serialized_token_count,
 };
-use crate::accounting::pricing::cost_of_turn;
+use crate::ports::pricing::cost_of_turn;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     CodexAppServerBackend, backend_availability,
@@ -250,7 +250,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::application::context::{CancellationToken, MonotonicDeadline};
+    use crate::ports::context::{CancellationToken, MonotonicDeadline};
     use crate::automation::backend::AgentTaskResponse;
     use tracedecay_automation::Result;
 
