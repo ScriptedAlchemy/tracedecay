@@ -5,6 +5,7 @@ pub mod global_db {
 }
 
 pub mod daemon {
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     use tracedecay_runtime_core::errors::Result;
@@ -120,6 +121,7 @@ pub mod daemon {
         false
     }
 
+    #[cfg(unix)]
     fn daemon_socket_path() -> Option<PathBuf> {
         std::env::var_os("TRACEDECAY_DAEMON_SOCKET")
             .filter(|path| !path.is_empty())
