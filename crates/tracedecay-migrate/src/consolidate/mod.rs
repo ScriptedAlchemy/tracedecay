@@ -11,7 +11,7 @@ mod finalize;
 mod preflight;
 mod prepare;
 mod runtime;
-pub(in crate) mod sqlite;
+pub(crate) mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -272,7 +272,8 @@ async fn apply_with_faults(
         .evidence
         .validate(&source_graphs, &target_graphs, &session_paths)?;
     let frozen_records = frozen_input_records(&resolved)?;
-    let profile = crate::root_seam::daemon::profile_identity::load_or_create(&options.profile_root)?;
+    let profile =
+        crate::root_seam::daemon::profile_identity::load_or_create(&options.profile_root)?;
     let profile_shard =
         StoreShardIdV1::profile(profile.brain_id().clone(), profile.profile_id().clone());
     let frozen = FrozenInputRuntimeSetV1::acquire(
@@ -1190,7 +1191,8 @@ pub(crate) async fn retire_applied_input_manifests(
     // ledger's destination, regardless of which one applied "first".
     let mut consumers: BTreeMap<(PathBuf, String), Vec<&str>> = BTreeMap::new();
     for (_, other) in &applied {
-        let git_common_dir = crate::root_seam::lifecycle_lease::canonical_or_original(&other.git_common_dir);
+        let git_common_dir =
+            crate::root_seam::lifecycle_lease::canonical_or_original(&other.git_common_dir);
         consumers
             .entry((git_common_dir.clone(), other.source_project_id.clone()))
             .or_default()
@@ -1210,7 +1212,8 @@ pub(crate) async fn retire_applied_input_manifests(
         // a forward-then-back pair (A's destination feeding B and B's
         // destination feeding A) can legitimately mark both as superseded;
         // that is a property of the data, not an ordering bug.
-        let git_common_dir = crate::root_seam::lifecycle_lease::canonical_or_original(&ledger.git_common_dir);
+        let git_common_dir =
+            crate::root_seam::lifecycle_lease::canonical_or_original(&ledger.git_common_dir);
         let superseded = consumers
             .get(&(git_common_dir, ledger.destination_project_id.clone()))
             .is_some_and(|migration_ids| {
@@ -1692,10 +1695,11 @@ fn artifact_authorities(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArti
         .and_then(Path::parent)
         .ok_or_else(|| config_error("destination shard has no profile root"))?;
     let profile = crate::root_seam::daemon::profile_identity::load_or_create(profile_root)?;
-    let indexing = crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
-        &resolved.report.project_root,
-    )
-    .map_err(|error| config_error(error.to_string()))?;
+    let indexing =
+        crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+            &resolved.report.project_root,
+        )
+        .map_err(|error| config_error(error.to_string()))?;
     let destination_project = canonical_project_id(&resolved.report.destination_project_id)?;
     let mut branches = meta.branches.iter().collect::<Vec<_>>();
     branches.sort_by(|(left_name, left), (right_name, right)| {
@@ -1791,10 +1795,11 @@ fn frozen_input_records(resolved: &ResolvedPlan) -> Result<Vec<ConsolidationArti
         .canonicalize()
         .map_err(io_error)?;
     let profile = crate::root_seam::daemon::profile_identity::load_or_create(&profile_root)?;
-    let indexing = crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
-        &resolved.report.project_root,
-    )
-    .map_err(|error| config_error(error.to_string()))?;
+    let indexing =
+        crate::root_seam::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
+            &resolved.report.project_root,
+        )
+        .map_err(|error| config_error(error.to_string()))?;
     let incarnation =
         StoreIncarnationV1::new(1).map_err(|error| config_error(error.to_string()))?;
     let mut authorities = BTreeMap::new();

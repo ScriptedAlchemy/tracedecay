@@ -653,12 +653,14 @@ async fn verify_payload_files(conn: &impl Executor, destination_root: &Path) -> 
         let byte_count = row
             .get::<i64>(2)
             .map_err(|error| db_error("verify_consolidation", error))?;
-        crate::root_seam::sessions::lcm::payload::validate_payload_ref(&payload_ref).map_err(|_| {
-            db_message(
-                "verify_consolidation",
-                format!("destination contains invalid external payload ref '{payload_ref}'"),
-            )
-        })?;
+        crate::root_seam::sessions::lcm::payload::validate_payload_ref(&payload_ref).map_err(
+            |_| {
+                db_message(
+                    "verify_consolidation",
+                    format!("destination contains invalid external payload ref '{payload_ref}'"),
+                )
+            },
+        )?;
         let path = destination_root.join("lcm-payloads").join(&payload_ref);
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
             db_message(

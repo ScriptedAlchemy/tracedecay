@@ -56,8 +56,8 @@ impl InputReadEvidence {
                 .session_fingerprints
                 .get(path)
                 .ok_or_else(|| config_error("session database set changed after inspection"))?;
-            let current =
-                crate::root_seam::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+            let current = crate::root_seam::sqlite_read_snapshot::family_fingerprint(path)
+                .map_err(io_error)?;
             if &current != expected {
                 return Err(config_error(format!(
                     "SQLite database family '{}' content changed after inspection",
@@ -105,8 +105,8 @@ impl GraphStoreEvidence {
                 .fingerprints
                 .get(path)
                 .ok_or_else(|| config_error("graph database set changed after inspection"))?;
-            let current =
-                crate::root_seam::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;
+            let current = crate::root_seam::sqlite_read_snapshot::family_fingerprint(path)
+                .map_err(io_error)?;
             if &current != expected {
                 return Err(config_error(format!(
                     "SQLite database family '{}' content changed after inspection",
@@ -140,10 +140,12 @@ pub(super) async fn capture_input_evidence(
 ) -> Result<InputReadEvidence> {
     let source_graph = capture_graph_evidence(source_graphs, scratch_root).await?;
     let target_graph = capture_graph_evidence(target_graphs, scratch_root).await?;
-    let sessions =
-        crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture_in(session_paths, scratch_root)
-            .await
-            .map_err(io_error)?;
+    let sessions = crate::root_seam::sqlite_read_snapshot::SnapshotSet::capture_in(
+        session_paths,
+        scratch_root,
+    )
+    .await
+    .map_err(io_error)?;
     let mut session_fingerprints = BTreeMap::new();
     for path in session_paths {
         sessions.get(path).map_err(io_error)?;

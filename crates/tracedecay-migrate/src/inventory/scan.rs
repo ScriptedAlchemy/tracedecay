@@ -158,7 +158,11 @@ async fn build_inventory_in_scope(
                 db.try_resolve_project_store_record_by_alias(&root)
                     .await?
                     .and_then(|store| {
-                        crate::root_seam::storage::classify_registry_storage(&root, profile_root, &store)
+                        crate::root_seam::storage::classify_registry_storage(
+                            &root,
+                            profile_root,
+                            &store,
+                        )
                     })
                     .map(|location| location.data_root)
             } else if let Some(profile_root) = profile_root {

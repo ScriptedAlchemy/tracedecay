@@ -235,10 +235,9 @@ async fn apply_planned(
             .map_err(|error| {
                 migration_error(format!("snapshot '{}': {error}", source.path.display()))
             })?;
-        let proofs = crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
-            &target, &snapshot,
-        )
-        .await?;
+        let proofs =
+            crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
+                .await?;
         if source.memory_v2_fact_count > 0 && proofs.is_empty() {
             return Err(migration_error(format!(
                 "branch memory source '{}' has V2 authority without an archive inclusion proof",
@@ -1163,7 +1162,9 @@ mod tests {
     async fn branch_removal_refuses_when_archived_target_closure_is_missing() {
         let fixture = BranchStoreFixture::empty(&["feature"]);
         let branch_path = fixture.database_path("feature");
-        let target_path = fixture.data_root.join(crate::root_seam::config::DB_FILENAME);
+        let target_path = fixture
+            .data_root
+            .join(crate::root_seam::config::DB_FILENAME);
         let target = initialize_test_database(&target_path).await;
         let source = initialize_test_database(&branch_path).await;
         let owner = FactOwnerV1::Project {
@@ -1196,11 +1197,10 @@ mod tests {
         let snapshot = crate::root_seam::sqlite_read_snapshot::open_in(&branch_path, &scratch)
             .await
             .unwrap();
-        let proofs = crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
-            &target, &snapshot,
-        )
-        .await
-        .unwrap();
+        let proofs =
+            crate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
+                .await
+                .unwrap();
         snapshot.validate_source().unwrap();
         drop(snapshot);
         target.checkpoint().await.unwrap();

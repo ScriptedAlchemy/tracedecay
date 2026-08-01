@@ -459,7 +459,9 @@ async fn session_only_divergence_does_not_duplicate_identical_external_raw_famil
     let payload = b"shared payload";
     let payload_ref = "shared.payload";
     let content_hash =
-        crate::root_seam::application::session::compatibility::projected_content_hash("shared payload");
+        crate::root_seam::application::session::compatibility::projected_content_hash(
+            "shared payload",
+        );
     for layout in [&source, &target] {
         fs::create_dir_all(layout.data_root.join("lcm-payloads")).unwrap();
         fs::write(

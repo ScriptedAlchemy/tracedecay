@@ -487,7 +487,8 @@ fn rebind_restored_store_manifests(
         )?;
         crate::root_seam::storage::write_store_manifest_to_path(&manifest_path, &manifest)
             .map_err(|error| error.to_string())?;
-        if crate::root_seam::storage::read_store_manifest(&manifest_path).map_err(|error| error.to_string())?
+        if crate::root_seam::storage::read_store_manifest(&manifest_path)
+            .map_err(|error| error.to_string())?
             != manifest
         {
             return Err(format!(
@@ -553,8 +554,8 @@ fn verify_restored_rehearsal(
             continue;
         };
         let source_path = checked_join(&backup.root, &entry.logical_path)?;
-        let source_manifest =
-            crate::root_seam::storage::read_store_manifest(&source_path).map_err(|error| error.to_string())?;
+        let source_manifest = crate::root_seam::storage::read_store_manifest(&source_path)
+            .map_err(|error| error.to_string())?;
         let expected = rebound_store_manifest(
             source_manifest,
             project_id,
@@ -953,8 +954,11 @@ mod tests {
         let restore = temp.path().join("restored");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease =
-            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "backup test",
+        )
+        .unwrap();
 
         let backup =
             create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
@@ -1022,8 +1026,11 @@ mod tests {
         let expected_memory = fs::read(profile.join("user-memory.db")).unwrap();
         let expected_lcm = fs::read(profile.join("user-sessions.db")).unwrap();
         let expected_config = fs::read(profile.join("config.toml")).unwrap();
-        let lease =
-            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "backup test",
+        )
+        .unwrap();
 
         let backup =
             create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
@@ -1074,8 +1081,11 @@ mod tests {
         let backups = temp.path().join("backups");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease =
-            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "backup test",
+        )
+        .unwrap();
         let backup =
             create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
                 .unwrap();
@@ -1092,8 +1102,11 @@ mod tests {
         let profile = temp.path().join("profile");
         fs::create_dir(&profile).unwrap();
         released_profile(&profile);
-        let lease =
-            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "backup test",
+        )
+        .unwrap();
 
         let error = create_complete_profile_backup(
             &profile,
@@ -1142,8 +1155,11 @@ mod tests {
             },
         )
         .unwrap();
-        let lease =
-            crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(&profile, "backup test").unwrap();
+        let lease = crate::root_seam::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "backup test",
+        )
+        .unwrap();
         let backup =
             create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
                 .unwrap();

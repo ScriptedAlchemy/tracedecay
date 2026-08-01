@@ -18,7 +18,8 @@ impl Drop for StoreLocks {
 }
 
 pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<()> {
-    if crate::root_seam::config::user_data_dir().is_some_and(|root| same_path(&root, &options.profile_root))
+    if crate::root_seam::config::user_data_dir()
+        .is_some_and(|root| same_path(&root, &options.profile_root))
         && crate::root_seam::daemon::daemon_reachable()
     {
         return Err(config_error(
@@ -30,7 +31,9 @@ pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<(
 
 #[cfg(not(test))]
 pub(super) fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> Result<()> {
-    evaluate_holder_scan(crate::root_seam::open_store_holders::scan(database_paths).map_err(io_error)?)
+    evaluate_holder_scan(
+        crate::root_seam::open_store_holders::scan(database_paths).map_err(io_error)?,
+    )
 }
 
 #[cfg(test)]
@@ -38,12 +41,14 @@ pub(super) fn ensure_no_open_store_holders(_database_paths: &[PathBuf]) -> Resul
     // Unit tests share the host with unrelated processes whose /proc entries
     // may be unreadable. Keep production discovery fail-closed and exercise
     // its result handling deterministically below.
-    evaluate_holder_scan(crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(
-        Vec::new(),
-    ))
+    evaluate_holder_scan(
+        crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(Vec::new()),
+    )
 }
 
-fn evaluate_holder_scan(scan: crate::root_seam::open_store_holders::OpenStoreHolderScan) -> Result<()> {
+fn evaluate_holder_scan(
+    scan: crate::root_seam::open_store_holders::OpenStoreHolderScan,
+) -> Result<()> {
     match scan {
         crate::root_seam::open_store_holders::OpenStoreHolderScan::Supported(holders)
             if holders.is_empty() =>

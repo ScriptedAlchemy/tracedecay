@@ -52,7 +52,10 @@ impl TemporalOwnedSessionFixture {
     }
 }
 
-async fn temporal_database(path: &Path, mode: crate::root_seam::db::TestDatabaseRuntimeMode) -> Database {
+async fn temporal_database(
+    path: &Path,
+    mode: crate::root_seam::db::TestDatabaseRuntimeMode,
+) -> Database {
     let runtime_mode = if mode == crate::root_seam::db::TestDatabaseRuntimeMode::Initialize {
         let seed = crate::root_seam::db::engine::TestConnection::open(path);
         crate::root_seam::global_db::ensure_registered_schema(&seed)
@@ -72,7 +75,11 @@ async fn temporal_database(path: &Path, mode: crate::root_seam::db::TestDatabase
 }
 
 async fn temporal_execute_batch(path: &Path, sql: &str) {
-    let db = temporal_database(path, crate::root_seam::db::TestDatabaseRuntimeMode::Initialize).await;
+    let db = temporal_database(
+        path,
+        crate::root_seam::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await;
     db.execute_write_batch("seed temporal consolidation fixture", sql)
         .await
         .unwrap();
@@ -81,9 +88,12 @@ async fn temporal_execute_batch(path: &Path, sql: &str) {
 }
 
 async fn temporal_initialize(path: &Path) {
-    temporal_database(path, crate::root_seam::db::TestDatabaseRuntimeMode::Initialize)
-        .await
-        .close();
+    temporal_database(
+        path,
+        crate::root_seam::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .close();
 }
 
 async fn temporal_scalar(path: &Path, sql: &str) -> i64 {

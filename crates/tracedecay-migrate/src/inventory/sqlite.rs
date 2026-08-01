@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use crate::inventory::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
 use crate::root_seam::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::root_seam::global_db::{self, RegisteredGlobalDb};
-use crate::inventory::{
-    GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome,
-};
 
 pub(super) async fn inspect_global_db(
     path: &Path,
@@ -16,8 +14,10 @@ pub(super) async fn inspect_global_db(
     let mut unavailable_reason = None;
 
     if exists {
-        let authority =
-            crate::root_seam::db::DatabaseAuthority::for_runtime(path, "inspect global database offline");
+        let authority = crate::root_seam::db::DatabaseAuthority::for_runtime(
+            path,
+            "inspect global database offline",
+        );
         if let Err(error) = authority.as_ref() {
             let warning = format!(
                 "global DB '{}' is owned by the daemon; stop it before offline inventory: {error}",

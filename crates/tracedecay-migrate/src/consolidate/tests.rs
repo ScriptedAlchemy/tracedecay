@@ -25,7 +25,9 @@ use tracedecay_store::{
 };
 
 use super::*;
-use crate::root_seam::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::root_seam::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1,
+};
 use crate::root_seam::db::engine::{QueryExecutor, params};
 use crate::root_seam::db::{Database, DatabaseAuthority};
 use crate::root_seam::global_db::RegisteredGlobalDb;

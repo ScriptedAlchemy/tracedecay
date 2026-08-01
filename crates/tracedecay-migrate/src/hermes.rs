@@ -85,11 +85,12 @@ pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigra
     if !has_legacy_hermes_sources(&hermes_homes, &profile_root) {
         return LegacyHermesMigrationReport::default();
     }
-    let lifecycle =
-        match crate::root_seam::daemon::QuiescedDaemonLifecycle::acquire("legacy Hermes store migration") {
-            Ok(lifecycle) => lifecycle,
-            Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
-        };
+    let lifecycle = match crate::root_seam::daemon::QuiescedDaemonLifecycle::acquire(
+        "legacy Hermes store migration",
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
+    };
     let lifecycle_lease = match lifecycle.lifecycle_lease() {
         Ok(lifecycle_lease) => lifecycle_lease,
         Err(error) => return migration_authority_failure(&profile_root, error.to_string()),
@@ -397,10 +398,14 @@ mod tests {
     use super::*;
     use crate::root_seam::agents::hermes::HermesIntegration;
     use crate::root_seam::agents::{AgentIntegration, InstallContext, UpdatePluginOutcome};
-    use crate::root_seam::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::root_seam::application::host_admission::{
+        HostAdmissionScope, HostAdmissionTestRuntimeV1,
+    };
     use crate::root_seam::db::engine::{Executor, QueryExecutor, TestConnection, params};
     use crate::root_seam::memory::store::MemoryStore;
-    use crate::root_seam::memory::types::{AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory};
+    use crate::root_seam::memory::types::{
+        AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
+    };
     use crate::root_seam::sessions::{SessionMessageRecord, SessionRecord};
     use sha2::{Digest, Sha256};
     use tracedecay_domain::ProjectId;
@@ -653,7 +658,9 @@ mod tests {
             let target = Self::create(target_path).await;
             let writer = target
                 .connection
-                .transaction_with_behavior(crate::root_seam::db::engine::TransactionBehavior::Immediate)
+                .transaction_with_behavior(
+                    crate::root_seam::db::engine::TransactionBehavior::Immediate,
+                )
                 .await
                 .unwrap();
             let mut merge = Box::pin(super::memory::merge_memory_snapshot_for_test(
@@ -768,14 +775,18 @@ mod tests {
     }
 
     async fn immutable_source_count(path: &Path, table: HermesFixtureTable) -> i64 {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path).await.unwrap();
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path)
+            .await
+            .unwrap();
         let count = query_count(snapshot.connection(), table).await;
         snapshot.validate_source().unwrap();
         count
     }
 
     async fn immutable_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
-        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path).await.unwrap();
+        let snapshot = crate::root_seam::sqlite_read_snapshot::open(path)
+            .await
+            .unwrap();
         let mut rows = snapshot
             .connection()
             .query(
@@ -1652,9 +1663,11 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let path_hash_layout =
-            crate::root_seam::storage::default_profile_sharded_layout(&current_project, &profile_root)
-                .unwrap();
+        let path_hash_layout = crate::root_seam::storage::default_profile_sharded_layout(
+            &current_project,
+            &profile_root,
+        )
+        .unwrap();
         assert!(
             !path_hash_layout.sessions_db_path.exists(),
             "migration must not create a second path-hash shard"
@@ -1798,7 +1811,8 @@ mod tests {
             immutable_source_count(&source, HermesFixtureTable::Sessions).await,
             1
         );
-        let target_layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let target_layout =
+            crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
         assert_ne!(target_layout.sessions_db_path, source);
         let target = registered_project_target(&profile_root, &project).await;
         assert!(
@@ -2104,7 +2118,8 @@ mod tests {
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.unresolved[0].reason.contains("ambiguous"));
         assert!(!crate::root_seam::sessions::user_sessions_db_path(&profile_root).exists());
-        let project_layout = crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
+        let project_layout =
+            crate::root_seam::storage::resolve_layout(&project, &profile_root).unwrap();
         assert!(!project_layout.sessions_db_path.exists());
     }
 

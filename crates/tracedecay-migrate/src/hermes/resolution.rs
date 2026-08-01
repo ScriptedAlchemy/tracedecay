@@ -190,7 +190,9 @@ pub(crate) async fn resolve_target_project<Q>(
 where
     Q: QueryExecutor + ?Sized,
 {
-    if let Some(pin) = crate::root_seam::agents::hermes::read_config_pinned_project_root(config_path) {
+    if let Some(pin) =
+        crate::root_seam::agents::hermes::read_config_pinned_project_root(config_path)
+    {
         return resolve_project_candidate(Path::new(&pin), user_home, hermes_homes, registry)
             .await?
             .ok_or_else(|| format!("legacy project pin '{pin}' is not a resolvable code project"));
