@@ -1,8 +1,9 @@
 use serde_json::Value;
 
+use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params};
 
-use super::util::{qmarks, query_i64, query_i64_result, query_rows};
+use super::util::{query_i64, query_i64_result, query_rows};
 
 pub const MESSAGE_TOKEN_ESTIMATE_EXPR: &str =
     "(LENGTH(COALESCE(content, snippet_text, '')) + 3) / 4";
@@ -417,7 +418,7 @@ pub async fn child_summary_nodes(
     if child_node_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(child_node_ids.len());
+    let placeholders = build_qmark_placeholders(child_node_ids.len());
     let params: Vec<DbValue> = child_node_ids.iter().cloned().map(DbValue::Text).collect();
     let sql = format!(
         "SELECT {NODE_COLUMNS},
@@ -436,7 +437,7 @@ pub async fn source_messages(
     if message_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = qmarks(message_ids.len());
+    let placeholders = build_qmark_placeholders(message_ids.len());
     let params: Vec<DbValue> = message_ids.iter().copied().map(DbValue::Integer).collect();
     let message_columns = message_columns();
     let sql = format!(

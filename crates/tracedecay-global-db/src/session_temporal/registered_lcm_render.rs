@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tracedecay_domain::HydrationStateV1;
 
 use super::render::apply_canonical_content;
+use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
@@ -656,7 +657,7 @@ async fn load_raw_messages(
     if store_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = placeholders(store_ids.len());
+    let placeholders = build_qmark_placeholders(store_ids.len());
     let sql = format!(
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
                 timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
@@ -685,7 +686,7 @@ async fn load_summary_nodes(
     if node_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let placeholders = placeholders(node_ids.len());
+    let placeholders = build_qmark_placeholders(node_ids.len());
     let values = node_ids
         .iter()
         .cloned()
@@ -865,12 +866,6 @@ fn parse_store_id(source_id: &str) -> Result<i64, LcmError> {
 fn storage_kind(value: &str) -> Result<LcmStorageKind, LcmError> {
     LcmStorageKind::from_db(value)
         .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {value}")))
-}
-
-fn placeholders(count: usize) -> String {
-    std::iter::repeat_n("?", count)
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 async fn query<P>(
