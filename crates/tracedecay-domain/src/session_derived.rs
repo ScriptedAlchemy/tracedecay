@@ -4,7 +4,7 @@
 //! message occurrences. They are not source authority, summaries, or carriers of
 //! external GitHub/CI/diagnostic/Git/receipt/task payloads.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -646,13 +646,7 @@ fn digest_from_hasher(hasher: Sha256) -> Result<DataVersionDigest, SessionContra
 }
 
 fn encode_sha256(hasher: Sha256) -> String {
-    let digest = hasher.finalize();
-    let mut encoded = String::with_capacity(71);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
+    crate::canonical_text::encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
 }
 
 fn is_sha256_identity(value: &str) -> bool {
