@@ -35,12 +35,9 @@ use super::semantic::SemanticConfig;
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
 pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
-/// Read-only cutover contract. `pub` because the composition root's
-/// `config.rs` drives the legacy transition bridge through it (the root
-/// re-exports this whole `registry` module).
-#[allow(dead_code)]
+/// Read-only cutover contract used by the legacy transition bridge.
 #[path = "legacy_decoder.rs"]
-pub mod legacy_decoder;
+pub(crate) mod legacy_decoder;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
