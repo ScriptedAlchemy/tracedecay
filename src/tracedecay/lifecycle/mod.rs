@@ -12,9 +12,7 @@ use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
-    install_configuration_daemon_client_for_project,
-    open_runtime_configuration_for_registered_database,
-    open_runtime_configuration_for_registered_database_read_only,
+    install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
@@ -23,6 +21,11 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_store::ProjectId;
+use tracedecay_usecases::config::{
+    install_configuration_daemon_client_for_project,
+    open_runtime_configuration_for_registered_database,
+    open_runtime_configuration_for_registered_database_read_only,
+};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 
@@ -305,6 +308,7 @@ impl TraceDecay {
             DatabaseAccessMode::ReadWrite,
         )
         .await?;
+        install_usecase_runtime_configuration_authority()?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database(
                 project_root,
@@ -314,7 +318,7 @@ impl TraceDecay {
             .await?,
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let config = configuration.config.clone();
+        let config = materialize_root_runtime_configuration(&configuration)?;
         install_configuration_daemon_client_for_project(
             &configuration.target,
             configuration_runtime.client(),
@@ -673,6 +677,7 @@ impl TraceDecay {
             OpenHealthOutcome::Recovered(result) => return result,
         };
 
+        install_usecase_runtime_configuration_authority()?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database(
                 project_root,
@@ -682,7 +687,7 @@ impl TraceDecay {
             .await?,
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let config = configuration.config.clone();
+        let config = materialize_root_runtime_configuration(&configuration)?;
         install_configuration_daemon_client_for_project(
             &configuration.target,
             configuration_runtime.client(),
@@ -871,6 +876,7 @@ impl TraceDecay {
             DatabaseAccessMode::ReadOnly,
         )
         .await?;
+        install_usecase_runtime_configuration_authority()?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
             open_runtime_configuration_for_registered_database_read_only(
                 project_root,
@@ -880,7 +886,7 @@ impl TraceDecay {
             .await?,
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let config = configuration.config.clone();
+        let config = materialize_root_runtime_configuration(&configuration)?;
         install_configuration_daemon_client_for_project(
             &configuration.target,
             configuration_runtime.client(),

@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
@@ -659,21 +657,6 @@ impl PinnedRuntimeConfiguration {
     }
 }
 
-/// Narrow daemon/client seam for direct configuration mutations. The daemon
-/// implementation must authenticate the caller and invoke the Wave-1
-/// `ConfigurationControlPlane`; this adapter deliberately has no store handle
-/// and cannot infer authority from a path.
-pub trait ConfigurationDaemonClient: Send + Sync {
-    fn mutate_direct(
-        &self,
-        target: RuntimeConfigurationTarget,
-        mutation: crate::application::configuration::DirectConfigurationMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration>;
-}
-
-pub type RuntimeConfigurationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-
 /// Process-local, immutable-after-publication lookup cache. The daemon owns
 /// refreshing it when a configuration revision activates; hook paths only
 /// perform an in-memory lookup.
@@ -788,55 +771,6 @@ pub fn install_dashboard_configuration_read_port() -> Result<()> {
     )
 }
 
-#[derive(Default)]
-struct ConfigurationDaemonClients {
-    by_project: BTreeMap<String, Arc<dyn ConfigurationDaemonClient>>,
-}
-
-fn configuration_daemon_client_slot() -> &'static RwLock<ConfigurationDaemonClients> {
-    static CLIENT: OnceLock<RwLock<ConfigurationDaemonClients>> = OnceLock::new();
-    CLIENT.get_or_init(|| RwLock::new(ConfigurationDaemonClients::default()))
-}
-
-/// Installs one daemon-owned client for its exact project identity. CLI, MCP,
-/// HTTP, and dashboard callers select this mapping from the already-pinned
-/// target rather than opening a configuration store or re-resolving a path.
-pub fn install_configuration_daemon_client_for_project(
-    target: &RuntimeConfigurationTarget,
-    client: Arc<dyn ConfigurationDaemonClient>,
-) {
-    configuration_daemon_client_slot()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .by_project
-        .insert(target.project_id.as_str().to_owned(), client);
-}
-
-/// Removes one project's daemon client if (and only if) the installed client
-/// is the exact instance being released. The `Arc::ptr_eq` guard keeps a
-/// dropping runtime from clobbering a newer client installed by a live
-/// handle for the same project (e.g. the daemon's close-and-reopen
-/// handshake). Without this release, any non-daemon process that opened a
-/// project retained the store `Arc` — and its exclusive sessions.db writer
-/// lease — in this process-global slot for its entire lifetime, starving the
-/// managed daemon of the single-writer lock.
-pub fn uninstall_configuration_daemon_client_for_project(
-    target: &RuntimeConfigurationTarget,
-    client: &Arc<dyn ConfigurationDaemonClient>,
-) {
-    let mut clients = configuration_daemon_client_slot()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let project_id = target.project_id.as_str();
-    if clients
-        .by_project
-        .get(project_id)
-        .is_some_and(|existing| Arc::ptr_eq(existing, client))
-    {
-        clients.by_project.remove(project_id);
-    }
-}
-
 /// Publishes one daemon-resolved snapshot for runtime and hook consumers.
 pub fn install_pinned_runtime_configuration(
     configuration: PinnedRuntimeConfiguration,
@@ -932,6 +866,142 @@ pub(crate) struct OpenedRuntimeConfiguration {
     /// snapshot. Configuration composition retains this authority directly;
     /// it never reacquires the physical database by path.
     pub(crate) registered_database: Arc<RegisteredGlobalDb>,
+}
+
+fn usecase_runtime_configuration(
+    configuration: PinnedRuntimeConfiguration,
+) -> Result<tracedecay_usecases::config::PinnedRuntimeConfiguration> {
+    tracedecay_usecases::config::PinnedRuntimeConfiguration::new(
+        tracedecay_usecases::config::RuntimeConfigurationTarget {
+            project_id: configuration.target.project_id,
+            project_root: configuration.target.project_root,
+        },
+        configuration.revision_id,
+        configuration.snapshot,
+    )
+}
+
+fn usecase_opened_runtime_configuration(
+    opened: OpenedRuntimeConfiguration,
+) -> Result<tracedecay_usecases::config::OpenedRuntimeConfiguration> {
+    Ok(
+        tracedecay_usecases::config::OpenedRuntimeConfiguration::new(
+            usecase_runtime_configuration(opened.configuration)?,
+            opened.registered_database,
+        ),
+    )
+}
+
+pub(crate) fn materialize_root_runtime_configuration(
+    configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+) -> Result<TraceDecayConfig> {
+    Ok(PinnedRuntimeConfiguration::new(
+        RuntimeConfigurationTarget {
+            project_id: configuration.target.project_id.clone(),
+            project_root: configuration.target.project_root.clone(),
+        },
+        configuration.revision_id.clone(),
+        configuration.snapshot.clone(),
+    )?
+    .config)
+}
+
+struct RootRuntimeConfigurationAuthority;
+
+impl tracedecay_usecases::config::RuntimeConfigurationAuthorityPort
+    for RootRuntimeConfigurationAuthority
+{
+    fn open<'a>(
+        &'a self,
+        project_root: &'a Path,
+        layout: &'a crate::storage::StoreLayout,
+        database: Arc<RegisteredGlobalDb>,
+    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+        'a,
+        tracedecay_usecases::config::OpenedRuntimeConfiguration,
+    > {
+        Box::pin(async move {
+            usecase_opened_runtime_configuration(
+                open_runtime_configuration_for_registered_database(project_root, layout, database)
+                    .await?,
+            )
+        })
+    }
+
+    fn open_read_only<'a>(
+        &'a self,
+        project_root: &'a Path,
+        layout: &'a crate::storage::StoreLayout,
+        database: Arc<RegisteredGlobalDb>,
+    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+        'a,
+        tracedecay_usecases::config::OpenedRuntimeConfiguration,
+    > {
+        Box::pin(async move {
+            usecase_opened_runtime_configuration(
+                open_runtime_configuration_for_registered_database_read_only(
+                    project_root,
+                    layout,
+                    database,
+                )
+                .await?,
+            )
+        })
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        project_root: &'a Path,
+        layout: &'a crate::storage::StoreLayout,
+        database: Arc<RegisteredGlobalDb>,
+    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+        'a,
+        tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    > {
+        Box::pin(async move {
+            usecase_runtime_configuration(
+                resolve_runtime_configuration_for_registered_database(
+                    project_root,
+                    layout,
+                    database,
+                )
+                .await?,
+            )
+        })
+    }
+
+    fn load_read_only<'a>(
+        &'a self,
+        project_root: &'a Path,
+        layout: &'a crate::storage::StoreLayout,
+        database: Arc<RegisteredGlobalDb>,
+    ) -> tracedecay_usecases::config::RuntimeConfigurationFuture<
+        'a,
+        tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    > {
+        Box::pin(async move {
+            usecase_runtime_configuration(
+                load_runtime_configuration_for_registered_database_read_only(
+                    project_root,
+                    layout,
+                    database,
+                )
+                .await?,
+            )
+        })
+    }
+}
+
+pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
+    static INSTALLATION: LazyLock<std::result::Result<(), String>> = LazyLock::new(|| {
+        tracedecay_usecases::config::install_runtime_configuration_authority(Arc::new(
+            RootRuntimeConfigurationAuthority,
+        ))
+        .map_err(|error| error.to_string())
+    });
+    INSTALLATION
+        .as_ref()
+        .map_err(|message| config_error(message.clone()))
 }
 
 /// Loads and publishes the durable current configuration for a resolved store
@@ -1285,15 +1355,9 @@ pub async fn mutate_pinned_runtime_configuration(
     else {
         return Ok(current.clone());
     };
-    let client = {
-        let clients = configuration_daemon_client_slot()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients
-            .by_project
-            .get(current.target.project_id.as_str())
-            .cloned()
-    }
+    let client = tracedecay_usecases::config::configuration_daemon_client_for_project(
+        &current.target.project_id,
+    )
     .ok_or_else(|| {
         config_error(
             "configuration authority unavailable: daemon control-plane client is not installed",
@@ -1306,13 +1370,16 @@ pub async fn mutate_pinned_runtime_configuration(
 /// Keeping this seam independent from the process-global client slot makes the
 /// response validation and publication rules testable without a local store.
 async fn commit_runtime_configuration_mutation(
-    client: &dyn ConfigurationDaemonClient,
+    client: &dyn tracedecay_usecases::config::ConfigurationDaemonClient,
     current: &PinnedRuntimeConfiguration,
     mutation: crate::application::configuration::DirectConfigurationMutation,
 ) -> Result<PinnedRuntimeConfiguration> {
     let next = client
         .mutate_direct(
-            current.target.clone(),
+            tracedecay_usecases::config::RuntimeConfigurationTarget {
+                project_id: current.target.project_id.clone(),
+                project_root: current.target.project_root.clone(),
+            },
             mutation,
             current.revision_id.clone(),
         )
@@ -1331,7 +1398,8 @@ async fn commit_runtime_configuration_mutation(
     // the returned snapshot to the caller's already-authorized route before
     // publishing it, which also re-materializes the legacy display fields from
     // the validated snapshot rather than trusting an adapter-provided shape.
-    let next = next.retarget(current.target.clone())?;
+    let next =
+        PinnedRuntimeConfiguration::new(current.target.clone(), next.revision_id, next.snapshot)?;
     runtime_configuration_cache().insert(next.clone())?;
     Ok(next)
 }
