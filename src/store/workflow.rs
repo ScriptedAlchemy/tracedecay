@@ -1,5 +1,7 @@
 //! Root adapter for workflow-index storage.
 
+use std::borrow::Borrow;
+
 use std::path::Path;
 
 use tracedecay_domain::ProjectId;
@@ -16,18 +18,30 @@ use crate::sessions::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs
 use crate::sessions::workflow_state::{WorkflowStateItem, list_unfinished};
 
 /// Borrowed adapter over an already-open project-sessions database.
-pub struct GlobalDbWorkflowStore<'a> {
-    db: &'a RegisteredGlobalDb,
+/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
+/// trait impls below apply only "for some specific lifetime", which turns any
+/// `Send` proof over a future holding one across an await into a higher-ranked
+/// obligation the compiler cannot discharge.
+pub struct GlobalDbWorkflowStore<D> {
+    db: D,
 }
 
-impl<'a> GlobalDbWorkflowStore<'a> {
-    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
+impl<D> GlobalDbWorkflowStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
+    pub(crate) const fn new(db: D) -> Self {
         Self { db }
+    }
+
+    fn db(&self) -> &RegisteredGlobalDb {
+        self.db.borrow()
     }
 
     pub(crate) fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
         matches!(
-            &self.db.binding().shard_id.scope,
+            &self.db().binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions {
                 project_id: authority_project_id,
             } if authority_project_id == project_id
@@ -35,7 +49,7 @@ impl<'a> GlobalDbWorkflowStore<'a> {
     }
 
     pub(crate) async fn read_ingest_watermark(&self) -> Option<i64> {
-        let Ok(snapshot) = self.db.read_snapshot().await else {
+        let Ok(snapshot) = self.db().read_snapshot().await else {
             return None;
         };
         // `None` means the snapshot could not be opened; a missing watermark
@@ -49,7 +63,7 @@ impl<'a> GlobalDbWorkflowStore<'a> {
         agents: &[WorkflowAgent],
     ) -> Result<(), WorkflowIndexError> {
         let transaction = self
-            .db
+            .db()
             .begin_write_transaction()
             .await
             .map_err(|error| WorkflowIndexError::Db(error.to_string()))?;
@@ -61,7 +75,7 @@ impl<'a> GlobalDbWorkflowStore<'a> {
     }
 
     pub(crate) async fn bump_ingest_watermark(&self, value: i64) {
-        let Ok(transaction) = self.db.begin_write_transaction().await else {
+        let Ok(transaction) = self.db().begin_write_transaction().await else {
             tracing::debug!("workflow ingest writer unavailable");
             return;
         };
@@ -88,14 +102,14 @@ impl<'a> GlobalDbWorkflowStore<'a> {
         &self,
     ) -> Result<RegisteredWorkflowIndexSnapshot, WorkflowIndexError> {
         if !matches!(
-            &self.db.binding().shard_id.scope,
+            &self.db().binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions { .. }
         ) {
             return Err(WorkflowIndexError::InvalidArgument(
                 "workflow index requires ProjectSessions authority".to_string(),
             ));
         }
-        let snapshot = self.db.read_snapshot().await?;
+        let snapshot = self.db().read_snapshot().await?;
         Ok(RegisteredWorkflowIndexSnapshot::from_snapshot(snapshot))
     }
 
@@ -133,7 +147,7 @@ impl<'a> GlobalDbWorkflowStore<'a> {
         limit: usize,
     ) -> Result<Vec<WorkflowStateItem>, String> {
         let snapshot = self
-            .db
+            .db()
             .read_snapshot()
             .await
             .map_err(|error| error.to_string())?;
@@ -141,7 +155,10 @@ impl<'a> GlobalDbWorkflowStore<'a> {
     }
 }
 
-impl WorkflowIngestSink for GlobalDbWorkflowStore<'_> {
+impl<D> WorkflowIngestSink for GlobalDbWorkflowStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
     fn matches_project_sessions_authority(&self, project_id: &ProjectId) -> bool {
         GlobalDbWorkflowStore::matches_project_sessions_authority(self, project_id)
     }

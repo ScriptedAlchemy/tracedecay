@@ -146,7 +146,7 @@ pub(super) async fn dispatch_admin_tools(
             hook_runtime::handle_hook_runtime(
                 cg,
                 args,
-                options.global_db,
+                options.global_db.map(std::sync::Arc::as_ref),
                 options.accounting_db,
                 options.session_authorities,
             )
@@ -167,7 +167,7 @@ pub(super) async fn dispatch_admin_tools(
             admin_project::handle_admin_project(
                 cg,
                 args,
-                options.global_db,
+                options.global_db.map(std::sync::Arc::as_ref),
                 options.automation_scheduler_reconciler.clone(),
             )
             .await
@@ -341,7 +341,7 @@ pub(super) async fn dispatch_health_tools(
             health::handle_runtime(
                 cg,
                 args,
-                options.global_db,
+                options.global_db.map(std::sync::Arc::as_ref),
                 active_project_session_db.map(Arc::as_ref),
                 options.doctor_report_reader.as_ref(),
             )
@@ -392,13 +392,28 @@ pub(super) async fn execute_project_retained_application_tool(
 ) -> Result<ToolResult> {
     match request.operation {
         RetainedSurfaceOperation::FactStore => {
-            memory::handle_fact_store(cg, request.arguments, options.global_db).await
+            memory::handle_fact_store(
+                cg,
+                request.arguments,
+                options.global_db.map(std::sync::Arc::as_ref),
+            )
+            .await
         }
         RetainedSurfaceOperation::FactFeedback => {
-            memory::handle_fact_feedback(cg, request.arguments, options.global_db).await
+            memory::handle_fact_feedback(
+                cg,
+                request.arguments,
+                options.global_db.map(std::sync::Arc::as_ref),
+            )
+            .await
         }
         RetainedSurfaceOperation::MemoryStatus => {
-            memory::handle_memory_status(cg, request.arguments, options.global_db).await
+            memory::handle_memory_status(
+                cg,
+                request.arguments,
+                options.global_db.map(std::sync::Arc::as_ref),
+            )
+            .await
         }
         RetainedSurfaceOperation::SessionRefresh => {
             session::handle_session_refresh(
@@ -471,7 +486,13 @@ pub(super) async fn dispatch_memory_tools(
             skills::handle_automation_run_artifact_view(cg, args).await
         }
         "tracedecay_analytics" => {
-            analytics::handle_analytics(cg, args, options.global_db, options.accounting_db).await
+            analytics::handle_analytics(
+                cg,
+                args,
+                options.global_db.map(std::sync::Arc::as_ref),
+                options.accounting_db,
+            )
+            .await
         }
         "tracedecay_skill_list" => skills::handle_skill_list(cg, args, options.accounting_db).await,
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args, options.accounting_db).await,

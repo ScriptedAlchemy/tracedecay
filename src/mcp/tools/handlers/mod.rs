@@ -158,7 +158,7 @@ pub async fn handle_tool_call(
 
 #[derive(Clone)]
 pub struct ToolCallRegistryOptions<'a> {
-    pub(crate) global_db: Option<&'a RegisteredGlobalDb>,
+    pub(crate) global_db: Option<&'a Arc<RegisteredGlobalDb>>,
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
@@ -275,7 +275,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 "user" => {
                     let profile_root = match options.profile_root {
                         Some(profile_root) => profile_root.to_path_buf(),
-                        None => support::profile_root_for_global_db(options.global_db)?,
+                        None => support::profile_root_for_global_db(
+                            options.global_db.map(std::sync::Arc::as_ref),
+                        )?,
                     };
                     if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
                         let dispatch: std::pin::Pin<
@@ -296,7 +298,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         args,
                         &profile_root,
                         options.session_authorities.user,
-                        options.global_db,
+                        options.global_db.map(std::sync::Arc::as_ref),
                         options.session_authorities.profile_retrieval,
                     ));
                     return dispatch.await;
@@ -338,7 +340,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             boxed_send(selected_registered_project_reader(
                 tool_name.to_owned(),
                 args.clone(),
-                options.global_db,
+                options.global_db.map(std::sync::Arc::as_ref),
                 options.retained_project_graph_resolver.clone(),
             ))
             .await?

@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use std::future::Future;
 use std::path::Path;
 
@@ -16,13 +18,25 @@ use crate::store::TranscriptIngestStore;
 /// The adapter deliberately borrows `RegisteredGlobalDb`: runtime ownership,
 /// authority checks, and all transaction begin/commit/rollback decisions stay
 /// in the registered database implementation.
-pub struct GlobalDbTranscriptStore<'a> {
-    db: &'a RegisteredGlobalDb,
+/// The holder `D` is generic so callers that own an `Arc<RegisteredGlobalDb>`
+/// can build a lifetime-free (`'static`) adapter. A borrowed adapter makes the
+/// trait impls below apply only "for some specific lifetime", which turns any
+/// `Send` proof over a future holding one across an await into a higher-ranked
+/// obligation the compiler cannot discharge.
+pub struct GlobalDbTranscriptStore<D> {
+    db: D,
 }
 
-impl<'a> GlobalDbTranscriptStore<'a> {
-    pub(crate) const fn new(db: &'a RegisteredGlobalDb) -> Self {
+impl<D> GlobalDbTranscriptStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
+    pub(crate) const fn new(db: D) -> Self {
         Self { db }
+    }
+
+    fn db(&self) -> &RegisteredGlobalDb {
+        self.db.borrow()
     }
 
     fn storage_error(operation: &'static str, message: impl Into<String>) -> TranscriptStoreError {
@@ -84,7 +98,7 @@ impl<'a> GlobalDbTranscriptStore<'a> {
                 let mut expected_offset = expected_offset;
                 loop {
                     match self
-                        .db
+                        .db()
                         .persist_transcript_offset_result(&cursor_key, expected_offset, next_offset)
                         .await
                     {
@@ -123,7 +137,7 @@ impl<'a> GlobalDbTranscriptStore<'a> {
                     session: *session,
                     messages,
                 };
-                self.db
+                self.db()
                     .persist_transcript_batch_with_git_evidence_result(
                         &batch,
                         commit_records,
@@ -139,10 +153,13 @@ impl<'a> GlobalDbTranscriptStore<'a> {
     }
 }
 
-impl TranscriptStore for GlobalDbTranscriptStore<'_> {
+impl<D> TranscriptStore for GlobalDbTranscriptStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
     async fn get_parse_offset(&self, cursor_path: &Path) -> TranscriptStoreResult<ParseOffset> {
         let cursor_key = Self::path_text(cursor_path);
-        self.db
+        self.db()
             .get_parse_offset_result(&cursor_key)
             .await
             .map(Option::unwrap_or_default)
@@ -157,14 +174,17 @@ impl TranscriptStore for GlobalDbTranscriptStore<'_> {
     }
 }
 
-impl TranscriptIngestStore for GlobalDbTranscriptStore<'_> {
+impl<D> TranscriptIngestStore for GlobalDbTranscriptStore<D>
+where
+    D: Borrow<RegisteredGlobalDb> + Send + Sync,
+{
     fn advance_parse_offset_monotonic(
         &self,
         cursor_path: &Path,
         offset: ParseOffset,
     ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
         async move {
-            self.db
+            self.db()
                 .advance_parse_offset_result(&Self::path_text(cursor_path), offset)
                 .await
                 .map_err(|error| Self::persistence_error(cursor_path, error))
@@ -179,7 +199,7 @@ impl TranscriptIngestStore for GlobalDbTranscriptStore<'_> {
     ) -> impl Future<Output = ()> + Send {
         async move {
             crate::application::event_lane::publish(
-                self.db,
+                self.db(),
                 crate::application::event_lane::ActivityFamilyV1::SessionIngest,
                 project_root,
                 None,
@@ -195,7 +215,7 @@ impl TranscriptIngestStore for GlobalDbTranscriptStore<'_> {
         provider: &str,
         session_id: &str,
     ) -> TranscriptStoreResult<Option<crate::sessions::SessionRecord>> {
-        self.db
+        self.db()
             .get_session_result(provider, session_id)
             .await
             .map_err(|error| match error {

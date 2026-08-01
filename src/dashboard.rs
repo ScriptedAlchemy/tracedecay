@@ -10,6 +10,6 @@
 //! `env!("OUT_DIR")`, which only resolves inside the crate whose build script
 //! produced it.
 
-pub(crate) use tracedecay_dashboard_api::*;
+pub use tracedecay_dashboard_api::*;
 
 pub(crate) mod assets;
