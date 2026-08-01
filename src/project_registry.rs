@@ -7,77 +7,20 @@ use serde::{Deserialize, Serialize};
 use crate::global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
+// The registry data structs (and `PublicCodeProject::from_record`) are the
+// canonical copies beside the dashboard read model. The root keeps the superset
+// pieces: the `Serialize/Deserialize/JsonSchema`-deriving `ProjectRegistryView`
+// (the crate's bare struct can't back the CLI/MCP JSON round-trips), the
+// label-disambiguating view builder/renderer, and the alias/store-wired
+// `PublicProjectRegistryContext`.
+pub use tracedecay_dashboard_api::project_registry::{
+    ProjectRegistryEntry, ProjectRegistrySummary, ProjectRepoGroup, PublicCodeProject,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegistryView {
     pub summary: ProjectRegistrySummary,
     pub project_tree: Vec<ProjectRepoGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistrySummary {
-    pub project_count: usize,
-    pub repo_count: usize,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRepoGroup {
-    pub label: String,
-    pub git_common_dir: Option<String>,
-    pub project_count: usize,
-    pub branches: Vec<String>,
-    pub projects: Vec<ProjectRegistryEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProjectRegistryEntry {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub canonical_root: String,
-    pub kind: String,
-    pub default_branch: Option<String>,
-    pub branches: Vec<String>,
-    pub store_count: usize,
-    pub graph_scope_count: usize,
-    pub artifact_count: usize,
-    pub alias_count: usize,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PublicCodeProject {
-    pub project_id: String,
-    pub label: String,
-    pub project_root: String,
-    pub display_root: String,
-    pub canonical_root: String,
-    pub git_common_dir: Option<String>,
-    pub default_branch: Option<String>,
-    pub created_at: i64,
-    pub last_seen_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-}
-
-impl PublicCodeProject {
-    pub fn from_record(project: &CodeProjectRecord, active_project_id: Option<&str>) -> Self {
-        Self {
-            project_id: project.project_id.clone(),
-            label: path_label(&project.display_root),
-            project_root: project.display_root.clone(),
-            display_root: project.display_root.clone(),
-            canonical_root: project.canonical_root.clone(),
-            git_common_dir: project.git_common_dir.clone(),
-            default_branch: project.default_branch.clone(),
-            created_at: project.created_at,
-            last_seen_at: project.last_seen_at,
-            is_active: active_project_id.map(|id| id == project.project_id),
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
