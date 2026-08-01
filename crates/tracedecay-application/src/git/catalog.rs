@@ -120,8 +120,15 @@ fn capability(
             TerminalState::EffectUnknown,
             TerminalState::Partial,
         ])?,
+        // Stage, unstage, and commit are fully shipped: the daemon's native Git
+        // index transactions implement all three, and callers reach them by
+        // naming the operation on `git_preview`/`git_apply`, which own the
+        // transport surface. Labelling them `NotImplemented` was false. They
+        // stay non-callable as direct catalog routes -- and stay registered so
+        // a direct route resolves to a typed unavailable decision rather than
+        // an unknown capability -- but the reason now says why.
         availability: AvailabilityContract::Unavailable {
-            reason: UnavailabilityReason::NotImplemented,
+            reason: UnavailabilityReason::ReachedThroughAnotherCapability,
         },
         binding_ids: Vec::new(),
         profile_eligibility: Vec::new(),

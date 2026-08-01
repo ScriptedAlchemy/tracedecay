@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, State};
@@ -2827,14 +2827,46 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         },
-        OperationEventError::InvalidConfiguration
-        | OperationEventError::InvalidContext(_)
-        | OperationEventError::AlreadyBound
+        // Permanently invalid input: the same request can never succeed, so the
+        // client must correct it rather than retry.
+        OperationEventError::InvalidContext(_)
         | OperationEventError::InvalidProgress
-        | OperationEventError::TerminalAlreadyPublished
         | OperationEventError::InvalidTerminal(_)
-        | OperationEventError::InvalidTestRunEvent
-        | OperationEventError::ResumeUnavailable => {
+        | OperationEventError::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.invalid_request".to_owned(),
+                message: "The operation-event request is invalid".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        },
+        // Idempotency facts: the identity or terminal receipt is already
+        // published, so the client re-reads current state instead of retrying
+        // the same publish.
+        OperationEventError::AlreadyBound | OperationEventError::TerminalAlreadyPublished => {
+            ApplicationProblem::Conflict {
+                diagnostic: SafeDiagnostic {
+                    code: "operation_event.already_published".to_owned(),
+                    message: "The operation-event identity is already published".to_owned(),
+                },
+                retry: RetryDirective::AfterRevalidate,
+                legal_actions: vec![LegalAction::Refresh],
+            }
+        }
+        // A misconfigured authority is a deterministic, process-lifetime
+        // failure. It is not the caller's request that is wrong and no amount
+        // of retrying will change the outcome.
+        OperationEventError::InvalidConfiguration => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic {
+                code: "operation_event.unsupported".to_owned(),
+                message: "The operation-event authority is not configured for this operation"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        },
+        // Genuinely transient: the resume-token authority could not answer.
+        OperationEventError::ResumeUnavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "operation_event.unavailable".to_owned(),
                 message: "The operation-event service is unavailable".to_owned(),
@@ -2880,8 +2912,31 @@ pub enum ApplicationSurfaceAdapterError {
     UnknownOrNotAuthorized,
 }
 
+/// Process-immutable application catalog snapshot.
+///
+/// The catalog is composed entirely from `const` application specs, so nothing
+/// about it can change while the process runs. Composition still collects and
+/// sorts every contribution, validates the handler/contribution bijection, and
+/// derives all four profiles, so rebuilding it per call made a single dispatch
+/// pay for the whole pipeline twice: once to resolve the binding and again to
+/// re-validate it before execution. The snapshot is built once here and
+/// borrowed from then on; the per-call binding identity comparison in
+/// [`validate_current_application_binding`] is unchanged and now runs against
+/// this cached snapshot.
+static APPLICATION_SURFACE_CATALOG: LazyLock<Result<CatalogSnapshotV1, CatalogCompositionError>> =
+    LazyLock::new(build_application_catalog_snapshot);
+
+/// Borrow the process-wide catalog snapshot without recomposing it.
+pub(crate) fn application_surface_catalog_ref()
+-> Result<&'static CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
+    match &*APPLICATION_SURFACE_CATALOG {
+        Ok(catalog) => Ok(catalog),
+        Err(error) => Err(ApplicationSurfaceAdapterError::Catalog(error.clone())),
+    }
+}
+
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
-    Ok(build_application_catalog_snapshot()?)
+    application_surface_catalog_ref().map(Clone::clone)
 }
 
 pub fn application_surface_dispatch_input(
@@ -4319,8 +4374,8 @@ pub fn resolve_application_surface_dispatch_with_controls(
     cancellation: CancellationSignal,
     requested_format: RequestedOutputFormat,
 ) -> Result<DispatchedInvocation<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
-    let catalog = application_surface_catalog()?;
-    let resolver = CatalogBindingResolver::new(&catalog);
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
     let input = application_surface_dispatch_input_with_controls(
         operation,
         request_id,
@@ -4666,8 +4721,8 @@ pub fn resolve_catalog_tool_binding(
     tool_name: &str,
 ) -> Result<Option<ResolvedBinding>, ApplicationSurfaceAdapterError> {
     let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-    let catalog = application_surface_catalog()?;
-    let resolver = CatalogBindingResolver::new(&catalog);
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
     Ok(resolve_named_binding(&resolver, surface, operation))
 }
 
@@ -4679,8 +4734,8 @@ fn validate_current_application_binding(
     operation: ApplicationSurfaceOperation,
     dispatched: &DispatchedInvocation<ApplicationSurfaceRequest>,
 ) -> Result<(), ApplicationSurfaceAdapterError> {
-    let catalog = application_surface_catalog()?;
-    let resolver = CatalogBindingResolver::new(&catalog);
+    let catalog = application_surface_catalog_ref()?;
+    let resolver = CatalogBindingResolver::new(catalog);
     let current = resolve_application_binding(&resolver, dispatched.surface, operation)
         .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
     if current.binding_id != dispatched.invocation.binding_id
@@ -4713,11 +4768,24 @@ fn http_adapter_problem(
                 legal_actions: Vec::new(),
             }
         }
+        // Catalog composition is derived from `const` application specs, so
+        // these failures are deterministic for the lifetime of the process.
+        // Reporting them as `unavailable` told clients to retry a request that
+        // can never succeed.
         ApplicationSurfaceAdapterError::Catalog(_)
         | ApplicationSurfaceAdapterError::Contract(_)
         | ApplicationSurfaceAdapterError::Identifier(_)
-        | ApplicationSurfaceAdapterError::CatalogValidation(_)
-        | ApplicationSurfaceAdapterError::DaemonUnavailable => {
+        | ApplicationSurfaceAdapterError::CatalogValidation(_) => ApplicationProblem::Unsupported {
+            diagnostic: SafeDiagnostic {
+                code: "application.surface.catalog_unavailable".to_owned(),
+                message: "The application catalog for this operation could not be composed"
+                    .to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        },
+        // Genuinely transient: the owning daemon transport is not answering.
+        ApplicationSurfaceAdapterError::DaemonUnavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "application.surface.unavailable".to_owned(),
                 message: "The application service for this operation is unavailable".to_owned(),
