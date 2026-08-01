@@ -83,6 +83,37 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
 }
 
 #[test]
+fn capture_registry_owns_every_supported_transcript_route() {
+    for route in [
+        ("claude", true),
+        ("codex", true),
+        ("cursor", true),
+        ("kiro", true),
+        ("codex", false),
+        ("cursor", false),
+        ("kiro", false),
+    ] {
+        assert!(
+            super::kernels::transcript_capture_kernel(route.0, route.1).is_some(),
+            "no capture kernel registered for {route:?}"
+        );
+    }
+    // Routes with no registered kernel are reported through the typed
+    // `unknown_provider` admission status rather than a generic config error.
+    for route in [
+        ("claude", false),
+        ("hermes", true),
+        ("hermes", false),
+        ("unknown-provider-v99", true),
+    ] {
+        assert!(
+            super::kernels::transcript_capture_kernel(route.0, route.1).is_none(),
+            "unexpected capture kernel registered for {route:?}"
+        );
+    }
+}
+
+#[test]
 fn cursor_event_numbers_accept_numeric_and_string_forms() {
     let event = json!({ "tokens": "42", "message_count": 7 });
     assert_eq!(event_i64(&event, &["tokens"]), Some(42));
