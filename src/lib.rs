@@ -45,6 +45,7 @@
 
 pub mod accounting;
 pub mod agents;
+pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 mod analytics;
 pub mod analytics_bridge;
 pub mod application;

@@ -472,7 +472,7 @@ pub(super) async fn drain_client_tasks(
     false
 }
 #[cfg(unix)]
-fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
+pub(super) fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
     let permissions = std::fs::Permissions::from_mode(mode);
     std::fs::set_permissions(path, permissions).map_err(|e| TraceDecayError::Config {
         message: format!(
