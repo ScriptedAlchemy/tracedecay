@@ -17,13 +17,15 @@
 > backward-read/recovery until the registered-store/profile census proves
 > absence.
 
-**Goal:** Publish Rust, TypeScript, and Python SDKs for accepted PR12–PR17
-operations without inventing lifecycle semantics.
+**Goal:** Publish Rust and TypeScript SDKs for accepted PR12–PR17
+operations without inventing lifecycle semantics. (The originally planned
+Python SDK was dropped: delivery is TypeScript-first plus a retained Rust
+SDK for native consumers, with no Python package.)
 
 ## Historical file and interface inventory
 
 - Rust workspace SDK crate and generated wire types.
-- TypeScript and Python package roots, generators, conformance fixtures,
+- TypeScript package root, generators, conformance fixtures,
   package metadata, examples, and release CI.
 - Bind local daemon and PR16 remote transports to one operation catalog.
 
@@ -36,7 +38,7 @@ accepted.
 ## Historical ordered slices
 
 1. Freeze accepted operation/schema manifest.
-2. Generate Rust/TS/Python wire models deterministically.
+2. Generate Rust/TS wire models deterministically.
 3. Implement lifecycle façades and local transport.
 4. Implement remote transport with identical semantics.
 5. Add examples and cross-language golden conformance.
@@ -44,7 +46,7 @@ accepted.
 
 ## Product outcome contributed
 
-The work contributed Rust, TypeScript, and Python SDK façades over one operation
+The work contributed Rust and TypeScript SDK façades over one operation
 catalog with equivalent authentication, scope, lifecycle, paging/SSE,
 cancellation, idempotency, and typed outcomes. Current direct behavior and
 acceptance live in the applicable numbered V2 plan.
@@ -59,5 +61,6 @@ package release, schemas follow the accepted major-version compatibility
 policy. Rollback unpublishes or yanks a package release according to registry
 policy but never changes server semantics. Measure generation, package size,
 startup, paging/SSE overhead, and conformance duration. Delete private client
-wrappers and aliases only after three-language local/remote conformance,
+wrappers and aliases only after two-language (Rust and TypeScript)
+local/remote conformance,
 examples, package/install gates, semver review, and normal CI pass.

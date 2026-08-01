@@ -350,7 +350,7 @@ CLI, MCP, HTTP, dashboard, and host bindings call the same application
 operations. They contain no readiness, scheduling, provider, retry, effect, or
 Git logic. PR17 names may remain pre-stabilization bindings, but every
 SDK-facing semantic operation and lifecycle state is callable and tested.
-PR18 freezes Rust, TypeScript, Python, HTTP, CLI, and MCP compatibility names
+PR18 freezes Rust, TypeScript, HTTP, CLI, and MCP compatibility names
 without changing this behavior.
 
 ## Work projections and observations
@@ -460,7 +460,7 @@ contract-only gates.
 
 ## Not in PR14/PR17
 
-- PR18 publishes and freezes the public Rust, TypeScript, and Python SDKs and
+- PR18 publishes and freezes the public Rust and TypeScript SDKs and
   compatibility policy for these already complete operations.
 - PR20 optimizes measured queue, provider, evidence, projection, and effect
   latency.
