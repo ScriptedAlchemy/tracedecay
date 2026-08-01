@@ -112,10 +112,7 @@ pub(super) struct OpeningRuntime {
 }
 
 impl StoreRuntimeRegistry {
-    pub fn begin_or_join_open(
-        &self,
-        request: &StoreRuntimeOpenRequest,
-    ) -> StoreRuntimeOpenBegin {
+    pub fn begin_or_join_open(&self, request: &StoreRuntimeOpenRequest) -> StoreRuntimeOpenBegin {
         let key = request.key.clone();
         let (binding, attempt, updates, join, eviction) = {
             let mut state = self.lock_state();

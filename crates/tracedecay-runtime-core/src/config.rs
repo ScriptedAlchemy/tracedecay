@@ -185,3 +185,48 @@ fn paths_same(left: &Path, right: &Path) -> bool {
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
     left == right
 }
+
+/// Directory-name segments treated as generated or vendored content:
+/// build output, package-manager caches, and vendored dependencies.
+///
+/// This is the single source of truth for "what counts as generated" and is
+/// shared by four call sites that used to hand-maintain independent lists
+/// which had drifted out of sync with each other:
+///
+/// - the root `config` module's `is_excluded` / `default_exclude_patterns`
+///   (config-driven, glob-pattern based — this list seeds the *default*
+///   patterns, but a project's `config.exclude` can still be overridden).
+/// - `tracedecay::scan::TraceDecay::is_skipped_dir_hint` (an informational
+///   hint only; the authoritative gate there is still `is_excluded_dir`).
+/// - `tracedecay_migrate::inventory::should_prune_dir` (authoritative
+///   directory prune during migration inventory scans).
+/// - `mcp::tools::handlers::redundancy::is_generated_path` (candidate
+///   filtering for the duplicate-code scanner).
+///
+/// Each call site may still layer its own local additions on top where
+/// something is specific to that tool's purpose (see call-site comments);
+/// this list only covers the shared "generated/vendored" core.
+pub const GENERATED_DIR_SEGMENTS: &[&str] = &[
+    ".cache",
+    ".gradle",
+    ".next",
+    ".turbo",
+    ".venv",
+    ".worktrees",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "vendor",
+    "venv",
+];
+
+/// Returns `true` if `segment` (a single path component, e.g. a directory
+/// name) is one of the shared [`GENERATED_DIR_SEGMENTS`].
+#[must_use]
+pub fn is_generated_dir_segment(segment: &str) -> bool {
+    GENERATED_DIR_SEGMENTS.contains(&segment)
+}

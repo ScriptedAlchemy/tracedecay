@@ -11,9 +11,7 @@ pub struct GraphRuntimeMetadata<'runtime> {
 }
 
 impl StoreRuntimeHandle {
-    pub fn graph_metadata(
-        &self,
-    ) -> Result<GraphRuntimeMetadata<'_>, StoreRuntimeRegistryFailure> {
+    pub fn graph_metadata(&self) -> Result<GraphRuntimeMetadata<'_>, StoreRuntimeRegistryFailure> {
         if !matches!(
             &self.binding().shard_id.scope,
             StoreShardScopeV1::Code { .. }
@@ -32,10 +30,7 @@ impl StoreRuntimeHandle {
 }
 
 impl GraphRuntimeMetadata<'_> {
-    pub async fn get(
-        &self,
-        key: &str,
-    ) -> Result<Option<String>, StoreRuntimeRegistryFailure> {
+    pub async fn get(&self, key: &str) -> Result<Option<String>, StoreRuntimeRegistryFailure> {
         self._runtime
             .validate_registered_read("read registered graph metadata")?;
         let mut rows = self
@@ -49,11 +44,7 @@ impl GraphRuntimeMetadata<'_> {
         row.get(0).map(Some).map_err(graph_metadata_failure)
     }
 
-    pub async fn set(
-        &self,
-        key: &str,
-        value: &str,
-    ) -> Result<(), StoreRuntimeRegistryFailure> {
+    pub async fn set(&self, key: &str, value: &str) -> Result<(), StoreRuntimeRegistryFailure> {
         self._runtime
             .validate_registered_read("write registered graph metadata")?;
         let transaction = self
