@@ -263,8 +263,8 @@ impl RegisteredTemporalHarness {
     /// assert a property survives losing and re-acquiring the handle rather
     /// than only rebuilding the objects layered over one.
     pub(super) async fn remount(&self) -> Arc<RegisteredGlobalDb> {
-        self._registry
-            .profile_sessions()
+        self._runtime
+            .remount_profile_database_for_test()
             .await
             .expect("remounted profile sessions")
     }
