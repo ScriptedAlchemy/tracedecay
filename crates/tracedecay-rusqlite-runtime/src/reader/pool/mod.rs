@@ -401,12 +401,20 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
         let started = Instant::now();
+        // Retiring burst workers walks and rebuilds the idle deque under the
+        // state lock; it only has anything to do when the idle set has actually
+        // changed. Run it on entry and after a notified wake, never on every
+        // bounded poll tick — a timed-out wait leaves the idle set untouched, so
+        // repeating the scan each 5ms merely adds lock traffic to the hot path.
+        let mut retire_pending = true;
 
         loop {
             if let Some(reason) = interrupted() {
                 return Err(ReaderAcquireError::Interrupted { reason });
             }
-            self.retire_idle_at(Instant::now());
+            if std::mem::take(&mut retire_pending) {
+                self.retire_idle_at(Instant::now());
+            }
             let mut state = self
                 .inner
                 .state
@@ -435,11 +443,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     });
                 }
                 let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
-                let (_state, _) = self
+                let (_state, wait_result) = self
                     .inner
                     .capacity_changed
                     .wait_timeout(state, wait)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                retire_pending = !wait_result.timed_out();
                 continue;
             }
             if let Some(worker) = state.available(lane).pop_front() {
@@ -514,11 +523,12 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 });
             }
             let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
-            let (_state, _) = self
+            let (_state, wait_result) = self
                 .inner
                 .capacity_changed
                 .wait_timeout(state, wait)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retire_pending = !wait_result.timed_out();
         }
     }
 
