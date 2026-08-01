@@ -162,6 +162,7 @@ async fn scheduler_skill_writer_respects_interval_gate() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activity() {
     let temp = tempdir().unwrap();
@@ -192,6 +193,7 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_success() {
     let temp = tempdir().unwrap();

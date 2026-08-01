@@ -1,4 +1,5 @@
 use crate::support::*;
+#[cfg(feature = "test-transport")]
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 
 #[test]
@@ -235,6 +236,7 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
     assert!(!profile_root.exists());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default() {
     let temp = tempdir().unwrap();
@@ -556,6 +558,7 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
     assert!(records[0].applied_ops.is_some());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     const HIGH_ENTROPY_RUN_ID: &str =
@@ -722,6 +725,7 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_self_manages_partial_noops_without_review_gate() {
     let temp = tempdir().unwrap();
@@ -884,6 +888,7 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     assert_eq!(proposals.proposals()[0].automation_run_id(), Some("run-a"));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_rejects_unsupported_source_role_and_time_filters_without_writes() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -978,6 +983,7 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     let temp = tempdir().unwrap();
@@ -1058,6 +1064,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
     assert_eq!(run.ledger_record.rejected_count, 0);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_suppresses_replay_for_filtered_runs() {
     let temp = tempdir().unwrap();
@@ -1155,8 +1162,10 @@ async fn session_reflector_skips_when_replay_disabled_and_no_grep_hits() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 struct NoSummaryReplayBackend;
 
+#[cfg(feature = "test-transport")]
 impl AgentTaskBackend for NoSummaryReplayBackend {
     fn run_task(
         &self,
@@ -1189,6 +1198,7 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
     }
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_replay_respects_include_summaries_false() {
     let temp = tempdir().unwrap();
@@ -1263,6 +1273,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_ledgers_malformed_backend_output() {
     let temp = tempdir().unwrap();
@@ -1326,6 +1337,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_ledgers_missing_facts_array() {
     let temp = tempdir().unwrap();
@@ -1389,6 +1401,7 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     assert_eq!(records[0].error_retryable, Some(false));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fails() {
     let temp = tempdir().unwrap();

@@ -46,6 +46,7 @@ fn combined_output_fixture() -> Value {
     })
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -384,6 +385,7 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     assert!(!profile_root.exists());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missing() {
     let _env_lock = ENV_LOCK.lock().await;
@@ -440,6 +442,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fails() {
     let _env_lock = ENV_LOCK.lock().await;

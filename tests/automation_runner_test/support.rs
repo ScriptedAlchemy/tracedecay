@@ -1034,6 +1034,7 @@ pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     TraceDecay::init(project_root).await.unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn project_session_runtime(
     cg: &TraceDecay,
 ) -> std::sync::Arc<HostAdmissionTestRuntimeV1> {
@@ -1041,6 +1042,7 @@ pub(crate) async fn project_session_runtime(
         .expect("project graph should retain its registered test runtime")
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
     let db = project_session_runtime(cg).await;
     seed_session_message_in_db(
@@ -1059,6 +1061,7 @@ pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {
     .await;
 }
 
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
     let db = project_session_runtime(cg).await;
     let session = SessionRecord {
@@ -1105,6 +1108,7 @@ pub(crate) async fn seed_search_underuse_session_evidence(cg: &TraceDecay) {
 
 /// Seeds one session message at `timestamp` so the scheduler observes LCM
 /// session activity at that instant.
+#[cfg(feature = "test-transport")]
 pub(crate) async fn seed_session_activity(cg: &TraceDecay, timestamp: i64) {
     let db = project_session_runtime(cg).await;
     seed_session_message_in_db(
