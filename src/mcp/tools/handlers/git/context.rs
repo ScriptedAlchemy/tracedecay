@@ -305,10 +305,30 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         .and_then(|v| v.as_str())
         .unwrap_or("HEAD");
 
-    let comparison = match git_pr_comparison(cg.project_root(), &base, head) {
-        Ok(comparison) => comparison,
-        Err(e) => {
-            return Ok(git_error_result(cg, &args, "diff", &e));
+    // The gix repo open, merge-base resolution, tree diff, and revwalk are all
+    // synchronous and unbounded on a diverged or pathological ref. Run them on
+    // the blocking pool so they never starve the async worker and so the
+    // dispatch deadline enforced in `dispatch_git_tools` can actually preempt
+    // this span (a `tokio::time::timeout` cannot interrupt an inline blocking
+    // call — only the `spawn_blocking` join future it awaits here).
+    let comparison = {
+        let project_root = cg.project_root().to_path_buf();
+        let base_ref = base.clone();
+        let head_ref = head.to_owned();
+        match tokio::task::spawn_blocking(move || {
+            git_pr_comparison(&project_root, &base_ref, &head_ref)
+        })
+        .await
+        {
+            Ok(Ok(comparison)) => comparison,
+            Ok(Err(e)) => {
+                return Ok(git_error_result(cg, &args, "diff", &e));
+            }
+            Err(join_error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("git PR comparison task failed: {join_error}"),
+                });
+            }
         }
     };
     let GitPrComparison {
