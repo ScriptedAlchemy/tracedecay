@@ -7,11 +7,58 @@ use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, profile_sharded_layout, write_enrollment_marker,
+    StoreKind, StoreLayout, StoreManifest, profile_sharded_layout, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay_lsp::analyzer::adapters::{DiagnosticMode, LspAdapterDefinition, LspInstallOption};
 use tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings;
+
+/// How the doctor "Current project" check sees the working directory's store.
+///
+/// Production resolves the current project through the daemon
+/// ([`daemon_project_status`]); this models the registry/alias-aware
+/// resolution the tools use so the tests below can assert it directly.
+#[derive(Debug)]
+enum CurrentProjectStore {
+    /// A store resolved through the same registry/alias-aware path the tools
+    /// use (enrollment marker, git-common-dir alias, profile shard, …).
+    Resolved(Box<StoreLayout>),
+    /// No resolvable store, but an old repo-local `.tracedecay/` database exists.
+    LegacyRepoLocal,
+    /// Resolution genuinely found nothing — `tracedecay init` is warranted.
+    Uninitialized,
+}
+
+async fn resolve_current_project_store(
+    project_path: &Path,
+    open_options: &TraceDecayOpenOptions,
+) -> crate::errors::Result<CurrentProjectStore> {
+    if let Some(layout) =
+        TraceDecay::try_initialized_store_layout_with_options(project_path, open_options).await?
+    {
+        return Ok(CurrentProjectStore::Resolved(Box::new(layout)));
+    }
+    if crate::config::has_project_database(project_path) {
+        return Ok(CurrentProjectStore::LegacyRepoLocal);
+    }
+    Ok(CurrentProjectStore::Uninitialized)
+}
+
+fn describe_resolved_store(layout: &StoreLayout) -> String {
+    let mode = match layout.storage_mode {
+        StorageMode::ProjectLocal => "repo-local",
+        StorageMode::ProfileSharded => "profile-sharded",
+    };
+    let store_id = layout
+        .identity
+        .project_id
+        .as_deref()
+        .map_or_else(String::new, |id| format!(", store {id}"));
+    format!(
+        "Index found: {}/ ({mode}{store_id})",
+        layout.data_root.display()
+    )
+}
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
