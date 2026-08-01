@@ -436,7 +436,7 @@ fn scanned_segments(
     Ok(segments)
 }
 
-struct SourceProcessingContext<'a, A> {
+struct SourceProcessingContext<'a, A: ?Sized> {
     admission: &'a A,
     source_adapter: &'a ClaudeSource,
     project_root: &'a Path,

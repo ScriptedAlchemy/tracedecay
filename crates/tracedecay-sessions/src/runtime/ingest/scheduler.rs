@@ -6,7 +6,7 @@ use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::SessionProvider;
 use crate::runtime::snapshot_observation::MAX_SNAPSHOT_CAPTURE_UNIT_BYTES;
 use crate::runtime::source::MAX_JSONL_RECORD_BYTES;
-use crate::store::TranscriptIngestStore;
+use crate::runtime::store_port::TranscriptIngestStore;
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, RoundRobinAdmission, plan_round_robin_admission,

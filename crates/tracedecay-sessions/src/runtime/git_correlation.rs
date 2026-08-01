@@ -1891,7 +1891,9 @@ pub use backfill::{
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;
-pub use store::{AnalyticsSessionTimestampSource, GitCorrelationWriteTxn};
+pub use store::{
+    AnalyticsSessionTimestampSource, GitCorrelationSessionStore, GitCorrelationWriteTxn,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

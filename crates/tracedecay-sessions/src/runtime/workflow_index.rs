@@ -706,7 +706,7 @@ fn workflow_scope_exists_predicate(
 }
 
 mod port;
-pub use port::WorkflowIngestWriteTxn;
+pub use port::{WorkflowIngestSink, WorkflowIngestWriteTxn};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
