@@ -4,12 +4,12 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use tracedecay_runtime_core::branch_meta;
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use crate::root_seam::global_db::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
     StoreArtifactUpsert, StoreInstanceUpsert,
 };
+use tracedecay_runtime_core::branch_meta;
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
 use tracedecay_runtime_core::storage::{
     ProjectStorageLocation, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
@@ -167,7 +167,9 @@ impl MigrationRegistryRuntime {
         })
     }
 
-    pub async fn registered_project_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
+    pub async fn registered_project_paths(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         self.profile_database
             .try_list_code_project_paths(usize::MAX)
             .await

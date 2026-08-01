@@ -3,8 +3,8 @@
 use tracedecay_application::DirectorySyncPolicy;
 
 use super::*;
-use tracedecay_runtime_core::db::engine::Value;
 use crate::root_seam::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+use tracedecay_runtime_core::db::engine::Value;
 use tracedecay_runtime_core::sqlite_read_snapshot::SnapshotConnection;
 
 pub(super) struct MergeOutcome {

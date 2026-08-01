@@ -198,7 +198,8 @@ async fn legacy_single_db_retry_after_destination_publish_is_deterministic() {
 
     assert_eq!(applied.state, ConsolidationState::Applied);
     let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
-    let default_branch = tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
+    let default_branch =
+        tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
     let preserved = &destination_meta.branches
         [&format!("consolidated/{}/{}", fixture.source_id, default_branch)];
     assert_eq!(preserved.created_at, "0");
@@ -221,7 +222,8 @@ async fn target_legacy_single_db_metadata_is_synthesized_without_input_mutation(
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
     assert!(!target.branch_meta_path.exists());
     let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
-    let default_branch = tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
+    let default_branch =
+        tracedecay_runtime_core::branch::detect_default_branch(&fixture.project).unwrap();
     assert_eq!(destination_meta.default_branch, default_branch);
     assert_eq!(destination_meta.branches[&default_branch].created_at, "0");
     assert_eq!(

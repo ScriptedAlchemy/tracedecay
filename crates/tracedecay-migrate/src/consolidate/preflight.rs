@@ -83,11 +83,11 @@ fn evaluate_holder_scan(
                 "profile shard consolidation requires every input store handle to be closed; restart the listed agent hosts and retry (TraceDecay never terminates them automatically):{details}"
             )))
         }
-        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
-            Err(config_error(format!(
-                "profile shard consolidation cannot prove every input store handle is closed: {reason}; run consolidation on a host with open-store process discovery"
-            )))
-        }
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Unsupported {
+            reason,
+        } => Err(config_error(format!(
+            "profile shard consolidation cannot prove every input store handle is closed: {reason}; run consolidation on a host with open-store process discovery"
+        ))),
     }
 }
 

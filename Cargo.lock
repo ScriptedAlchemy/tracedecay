@@ -5830,6 +5830,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-domain",
+ "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracing",

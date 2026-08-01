@@ -12,8 +12,8 @@ use super::resolution::{ResolvedTargetProject, resolve_target_project, same_path
 use super::session_merge::{MergeSnapshotRequest, merge_snapshot};
 use crate::hermes::{LegacyHermesMigration, LegacyHermesMigrationIssue};
 use crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use crate::root_seam::global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_runtime_core::sqlite_read_snapshot::{SnapshotConnection, SnapshotDatabase};
 
 pub async fn verify_source<Q>(source: &Q) -> Result<(), String>
@@ -222,7 +222,10 @@ async fn resolve_target_layout(
         )
         .await
     } else {
-        tracedecay_runtime_core::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
+        tracedecay_runtime_core::storage::resolve_layout(
+            &target_project.root,
+            tracedecay_profile_root,
+        )
     }?;
     project_layout(layout)
 }

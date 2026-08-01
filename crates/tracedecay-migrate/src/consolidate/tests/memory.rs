@@ -57,9 +57,10 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
     source.checkpoint().await.unwrap();
     source.close();
 
-    let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(&source_path, temp.path())
-        .await
-        .unwrap();
+    let snapshot =
+        tracedecay_runtime_core::sqlite_read_snapshot::open_in(&source_path, temp.path())
+            .await
+            .unwrap();
     sqlite::merge_branch_legacy_memory_snapshot(&target, &snapshot)
         .await
         .unwrap();

@@ -3,11 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::Cell;
 
-use tracedecay_runtime_core::db::engine::{Executor, params};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalObservationIdV1, MessageOccurrenceIdV1, ProjectionOutputOrdinalV1,
 };
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_runtime_core::errors::Result;
 

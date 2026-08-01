@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use super::runtime::{ConsolidationArtifactAuthorityV1, ConsolidationAttachTokenV1};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{
+    DatabaseAttachmentExecutor, Executor, QueryExecutor, params,
+};
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::memory::store::MemoryStore;
 
