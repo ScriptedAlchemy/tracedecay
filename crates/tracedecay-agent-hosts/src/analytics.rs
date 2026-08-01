@@ -8,11 +8,10 @@
 //! pure classification over `serde_json` values — so it moves cleanly rather
 //! than needing a port.
 //!
-//! Root wiring: `src/analytics.rs` becomes
+//! Root wiring: `src/analytics.rs` is
 //! `pub use tracedecay_agent_hosts::analytics::*;`, keeping every
 //! `crate::analytics::…` path resolving for the hook and MCP readers that stay
-//! in the root crate. Until that lands the two copies are duplicated; see
-//! `SEAMS.md`.
+//! in the root crate.
 
 use std::collections::{BTreeMap, BTreeSet};
 
