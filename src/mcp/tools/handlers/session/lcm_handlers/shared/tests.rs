@@ -1,26 +1,10 @@
 use std::path::Path;
-use std::sync::Mutex;
-
-use tempfile::TempDir;
-use tracedecay_domain::{
-    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
-    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
-};
 
 use super::super::super::*;
 use super::super::retrieval::{handle_lcm_grep, handle_lcm_load_session};
 use super::super::test_support::*;
 use super::*;
-use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
-use crate::mcp::tools::handlers::session::message_search::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-};
-use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
+use crate::mcp::tools::handlers::session::message_search::SessionRetrievalServiceOutcome;
 
 #[tokio::test]
 async fn unsupported_filters_are_typed_and_never_call_the_service() {

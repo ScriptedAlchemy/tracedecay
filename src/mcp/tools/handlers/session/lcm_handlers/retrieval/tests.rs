@@ -1,25 +1,15 @@
 use std::path::Path;
-use std::sync::Mutex;
 
 use tempfile::TempDir;
-use tracedecay_domain::{
-    HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
-    SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
-};
+use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1, UtcMicros};
 
 use super::super::super::*;
 use super::super::test_support::*;
 use super::*;
 use crate::application::session::{SessionDataFreshness, SessionRetrievalScope};
 use crate::mcp::tools::handlers::session::message_search::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalUnavailable, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalPageView, SessionRetrievalServiceOutcome,
 };
-use crate::sessions::lcm::{LcmContentRange, LcmDescribeResponse, LcmExpandResponse};
 
 #[tokio::test]
 async fn load_maps_exact_forensic_occurrence_and_preserves_legacy_keys() {
