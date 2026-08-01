@@ -23,6 +23,7 @@ mod kiro;
 pub(crate) mod memory_inject;
 mod post_tool_use;
 mod steering;
+mod store_layout;
 pub mod tool_hints;
 mod v2;
 pub(crate) use v2::HOOK_V2_BOUND_HOSTS;
@@ -675,7 +676,7 @@ fn deduped_project_hint_with_id(
     // those decisions in the user profile so one missing cwd does not turn
     // every prompt/tool event into the same repeated hint.
     let project_path = root
-        .and_then(|root| crate::storage::resolve_layout_for_current_profile(root).ok())
+        .and_then(store_layout::layout)
         .filter(|layout| layout.data_root.is_dir())
         .map(|layout| layout.data_root.join("tool_hints_seen.json"));
     let path = project_path.or_else(|| {

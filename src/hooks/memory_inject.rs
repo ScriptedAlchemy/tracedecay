@@ -475,7 +475,7 @@ impl MemoryInjectSeen {
 }
 
 fn seen_facts_path(root: &Path) -> Option<std::path::PathBuf> {
-    let layout = crate::storage::resolve_layout_for_current_profile(root).ok()?;
+    let layout = super::store_layout::layout(root)?;
     layout
         .data_root
         .is_dir()
