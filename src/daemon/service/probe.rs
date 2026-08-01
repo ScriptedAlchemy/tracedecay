@@ -12,6 +12,7 @@ use super::default_socket_path;
 
 trait ProbeStream: Read + IoWrite {
     fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()>;
+    fn set_probe_write_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()>;
 }
 
 #[cfg(unix)]
@@ -19,12 +20,20 @@ impl ProbeStream for StdUnixStream {
     fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         self.set_read_timeout(Some(timeout))
     }
+
+    fn set_probe_write_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.set_write_timeout(Some(timeout))
+    }
 }
 
 #[cfg(not(unix))]
 impl ProbeStream for StdTcpStream {
     fn set_probe_read_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         self.set_read_timeout(Some(timeout))
+    }
+
+    fn set_probe_write_timeout(&self, timeout: std::time::Duration) -> std::io::Result<()> {
+        self.set_write_timeout(Some(timeout))
     }
 }
 
@@ -112,14 +121,13 @@ fn query_daemon_identity(
     socket_path: &Path,
     probe_timeout: std::time::Duration,
 ) -> Result<(Option<String>, Option<String>)> {
+    let deadline = std::time::Instant::now() + probe_timeout;
     // The first initialize after a restart can sit behind startup recovery
     // on the daemon side; a sub-second read deadline misclassifies a busy,
     // healthy daemon as unresponsive.
     let connection = super::super::client_connection(socket_path)?;
     let stream = StdUnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(probe_timeout))?;
-    stream.set_write_timeout(Some(probe_timeout))?;
-    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), probe_timeout)
+    query_daemon_identity_stream(stream, connection.auth_token.as_deref(), deadline)
 }
 
 #[cfg(not(unix))]
@@ -127,18 +135,18 @@ fn query_daemon_identity(
     socket_path: &Path,
     probe_timeout: std::time::Duration,
 ) -> Result<(Option<String>, Option<String>)> {
+    let deadline = std::time::Instant::now() + probe_timeout;
     let (address, auth_token) =
         current_loopback_authority(socket_path)?.ok_or_else(missing_loopback_authority)?;
-    let stream = StdTcpStream::connect_timeout(&address, probe_timeout)?;
-    stream.set_read_timeout(Some(probe_timeout))?;
-    stream.set_write_timeout(Some(probe_timeout))?;
-    query_daemon_identity_stream(stream, Some(&auth_token), probe_timeout)
+    let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
+    let stream = StdTcpStream::connect_timeout(&address, remaining)?;
+    query_daemon_identity_stream(stream, Some(&auth_token), deadline)
 }
 
 fn query_daemon_identity_stream(
     mut stream: impl ProbeStream,
     auth_token: Option<&str>,
-    probe_timeout: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> Result<(Option<String>, Option<String>)> {
     const REQUEST_ID: i64 = 1;
     let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
@@ -156,21 +164,15 @@ fn query_daemon_identity_stream(
     preamble.push('\n');
     preamble.push_str(&request.to_string());
     preamble.push('\n');
+    let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
+    stream.set_probe_write_timeout(remaining)?;
     IoWrite::write_all(&mut stream, preamble.as_bytes())?;
     IoWrite::flush(&mut stream)?;
 
-    let deadline = std::time::Instant::now() + probe_timeout;
     let mut reader = BufReader::new(stream);
     loop {
-        let now = std::time::Instant::now();
-        if now >= deadline {
-            return Err(TraceDecayError::Config {
-                message: "daemon readiness probe exceeded its absolute deadline".to_string(),
-            });
-        }
-        reader
-            .get_ref()
-            .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
+        let remaining = remaining_probe_time(deadline, "daemon readiness probe")?;
+        reader.get_ref().set_probe_read_timeout(remaining)?;
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
             return Err(TraceDecayError::Config {
@@ -208,19 +210,19 @@ pub(super) enum DaemonShutdownRequest {
 #[cfg(not(unix))]
 pub(super) fn request_daemon_shutdown(transport_hint: &Path) -> Result<DaemonShutdownRequest> {
     const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SHUTDOWN_TIMEOUT;
     let (address, auth_token) =
         current_loopback_authority(transport_hint)?.ok_or_else(missing_loopback_authority)?;
-    let stream = StdTcpStream::connect_timeout(&address, SHUTDOWN_TIMEOUT)?;
-    stream.set_read_timeout(Some(SHUTDOWN_TIMEOUT))?;
-    stream.set_write_timeout(Some(SHUTDOWN_TIMEOUT))?;
-    request_daemon_shutdown_stream(stream, &auth_token, SHUTDOWN_TIMEOUT)
+    let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
+    let stream = StdTcpStream::connect_timeout(&address, remaining)?;
+    request_daemon_shutdown_stream(stream, &auth_token, deadline)
 }
 
 #[cfg(not(unix))]
 fn request_daemon_shutdown_stream(
     mut stream: impl ProbeStream,
     auth_token: &str,
-    shutdown_timeout: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> Result<DaemonShutdownRequest> {
     const REQUEST_ID: i64 = 2;
     let handshake = super::super::DaemonHandshake::for_current_client(None, None, false, false)?;
@@ -234,21 +236,15 @@ fn request_daemon_shutdown_stream(
     let request = request.to_string();
     let preamble = format!("{preface}\n{handshake}\n{request}\n");
 
-    let deadline = std::time::Instant::now() + shutdown_timeout;
+    let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
+    stream.set_probe_write_timeout(remaining)?;
     let acknowledgement = (|| -> Result<()> {
         IoWrite::write_all(&mut stream, preamble.as_bytes())?;
         IoWrite::flush(&mut stream)?;
         let mut reader = BufReader::new(stream);
         loop {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return Err(TraceDecayError::Config {
-                    message: "daemon shutdown request exceeded its absolute deadline".to_string(),
-                });
-            }
-            reader
-                .get_ref()
-                .set_probe_read_timeout(deadline.saturating_duration_since(now))?;
+            let remaining = remaining_probe_time(deadline, "daemon shutdown request")?;
+            reader.get_ref().set_probe_read_timeout(remaining)?;
             let mut line = String::new();
             if reader.read_line(&mut line)? == 0 {
                 return Err(TraceDecayError::Config {
@@ -272,6 +268,18 @@ fn request_daemon_shutdown_stream(
         Ok(()) => DaemonShutdownRequest::Acknowledged,
         Err(error) => DaemonShutdownRequest::SentWithoutAcknowledgement(error.to_string()),
     })
+}
+
+fn remaining_probe_time(
+    deadline: std::time::Instant,
+    operation: &str,
+) -> Result<std::time::Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{operation} exceeded its absolute deadline"),
+        })
 }
 
 #[cfg(any(not(unix), test))]
