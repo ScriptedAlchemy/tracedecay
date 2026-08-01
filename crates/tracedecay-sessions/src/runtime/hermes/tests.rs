@@ -9,9 +9,9 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::ObservationCoverageReason;
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
-use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::observation::ObservationCancellation;
+use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 use crate::runtime::shared::StoredCursor;
 
 use super::coverage::{
@@ -290,7 +290,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
         record.native_record_id,
     )
     .unwrap();
-    let outcome = crate::privacy::ClaudeRecordSanitizerV1::observation_v1()
+    let outcome = tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1::observation_v1()
         .unwrap()
         .sanitize_parsed(
             parsed,
@@ -298,7 +298,7 @@ fn sanitizer_preserves_non_sensitive_v1_message_identity() {
             RetentionClass::new(OBSERVATION_RETENTION).unwrap(),
         )
         .unwrap();
-    let crate::privacy::ObservationSanitizationOutcomeV1::Durable { observation, .. } = outcome
+    let tracedecay_runtime_core::privacy::ObservationSanitizationOutcomeV1::Durable { observation, .. } = outcome
     else {
         panic!("safe Hermes fixture must remain durable");
     };

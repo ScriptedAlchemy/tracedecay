@@ -7,8 +7,8 @@ use super::filesystem_authority::{
 };
 use super::{LcmError, gc, load_payload_metadata, util, validate_payload_ref};
 #[cfg(test)]
-use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {

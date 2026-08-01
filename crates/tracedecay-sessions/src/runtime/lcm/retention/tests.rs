@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::db::engine::{Connection, Executor, IntoParams, QueryExecutor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, IntoParams, QueryExecutor, TestConnection, params};
 use crate::runtime::lcm::schema;
 
 use super::*;
@@ -217,14 +217,14 @@ async fn authority_loss_before_commit_rolls_back_retention_mutations() -> Result
     let durable = insert_message(&store.conn, 1, 90, "must survive").await?;
     make_projection_durable(&store.conn, durable).await?;
     let scope = std::sync::Mutex::new(Some(
-        crate::db::enter_daemon_database_scope(
+        tracedecay_runtime_core::db::enter_daemon_database_scope(
             &store.storage_root,
             1,
             "session-retention-revocation-test",
         )
         .map_err(|error| error.to_string())?,
     ));
-    let authority = crate::db::DatabaseAuthority::for_runtime(
+    let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
         &store.storage_root.join("sessions.db"),
         "session retention revocation test",
     )

@@ -4,7 +4,7 @@ use serde_json::Value;
 use tracedecay_capture::claude::{normalize, stable_record_id};
 use tracedecay_domain::{ClaudeByteRangeV1, ObservationOrderingDomainV1};
 
-use crate::privacy::{
+use tracedecay_runtime_core::privacy::{
     MAX_OBSERVATION_RECORD_BYTES, ParsedClaudeRecordV1, SanitizedClaudeRecordV1,
     parse_normalized_observation_record_v1, protect_sensitive_structural_id,
 };

@@ -1,7 +1,7 @@
-use crate::application::session::compatibility::projected_content_hash;
+use crate::compatibility::projected_content_hash;
 #[cfg(test)]
-use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
 
@@ -567,7 +567,7 @@ async fn fetch_i64(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::TestConnection;
 
     #[tokio::test]
     async fn raw_fts_currency_requires_table_and_every_trigger_contract() -> Result<(), String> {

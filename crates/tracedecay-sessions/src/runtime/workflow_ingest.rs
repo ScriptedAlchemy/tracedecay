@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::ProjectId;
 
-use crate::accounting::parser::parse_timestamp;
-use crate::application::host_admission::DEFAULT_MAX_RECORDS;
+use crate::host_ports::parse_timestamp;
+use crate::admission::DEFAULT_MAX_RECORDS;
 use crate::runtime::shared::ProjectRootMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -22,7 +22,7 @@ use crate::runtime::source::{
     collect_files_with_ext_bounded, path_byte_len,
 };
 use crate::runtime::workflow_index::{WorkflowAgent, WorkflowRun, WorkflowStatus};
-use crate::store::GlobalDbWorkflowStore;
+use crate::runtime::workflow_index::WorkflowIngestSink;
 
 const RESULT_SUMMARY_CAP: usize = 600;
 const MAX_WORKFLOW_RUNS: usize = DEFAULT_MAX_RECORDS;
@@ -56,11 +56,10 @@ struct DiscoveredRun {
 /// cannot be resolved, or an individual malformed run all degrade to "ingest
 /// less", never an error. Returns the number of runs and agents upserted.
 ///
-/// The registered-database entry points live on the store adapter, which
-/// implements [`WorkflowIngestSink`]; taking the concrete adapter here keeps
-/// spawn paths on inherent `Send` futures instead of HRTB trait RPITIT.
-pub async fn ingest_workflow_runs_with_sink(
-    sink: &GlobalDbWorkflowStore<'_>,
+/// The registered-database entry points live on the root store adapter, which
+/// implements [`WorkflowIngestSink`]; this sweep sees only that port.
+pub async fn ingest_workflow_runs_with_sink<S: WorkflowIngestSink>(
+    sink: &S,
     project_id: &ProjectId,
     project_root: &Path,
     projects_dir: &Path,
@@ -287,8 +286,8 @@ fn agent_transcripts(agents_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse one discovered run and upsert its run row plus every agent row.
-async fn ingest_one_run(
-    sink: &GlobalDbWorkflowStore<'_>,
+async fn ingest_one_run<S: WorkflowIngestSink>(
+    sink: &S,
     run: &DiscoveredRun,
 ) -> Result<WorkflowIngestStats, crate::runtime::workflow_index::WorkflowIndexError> {
     let (mut workflow_run, mut agents) = match run.meta_path.as_deref().and_then(read_run_meta) {

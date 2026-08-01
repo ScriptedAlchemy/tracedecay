@@ -1,3 +1,4 @@
+pub mod authority;
 mod failure;
 mod project;
 mod project_provider;
@@ -6,6 +7,7 @@ mod startup;
 mod user;
 mod user_provider;
 
+pub use authority::{IngestAdmissionBinding, SessionIngestAuthority};
 pub use failure::{
     TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure,

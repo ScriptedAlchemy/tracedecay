@@ -27,12 +27,12 @@ use tracedecay_capture::kiro::{
 };
 use crate::decode_kiro_workspace_path;
 
-use crate::application::host_admission::HostAdmissionFacade;
+use crate::admission::HostAdmission;
 #[cfg(test)]
-use crate::application::host_admission::{HostAdmissionOutcome, HostAdmissionStatus};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+use crate::observation::ObservationCancellation;
 #[cfg(test)]
-use crate::privacy::parse_normalized_observation_record_v1;
+use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
     StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
@@ -131,7 +131,7 @@ impl KiroSource {
 
     /// Source rooted at `<home>/.config/Kiro` (or macOS equivalent).
     pub fn with_home(home: &Path) -> Self {
-        let data_dir = crate::agents::kiro_data_dir(home);
+        let data_dir = crate::host_ports::kiro_data_dir(home);
         Self {
             agent_dir: data_dir.join("User/globalStorage/kiro.kiroagent"),
             workspace_storage_dir: data_dir.join("User/workspaceStorage"),
@@ -335,7 +335,7 @@ fn collect_user_workspace_session_files(
 /// from their content hash; it neither consults nor advances legacy parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 pub async fn capture_kiro_snapshot_observations(
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     source: &KiroSource,
     project_root: &Path,
     scope: ObservationScopeV1,
@@ -898,7 +898,7 @@ fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     }
     value
         .as_str()
-        .and_then(crate::accounting::parser::parse_timestamp)
+        .and_then(crate::host_ports::parse_timestamp)
         .map(|secs| secs as i64)
 }
 
@@ -1070,7 +1070,7 @@ mod observation_tests {
         let first_bytes = source.snapshot_input_bytes(&first_path).unwrap();
         let second_bytes = source.snapshot_input_bytes(&second_path).unwrap();
 
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
             temp.path().join("profile"),
         )
         .await
@@ -1143,7 +1143,7 @@ mod observation_tests {
             workspace_storage_dir,
             user_registered_roots: None,
         };
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
             temp.path().join("profile"),
         )
         .await
@@ -1221,7 +1221,7 @@ mod observation_tests {
         let first_bytes = source.snapshot_input_bytes(&paths[0]).unwrap();
         let second_bytes = source.snapshot_input_bytes(&paths[1]).unwrap();
         let full_cap = first_bytes.saturating_add(second_bytes);
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        let runtime = crate::admission::HostAdmissionTestRuntimeV1::profile(
             temp.path().join("profile"),
         )
         .await

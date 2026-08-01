@@ -41,7 +41,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_store::{ParseOffset, TranscriptStoreError, TranscriptWriteBatch};
 
-use crate::application::host_admission::{WireReadOutcome, read_bounded_to_string};
+use crate::admission::{WireReadOutcome, read_bounded_to_string};
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub use crate::runtime::shared::{
@@ -50,7 +50,7 @@ pub use crate::runtime::shared::{
     usage_counters_from,
 };
 use crate::runtime::{SessionMessageRecord, SessionRecord};
-use crate::store::TranscriptIngestStore;
+use crate::runtime::store_port::TranscriptIngestStore;
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
 
@@ -69,7 +69,7 @@ pub enum TranscriptIngestError {
     #[error("transcript changed generation while scanning {path}")]
     ScanGenerationChanged { path: PathBuf },
     #[error(transparent)]
-    Privacy(#[from] crate::privacy::PrivacySanitizerError),
+    Privacy(#[from] tracedecay_runtime_core::privacy::PrivacySanitizerError),
     #[error(transparent)]
     Domain(#[from] tracedecay_domain::DomainError),
     #[error(transparent)]
@@ -541,9 +541,9 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
 
 fn protect_parsed_transcript_structural_ids(
     parsed: &mut ParsedTranscript,
-) -> Result<(), crate::privacy::PrivacySanitizerError> {
-    fn protect(value: &mut String) -> Result<(), crate::privacy::PrivacySanitizerError> {
-        *value = crate::privacy::protect_sensitive_structural_id(value)?;
+) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
+    fn protect(value: &mut String) -> Result<(), tracedecay_runtime_core::privacy::PrivacySanitizerError> {
+        *value = tracedecay_runtime_core::privacy::protect_sensitive_structural_id(value)?;
         Ok(())
     }
 
@@ -859,7 +859,7 @@ fn stable_jsonl_file_id(
     {
         use std::os::windows::fs::MetadataExt;
 
-        if let Ok(information) = crate::windows_file::information(file) {
+        if let Ok(information) = tracedecay_runtime_core::windows_file::information(file) {
             hasher.update(information.volume_serial_number.to_le_bytes());
             hasher.update(information.file_index.to_le_bytes());
         } else {

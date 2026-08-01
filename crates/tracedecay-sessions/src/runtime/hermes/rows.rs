@@ -1,7 +1,7 @@
 //! Joined `messages` × `sessions` row model and byte accounting for the
 //! bounded `SQLite` page sweep.
 
-use crate::privacy::MAX_OBSERVATION_RECORD_BYTES;
+use tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES;
 #[cfg(test)]
 use crate::runtime::shared::StoredCursor;
 

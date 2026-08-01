@@ -20,14 +20,12 @@ use tracedecay_store::{
     TranscriptStoreError,
 };
 
-use crate::application::host_admission::{
-    ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
-};
-use crate::application::observation::{
+use crate::admission::HostAdmission;
+use crate::observation::{
     CaptureClaudeObservationOutcome, CaptureClaudeObservationRequest,
     CaptureClaudeObservationRequestError, ObservationApplicationError, ObservationCancellation,
 };
-use crate::privacy::PrivacySanitizerError;
+use tracedecay_runtime_core::privacy::PrivacySanitizerError;
 use crate::runtime::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
@@ -261,7 +259,7 @@ fn cursor_after_receipt(
 }
 
 /// Sanitize and commit one already-framed record before any V1 sink.
-async fn capture_frame<A: ObservationCaptureAdmissionPort>(
+async fn capture_frame<A: HostAdmission + ?Sized>(
     admission: &A,
     frame: &mut ClaudeSourceFrame,
     expected_cursor: Option<ClaudeSourceCursorV1>,
@@ -326,7 +324,7 @@ async fn capture_frame<A: ObservationCaptureAdmissionPort>(
     }
 }
 
-async fn advance_non_durable_covered_range<A: ObservationCaptureAdmissionPort>(
+async fn advance_non_durable_covered_range<A: HostAdmission + ?Sized>(
     admission: &A,
     context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
@@ -438,7 +436,7 @@ fn scanned_segments(
     Ok(segments)
 }
 
-struct SourceProcessingContext<'a, A> {
+struct SourceProcessingContext<'a, A: ?Sized> {
     admission: &'a A,
     source_adapter: &'a ClaudeSource,
     project_root: &'a Path,
@@ -452,7 +450,7 @@ async fn prepare_source<A>(
     max_new_bytes: Option<u64>,
 ) -> Result<SourcePreparation, ClaudeObservationIngestError>
 where
-    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+    A: HostAdmission + ?Sized,
 {
     if context.cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
@@ -561,7 +559,7 @@ where
     })))
 }
 
-async fn apply_scanned_segment<A: ObservationCaptureAdmissionPort>(
+async fn apply_scanned_segment<A: HostAdmission + ?Sized>(
     admission: &A,
     capture_context: &FrameCaptureContext,
     observation_cursor: &mut Option<ClaudeSourceCursorV1>,
@@ -655,7 +653,7 @@ async fn apply_scanned_segment<A: ObservationCaptureAdmissionPort>(
     Ok(true)
 }
 
-async fn apply_prepared_source<A: ObservationCaptureAdmissionPort>(
+async fn apply_prepared_source<A: HostAdmission + ?Sized>(
     prepared: PreparedSource,
     admission: &A,
     cancellation: &ObservationCancellation,
@@ -691,7 +689,7 @@ async fn process_source<A>(
     max_new_bytes: Option<u64>,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
 where
-    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+    A: HostAdmission + ?Sized,
 {
     match prepare_source(context, path, max_new_bytes).await? {
         SourcePreparation::Finished(stats) => Ok(stats),
@@ -701,7 +699,7 @@ where
     }
 }
 
-pub async fn drain_projection_queue<A: ObservationCaptureAdmissionPort>(
+pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
@@ -734,7 +732,7 @@ fn frontier_store_error(
     .into()
 }
 
-async fn scheduled_source_paths<A: TranscriptCursorAdmissionPort>(
+async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     source: &ClaudeSource,
@@ -764,7 +762,7 @@ async fn scheduled_source_paths<A: TranscriptCursorAdmissionPort>(
     Ok((paths, deferred))
 }
 
-async fn advance_source_frontier<A: TranscriptCursorAdmissionPort>(
+async fn advance_source_frontier<A: HostAdmission + ?Sized>(
     admission: &A,
     scope: &ObservationScopeV1,
     processed: usize,
@@ -802,7 +800,7 @@ pub async fn ingest_source_with_observations_with_admission<A>(
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
 where
-    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+    A: HostAdmission + ?Sized,
 {
     if cancellation.is_cancelled() {
         return Err(ObservationApplicationError::Cancelled.into());
@@ -878,7 +876,7 @@ pub async fn ingest_user_sessions_with_admission<A>(
     cancellation: ObservationCancellation,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
 where
-    A: ObservationCaptureAdmissionPort + TranscriptCursorAdmissionPort,
+    A: HostAdmission + ?Sized,
 {
     let Some(source) = ClaudeSource::new() else {
         return Ok(ClaudeObservationIngestStats::default());
@@ -909,15 +907,15 @@ mod tests {
     use super::*;
     use std::future::Future;
 
-    use crate::application::host_admission::{
+    use crate::admission::{
         HostAdmissionOutcome, HostAdmissionScope, HostAdmissionTestRuntimeV1,
-        HostProjectionDrainOutcome, ObservationCaptureAdmissionPort, TranscriptCursorAdmissionPort,
+        HostProjectionDrainOutcome, HostAdmission, HostAdmission,
     };
-    use crate::application::observation::{
+    use crate::observation::{
         CaptureObservationOutcome, CaptureObservationRequest, ObservationApplication,
         ReplayObservationsRequest,
     };
-    use crate::privacy::ClaudeRecordSanitizerV1;
+    use tracedecay_runtime_core::privacy::ClaudeRecordSanitizerV1;
     use crate::runtime::claude::{scan_claude_source_frames, try_scan_claude_source_frames};
     use tracedecay_domain::{ObservationSourceCursorV1, ObservationSourceIdentityV1};
     use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
@@ -943,7 +941,7 @@ mod tests {
         last_drain_max: std::sync::atomic::AtomicUsize,
     }
 
-    impl ObservationCaptureAdmissionPort for CapturePortSpy {
+    impl HostAdmission for CapturePortSpy {
         fn capture_observation(
             &self,
             _request: CaptureObservationRequest,
@@ -1002,7 +1000,7 @@ mod tests {
         }
     }
 
-    impl TranscriptCursorAdmissionPort for CapturePortSpy {
+    impl HostAdmission for CapturePortSpy {
         fn get_parse_offset<'a>(
             &'a self,
             _scope: &'a ObservationScopeV1,
@@ -1085,7 +1083,7 @@ mod tests {
         );
         assert!(
             spy.cursor_reads.load(std::sync::atomic::Ordering::SeqCst) >= 1,
-            "scheduling must read the durable frontier through TranscriptCursorAdmissionPort"
+            "scheduling must read the durable frontier through HostAdmission"
         );
     }
 
@@ -1159,7 +1157,7 @@ mod tests {
             }
         }
 
-        fn registered(&self) -> &crate::global_db::RegisteredGlobalDb {
+        fn registered(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
             self.runtime
                 .registered_database(HostAdmissionScope::Profile)
                 .expect("registered profile session database")
@@ -1640,7 +1638,7 @@ mod tests {
     #[tokio::test]
     async fn registered_claude_ingest_api_routes_through_observation_authority() {
         let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().unwrap();
+        let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
         let fixture = Fixture::new_in_home(
             "legacy-api-session",
             profile_root.parent().unwrap().to_path_buf(),
@@ -2070,7 +2068,7 @@ mod tests {
     async fn malformed_partial_and_oversized_frames_preserve_all_observation_state() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
+            "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, frame) in [
             (
@@ -2090,7 +2088,7 @@ mod tests {
     async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() {
         let oversized = format!(
             "{{\"type\":\"user\",\"payload\":\"{}\"}}\n",
-            "x".repeat(crate::privacy::MAX_OBSERVATION_RECORD_BYTES)
+            "x".repeat(tracedecay_runtime_core::privacy::MAX_OBSERVATION_RECORD_BYTES)
         );
         for (session_id, suffix) in [
             (

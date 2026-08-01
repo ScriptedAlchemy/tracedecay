@@ -9,15 +9,15 @@ use tracedecay_store::{
     ObservationReplayRequest, SESSION_MESSAGE_PROJECTOR_VERSION, StoredObservation,
 };
 
-use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::application::observation::ObservationCancellation;
+use crate::admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::observation::ObservationCancellation;
 use crate::runtime::claude::ClaudeSource;
 use crate::runtime::claude_observation::{
     ClaudeObservationIngestStats, ingest_source_with_observations_with_admission,
 };
 use crate::runtime::cline_like::{ClineLikeSource, capture_cline_like_snapshot_observations};
 use crate::runtime::{codex, cursor, hermes, kiro};
-use crate::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use tracedecay_runtime_core::storage::{read_repository_identity_marker, write_repository_identity_marker};
 
 use super::artifact::{
     attest_build, command_output, git_snapshot, validate_git_snapshots, workload_identity,
@@ -1127,7 +1127,7 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
 }
 
 fn write_provider_kiro(home: &Path, project: &Path, repetition: usize) -> PathBuf {
-    let data_dir = crate::agents::kiro_data_dir(home);
+    let data_dir = crate::host_ports::kiro_data_dir(home);
     let workspace_hash = "0123456789abcdef0123456789abcdef";
     let workspace_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
     fs::create_dir_all(&workspace_storage).expect("create Kiro workspace fixture");
@@ -1176,7 +1176,7 @@ fn write_provider_cline_like(
         ProviderKind::Kilo => ("kilocode.kilo-code", "benchmark-kilo-session"),
         _ => unreachable!("Cline-family fixture kind"),
     };
-    let task_dir = crate::agents::vscode_data_dir(home)
+    let task_dir = crate::host_ports::vscode_data_dir(home)
         .join("User/globalStorage")
         .join(extension)
         .join("tasks")

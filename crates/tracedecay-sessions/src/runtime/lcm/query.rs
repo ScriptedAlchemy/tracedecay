@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::{
-    db::engine::{QueryExecutor, Value, params},
-    query::temporal::context::OrderedTextContextAssembler,
-    tracedecay::current_timestamp,
-};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_temporal_query::context::OrderedTextContextAssembler;
 
 mod describe;
 mod expand;
@@ -70,7 +68,7 @@ const PER_SESSION_HIT_CAP: usize = 3;
 
 /// Fetch budget before the re-rank stage, bounded by [`MAX_PAGE_LIMIT`].
 fn rerank_fetch_limit(limit: usize) -> usize {
-    crate::application::session::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
+    crate::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
 pub async fn expand_query(

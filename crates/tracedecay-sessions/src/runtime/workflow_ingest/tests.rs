@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::runtime::workflow_index::{
     INGEST_WATERMARK_KEY, RegisteredWorkflowIndexSnapshot, read_ingest_watermark,
 };
@@ -16,7 +16,7 @@ struct WorkflowTestStore {
     database: Arc<RegisteredGlobalDb>,
     project_id: ProjectId,
     _registry: DaemonSessionRuntimeRegistryV1,
-    _scope: crate::db::DaemonDatabaseScope,
+    _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _profile: tempfile::TempDir,
 }
 
@@ -38,7 +38,7 @@ async fn workflow_test_store(project_root: &Path) -> WorkflowTestStore {
     let identity =
         crate::daemon::profile_identity::load_or_create(&profile.path().join("profile")).unwrap();
     let nonce = WORKFLOW_TEST_NONCE.fetch_add(1, Ordering::Relaxed);
-    let scope = crate::db::enter_daemon_database_scope(
+    let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         identity.profile_root(),
         nonce,
         &format!("workflow-ingest-test-{nonce}"),
@@ -48,11 +48,11 @@ async fn workflow_test_store(project_root: &Path) -> WorkflowTestStore {
         .await
         .unwrap();
     let project_id = ProjectId::new(format!("project.workflow-ingest-{nonce}")).unwrap();
-    crate::storage::write_enrollment_marker(
+    tracedecay_runtime_core::storage::write_enrollment_marker(
         project_root,
-        &crate::storage::EnrollmentMarker {
+        &tracedecay_runtime_core::storage::EnrollmentMarker {
             project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
+            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
         },
     )
     .unwrap();

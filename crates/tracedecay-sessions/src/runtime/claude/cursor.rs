@@ -32,14 +32,14 @@ pub(super) fn claude_cursor_key(path: &Path) -> TranscriptCursorKey {
 fn claude_non_unicode_cursor_key(path: &Path) -> String {
     encode_cursor_key(
         claude_native_platform(),
-        &crate::os_str_bytes::native_os_str_bytes(path.as_os_str()),
+        &tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(path.as_os_str()),
     )
 }
 
 fn claude_non_unicode_source_id(component: &OsStr) -> String {
     encode_source_id(
         claude_native_platform(),
-        &crate::os_str_bytes::native_os_str_bytes(component),
+        &tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(component),
     )
 }
 

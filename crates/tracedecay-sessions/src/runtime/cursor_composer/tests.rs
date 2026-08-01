@@ -12,8 +12,8 @@ use tracedecay_capture::cursor_composer::normalize_cursor_composer_envelope_obse
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
-use crate::application::host_admission::HostAdmissionTestRuntimeV1;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmissionTestRuntimeV1;
+use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 
 #[tokio::test]

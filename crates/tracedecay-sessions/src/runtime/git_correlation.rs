@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, Value, params};
+use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params};
 
 use super::SessionMessageRecord;
 
@@ -71,8 +71,8 @@ impl std::fmt::Display for GitCorrelationError {
 
 impl std::error::Error for GitCorrelationError {}
 
-impl From<crate::db::engine::Error> for GitCorrelationError {
-    fn from(err: crate::db::engine::Error) -> Self {
+impl From<tracedecay_runtime_core::db::engine::Error> for GitCorrelationError {
+    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
         Self::Db(err.to_string())
     }
 }
@@ -413,9 +413,9 @@ pub struct SessionGitCorrelationHit {
     pub first_ts: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ts: Option<i64>,
-    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
+    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
     pub event_count: i64,
-    #[serde(default, skip_serializing_if = "crate::serde_util::is_default")]
+    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
     pub span_count: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
@@ -439,7 +439,7 @@ pub struct SessionGitCorrelationHit {
 /// whitespace, converts backslashes to forward slashes, and strips trailing
 /// slashes (keeping a lone `/`). Deliberately does **not** hit the
 /// filesystem — writers should pass already-resolved worktree roots (e.g.
-/// from [`crate::worktree::git_worktree_root`]); this keeps readers and
+/// from [`tracedecay_runtime_core::worktree::git_worktree_root`]); this keeps readers and
 /// writers agreeing even when the path no longer exists.
 pub fn normalize_worktree(path: &str) -> String {
     let mut normalized = path.trim().replace('\\', "/");
@@ -539,7 +539,21 @@ pub fn span_debounce_key(
         "{provider}\u{1f}{session_id}\u{1f}{}\u{1f}{worktree}",
         branch.unwrap_or("\u{0}")
     );
-    crate::context::read_cache::digest_bytes(material.as_bytes())
+    digest_bytes(material.as_bytes())
+}
+
+/// Hex SHA-256 over raw bytes.
+///
+/// Formerly `crate::context::read_cache::digest_bytes`. That module is a root
+/// read-cache concern and the debounce key only ever needed the digest, so the
+/// two-line helper is owned here instead of holding the session layer above
+/// the root crate.
+fn digest_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -1877,7 +1891,9 @@ pub use backfill::{
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;
-pub use store::{AnalyticsSessionTimestampSource, GitCorrelationWriteTxn};
+pub use store::{
+    AnalyticsSessionTimestampSource, GitCorrelationSessionStore, GitCorrelationWriteTxn,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

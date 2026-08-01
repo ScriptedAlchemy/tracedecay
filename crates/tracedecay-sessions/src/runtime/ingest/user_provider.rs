@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::ObservationScopeV1;
 
-use crate::application::host_admission::HostAdmissionFacade;
-use crate::application::observation::ObservationCancellation;
+use crate::admission::HostAdmission;
+use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
-use crate::store::TranscriptIngestStore;
+use crate::runtime::store_port::TranscriptIngestStore;
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
@@ -20,7 +20,7 @@ pub(super) async fn run_user_provider<S: TranscriptIngestStore>(
     store: &S,
     profile_root: &Path,
     roots: &[PathBuf],
-    facade: &HostAdmissionFacade<'_>,
+    facade: &dyn HostAdmission,
     candidate: SessionProvider,
     max_new_bytes: u64,
     cancellation: &ObservationCancellation,
@@ -42,7 +42,7 @@ struct UserProviderUnit<'a, S> {
     _store: &'a S,
     profile_root: &'a Path,
     roots: &'a [PathBuf],
-    facade: &'a HostAdmissionFacade<'a>,
+    facade: &'a dyn HostAdmission,
     candidate: SessionProvider,
     max_new_bytes: u64,
     cancellation: &'a ObservationCancellation,
