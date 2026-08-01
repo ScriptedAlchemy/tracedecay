@@ -15,6 +15,8 @@ use tokio::task::JoinHandle;
 use tracedecay_query::code_search;
 
 #[cfg(unix)]
+use super::explicit_git_state;
+#[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
 #[cfg(unix)]
 use super::{
@@ -22,8 +24,7 @@ use super::{
 };
 use super::{
     DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
-    ProjectServerKey, StoreAdministration, StoreOwnerKey, explicit_git_state,
-    multi_root_family_allows,
+    ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
 };
 
 mod bootstrap;

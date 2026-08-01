@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ const AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 struct RmcpRouteFixture {
     _temp: TempDir,
     _database_scope: crate::db::DaemonDatabaseScope,
+    store_administration: StoreAdministration,
+    #[cfg(unix)]
     engine: DaemonEngine,
     handshake: DaemonHandshake,
     server: Arc<crate::mcp::McpServer>,
@@ -28,7 +31,6 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     let _database_scope = enter_test_daemon_database_scope(&profile_root, label);
-    let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
@@ -36,13 +38,42 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
         ..test_handshake_defaults()
     };
     register_mcp_route_observer(&handshake.client_instance_id);
-    let server = engine
-        .project_server(&handshake)
+
+    #[cfg(unix)]
+    let (engine, store_administration, server) = {
+        let engine = test_daemon_engine_for_profile(&profile_root);
+        let server = engine
+            .project_server(&handshake)
+            .await
+            .expect("open production project server");
+        let store_administration = engine.store_administration.clone();
+        (engine, store_administration, server)
+    };
+    #[cfg(not(unix))]
+    let (store_administration, server) = {
+        let store_administration = test_store_administration_for_profile(&profile_root);
+        let server = Box::pin(super::super::portable_project_server_for_request(
+            DaemonLifecycle::default(),
+            store_administration.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            super::super::DaemonInvocationState::default(),
+            super::super::http_application::DaemonHttpApplicationRegistry::default(),
+            &handshake,
+            super::super::ProjectServerRequirement::Core,
+            None,
+        ))
         .await
-        .expect("open production project server");
+        .expect("open portable production project server");
+        (store_administration, server)
+    };
+
     RmcpRouteFixture {
         _temp: temp,
         _database_scope,
+        store_administration,
+        #[cfg(unix)]
         engine,
         handshake,
         server,
@@ -285,7 +316,7 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     .await
     .expect("portable route listener");
     let lifecycle = DaemonLifecycle::default();
-    let store_administration = fixture.engine.store_administration.clone();
+    let store_administration = fixture.store_administration.clone();
     let server_task = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept portable client");
         Box::pin(super::super::serve_windows_broker_client(
@@ -331,7 +362,7 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     .await
     .expect("portable legacy route listener");
     let lifecycle = DaemonLifecycle::default();
-    let store_administration = fixture.engine.store_administration.clone();
+    let store_administration = fixture.store_administration.clone();
     let legacy_task = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept legacy client");
         Box::pin(super::super::serve_windows_broker_client(
@@ -393,6 +424,7 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     );
 }
 
+#[cfg(unix)]
 struct ControlledCancellationExecutor {
     started: AtomicUsize,
     cancellation_observed: AtomicUsize,
@@ -401,6 +433,7 @@ struct ControlledCancellationExecutor {
     release_first: AtomicBool,
 }
 
+#[cfg(unix)]
 impl ControlledCancellationExecutor {
     fn new() -> Self {
         Self {
@@ -413,6 +446,7 @@ impl ControlledCancellationExecutor {
     }
 }
 
+#[cfg(unix)]
 impl tracedecay_application::ApplicationInvocationExecutor for ControlledCancellationExecutor {
     fn invoke(
         &self,
@@ -446,6 +480,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for ControlledCancell
     }
 }
 
+#[cfg(unix)]
 impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationExecutor {
     fn invoke_controlled(
         &self,
@@ -473,6 +508,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
     }
 }
 
+#[cfg(unix)]
 async fn wait_for_count(counter: &AtomicUsize, expected: usize, message: &str) {
     tokio::time::timeout(PHASE_TIMEOUT, async {
         while counter.load(Ordering::SeqCst) < expected {
