@@ -355,7 +355,7 @@ const LIFECYCLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_m
 #[cfg(any(windows, test))]
 const CONTROL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 #[cfg(any(windows, test))]
-const START_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+const START_READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(3);
 #[cfg(any(windows, test))]
 const GRACEFUL_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 #[cfg(any(windows, test))]
@@ -1239,6 +1239,7 @@ fn restore_registered_snapshot_with(
     )
 }
 
+#[cfg(any(windows, test))]
 fn apply_state_with(api: &mut dyn TaskSchedulerApi, desired: DaemonServiceState) -> Result<()> {
     if desired == DaemonServiceState::Missing {
         return delete_with(api);
@@ -1309,6 +1310,7 @@ fn restore_enablement_with(api: &mut dyn TaskSchedulerApi, enabled: bool) -> Res
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn start_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     let current = api.snapshot()?.ok_or_else(|| missing_task("start"))?;
     if current.running {
@@ -1565,6 +1567,7 @@ fn restore_snapshot_with(api: &mut dyn TaskSchedulerApi, previous: TaskSnapshot)
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn deactivate_with(api: &mut dyn TaskSchedulerApi) -> Result<()> {
     let Some(current) = api.snapshot()? else {
         return Ok(());
