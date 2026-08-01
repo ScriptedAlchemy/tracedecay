@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_domain::TemporalCoverageCountsV1;
 
-use crate::sessions::lcm::{LcmGrepHit, LcmGrepSort, LcmScope};
+use crate::ports::session_evidence::{LcmGrepHit, LcmGrepSort, LcmScope};
 
 use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::automation::artifacts::sha256_json;

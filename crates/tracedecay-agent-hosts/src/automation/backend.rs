@@ -15,8 +15,8 @@ pub use tracedecay_automation::backend::{
 use tracedecay_automation::{AutomationError, Result as AutomationResult};
 
 use crate::errors::Result;
-use crate::sessions::codex_app_server::{
-    CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
+use crate::ports::codex_app_server::{
+    SummaryConfig as CodexAppServerSummaryConfig, run_prompt as run_prompt_with_codex_app_server,
 };
 
 use super::config::{AutomationBackend, AutomationConfig};
