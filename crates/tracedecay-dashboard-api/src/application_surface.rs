@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::Router;
-use tracedecay_application::{ApplicationProblem, RequestId};
+use tracedecay_application::{ApplicationProblemEnvelope, RequestId};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
@@ -17,7 +17,7 @@ pub struct DashboardApplicationRouters {
 }
 
 pub type DashboardConfigurationApplyFuture<'a> =
-    Pin<Box<dyn Future<Output = std::result::Result<(), ApplicationProblem>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = std::result::Result<(), ApplicationProblemEnvelope>> + Send + 'a>>;
 
 pub trait DashboardApplicationRuntime: Send + Sync {
     fn routers(

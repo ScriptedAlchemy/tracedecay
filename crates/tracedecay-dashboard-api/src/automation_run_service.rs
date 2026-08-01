@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
-use tracedecay_sessions::runtime::lcm::{LcmGrepSort, LcmScope};
+use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 
 pub type DashboardAutomationWriteFuture =
     Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
@@ -120,7 +120,7 @@ async fn memory_curator_run_payload_with_run_id_direct(
     )
     .await;
     let run = match run_memory_curator_with_backend(
-        &run_context.cg,
+        run_context.cg.automation_runtime(),
         &run_context.config,
         &run_context.backend,
         MemoryCuratorAutomationOptions {
@@ -365,7 +365,7 @@ async fn session_reflection_run_payload_with_run_id_direct(
     options.start_time = request.start_time;
     options.end_time = request.end_time;
     let run = match run_session_reflector_with_backend(
-        &run_context.cg,
+        run_context.cg.automation_runtime(),
         &run_context.config,
         &run_context.backend,
         options,
@@ -454,7 +454,7 @@ async fn skill_writing_run_payload_with_run_id_direct(
         options.evidence_limit = evidence_limit;
     }
     let run = match run_skill_writer_with_backend(
-        &run_context.cg,
+        run_context.cg.automation_runtime(),
         &run_context.config,
         &run_context.backend,
         options,

@@ -23,8 +23,8 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
     read_published_artifact_manifest, read_run_artifact_payload,
 };
+use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
-use tracedecay_sessions::runtime::lcm::{LcmGrepSort, LcmScope};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

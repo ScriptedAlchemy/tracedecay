@@ -22,7 +22,6 @@
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
 pub use tracedecay_agent_hosts::analytics;
-pub use tracedecay_hooks as hooks;
 pub use tracedecay_usecases as application;
 pub use tracedecay_usecases::{git_query, graph, request_identity, user_config};
 pub mod tracedecay;
@@ -63,6 +62,7 @@ mod graph_api;
 mod graph_queries;
 mod graph_service;
 mod graph_structure_api;
+pub mod hooks;
 mod lcm_api;
 // SEAM(sessions): the sessions mover physically relocated this dashboard test
 // module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
@@ -89,6 +89,10 @@ mod savings_api;
 mod savings_pricing;
 pub mod scope;
 mod settings_api;
+pub use settings_api::{
+    DashboardPrAutoTrackEntryV1, DashboardPrAutoTrackReadPort,
+    install_dashboard_pr_autotrack_read_port,
+};
 mod storage_findings_api;
 mod storage_telemetry_api;
 #[cfg(test)]
@@ -507,8 +511,8 @@ async fn build_state_inner(
         store_root,
         config_path,
         dashboard_root,
-        retention_config: cg.get_config().sync.retention.clone(),
-        user_settings: cg.configuration_runtime().user_settings_client(),
+        retention_config: cg.retention_config(),
+        user_settings: cg.user_settings_client(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority,
@@ -681,7 +685,7 @@ where
 #[cfg(feature = "test-transport")]
 pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     cg: Arc<TraceDecay>,
-    runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    authority: DashboardHostAdmissionTestAuthorityV1,
     project_graphs: DashboardTestProjectGraphsV1,
     host: &str,
     port: u16,
@@ -691,7 +695,6 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let authority = runtime.dashboard_test_authority()?;
     let project_graph_resolver = project_graphs.resolver();
     run_until_shutdown_inner(
         cg.as_ref(),
