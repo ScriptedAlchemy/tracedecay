@@ -304,12 +304,15 @@ impl TraceDecay {
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
+        // Computed once and reused below (for `active_branch`) instead of
+        // calling `branch::current_branch` twice for the same project root.
+        let active_branch = branch::current_branch(project_root);
         let db = Self::mount_worktree_graph(
             runtime_registry.as_ref(),
             project_root,
             &store_layout,
             &store_layout.graph_db_path,
-            branch::current_branch(project_root).as_deref(),
+            active_branch.as_deref(),
             "init",
             DatabaseAccessMode::ReadWrite,
         )
@@ -334,7 +337,6 @@ impl TraceDecay {
         }
 
         // Bootstrap branch metadata if we can detect a default branch
-        let active_branch = branch::current_branch(project_root);
         let default_branch = active_branch.as_ref().and_then(|_| {
             branch::detect_default_branch(project_root).or_else(|| active_branch.clone())
         });
