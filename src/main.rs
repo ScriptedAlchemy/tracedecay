@@ -179,6 +179,7 @@ fn main() {
 }
 
 fn async_main() -> tracedecay::errors::Result<()> {
+    tracedecay::agents::register_mcp_tool_catalog_ports();
     let args: Vec<String> = std::env::args().collect();
     if render_dynamic_command_help(&args) {
         return Ok(());
