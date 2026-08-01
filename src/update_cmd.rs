@@ -836,6 +836,23 @@ pub(crate) fn record_completed_reinstall_pass(
     Ok(())
 }
 
+/// Whether an explicit `tracedecay install` pass amounted to a full
+/// tracked-agent refresh and may therefore call
+/// [`record_completed_reinstall_pass`].
+///
+/// The install flow only (re)installs its selection delta — agents that were
+/// already tracked are left untouched. After an upgrade those untouched
+/// agents still carry the previous binary's integration, so the pass may
+/// only disarm the startup silent reinstall when every agent that remains
+/// tracked was actually installed by this very pass. An empty tracked set is
+/// trivially covered: there is nothing left to refresh.
+pub(crate) fn install_pass_covers_tracked_agents(
+    tracked: &[String],
+    refreshed: &std::collections::BTreeSet<String>,
+) -> bool {
+    tracked.iter().all(|id| refreshed.contains(id))
+}
+
 fn reinstall_failure_result(failed: &[String], strict: bool) -> tracedecay::errors::Result<()> {
     if strict {
         return Err(tracedecay::errors::TraceDecayError::Config {
@@ -1574,6 +1591,57 @@ mod tests {
             crate::SilentReinstallAction::Nothing,
             "a completed explicit reinstall disarms the startup pass"
         );
+    }
+
+    /// Defect (sibling of the reinstall one): `tracedecay install` recorded
+    /// only `last_installed_version`, leaving the startup pass armed even
+    /// when the install had just refreshed every tracked agent. The converse
+    /// matters too: an install that only touched its selection delta must
+    /// NOT disarm the pass, because after an upgrade the untouched agents
+    /// still carry the previous binary's integration.
+    #[test]
+    fn an_install_pass_disarms_the_silent_reinstall_only_on_full_coverage() {
+        let running = "9.9.9";
+        let armed = |agents: &[&str]| UserConfig {
+            installed_agents: agents.iter().map(ToString::to_string).collect(),
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        let refreshed = |ids: &[&str]| -> std::collections::BTreeSet<String> {
+            ids.iter().map(ToString::to_string).collect()
+        };
+
+        // Full coverage: every tracked agent was installed by this pass, so
+        // completing the shared protocol disarms the startup reinstall.
+        let mut config = armed(&["claude"]);
+        assert!(install_pass_covers_tracked_agents(
+            &config.installed_agents,
+            &refreshed(&["claude"]),
+        ));
+        assert!(config.mark_version_installed(running));
+        assert_eq!(
+            crate::silent_reinstall_action(&config, running),
+            crate::SilentReinstallAction::Nothing,
+            "a full-coverage install pass disarms the startup pass"
+        );
+
+        // Partial coverage: `cursor` stayed tracked but untouched, so the
+        // old tail (last_installed_version only) must be kept and the
+        // startup pass must stay armed to refresh it.
+        let mut config = armed(&["claude", "cursor"]);
+        assert!(!install_pass_covers_tracked_agents(
+            &config.installed_agents,
+            &refreshed(&["claude"]),
+        ));
+        config.last_installed_version = running.to_string();
+        assert_eq!(
+            crate::silent_reinstall_action(&config, running),
+            crate::SilentReinstallAction::Reinstall,
+            "a delta-only install pass leaves the startup pass armed"
+        );
+
+        // Nothing tracked: trivially covered, nothing left to refresh.
+        assert!(install_pass_covers_tracked_agents(&[], &refreshed(&[])));
     }
 
     /// Closure factory for the upgrade step: records `label`, returns `result`.
