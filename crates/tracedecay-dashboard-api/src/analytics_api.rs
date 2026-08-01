@@ -19,10 +19,10 @@ use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
-use crate::db::engine::params;
-use crate::global_db::{
+use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
+use tracedecay_runtime_core::db::engine::params;
 
 use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
@@ -175,7 +175,8 @@ pub async fn observatory_export(State(state): State<DashboardState>) -> Response
 
 async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
     let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
+    let since =
+        tracedecay_runtime_core::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
     let mut read_model = match state.savings_db.as_deref() {
         Some(db) => {
             crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
@@ -245,12 +246,12 @@ async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
 }
 
 fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Option<&'static str> {
-    crate::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
+    tracedecay_agent_hosts::automation::agent_targets::managed_agent_label(agent_id).or_else(|| {
         let metadata: Value = serde_json::from_str(metadata_json).ok()?;
         ["agent_nickname", "agent_role"]
             .into_iter()
             .filter_map(|key| metadata.get(key).and_then(Value::as_str))
-            .find_map(crate::automation::agent_targets::managed_agent_label)
+            .find_map(tracedecay_agent_hosts::automation::agent_targets::managed_agent_label)
     })
 }
 
@@ -1005,7 +1006,7 @@ pub fn read_hook_analytics_rows_at(
     if let Some(store_path) = &store_path {
         read_hook_analytics_file(store_path, None, &mut out);
     }
-    if let Ok(profile_root) = crate::storage::default_profile_root() {
+    if let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() {
         let global_path = profile_root.join("hook_analytics.jsonl");
         if store_path.as_deref() != Some(global_path.as_path()) {
             read_hook_analytics_file(&global_path, project_root, &mut out);

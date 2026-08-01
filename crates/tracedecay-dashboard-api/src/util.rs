@@ -12,7 +12,7 @@ use axum::http::request::Parts;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value, json};
 
-use crate::db::engine::{IntoParams, QueryExecutor, Rows, Value as DbValue};
+use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, Rows, Value as DbValue};
 
 pub type JsonError = (StatusCode, Json<Value>);
 
@@ -28,7 +28,7 @@ pub fn db_value_to_json(value: DbValue) -> Value {
 /// Drains `rows` into an array of `{column_name: value}` objects.
 pub async fn collect_rows(
     mut rows: Rows,
-) -> std::result::Result<Vec<Value>, crate::db::engine::Error> {
+) -> std::result::Result<Vec<Value>, tracedecay_runtime_core::db::engine::Error> {
     let mut out = Vec::new();
     while let Some(row) = rows.next().await? {
         let mut obj = Map::new();
@@ -233,10 +233,14 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+    fn test_conn() -> (
+        tempfile::TempDir,
+        tracedecay_runtime_core::db::engine::TestConnection,
+    ) {
         let directory = tempfile::tempdir().unwrap();
-        let connection =
-            crate::db::engine::TestConnection::open(&directory.path().join("dashboard.db"));
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("dashboard.db"),
+        );
         (directory, connection)
     }
 
@@ -278,7 +282,7 @@ mod tests {
         let rows = query_rows(
             &conn,
             "SELECT name FROM t WHERE id = ?1",
-            crate::db::engine::params![2],
+            tracedecay_runtime_core::db::engine::params![2],
         )
         .await
         .unwrap();
@@ -308,7 +312,7 @@ mod tests {
             query_i64(
                 &conn,
                 "SELECT v FROM c WHERE v = ?1",
-                crate::db::engine::params![7],
+                tracedecay_runtime_core::db::engine::params![7],
             )
             .await,
             7

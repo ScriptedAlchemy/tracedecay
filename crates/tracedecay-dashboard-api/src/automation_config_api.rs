@@ -7,12 +7,12 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::automation::backend;
-use crate::automation::config::{
+use crate::user_config::UserConfig;
+use tracedecay_agent_hosts::automation::backend;
+use tracedecay_agent_hosts::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, apply_project_config_patch,
     clear_project_config, effective_config, load_project_config, merge_project_config,
 };
-use crate::user_config::UserConfig;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -126,7 +126,7 @@ fn config_payload_value(
         "project": project,
         "effective": effective,
         "backend_availability": backend::backend_availability(effective),
-        "project_config_path": crate::automation::config::project_config_path(&state.dashboard_root)
+        "project_config_path": tracedecay_agent_hosts::automation::config::project_config_path(&state.dashboard_root)
             .display()
             .to_string(),
     })

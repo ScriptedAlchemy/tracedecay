@@ -4,8 +4,8 @@ use serde_json::{Map, Value, json};
 
 use super::super::DashboardState;
 use super::projection::PROJECTION_POINT_CAP;
-use crate::memory::types::MemoryCategory;
 use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_runtime_core::memory::types::MemoryCategory;
 use tracedecay_store::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactSummaryV1,
     CompatibilityDashboardHrrStateV1, CompatibilityDashboardMemoryOverviewV1,

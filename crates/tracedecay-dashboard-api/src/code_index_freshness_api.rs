@@ -161,7 +161,7 @@ mod tests {
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().expect("profile root"),
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             ProjectId::new("project.dashboard-code-index").expect("project id"),
         )
@@ -180,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_is_typed_unsupported_without_daemon_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = freshness(State(state)).await;
 
@@ -192,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn freshness_route_projects_exact_live_scheduler_identity() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -228,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn mounted_scheduler_without_a_generation_is_loading_not_ready() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|root| {
             Box::pin(async move {
@@ -256,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn attached_registry_without_a_mount_is_unknown_not_unsupported() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         state.code_index_freshness_reader = Some(Arc::new(|_| Box::pin(async { None })));
 

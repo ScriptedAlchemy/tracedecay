@@ -198,7 +198,7 @@ mod tests {
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
         let runtime = HostAdmissionTestRuntimeV1::project(
-            crate::storage::default_profile_root().expect("profile root"),
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             ProjectId::new("project.dashboard-code-diagnostics").expect("project id"),
         )
@@ -217,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn overview_delegates_to_the_exact_mounted_diagnostics_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         let mut settings = CodeDiagnosticsSettings {
             idle_backfill: IdleBackfillMode::Off,
@@ -256,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
             state.project_root.clone(),
@@ -285,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, mut state) = state_for_test().await;
         state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
             state.project_root.clone(),
@@ -313,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_service_unavailable_without_mounted_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let (_project, _runtime, state) = state_for_test().await;
 
         let (status, Json(body)) = overview(State(state))

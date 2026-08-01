@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
-use crate::sessions::lcm::{LcmGrepSort, LcmScope};
+use tracedecay_sessions::runtime::lcm::{LcmGrepSort, LcmScope};
 
 pub type DashboardAutomationWriteFuture =
     Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
@@ -67,8 +67,8 @@ async fn memory_curator_run_payload_with_run_id_direct(
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
+    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+    use tracedecay_agent_hosts::automation::runner::{
         MemoryCuratorAutomationOptions, run_memory_curator_with_backend,
     };
 
@@ -305,8 +305,8 @@ async fn session_reflection_run_payload_with_run_id_direct(
     request: SessionReflectionRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
+    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+    use tracedecay_agent_hosts::automation::runner::{
         SessionReflectorAutomationOptions, run_session_reflector_with_backend,
     };
 
@@ -413,8 +413,10 @@ async fn skill_writing_run_payload_with_run_id_direct(
     request: SkillWritingRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{SkillWriterAutomationOptions, run_skill_writer_with_backend};
+    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+    use tracedecay_agent_hosts::automation::runner::{
+        SkillWriterAutomationOptions, run_skill_writer_with_backend,
+    };
 
     push_dashboard_automation_activity_start(
         state,
@@ -529,9 +531,10 @@ async fn push_dashboard_automation_activity_failure(
 async fn push_dashboard_automation_activity_result(
     state: &DashboardState,
     task_label: &str,
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
 ) {
-    if record.status == crate::automation::run_ledger::AutomationRunStatus::Skipped {
+    if record.status == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
+    {
         let reason = record.error.as_deref().unwrap_or("skipped");
         push_curation_activity(
             state,
@@ -614,7 +617,7 @@ async fn push_dashboard_automation_activity_result(
 }
 
 fn automation_record_mutates_store(
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
 ) -> bool {
     let Some(report) = record.validation_report.as_ref() else {
         return false;
@@ -628,15 +631,17 @@ fn automation_record_mutates_store(
 
 struct DashboardAutomationRunContext {
     cg: Arc<crate::tracedecay::TraceDecay>,
-    config: crate::automation::config::AutomationConfig,
-    backend: crate::automation::backend::CodexAppServerBackend,
+    config: tracedecay_agent_hosts::automation::config::AutomationConfig,
+    backend: tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
 }
 
 async fn dashboard_automation_run_context(
     state: &DashboardState,
 ) -> Result<DashboardAutomationRunContext, String> {
-    use crate::automation::backend::CodexAppServerBackend;
-    use crate::automation::config::{AutomationBackend, effective_config, load_project_config};
+    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
+    use tracedecay_agent_hosts::automation::config::{
+        AutomationBackend, effective_config, load_project_config,
+    };
     let cg = state
         .project_graph
         .as_ref()
@@ -661,8 +666,8 @@ async fn dashboard_automation_run_context(
 fn automation_run_payload(
     run_id: &str,
     report: &Value,
-    ledger_record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
-    backend_response: Option<&crate::automation::backend::AgentTaskResponse>,
+    ledger_record: &tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+    backend_response: Option<&tracedecay_agent_hosts::automation::backend::AgentTaskResponse>,
 ) -> Value {
     json!({
         "run_id": run_id,

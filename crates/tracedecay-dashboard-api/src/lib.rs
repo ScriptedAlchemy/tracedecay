@@ -54,12 +54,15 @@ mod graph_queries;
 mod graph_service;
 mod graph_structure_api;
 mod lcm_api;
-// SEAM(sessions): this test module is owned by `src/sessions/lcm/`, which the
-// sessions mover is extracting into `tracedecay-sessions` in parallel. The
-// `#[path]` reaches across the workspace until the lead repoints it at the
-// sessions crate (or moves the file into this crate's `tests/`).
+// SEAM(sessions): the sessions mover physically relocated this dashboard test
+// module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
+// declares it — it is a dashboard test (`super::*` resolves to this crate's
+// root, and it drives an `axum::Router` over `DashboardState`). The `#[path]`
+// follows the file so the coverage is not silently dropped; the lead should
+// physically move it back under this crate (`src/` or `tests/`) at
+// integration, at which point this attribute goes away.
 #[cfg(test)]
-#[path = "../../../src/sessions/lcm/dashboard_fixes_tests.rs"]
+#[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
 mod lcm_service;
@@ -77,6 +80,8 @@ pub mod scope;
 mod settings_api;
 mod storage_findings_api;
 mod storage_telemetry_api;
+#[cfg(test)]
+mod test_support;
 mod token_count;
 mod util;
 mod work_api;
@@ -104,17 +109,19 @@ use crate::application_surface::{
     dashboard_feedback_application_router_with_executor,
     dashboard_work_application_router_with_executor, http_application_router_with_executor,
 };
-use crate::automation::backend;
-use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
 use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
-use crate::db::{Database, DatabaseEngineConnection};
-use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
-use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
+use tracedecay_agent_hosts::automation::backend;
+use tracedecay_agent_hosts::automation::config::{
+    self as automation_config, AutomationBackend, AutomationHostMode,
+};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::{Database, DatabaseEngineConnection};
+use tracedecay_runtime_core::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::storage::StorageMode;
 
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
@@ -462,7 +469,7 @@ async fn build_state_inner(
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
-        .or_else(|| crate::global_db::global_db_path().map(|path| path.display().to_string()))
+        .or_else(|| tracedecay_global_db::global_db_path().map(|path| path.display().to_string()))
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
@@ -608,11 +615,15 @@ pub fn config_error(message: impl Into<String>) -> TraceDecayError {
 /// Binds `host:port` (`port` 0 lets the OS pick) and prints the URL on
 /// stderr; the URL line on stdout is stable output for wrappers to parse.
 /// Pass `open: true` to also open the URL in the default browser (CLI --open).
+///
+/// `spa_routes` is the owning binary's embedded single-page-app router; see
+/// [`router`] for the contract it must satisfy.
 pub async fn run_until_shutdown<F>(
     cg: &TraceDecay,
     host: &str,
     port: u16,
     open: bool,
+    spa_routes: Router,
     shutdown: F,
 ) -> Result<()>
 where
@@ -622,6 +633,7 @@ where
         cg,
         host,
         port,
+        spa_routes,
         shutdown,
         DashboardRunOptions::production(open),
         None,
@@ -636,6 +648,7 @@ pub async fn run_until_shutdown_for_tests<F>(
     cg: &TraceDecay,
     host: &str,
     port: u16,
+    spa_routes: Router,
     shutdown: F,
 ) -> Result<()>
 where
@@ -645,6 +658,7 @@ where
         cg,
         host,
         port,
+        spa_routes,
         shutdown,
         DashboardRunOptions::test(),
         None,
@@ -662,6 +676,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
     project_graphs: DashboardTestProjectGraphsV1,
     host: &str,
     port: u16,
+    spa_routes: Router,
     shutdown: F,
 ) -> Result<()>
 where
@@ -673,6 +688,7 @@ where
         cg.as_ref(),
         host,
         port,
+        spa_routes,
         shutdown,
         DashboardRunOptions::test(),
         Some(&authority),
@@ -708,6 +724,7 @@ async fn run_until_shutdown_inner<F>(
     cg: &TraceDecay,
     host: &str,
     port: u16,
+    spa_routes: Router,
     shutdown: F,
     options: DashboardRunOptions,
     test_authority: Option<&DashboardHostAdmissionTestAuthorityV1>,
@@ -744,7 +761,7 @@ where
         None,
     )
     .await?;
-    let app = router(cg, state).await?;
+    let app = router(cg, state, spa_routes).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
     let app = with_dashboard_http_admission(app, addr);
 
@@ -768,8 +785,17 @@ where
 }
 
 /// Runs the dashboard server until interrupted by Ctrl-C.
-pub async fn run(cg: &TraceDecay, host: &str, port: u16, open: bool) -> Result<()> {
-    run_until_shutdown(cg, host, port, open, async {
+///
+/// `spa_routes` is the owning binary's embedded single-page-app router; see
+/// [`router`] for the contract it must satisfy.
+pub async fn run(
+    cg: &TraceDecay,
+    host: &str,
+    port: u16,
+    open: bool,
+    spa_routes: Router,
+) -> Result<()> {
+    run_until_shutdown(cg, host, port, open, spa_routes, async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await
@@ -942,7 +968,20 @@ impl ActiveProjectApplicationRoutes {
 
 /// Builds the complete dashboard router shared by direct and daemon-managed
 /// startup. The supplied state is the active writable project authority.
-pub async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result<Router> {
+///
+/// `spa_routes` carries the embedded single-page-app surface — the app index,
+/// `/static/{*tail}`, and the SPA fallback for unmatched non-API client routes
+/// (`/brain?scope=…` deep links). It is built by the owning binary because the
+/// bundle is generated into `OUT_DIR` by that crate's `build.rs`. It must be a
+/// stateless `axum::Router` (it is merged after `.with_state(…)`), it must set
+/// its own `.fallback(…)`, and it must not define any `/api/**` route — axum
+/// panics on overlapping paths. Pass `Router::new()` to serve the JSON API
+/// with no UI.
+pub async fn router(
+    cg: &TraceDecay,
+    mut state: DashboardState,
+    spa_routes: Router,
+) -> Result<Router> {
     // Fact writes defer derived memory rebuilds. Invoke the canonical bounded
     // convergence policy exactly once for the active writable project before
     // serving either startup path. Selected-project states are opened later
@@ -991,24 +1030,20 @@ pub async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result<Router
             None
         }
     };
-    Ok(router_with_active_application(state, application))
+    Ok(router_with_active_application(
+        state,
+        application,
+        spa_routes,
+    ))
 }
 
 fn router_with_active_application(
     state: DashboardState,
     application: Option<ActiveProjectApplicationRoutes>,
+    spa_routes: Router,
 ) -> Router {
     let runtime = projects::DashboardRuntime::new(state, project_api_router());
-    // SEAM(assets): `assets::*` still lives in the root crate — its bundle is
-    // generated into `OUT_DIR` by the root `build.rs`, so it cannot move here.
-    // Resolution options (lead picks at integration, see SEAMS.md):
-    //   a) thread an `axum::Router` of SPA routes built by the root crate into
-    //      `router()`/`run_until_shutdown*()` and `.merge()` it below, or
-    //   b) give `DashboardState` an injected SPA-asset provider, mirroring the
-    //      existing `project_graph_resolver` field.
     let router = Router::new()
-        .route("/", get(assets::app_index))
-        .route("/static/{*tail}", get(assets::app_static))
         .route("/api/projects", get(projects::list))
         .route("/api/projects/{project_id}", get(projects::context))
         .route(
@@ -1032,10 +1067,15 @@ fn router_with_active_application(
         .route("/api/code-index/{*tail}", any(active_api_gateway))
         .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
-        // SPA fallback: unmatched non-API paths are client routes
-        // (/brain?scope=… deep links) and receive the embedded app index.
-        .fallback(get(assets::app_spa_fallback))
-        .with_state(runtime);
+        .with_state(runtime)
+        // Embedded SPA/static routes are supplied by the owning binary: the
+        // asset bundle is generated into `OUT_DIR` by the root crate's
+        // `build.rs` and included with `env!("OUT_DIR")`, which only resolves
+        // inside the crate that ran that build script. `spa_routes` is merged
+        // after `.with_state(…)`, so it is a stateless `axum::Router` and must
+        // carry the SPA fallback itself (see [`spa_routes`] on the entry
+        // points for the exact contract).
+        .merge(spa_routes);
     match application {
         Some(application) => router
             .nest("/api/application", application.http_router)
@@ -1555,12 +1595,13 @@ async fn forward_project_request(
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let has_lcm = state.lcm_db.is_some();
     let global_automation = crate::user_config::UserConfig::load().automation;
-    let project_automation = config::load_project_config(&state.dashboard_root)
+    let project_automation = automation_config::load_project_config(&state.dashboard_root)
         .await
         .ok()
         .flatten();
-    let automation = config::effective_config(&global_automation, project_automation.as_ref())
-        .unwrap_or(global_automation);
+    let automation =
+        automation_config::effective_config(&global_automation, project_automation.as_ref())
+            .unwrap_or(global_automation);
     let automation_backend = automation.backend;
     let automation_host_mode = automation.host_mode;
     let backend_availability = backend::backend_availability(&automation);
@@ -1634,7 +1675,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn dashboard_state_resolves_exact_application_scope_once() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1672,7 +1713,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn project_memory_owner_uses_validated_store_identity() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1700,7 +1741,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn dashboard_state_reuses_its_active_database_as_memory_authority() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1731,7 +1772,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_retains_the_exact_mounted_project_graph() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1802,7 +1843,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn retained_project_session_authority_is_reused_exactly() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1846,7 +1887,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_fails_closed() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1869,7 +1910,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn daemon_dashboard_without_retained_authority_is_read_only() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1904,7 +1945,7 @@ mod authority_tests {
 
     #[tokio::test]
     async fn application_routes_are_active_project_only() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -1932,7 +1973,7 @@ mod authority_tests {
                 .route("/snapshot", post(|| async { StatusCode::NO_CONTENT })),
             executor: None,
         };
-        let app = router_with_active_application(state, Some(application));
+        let app = router_with_active_application(state, Some(application), Router::new());
 
         let active = app
             .clone()
@@ -2016,7 +2057,7 @@ mod authority_tests {
     /// existing families are exposed.
     #[tokio::test]
     async fn v2_read_models_are_reachable_through_both_gateways() {
-        let _pin = crate::config::PinnedUserDataDir::new();
+        let _pin = crate::test_support::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
@@ -2028,7 +2069,7 @@ mod authority_tests {
         .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
-        let app = router_with_active_application(state, None);
+        let app = router_with_active_application(state, None, Router::new());
 
         // Every V2 read-model route resolves both through the active gateway and
         // through the project-scoped gateway for the active project.

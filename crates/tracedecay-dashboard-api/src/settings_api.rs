@@ -31,11 +31,11 @@ use crate::application_surface::{
     ConfigurationDirectMutationSurfaceRequest, ConfigurationSurfaceRequest,
     resolve_dashboard_application_surface,
 };
-use crate::automation::config as automation_config;
 use crate::config::TraceDecayConfig;
 use crate::daemon_client::RequestedOutputFormat;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::user_config;
+use tracedecay_agent_hosts::automation::config as automation_config;
 
 pub use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
 
@@ -519,7 +519,7 @@ fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
 }
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {
-    let accounting_mode = crate::global_db::global_accounting_mode();
+    let accounting_mode = tracedecay_global_db::global_accounting_mode();
     let pricing_offline =
         std::env::var("TRACEDECAY_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0");
     EnvironmentSettingsPayloadV1 {

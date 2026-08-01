@@ -16,14 +16,16 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::automation::backend::CodexAppServerBackend;
-use crate::automation::config::{AutomationConfig, effective_config, load_project_config};
-use crate::automation::jobs::{
+use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
+use tracedecay_agent_hosts::automation::config::{
+    AutomationConfig, effective_config, load_project_config,
+};
+use tracedecay_agent_hosts::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, find_job, job_task_key, load_jobs,
     run_user_job_with_backend, save_jobs, validate_job, validate_job_id,
 };
-use crate::automation::run_ledger::AutomationTrigger;
-use crate::tracedecay::current_timestamp;
+use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
