@@ -405,6 +405,53 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  windows-service-e2e:
+    name: Test Windows native service lifecycle
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Windows nextest archive
+        uses: actions/download-artifact@v7
+        with:
+          name: windows-nextest-archive
+          path: ${{ runner.temp }}
+
+      - name: Run Windows native service E2E
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP "nextest-archive.tar.zst"
+          $extractRoot = Join-Path $env:RUNNER_TEMP "windows-service-e2e"
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+          & 7z.exe x $archive "-o$extractRoot" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed to decompress $archive"
+          }
+          $tar = Join-Path $extractRoot "nextest-archive.tar"
+          & 7z.exe x $tar "-o$extractRoot" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip failed to extract $tar"
+          }
+          $binaries = @(
+            Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter tracedecay.exe |
+              Where-Object { $_.FullName -notmatch '[\\/]deps[\\/]' }
+          )
+          if ($binaries.Count -ne 1) {
+            throw "expected exactly one non-deps tracedecay.exe; found $($binaries.Count): $($binaries.FullName -join ', ')"
+          }
+          $binary = $binaries[0].FullName
+          & ./scripts/windows-service-e2e.ps1 -TraceDecayExe $binary
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows service E2E exited $LASTEXITCODE"
+          }
+
+      - name: Clean abandoned Windows test children
+        if: always()
+        uses: ./.github/actions/clean-windows-test-children
+
   windows-test-shard:
     name: Test Windows shard ${{ matrix.partition }}/5
     needs: windows-build
@@ -536,17 +583,21 @@ jobs:
   windows-test:
     name: Test Windows
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-test-shard
+    needs: [windows-test-shard, windows-service-e2e]
     runs-on: ubuntu-latest
     steps:
-      - name: Check Windows shards
+      - name: Check Windows jobs
         run: |
           set -euo pipefail
           if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
             echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
             exit 1
           fi
-          echo "All Windows shards passed."
+          if [ "${{ needs.windows-service-e2e.result }}" != "success" ]; then
+            echo "Windows service E2E result: ${{ needs.windows-service-e2e.result }}"
+            exit 1
+          fi
+          echo "All Windows jobs passed."
 
   windows-platform-acceptance:
     name: Windows platform acceptance
