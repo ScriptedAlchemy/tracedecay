@@ -32,6 +32,36 @@ async fn storage_fixture_authorities_are_available() {
     assert!(support::ephemeral_safe_fixture_base().is_absolute());
 }
 
+#[tokio::test]
+async fn sqlite_writer_uses_production_wal_normal_policy() {
+    let tmp = tempfile::TempDir::new().expect("create SQLite policy fixture");
+    let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))
+        .await
+        .expect("initialize SQLite policy fixture");
+    let writer = database
+        .writer_connection("inspect production SQLite policy")
+        .await
+        .expect("acquire SQLite writer");
+    let mut rows = writer
+        .engine_connection()
+        .query(
+            "SELECT lower(journal_mode), synchronous, wal_autocheckpoint
+             FROM pragma_journal_mode(), pragma_synchronous(), pragma_wal_autocheckpoint()",
+            (),
+        )
+        .await
+        .expect("inspect production SQLite policy");
+    let row = rows
+        .next()
+        .await
+        .expect("read production SQLite policy")
+        .expect("production SQLite policy row");
+
+    assert_eq!(row.get::<String>(0).expect("journal_mode"), "wal");
+    assert_eq!(row.get::<i64>(1).expect("synchronous"), 1);
+    assert_eq!(row.get::<i64>(2).expect("wal_autocheckpoint"), 0);
+}
+
 mod temporal_kernel_behavior {
     use tracedecay_temporal_query::candidates::{CandidateChannel, plan_candidates};
 

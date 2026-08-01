@@ -445,8 +445,6 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Run Windows tests
-        env:
-          TRACEDECAY_SQLITE_UNSAFE_FAST: "1"
         shell: pwsh
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake
@@ -472,8 +470,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  windows-sqlite-durable-journal:
-    name: Test Windows SQLite durable journal (DELETE+FULL)
+  windows-sqlite-production-policy:
+    name: Test Windows SQLite production policy (WAL+NORMAL)
     if: ${{ needs.windows-build.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
     needs: windows-build
     runs-on: windows-latest
@@ -508,29 +506,29 @@ jobs:
           name: windows-nextest-archive
           path: ${{ runner.temp }}
 
-      - name: Run Windows SQLite durable journal tests
+      - name: Run Windows SQLite production policy tests
         shell: pwsh
         timeout-minutes: 24
         # --extract-to must be the workspace so target/ lands at the same
         # absolute path as on the build job: integration tests bake
         # env!("CARGO_BIN_EXE_tracedecay") into the binaries at compile time.
-        run: |
-          # Keep the CI-only fast path absent so child tests use DELETE+FULL.
-          Remove-Item Env:TRACEDECAY_SQLITE_UNSAFE_FAST -ErrorAction SilentlyContinue
-          if (Test-Path Env:TRACEDECAY_SQLITE_UNSAFE_FAST) {
-            throw "TRACEDECAY_SQLITE_UNSAFE_FAST must be absent for durable SQLite coverage"
-          }
-          cargo-nextest nextest run --profile ci --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst" --extract-to "$env:GITHUB_WORKSPACE" --workspace-remap "$env:GITHUB_WORKSPACE" -E 'binary(=windows_durable_behavior)' --no-tests=fail --test-threads 1 --status-level slow
+        run: >-
+          cargo-nextest nextest run --profile ci
+          --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+          --extract-to "$env:GITHUB_WORKSPACE"
+          --workspace-remap "$env:GITHUB_WORKSPACE"
+          -E 'binary(=windows_durable_behavior)'
+          --no-tests=fail --test-threads 1 --status-level slow
 
       - name: Clean abandoned Windows test children
         if: always()
         uses: ./.github/actions/clean-windows-test-children
 
-      - name: Upload Windows SQLite durable journal nextest report
+      - name: Upload Windows SQLite production policy nextest report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: windows-sqlite-durable-junit-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          name: windows-sqlite-production-policy-junit-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 7
