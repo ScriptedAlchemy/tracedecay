@@ -7,6 +7,47 @@ up into root `daemon`, `mcp`, `dashboard`, `hooks`, or diagnostics modules.
 It deliberately does not depend on `tracedecay-agent-hosts`,
 `tracedecay-dashboard-api`, or `tracedecay-migrate`.
 
+## Dependency edges and cycle proofs
+
+Every internal edge below is proven acyclic with
+`cargo tree -e normal -p <dep> | grep tracedecay-usecases` returning **no
+matches** (verified at `96fc109f1`, all 19 edges, 0 occurrences each):
+
+| Internal dependency | Cycle proof (`grep tracedecay-usecases` hits) |
+| --- | --- |
+| `tracedecay-api` | 0 |
+| `tracedecay-application` (`native-git`) | 0 |
+| `tracedecay-automation` | 0 |
+| `tracedecay-code-index` (`default-features = false`) | 0 |
+| `tracedecay-domain` | 0 |
+| `tracedecay-global-db` | 0 |
+| `tracedecay-hooks` | 0 |
+| `tracedecay-host-integration` | 0 |
+| `tracedecay-lsp` | 0 |
+| `tracedecay-policy` | 0 |
+| `tracedecay-query` | 0 |
+| `tracedecay-runtime-core` | 0 |
+| `tracedecay-rusqlite-runtime` | 0 |
+| `tracedecay-search-eval` | 0 |
+| `tracedecay-semantic` | 0 |
+| `tracedecay-sessions` | 0 |
+| `tracedecay-store` | 0 |
+| `tracedecay-temporal-query` | 0 |
+| `tracedecay-tool-catalog` | 0 |
+
+External deps track sibling manifests: `cap-std`, `getrandom`, `fs2`, `gix`,
+`glob`, `hex`, `rusqlite`, `regex`, `same-file`, `schemars`, `serde`,
+`serde_json`, `sha2`, `tempfile`, `thiserror`, `toml`, `ureq`, `tokio`,
+`tokio-stream`, `tracing`, `url`, `zeroize`, `ignore`.
+
+### Forbidden-edge proof
+
+`cargo tree -e normal -p tracedecay-usecases` contains no `tracedecay` (root),
+`tracedecay-agent-hosts`, `tracedecay-dashboard-api`, or `tracedecay-migrate`
+node. The reverse edge is the real one: `tracedecay-dashboard-api` depends on
+`tracedecay-usecases`, so any edge back would be a Cargo cycle. Root-owned
+seams must therefore be resolved by port inversion, never by a dependency.
+
 ## Root wiring required
 
 ### Graph runtime
@@ -74,6 +115,45 @@ Some existing unit-test-only modules still name root paths and therefore need
 that composition-root relocation before `cargo test -p tracedecay-usecases`
 can be a standalone target. They do not enter the production/all-features
 library build.
+
+### Test-target status (not yet in scope)
+
+`cargo check -p tracedecay-usecases --all-features` (lib) is **0 errors**.
+`--all-targets` still fails on the `lib test` target with 175 errors. This is
+a repo-wide phase of the split, not a defect local to this crate: at the same
+commit `tracedecay-global-db` (53) and `tracedecay-sessions` (52) `lib test`
+targets fail the same way. Fixing it is a coordinated lane, because it needs
+new `test-support` features in dependency crates rather than edits here.
+
+Two distinct blocker classes:
+
+1. **Upstream test-only surfaces are `#[cfg(test)]`-gated**, so they are
+   invisible downstream no matter how visibility is widened here. Each needs a
+   `#[cfg(any(test, feature = "test-support"))]` gate plus a feature in the
+   owning crate:
+   - `tracedecay_runtime_core::db::engine::TestConnection`
+     (`db/engine/mod.rs:10,23` — `mod test_support` and its re-export are both
+     `#[cfg(test)]`)
+   - `tracedecay_runtime_core::config::{PinnedUserDataDir,
+     lock_user_data_dir_test_env}` (absent from the extracted config surface)
+   - `tracedecay_global_db::tests`
+   - `session_pool::test_support` (via `tracedecay-semantic`)
+   - `code_index::projection`
+   - `tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext::new`
+     (exists but its trait bounds are unsatisfied from here)
+
+2. **Root-owned seams still named by `#[cfg(test)]` fixtures**, concentrated in
+   `host_admission.rs` (~60), `edit.rs` (~45), and smaller counts in
+   `diagnostics_*.rs`, `dashboard_diagnostics.rs`, `semantic_runtime/*`,
+   `observation_test.rs`, `event_lane.rs`: `crate::{mcp, daemon, hooks,
+   automation, dashboard}`, `crate::tracedecay::TraceDecayOpenOptions`,
+   `crate::store::{session, GlobalDbGitCorrelationStore, GlobalDbTranscriptStore,
+   GlobalDbWorkflowStore}`, and `tracedecay_migrate`. The `edit.rs` cluster is
+   one root cause repeated 40 times: the `FixtureGraph` test double predates
+   `GraphRuntimePort` and no longer satisfies it. Several fixtures also call
+   `GraphRuntimePort::init`/`open_*` as if the port were a concrete type,
+   producing `dyn GraphRuntimePort` unsized errors — these fixtures must move to
+   the composition root, which is the same conclusion as the section above.
 
 ## Moved read modules
 
