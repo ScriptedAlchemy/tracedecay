@@ -338,8 +338,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         // This is the sole constructor of the production registry, so it is the
         // one place that must supply the installer.
         super::register_registered_schema_installer();
-        crate::automation::register_runtime_ports();
-        crate::dashboard::register_runtime_ports();
+        // `main` registers these for every real invocation; this constructor
+        // is also reached by embedded and integration-test runtimes that never
+        // pass through it, and transcript ingest starts here. Idempotent.
+        crate::register_runtime_ports();
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
             LocalProfileStoreAuthorityV1::new(
