@@ -8,8 +8,9 @@
 //! can never quietly resolve to each other and recurse.
 //!
 //! Three methods have no inherent counterpart because the behavior lives in
-//! the MCP handler tree or the diagnostics drivers rather than on the engine;
-//! those are adapted here and marked below.
+//! the graph analysis engine or the diagnostics drivers rather than on the
+//! engine itself; those are adapted here and marked below. None of them reach
+//! up into the MCP handler layer.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use tracedecay_usecases::tracedecay::{
 
 use crate::db::Database;
 use crate::errors::TraceDecayError;
+use crate::graph::redundancy_scan::RedundancyOptions;
 use crate::storage::StoreLayout;
 use crate::types::{Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph};
 
@@ -219,54 +221,52 @@ impl GraphRuntimePort for TraceDecay {
         })
     }
 
-    /// Adapter: the redundancy pipeline lives in the MCP handler, which
-    /// renders the same structured payload this port returns typed.
+    /// Adapter: the redundancy pipeline lives in the graph analysis engine,
+    /// which renders the same structured payload this port returns typed. The
+    /// MCP handler renders that payload rather than owning it.
     fn redundancy<'a>(
         &'a self,
         request: &'a RedundancyRequestV1,
         scope_prefix: Option<&'a str>,
     ) -> GraphFuture<'a, RedundancyResultV1> {
         Box::pin(async move {
-            let args = serde_json::json!({
-                "path": request.path,
-                "min_lines": request.min_lines,
-                "max_pairs": request.max_pairs,
-                "similarity_threshold": request.similarity_threshold,
-                "include_naming_only": request.include_naming_only,
-                "include_generated_paths": request.include_generated_paths,
-                "format": "json",
-            });
-            let tool = crate::mcp::tools::handlers::redundancy::handle_redundancy(
-                self,
-                args,
-                scope_prefix,
-            )
-            .await?;
-            let payload = tool_json_payload(&tool).ok_or_else(|| TraceDecayError::Config {
-                message: "redundancy payload was not structured JSON".to_owned(),
-            })?;
-            serde_json::from_value(payload).map_err(|error| TraceDecayError::Config {
+            let options = RedundancyOptions {
+                path_prefix: request.path.as_deref().or(scope_prefix),
+                min_lines: request.min_lines,
+                max_pairs: usize::try_from(u64::from(request.max_pairs).min(500)).unwrap_or(20),
+                // A non-finite threshold never survived the handler's JSON
+                // argument round-trip either (it decoded as null and fell back
+                // to the default); keep that exact behavior.
+                threshold: if request.similarity_threshold.is_finite() {
+                    request.similarity_threshold.clamp(0.0, 1.0)
+                } else {
+                    0.6
+                },
+                include_naming: request.include_naming_only,
+                include_generated: request.include_generated_paths,
+            };
+            let scan = crate::graph::redundancy_scan::redundancy_scan(self, &options).await?;
+            serde_json::from_value(scan.output).map_err(|error| TraceDecayError::Config {
                 message: format!("redundancy payload failed typed decode: {error}"),
             })
         })
     }
 
-    /// Adapter: the pinned health delta is owned by the health handler tree,
-    /// which already takes the engine and the observation database directly.
+    /// Adapter: the pinned health delta is computed by the graph health
+    /// engine, which already takes the engine and the observation database
+    /// directly. The MCP session handlers call the same function.
     fn health_delta<'a>(
         &'a self,
         observation_database: &'a RegisteredGlobalDb,
         before_cursor: Option<&'a str>,
         path_prefix: Option<&'a str>,
     ) -> GraphFuture<'a, HealthDeltaResult> {
-        Box::pin(
-            crate::mcp::tools::handlers::health::compute_health_delta_result(
-                self,
-                observation_database,
-                before_cursor,
-                path_prefix,
-            ),
-        )
+        Box::pin(crate::graph::health::delta::compute_health_delta_result(
+            self,
+            observation_database,
+            before_cursor,
+            path_prefix,
+        ))
     }
 
     fn replace_symbol<'a>(
@@ -386,17 +386,4 @@ impl GraphRuntimePort for TraceDecay {
     ) -> GraphFuture<'a, ()> {
         Box::pin(TraceDecay::recover_source_edit_preimages(self, files))
     }
-}
-
-/// The MCP handlers return a rendered tool result whose single text block is
-/// the structured JSON payload when `format: "json"` is requested.
-fn tool_json_payload(tool: &crate::mcp::tools::ToolResult) -> Option<serde_json::Value> {
-    let text = tool
-        .value
-        .get("content")
-        .and_then(|content| content.as_array())
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("text"))
-        .and_then(serde_json::Value::as_str)?;
-    serde_json::from_str(text).ok()
 }

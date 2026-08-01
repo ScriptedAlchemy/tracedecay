@@ -2,17 +2,6 @@
 
 use super::*;
 
-pub(super) fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
-    [
-        ("acyclicity", snap.acyclicity),
-        ("depth", snap.depth),
-        ("equality", snap.equality),
-        ("redundancy", snap.redundancy),
-        ("modularity", snap.modularity),
-        ("coverage_discipline", snap.coverage_discipline),
-    ]
-}
-
 fn session_dimension_deltas(
     dims_before: &Value,
     snap: &HealthSnapshot,
