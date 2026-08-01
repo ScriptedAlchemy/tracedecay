@@ -5763,7 +5763,6 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
- "tracedecay-migrate",
  "tracedecay-query",
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
@@ -5837,6 +5836,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
+ "tracedecay-sessions",
  "tracedecay-store",
  "tracing",
 ]

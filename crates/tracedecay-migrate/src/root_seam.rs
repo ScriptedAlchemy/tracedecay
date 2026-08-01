@@ -31,3 +31,23 @@
 //! that nothing can implement. `SEAMS.md` next to this crate's manifest
 //! catalogs all 94 remaining references by module, item, and file:line, and
 //! records the recommended mechanism and owner for each.
+
+/// The daemon slice that found an owning crate: `store_runtime` now lives in
+/// the kernel. `session_registry` and `profile_identity` remain root-owned
+/// (the `RegisteredGlobalDb` return types make them unmovable for now), so
+/// their references still fail here by design.
+pub mod daemon {
+    pub use tracedecay_runtime_core::store_runtime;
+}
+
+/// The sessions slice found its owning crate: the moved root tree lives at
+/// `tracedecay_sessions::runtime`.
+pub mod sessions {
+    pub use tracedecay_sessions::runtime::{git_correlation, hermes, lcm, workflow_index};
+}
+
+/// Root-owned storage adapters (typed wrappers over the kernel's
+/// `classify_registry_storage_fields`) and the root graph engine. Both stay
+/// seams until their owners extract.
+pub mod tracedecay_root {}
+pub mod storage_adapters {}

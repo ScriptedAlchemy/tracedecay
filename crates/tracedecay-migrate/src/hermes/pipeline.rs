@@ -181,7 +181,7 @@ async fn resolve_target_layout(
 ) -> tracedecay_runtime_core::errors::Result<ResolvedTargetLayout> {
     if target_project.user_scope {
         return Ok(ResolvedTargetLayout {
-            sessions_db_path: crate::root_seam::sessions::user_sessions_db_path(
+            sessions_db_path: tracedecay_runtime_core::store_runtime::profile_paths::user_sessions_db_path(
                 tracedecay_profile_root,
             ),
             graph_db_path: None,
