@@ -746,8 +746,7 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
 }
 
 /// Runs a git command in `root`, panicking on failure. The git-dispatch
-/// deadline regressions need real refs, so they drive a real repository rather
-/// than a stubbed one.
+/// deadline tests need resolvable refs, so they drive a real repository.
 fn run_git_in(root: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)
@@ -778,11 +777,9 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
     .expect("deadline")
 }
 
-/// The carried dispatch deadline used to be discarded (`_options`), so a git
-/// handler on a diverged or pathological ref ran unbounded and hung. An
-/// already-elapsed deadline must now short-circuit *before* the expensive body
-/// runs — proving both the `pr_context` walk and the `admin_branch_add` index
-/// build are bounded and can never hang once the horizon is gone.
+/// An already-elapsed deadline must short-circuit *before* the expensive body
+/// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
+/// build can proceed once the horizon is gone.
 #[tokio::test]
 async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_handler() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -947,14 +944,11 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
 
     cg.close();
 }
-/// LIVE DEFECT REGRESSION.
-///
-/// `tracedecay tool impact --args '{"node_id":""}'` used to reach
-/// `GraphTraverser::get_impact_radius`, trip a `debug_assert!`, and panic the
-/// daemon's client task. The client only saw "daemon closed the connection",
-/// with nothing naming the offending argument. Blank ids and zero depths are
-/// caller input, not internal invariants, so every node-id graph tool must
-/// answer with a typed argument error.
+/// Blank ids and zero depths are caller input, not internal invariants: they
+/// arrive straight from tool arguments (`tracedecay tool impact --args
+/// '{"node_id":""}'`). Every node-id graph tool must therefore answer with a
+/// typed argument error naming the parameter, never an assertion that unwinds
+/// the daemon's client task into a bare dropped connection.
 #[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1000,8 +994,8 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         }
     }
 
-    // Depth arguments are clamped with `min(max)`, which leaves an explicit
-    // zero intact; that reached the same assertions from the other side.
+    // Handlers clamp depth with `min(max)`, which leaves an explicit zero
+    // intact, so a valid node id still reaches the guard from this side.
     let node_id = cg
         .get_nodes_by_name("blank_probe")
         .await
@@ -1037,10 +1031,9 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 
 /// The daemon serves each client from a task in a `JoinSet`, so a panicking
 /// request unwinds only that task while the graph handle and the server-side
-/// registries it touched stay shared with every later request. A follow-up
-/// query on a valid node id hung once after the original panic, so this pins
-/// down that neither the previously panicking argument nor a real unwind on a
-/// task holding the same graph leaves later calls broken.
+/// registries it touched stay shared with every later request. Neither a
+/// rejected argument nor a real unwind on a task holding the same graph may
+/// leave a later call broken or hanging.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graph_tools_still_answer_after_a_panicking_worker_task() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1068,7 +1061,7 @@ async fn graph_tools_still_answer_after_a_panicking_worker_task() {
         .id
         .clone();
 
-    // 1. The argument that used to panic now fails as an ordinary error.
+    // 1. A rejected argument fails as an ordinary error.
     assert!(
         dispatch_graph_tools(
             "tracedecay_impact",

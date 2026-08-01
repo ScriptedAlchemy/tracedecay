@@ -137,13 +137,10 @@ pub(super) fn parse_invocation_with_stdin(
                     .and_then(Value::as_str)
                     == Some("boolean");
                 // A boolean flag's value is optional: `--helpful` alone means
-                // `true`. Without this, a bare boolean flag would blindly
-                // consume whatever token follows it as its value — including
-                // the *next* flag (e.g. `--helpful --note x` would read
-                // `--note` as `--helpful`'s value and error on it, or worse,
-                // silently coerce it), which also drops that next flag from
-                // parsing entirely. Only treat the following token as this
-                // flag's value when it doesn't itself look like a flag.
+                // `true`. The following token is its value only when the token
+                // is not itself a flag, so `--helpful --note x` binds
+                // `helpful=true` and leaves `--note` to parse on its own
+                // instead of consuming it as `--helpful`'s value.
                 if is_boolean
                     && inline_value.is_none()
                     && iter

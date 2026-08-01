@@ -4535,14 +4535,13 @@ fn component_set_receipt_from_prepared(
     // Update left untouched while it did real work on a sibling. Two gates bound
     // this:
     //
-    // * The operation is an Update. Install first-deploys every component,
-    //   Repair re-asserts ownership of the entire cataloged set, and Uninstall
-    //   removes it — each legitimately stamps its operation onto every receipt,
-    //   changed or not. Only Update is incremental.
+    // * The operation is an Update — the only incremental one. Install
+    //   first-deploys every component, Repair re-asserts ownership of the whole
+    //   cataloged set, and Uninstall removes it, so each legitimately stamps its
+    //   operation onto every receipt, changed or not.
     // * The set performed at least one effective artifact write. A transaction
     //   that writes nothing anywhere is a pure no-op re-run of the identical
-    //   set; it still records its operation on every receipt rather than
-    //   silently reusing the prior one.
+    //   set, and still records its operation rather than reusing the prior one.
     let preserves_untouched_companions = request.lifecycle.operation
         == HostBundleLifecycleOpV1::Update
         && prepared.iter().any(|component| {
@@ -4555,12 +4554,12 @@ fn component_set_receipt_from_prepared(
     let component_receipts = prepared
         .iter()
         .map(|component| {
-            // An unchanged companion — one whose plan writes nothing (every
-            // artifact action is a Noop) and whose manifest is byte-identical to
-            // its durable receipt — keeps its original operation provenance. A
+            // An unchanged companion — one whose plan writes nothing and whose
+            // manifest is byte-identical to its durable receipt — keeps its
+            // original operation provenance. "Writes nothing" must be read from
+            // each mutation's action, not from an empty mutation list: a
             // component with manifest artifacts always plans one Noop mutation
-            // per artifact, so the emptiness of the mutation list can never stand
-            // in for "no work"; the action of each mutation must be inspected.
+            // per artifact.
             if preserves_untouched_companions
                 && component
                     .plan
@@ -4578,14 +4577,14 @@ fn component_set_receipt_from_prepared(
                 .map(|receipt| receipt.rollback_history.clone())
                 .unwrap_or_default();
             // A Repair that overwrites a receipt-owned path whose bytes drifted
-            // from the catalog backs up genuinely foreign content: a user edit,
-            // never tracedecay's own prior output (Repair replaces a path only
-            // when its observed digest differs from the cataloged digest, which
-            // for the unchanged Repair manifest is also the previously owned
-            // digest). Reference this operation from the receipt so the commit
-            // boundary retains that backup and an operator can still recover the
-            // overwritten bytes. Ordinary Update backups replace tracedecay's own
-            // previously owned output and stay retired on commit.
+            // from the catalog backs up genuinely foreign content — a user edit,
+            // never tracedecay's own prior output, because Repair replaces a
+            // path only when its observed digest differs from the cataloged one,
+            // which for an unchanged Repair manifest is also the previously
+            // owned digest. Referencing this operation from the receipt keeps the
+            // commit boundary from retiring that backup, so an operator can still
+            // recover the overwritten bytes. Ordinary Update backups hold
+            // tracedecay's own output and stay retired on commit.
             if request.lifecycle.operation == HostBundleLifecycleOpV1::Repair
                 && component
                     .plan

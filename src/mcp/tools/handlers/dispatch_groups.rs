@@ -263,15 +263,13 @@ pub(super) async fn dispatch_git_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    // The admission layer computes and carries a dispatch deadline for every
-    // git-walking tool (thirty seconds by default, see
-    // `dispatch_deadline_horizon_micros`). This dispatcher used to discard it
-    // (`_options`), so `pr_context`, `admin_branch_add`, and the other git
-    // handlers ran their gix tree walks, revwalks, diffs, and the branch-add
-    // index build without any horizon — a diverged or pathological ref hung the
-    // request indefinitely. Enforce the carried deadline here so every handler
-    // is bounded uniformly, returning the same typed semantic error the other
-    // git failures surface instead of a bare hang.
+    // Every git handler below performs unbounded gix work — tree walks,
+    // revwalks, diffs, the branch-add index build — so a diverged or
+    // pathological ref would hang the request. The admission layer carries a
+    // dispatch deadline for exactly this (thirty seconds by default, see
+    // `dispatch_deadline_horizon_micros`); enforcing it here bounds every
+    // handler uniformly and reports exhaustion as the same typed semantic
+    // error the other git failures surface.
     let carried_deadline = options.application_deadline.as_ref();
     let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
 
@@ -291,18 +289,16 @@ pub(super) async fn dispatch_git_tools(
     };
 
     match (carried_deadline.is_some(), remaining) {
-        // A live remaining budget bounds the handler.
         (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
             Ok(result) => result,
             Err(_elapsed) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
         },
-        // A deadline was carried but has already elapsed before dispatch even
-        // started: `deadline_remaining` returns `None` for a non-positive
-        // budget. Reject immediately with the typed error rather than running
-        // the handler unbounded.
+        // `deadline_remaining` yields `None` for a non-positive budget, so a
+        // carried deadline that already elapsed must be rejected rather than
+        // dispatched unbounded.
         (true, None) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
-        // No deadline was carried at all (standalone / non-admission callers):
-        // preserve the previous unbounded behaviour.
+        // Standalone / non-admission callers carry no deadline and stay
+        // unbounded.
         (false, None) => handler.await,
     }
 }
