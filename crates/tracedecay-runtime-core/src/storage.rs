@@ -17,11 +17,11 @@ use crate::errors::{Result, TraceDecayError};
 pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
-pub const IDENTITY_CUTOVER_BACKUP_MANIFEST_FILENAME: &str =
+pub(crate) const IDENTITY_CUTOVER_BACKUP_MANIFEST_FILENAME: &str =
     "store_manifest.identity-cutover-backup.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
-pub const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
+pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 /// Filename prefix for corrupt `branch-meta.json` files renamed out of the
 /// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
@@ -664,7 +664,7 @@ pub fn default_profile_project_id(project_root: &Path) -> String {
 ///
 /// See [`path_local_profile_project_id`] for why discovery must not consult
 /// the repository-collapsed identity here.
-pub fn has_path_local_profile_store(project_root: &Path) -> bool {
+pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
     let Ok(profile_root) = default_profile_root() else {
         return false;
     };
@@ -1243,7 +1243,7 @@ fn validate_profile_shard_manifest(
 }
 
 impl StoreManifest {
-    pub fn from_layout(layout: &StoreLayout) -> Self {
+    pub(crate) fn from_layout(layout: &StoreLayout) -> Self {
         Self {
             schema_version: STORE_MANIFEST_SCHEMA_VERSION,
             project_id: layout.identity.project_id.clone(),
@@ -1679,7 +1679,7 @@ fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs:
 /// append lock. When `private`, the data file is created owner-only and both
 /// the data and lock paths are symlink-checked (the private-store contract);
 /// otherwise a plain create+append handle is used (the automation run ledger).
-pub fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
+pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
     let lock_path = append_lock_path(path);
     if private {
         reject_symlink_components(&lock_path, "private store lock file")?;

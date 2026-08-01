@@ -11,19 +11,16 @@ mod structural_id;
 
 pub use detect::{
     CODE_SOURCE_SANITIZER_VERSION_V1, DetectionConfidenceV1, PrivacyDetectorV1,
-    SanitizationActionV1, SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1,
-    SanitizationEvidenceAnchorV1, SanitizationFindingV1, SanitizationRemediationClassV1,
-    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
+    SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
 };
 pub use detect::{
     CodeSourceSanitizationV1, MemoryFactSanitizationV1, sanitize_code_source_bytes,
     sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
 pub use sanitize::{
-    CLAUDE_SANITIZER_VERSION_V1, ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1,
-    ClaudeSanitizerPolicyV1, OBSERVATION_SANITIZER_VERSION_V1, ObservationSanitizationOutcomeV1,
-    PrivacySanitizerError, RecordSanitizerPolicyV1, RecordSanitizerV1, SanitizedClaudeRecordV1,
-    SanitizedObservationRecordV1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
+    ObservationSanitizationOutcomeV1, PrivacySanitizerError, RecordSanitizerV1,
+    SanitizedClaudeRecordV1, SanitizedObservationRecordV1,
 };
 pub use structural_id::{
     protect_optional_sensitive_structural_id, protect_sensitive_structural_id,

@@ -9,8 +9,8 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
 };
 
-pub const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
-pub const DEFAULT_PROJECT_CODE_OPEN_RUNTIMES: usize = 4;
+pub(crate) const MAX_PROJECT_CODE_OPEN_RUNTIMES: usize = 8;
+pub(crate) const DEFAULT_PROJECT_CODE_OPEN_RUNTIMES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreRuntimeRegistryConfig {
@@ -42,7 +42,7 @@ impl StoreRuntimeRegistryConfig {
         })
     }
 
-    pub fn with_eviction_idle(
+    pub(crate) fn with_eviction_idle(
         project_code_open_runtime_budget: usize,
         eviction_idle: Duration,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
@@ -55,7 +55,7 @@ impl StoreRuntimeRegistryConfig {
         Ok(config)
     }
 
-    pub const fn project_code_open_runtime_budget(self) -> usize {
+    pub(crate) const fn project_code_open_runtime_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }
 

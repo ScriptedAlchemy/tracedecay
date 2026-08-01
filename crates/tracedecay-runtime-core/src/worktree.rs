@@ -105,11 +105,11 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
     crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
 }
 
-pub fn is_linked_worktree(dir: &Path) -> bool {
+pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
     git_worktree_root(dir).is_some_and(|root| root.join(".git").is_file())
 }
 
-pub fn is_detached_linked_worktree(dir: &Path) -> bool {
+pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
     is_linked_worktree(dir) && crate::branch::current_branch(dir).is_none()
 }
 
@@ -169,7 +169,7 @@ pub fn git_may_resolve_repo(dir: &Path) -> bool {
 ///     directory that merely happens to contain a data dir), which
 ///     keeps non-git and monorepo-subdir layouts from producing false
 ///     warnings.
-pub fn detect_worktree_index_mismatch(
+pub(crate) fn detect_worktree_index_mismatch(
     start_path: &Path,
     index_root: &Path,
 ) -> Option<WorktreeIndexMismatch> {

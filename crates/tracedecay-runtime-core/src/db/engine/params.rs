@@ -66,7 +66,7 @@ pub struct Params {
 }
 
 impl Params {
-    pub fn from_results(values: Vec<Result<Value>>) -> Self {
+    pub(crate) fn from_results(values: Vec<Result<Value>>) -> Self {
         Self {
             values: values.into_iter().collect(),
         }

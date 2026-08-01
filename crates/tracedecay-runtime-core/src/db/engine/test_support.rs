@@ -28,7 +28,7 @@ impl TestConnection {
         Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
     }
 
-    pub fn open_without_write_authority(path: &Path) -> Self {
+    pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
 

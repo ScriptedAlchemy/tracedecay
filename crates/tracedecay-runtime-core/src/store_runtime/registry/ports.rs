@@ -54,7 +54,7 @@ impl ResolvedStoreLocator {
         &self.path
     }
 
-    pub const fn is_prospective(&self) -> bool {
+    pub(crate) const fn is_prospective(&self) -> bool {
         self.prospective
     }
 
@@ -86,7 +86,7 @@ impl RuntimeLocatorRecord {
         self.locator.path()
     }
 
-    pub const fn is_prospective(&self) -> bool {
+    pub(crate) const fn is_prospective(&self) -> bool {
         self.locator.is_prospective()
     }
 }

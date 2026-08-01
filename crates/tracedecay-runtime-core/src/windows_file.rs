@@ -8,7 +8,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy)]
-pub struct FileInformation {
+pub(crate) struct FileInformation {
     pub volume_serial_number: u32,
     pub file_index: u64,
     pub number_of_links: u32,
@@ -34,7 +34,7 @@ pub fn information(file: &File) -> io::Result<FileInformation> {
     })
 }
 
-pub fn stable_file_identity(file: &File, path: &Path) -> io::Result<u64> {
+pub(crate) fn stable_file_identity(file: &File, path: &Path) -> io::Result<u64> {
     let metadata = file.metadata()?;
     let mut hasher = Sha256::new();
     if let Ok(information) = information(file) {

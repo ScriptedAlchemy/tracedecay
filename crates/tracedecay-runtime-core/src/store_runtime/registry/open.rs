@@ -19,7 +19,7 @@ use super::{
 
 static PROCESS_AUTHORITY_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-pub enum StoreRuntimeOpenBegin {
+pub(crate) enum StoreRuntimeOpenBegin {
     Ready(StoreRuntimeHandle),
     Started(StoreRuntimeOpenJoin),
     Joined(StoreRuntimeOpenJoin),
@@ -56,7 +56,7 @@ impl fmt::Debug for StoreRuntimeOpenBegin {
     }
 }
 
-pub struct StoreRuntimeOpenJoin {
+pub(crate) struct StoreRuntimeOpenJoin {
     key: Box<StoreRuntimeKey>,
     updates: watch::Receiver<OpenState>,
 }
@@ -112,7 +112,10 @@ pub(super) struct OpeningRuntime {
 }
 
 impl StoreRuntimeRegistry {
-    pub fn begin_or_join_open(&self, request: &StoreRuntimeOpenRequest) -> StoreRuntimeOpenBegin {
+    pub(crate) fn begin_or_join_open(
+        &self,
+        request: &StoreRuntimeOpenRequest,
+    ) -> StoreRuntimeOpenBegin {
         let key = request.key.clone();
         let (binding, attempt, updates, join, eviction) = {
             let mut state = self.lock_state();
