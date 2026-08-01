@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tracedecay_hooks::DaemonHookEvent;
 
 use super::claude::is_code_research_prompt;
 use super::codex::codex_project_root_from_event;
@@ -289,7 +290,7 @@ async fn notify_kiro_post_tool_use(event_json: &str, telemetry: &super::analytic
     let rel_paths = kiro_post_tool_use_rel_paths(event_json, &project_root);
     super::notify_hook_event_with_telemetry(
         &project_root,
-        crate::daemon::DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
+        DaemonHookEvent::kiro_post_tool_use(rel_paths, event_cwd(event_json))
             .with_route(hook_route_metadata_from_event(event_json, &project_root)),
         telemetry,
     )

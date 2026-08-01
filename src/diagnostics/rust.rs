@@ -20,7 +20,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file};
+use crate::diagnostics::{Diagnostic, Driver, Scope, canonicalise_file, is_diagnostic_level};
 use crate::errors::{Result, TraceDecayError};
 
 /// Driver for Rust projects. Probes for `Cargo.toml` at the project root.
@@ -127,13 +127,6 @@ pub(crate) fn target_dir_for(project_root: &Path) -> PathBuf {
         .join("tracedecay-target")
         .join(crate::storage::path_local_profile_project_id(project_root))
         .join("diagnostics")
-}
-
-/// Cargo emits messages of many levels — "warning" and "error" produce
-/// diagnostics; "note", "help", "failure-note" are advisory and would
-/// double-count if we surfaced them.
-fn is_diagnostic_level(level: &str) -> bool {
-    matches!(level, "error" | "warning")
 }
 
 #[derive(Debug, Deserialize)]

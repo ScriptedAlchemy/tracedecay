@@ -761,14 +761,6 @@ impl SyncConfig {
     }
 }
 
-/// Reads the sync settings from the already-pinned runtime snapshot.
-///
-/// This compatibility name intentionally no longer reads `config.json`, opens
-/// a store, or applies an environment override at call time.
-pub fn load_sync_config(project_root: &Path) -> Result<SyncConfig> {
-    cached_sync_config(project_root)
-}
-
 impl Default for TraceDecayConfig {
     fn default() -> Self {
         Self {
@@ -786,15 +778,6 @@ impl Default for TraceDecayConfig {
             telemetry: TelemetryConfig::default(),
         }
     }
-}
-
-/// Reads telemetry settings from the already-pinned runtime snapshot.
-///
-/// This compatibility name intentionally performs no file, database, or IPC
-/// access. A missing authority is an error; hooks handle that by disabling
-/// optional telemetry rather than inventing a fallback value.
-pub fn load_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
-    cached_telemetry_config(project_root)
 }
 
 /// Typed project route for the configuration daemon boundary. The path is
@@ -941,21 +924,11 @@ fn runtime_configuration_cache() -> &'static RuntimeConfigurationCache {
 #[derive(Default)]
 struct ConfigurationDaemonClients {
     by_project: BTreeMap<String, Arc<dyn ConfigurationDaemonClient>>,
-    fallback: Option<Arc<dyn ConfigurationDaemonClient>>,
 }
 
 fn configuration_daemon_client_slot() -> &'static RwLock<ConfigurationDaemonClients> {
     static CLIENT: OnceLock<RwLock<ConfigurationDaemonClients>> = OnceLock::new();
     CLIENT.get_or_init(|| RwLock::new(ConfigurationDaemonClients::default()))
-}
-
-/// Installs a fallback daemon-owned mutation client for compatibility callers
-/// that have no authoritative project route.
-pub fn install_configuration_daemon_client(client: Arc<dyn ConfigurationDaemonClient>) {
-    configuration_daemon_client_slot()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .fallback = Some(client);
 }
 
 /// Installs one daemon-owned client for its exact project identity. CLI, MCP,
@@ -1449,12 +1422,10 @@ pub async fn mutate_pinned_runtime_configuration(
         let clients = configuration_daemon_client_slot()
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients.fallback.clone().or_else(|| {
-            clients
-                .by_project
-                .get(current.target.project_id.as_str())
-                .cloned()
-        })
+        clients
+            .by_project
+            .get(current.target.project_id.as_str())
+            .cloned()
     }
     .ok_or_else(|| {
         config_error(
@@ -2240,42 +2211,14 @@ pub fn resolve_path_with_discovery(path: Option<String>) -> PathBuf {
 /// This is used to allow hidden (dot-prefixed) directories that would
 /// otherwise be skipped by the file walker.
 pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && pattern.matches_with(path, match_opts)
-        {
-            return true;
-        }
-    }
-
-    false
+    any_pattern_matches(&config.include, &[path])
 }
 
 /// Returns `true` if a directory should be entered because it or one of its
 /// descendants matches an explicit include glob.
 pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && (pattern.matches_with(dir_path, match_opts)
-                || pattern.matches_with(&format!("{dir_path}/_"), match_opts))
-        {
-            return true;
-        }
-    }
-
-    false
+    let descendant_probe = format!("{dir_path}/_");
+    any_pattern_matches(&config.include, &[dir_path, &descendant_probe])
 }
 
 /// Returns `true` if a directory should be pruned during scanning.
@@ -2285,44 +2228,39 @@ pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
 /// ensures that patterns like `**/node_modules` and `**/node_modules/**`
 /// both trigger directory pruning in `scan_files_walkdir`.
 pub fn is_excluded_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    for pattern_str in &config.exclude {
-        if let Ok(pattern) = Pattern::new(pattern_str) {
-            // Try both the dummy-file probe (catches dir/**) and the bare
-            // directory path (catches **/dirname).
-            if pattern.matches_with(&format!("{dir_path}/_"), match_opts)
-                || pattern.matches_with(dir_path, match_opts)
-            {
-                return true;
-            }
-        }
-    }
-
-    false
+    // Try both the dummy-file probe (catches `dir/**`) and the bare directory
+    // path (catches `**/dirname`).
+    let descendant_probe = format!("{dir_path}/_");
+    any_pattern_matches(&config.exclude, &[&descendant_probe, dir_path])
 }
 
 /// Returns `true` if the file matches any of the configured exclude patterns.
 pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
-    let match_opts = glob::MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
+    any_pattern_matches(&config.exclude, &[file_path])
+}
 
-    for pattern_str in &config.exclude {
-        if let Ok(pattern) = Pattern::new(pattern_str)
-            && pattern.matches_with(file_path, match_opts)
-        {
-            return true;
-        }
-    }
+/// Glob semantics shared by every include/exclude test. Kept in one place so
+/// the four entry points cannot drift apart on case or separator handling.
+const PATTERN_MATCH_OPTIONS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: false,
+    require_literal_leading_dot: false,
+};
 
-    false
+/// True when any of `patterns` matches any of `candidates`. Unparseable
+/// patterns are skipped rather than failing the whole test, matching the
+/// long-standing behaviour of the include/exclude entry points.
+///
+/// Callers pass every candidate string they want probed, built once per call:
+/// the directory variants used to format their `dir/_` probe once per pattern.
+fn any_pattern_matches(patterns: &[String], candidates: &[&str]) -> bool {
+    patterns.iter().any(|pattern_str| {
+        Pattern::new(pattern_str).is_ok_and(|pattern| {
+            candidates
+                .iter()
+                .any(|candidate| pattern.matches_with(candidate, PATTERN_MATCH_OPTIONS))
+        })
+    })
 }
 
 /// Serializes test and benchmark code that mutates process-wide storage env

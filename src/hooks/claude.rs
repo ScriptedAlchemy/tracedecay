@@ -3,6 +3,7 @@
 //! Claude and Codex share the common hook JSON shape.
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
 use super::memory_inject;
@@ -237,10 +238,9 @@ async fn claude_subagent_start_context(event_json: &str) -> Option<String> {
     Some(context)
 }
 
-fn claude_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
-    event_cwd_from_parsed(parsed).map(|cwd| {
-        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Claude, cwd)
-    })
+fn claude_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
+    event_cwd_from_parsed(parsed)
+        .map(|cwd| DaemonHookEvent::session_start(HookAgent::Claude, cwd))
 }
 
 /// Builds the Claude `SessionStart` context for code workspaces.
@@ -522,7 +522,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(event.agent, crate::daemon::HookAgent::Claude.as_wire());
+        assert_eq!(event.agent, HookAgent::Claude.as_wire());
         assert_eq!(event.event, "sessionStart");
         assert_eq!(
             event.cwd.as_deref(),
