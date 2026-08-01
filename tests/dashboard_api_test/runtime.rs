@@ -67,9 +67,21 @@ impl DashboardTestRuntimeV1 {
         project_root: &Path,
         _open_options: TraceDecayOpenOptions,
     ) -> Result<TraceDecay> {
-        self.graph
+        let graph = self
+            .graph
             .initialize(project_root, self.project_id.clone())
+            .await?;
+        self.databases
+            .profile_database()
+            .upsert_code_project(self.project_id.as_str(), project_root, None, None, None)
             .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "dashboard test project '{}' was rejected by the registry",
+                    project_root.display()
+                ),
+            })?;
+        Ok(graph)
     }
 
     pub(crate) async fn open_project_graph_for_test(
