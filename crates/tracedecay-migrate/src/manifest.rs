@@ -437,7 +437,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::final_v2::*;
     use crate::inventory::MigrationInventory;
 
     /// Records what a checkpoint save asked the host to do, in order, so the
@@ -595,7 +594,8 @@ mod tests {
             ..RecordingWriter::default()
         };
 
-        let error = save_manifest(&writer, &manifest).expect_err("publish failure must surface");
+        let error = save_manifest_with_writer(&writer, &manifest)
+            .expect_err("publish failure must surface");
         assert!(error.to_string().contains("staging failed"));
     }
 
@@ -605,7 +605,7 @@ mod tests {
         let mut manifest = manifest_at(dir.path(), "mig-1");
         manifest.confirmation_token = String::new();
 
-        let error = save_manifest(&RecordingWriter::default(), &manifest)
+        let error = save_manifest_with_writer(&RecordingWriter::default(), &manifest)
             .expect_err("an unconfirmed migration must not checkpoint");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("confirmation_token"));
@@ -620,7 +620,7 @@ mod tests {
         let mut manifest = manifest_at(dir.path(), "mig-1");
         manifest.protocol.lock_path = dir.path().join("somewhere-else.lock");
 
-        let error = save_manifest(&RecordingWriter::default(), &manifest)
+        let error = save_manifest_with_writer(&RecordingWriter::default(), &manifest)
             .expect_err("tampered protocol paths must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("must be derived"));
@@ -655,7 +655,7 @@ mod tests {
         let mut manifest = manifest_at(dir.path(), "mig-1");
         manifest.migration_id = "../escape".to_owned();
 
-        let error = save_manifest(&RecordingWriter::default(), &manifest)
+        let error = save_manifest_with_writer(&RecordingWriter::default(), &manifest)
             .expect_err("an unsafe migration_id must not reach the filesystem");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }

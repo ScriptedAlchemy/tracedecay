@@ -311,14 +311,19 @@ where
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct CandidateTarget<'a> {
+    profile_root: &'a Path,
+    session_registry: &'a DaemonSessionRuntimeRegistryV1,
+    profile_registry: &'a RegisteredGlobalDb,
+}
+
 async fn migrate_candidate_snapshot(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     candidate: &LegacyStoreCandidate,
     source: Option<&SnapshotConnection>,
-    tracedecay_profile_root: &Path,
-    session_registry: &DaemonSessionRuntimeRegistryV1,
-    profile_registry: &RegisteredGlobalDb,
+    target: CandidateTarget<'_>,
     fail_after_table: Option<&str>,
 ) -> Result<CandidateOutcome, CandidateError> {
     if let Some(source) = source {
@@ -344,7 +349,7 @@ async fn migrate_candidate_snapshot(
 
     let target_project = resolve_target_project(
         source,
-        Some(profile_registry),
+        Some(target.profile_registry),
         &candidate.profile_dir.join("config.yaml"),
         user_home,
         hermes_homes,
@@ -363,7 +368,7 @@ async fn migrate_candidate_snapshot(
     } else {
         None
     };
-    let target_layout = resolve_target_layout(&target_project, tracedecay_profile_root)
+    let target_layout = resolve_target_layout(&target_project, target.profile_root)
         .await
         .map_err(|error| {
             CandidateError::Failed(format!("could not resolve target profile shard: {error}"))
@@ -397,7 +402,7 @@ async fn migrate_candidate_snapshot(
         .filter(|_| !target_project.user_scope)
     {
         Some(path) => Some(
-            tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, tracedecay_profile_root)
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, target.profile_root)
                 .await
                 .map_err(|error| {
                     CandidateError::Failed(format!(
@@ -425,9 +430,10 @@ async fn migrate_candidate_snapshot(
         CandidateError::Failed(format!("invalid target project identity: {error}"))
     })?;
     let target_db = if target_project.user_scope {
-        session_registry.profile_sessions().await
+        target.session_registry.profile_sessions().await
     } else {
-        session_registry
+        target
+            .session_registry
             .project_sessions(target_project_id.clone(), [target_project.root.clone()])
             .await
     }
@@ -460,7 +466,8 @@ async fn migrate_candidate_snapshot(
             let graph_db_path = target_layout.graph_db_path.as_deref().ok_or_else(|| {
                 CandidateError::Failed("project memory target disappeared".to_string())
             })?;
-            let memory_db = session_registry
+            let memory_db = target
+                .session_registry
                 .project_memory(target_project_id.clone(), [target_project.root.clone()])
                 .await
                 .map_err(|error| {
@@ -605,9 +612,11 @@ pub(super) async fn migrate_candidate(
         hermes_homes,
         candidate,
         source,
-        tracedecay_profile_root,
-        session_registry,
-        profile_registry,
+        CandidateTarget {
+            profile_root: tracedecay_profile_root,
+            session_registry,
+            profile_registry,
+        },
         fail_after_table,
     )
     .await
