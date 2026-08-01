@@ -13,6 +13,11 @@ use crate::types::*;
 /// `rowid` cursor column in a paged file scan.
 const FILE_COLUMNS: i32 = 6;
 
+/// One `rowid` keyset page of just the indexed paths. Shared with
+/// [`Database::get_stats`], which counts the same paths by language.
+pub(super) const FILE_PATH_PAGE_SQL: &str =
+    "SELECT path, rowid FROM files WHERE rowid > ?1 ORDER BY rowid LIMIT ?2";
+
 /// Keyset page size for file token-map construction.
 ///
 /// Token accounting only needs `(path, size)`. Paging keeps peak allocation
@@ -158,25 +163,20 @@ impl Database {
     /// Startup language discovery needs names, not hashes or metadata. Keeping
     /// that query narrow avoids materializing every full file record for large
     /// projects.
+    /// Read through `rowid` keyset pages: whole-table reads on a real project
+    /// exceed what the `SQLite` runtime will materialize for one query. The
+    /// pages arrive in `rowid` order, so the path ordering callers see is
+    /// restored here rather than by the database.
     pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
-        let mut rows = self
-            .engine_conn()
-            .query("SELECT path FROM files ORDER BY path", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query all file paths: {e}"),
-                operation: "get_all_file_paths".to_string(),
-            })?;
-        let mut paths = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read file path row: {e}"),
-            operation: "get_all_file_paths".to_string(),
-        })? {
-            paths.push(row.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to map file path row: {e}"),
-                operation: "get_all_file_paths".to_string(),
-            })?);
-        }
+        let mut paths = collect_rowid_pages(
+            &self.engine_conn(),
+            FILE_PATH_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "get_all_file_paths",
+        )
+        .await?;
+        paths.sort_unstable();
         Ok(paths)
     }
 

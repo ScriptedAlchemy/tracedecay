@@ -3,13 +3,50 @@ use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_edge;
-use super::sql::{collect_rowid_pages, collect_rows};
+use super::sql::{collect_rowid_pages, collect_rowid_pages_with, collect_rows};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
 /// Columns `row_to_edge` reads, and therefore the index of the trailing
 /// `rowid` cursor column in a paged edge scan.
-const EDGE_COLUMNS: i32 = 4;
+pub(super) const EDGE_COLUMNS: i32 = 4;
+
+/// Builds one `rowid` keyset page of every edge whose `endpoint_column` is one
+/// of `id_count` node ids.
+///
+/// `endpoint_column` is one of the two literal column names `"source"` /
+/// `"target"` chosen by the caller — never caller data. The ids bind as
+/// `?1..?id_count`, `kind_count` optional edge kinds follow, then the `rowid`
+/// cursor and the page row budget.
+///
+/// An id list is not a bound on the row count. A hub symbol carries more edges
+/// than the `SQLite` runtime will materialize for one query on its own, and a
+/// bulk frontier multiplies that by the number of ids; the runtime refuses an
+/// oversized query outright rather than truncating it.
+pub(super) fn edges_by_endpoint_page_sql(
+    endpoint_column: &str,
+    id_count: usize,
+    kind_count: usize,
+) -> String {
+    debug_assert!(id_count > 0, "edges_by_endpoint_page_sql needs an endpoint");
+    let id_placeholders: Vec<String> = (0..id_count).map(|i| format!("?{}", i + 1)).collect();
+    let kind_clause = if kind_count == 0 {
+        String::new()
+    } else {
+        let placeholders: Vec<String> = (0..kind_count)
+            .map(|i| format!("?{}", id_count + i + 1))
+            .collect();
+        format!(" AND kind IN ({})", placeholders.join(", "))
+    };
+    let cursor_param = id_count + kind_count + 1;
+    format!(
+        "SELECT source, target, kind, line, rowid FROM edges \
+         WHERE {endpoint_column} IN ({}){kind_clause} AND rowid > ?{cursor_param} \
+         ORDER BY rowid LIMIT ?{}",
+        id_placeholders.join(", "),
+        cursor_param + 1
+    )
+}
 
 impl Database {
     /// Inserts a single edge, skipping silently if either endpoint is missing.
@@ -150,105 +187,71 @@ impl Database {
     /// Returns outgoing edges from a source node, optionally filtered by edge kinds.
     ///
     /// If `kinds` is empty, all outgoing edges are returned.
+    ///
+    /// Read through `rowid` keyset pages. One endpoint is not a bound: a hub
+    /// symbol on a real repository carries more edges than the `SQLite` runtime
+    /// will materialize for one query, and the runtime refuses an oversized
+    /// query outright rather than truncating it.
     pub async fn get_outgoing_edges(
         &self,
         source_id: &str,
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        if kinds.is_empty() {
-            let mut rows = self
-                .engine_conn()
-                .query(
-                    "SELECT source, target, kind, line FROM edges WHERE source = ?1",
-                    params![source_id],
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query outgoing edges: {e}"),
-                    operation: "get_outgoing_edges".to_string(),
-                })?;
-
-            collect_rows(&mut rows, row_to_edge, "get_outgoing_edges").await
-        } else {
-            let placeholders: Vec<String> = kinds
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 2))
-                .collect();
-            let sql = format!(
-                "SELECT source, target, kind, line FROM edges WHERE source = ?1 AND kind IN ({})",
-                placeholders.join(", ")
-            );
-
-            let mut param_values: Vec<Value> = Vec::new();
-            param_values.push(Value::Text(source_id.to_string()));
-            for k in kinds {
-                param_values.push(Value::Text(k.as_str().to_string()));
-            }
-
-            let mut rows = self
-                .engine_conn()
-                .query(&sql, params_from_iter(param_values))
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query outgoing edges: {e}"),
-                    operation: "get_outgoing_edges".to_string(),
-                })?;
-
-            collect_rows(&mut rows, row_to_edge, "get_outgoing_edges").await
-        }
+        self.edges_by_endpoint(
+            "source",
+            &[source_id.to_string()],
+            kinds,
+            "get_outgoing_edges",
+        )
+        .await
     }
 
     /// Returns incoming edges to a target node, optionally filtered by edge kinds.
     ///
     /// If `kinds` is empty, all incoming edges are returned.
+    ///
+    /// Paged for the same reason as [`Database::get_outgoing_edges`].
     pub async fn get_incoming_edges(
         &self,
         target_id: &str,
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        if kinds.is_empty() {
-            let mut rows = self
-                .engine_conn()
-                .query(
-                    "SELECT source, target, kind, line FROM edges WHERE target = ?1",
-                    params![target_id],
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query incoming edges: {e}"),
-                    operation: "get_incoming_edges".to_string(),
-                })?;
+        self.edges_by_endpoint(
+            "target",
+            &[target_id.to_string()],
+            kinds,
+            "get_incoming_edges",
+        )
+        .await
+    }
 
-            collect_rows(&mut rows, row_to_edge, "get_incoming_edges").await
-        } else {
-            let placeholders: Vec<String> = kinds
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 2))
-                .collect();
-            let sql = format!(
-                "SELECT source, target, kind, line FROM edges WHERE target = ?1 AND kind IN ({})",
-                placeholders.join(", ")
-            );
-
-            let mut param_values: Vec<Value> = Vec::new();
-            param_values.push(Value::Text(target_id.to_string()));
-            for k in kinds {
-                param_values.push(Value::Text(k.as_str().to_string()));
-            }
-
-            let mut rows = self
-                .engine_conn()
-                .query(&sql, params_from_iter(param_values))
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query incoming edges: {e}"),
-                    operation: "get_incoming_edges".to_string(),
-                })?;
-
-            collect_rows(&mut rows, row_to_edge, "get_incoming_edges").await
+    /// Shared keyset-paged read of every edge touching any of `node_ids`
+    /// through `endpoint_column`, which is one of the two literal column names
+    /// `"source"` / `"target"` chosen by the caller — never caller data.
+    async fn edges_by_endpoint(
+        &self,
+        endpoint_column: &'static str,
+        node_ids: &[String],
+        kinds: &[EdgeKind],
+        operation: &'static str,
+    ) -> Result<Vec<Edge>> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
         }
+        let mut leading: Vec<Value> = node_ids.iter().map(|id| Value::Text(id.clone())).collect();
+        for k in kinds {
+            leading.push(Value::Text(k.as_str().to_string()));
+        }
+        let sql = edges_by_endpoint_page_sql(endpoint_column, node_ids.len(), kinds.len());
+        collect_rowid_pages_with(
+            &self.engine_conn(),
+            &sql,
+            &leading,
+            EDGE_COLUMNS,
+            row_to_edge,
+            operation,
+        )
+        .await
     }
 
     /// Returns all outgoing edges for many source nodes in a single query.
@@ -259,52 +262,16 @@ impl Database {
     /// round-trip.
     ///
     /// When `kinds` is empty, all edge kinds are returned.
+    ///
+    /// Paged for the same reason as [`Database::get_outgoing_edges`], and more
+    /// so: a bulk frontier multiplies one node's fan-out by the number of ids.
     pub async fn get_outgoing_edges_bulk(
         &self,
         source_ids: &[String],
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        if source_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let source_placeholders: Vec<String> =
-            (1..=source_ids.len()).map(|i| format!("?{i}")).collect();
-        let mut param_values: Vec<Value> = source_ids
-            .iter()
-            .map(|id| Value::Text(id.clone()))
-            .collect();
-
-        let sql = if kinds.is_empty() {
-            format!(
-                "SELECT source, target, kind, line FROM edges WHERE source IN ({})",
-                source_placeholders.join(", ")
-            )
-        } else {
-            let kind_placeholders: Vec<String> = (1..=kinds.len())
-                .map(|i| format!("?{}", source_ids.len() + i))
-                .collect();
-            for k in kinds {
-                param_values.push(Value::Text(k.as_str().to_string()));
-            }
-            format!(
-                "SELECT source, target, kind, line FROM edges \
-                 WHERE source IN ({}) AND kind IN ({})",
-                source_placeholders.join(", "),
-                kind_placeholders.join(", ")
-            )
-        };
-
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
+        self.edges_by_endpoint("source", source_ids, kinds, "get_outgoing_edges_bulk")
             .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query bulk outgoing edges: {e}"),
-                operation: "get_outgoing_edges_bulk".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_edge, "get_outgoing_edges_bulk").await
     }
 
     /// Returns all incoming edges for many target nodes in a single query.
@@ -315,52 +282,15 @@ impl Database {
     /// through `get_incoming_edges`.
     ///
     /// When `kinds` is empty, all edge kinds are returned.
+    ///
+    /// Paged for the same reason as [`Database::get_outgoing_edges_bulk`].
     pub async fn get_incoming_edges_bulk(
         &self,
         target_ids: &[String],
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
-        if target_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let target_placeholders: Vec<String> =
-            (1..=target_ids.len()).map(|i| format!("?{i}")).collect();
-        let mut param_values: Vec<Value> = target_ids
-            .iter()
-            .map(|id| Value::Text(id.clone()))
-            .collect();
-
-        let sql = if kinds.is_empty() {
-            format!(
-                "SELECT source, target, kind, line FROM edges WHERE target IN ({})",
-                target_placeholders.join(", ")
-            )
-        } else {
-            let kind_placeholders: Vec<String> = (1..=kinds.len())
-                .map(|i| format!("?{}", target_ids.len() + i))
-                .collect();
-            for k in kinds {
-                param_values.push(Value::Text(k.as_str().to_string()));
-            }
-            format!(
-                "SELECT source, target, kind, line FROM edges \
-                 WHERE target IN ({}) AND kind IN ({})",
-                target_placeholders.join(", "),
-                kind_placeholders.join(", ")
-            )
-        };
-
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
+        self.edges_by_endpoint("target", target_ids, kinds, "get_incoming_edges_bulk")
             .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query bulk incoming edges: {e}"),
-                operation: "get_incoming_edges_bulk".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_edge, "get_incoming_edges_bulk").await
     }
 
     /// Returns every edge in the database.
