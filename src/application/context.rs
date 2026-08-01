@@ -1,10 +1,6 @@
 use std::fmt;
 use std::path::Path;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
