@@ -6,32 +6,42 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracedecay::application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
+#[cfg(feature = "test-transport")]
 use tracedecay::application::advisory::ci_runtime::{
     CiCodeAnchorStoreV1, CiRetainedProviderObservationV1, CiRetainedProviderRecordV1,
-    GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
+    ProjectCiCodeAnchorStoreV1,
 };
 use tracedecay::application::advisory::github_runtime::{
-    GitHubProviderLifecycleV1, GitHubReviewAtomicRefreshStoreV1, GitHubReviewBodyReadOutcomeV1,
-    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
-    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
-    GitHubSourceAccessAuthorityV1, ProjectGitHubAnchorAuthorityV1,
+    GitHubProviderLifecycleV1, GitHubReviewBodyReadOutcomeV1, GitHubSourceAccessAuthorityV1,
+    ProjectGitHubAnchorAuthorityV1,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay::application::advisory::github_runtime::{
+    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
+    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay::application::advisory::{CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource};
 use tracedecay::application::advisory::{
-    CiFailureLocalizationAdapter, CiReadOnlyEvidenceSource, GitHubCanonicalReviewAnchorAuthorityV1,
-    GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1, GitHubOfficialResponseDecoderV1,
-    GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1, GitHubReadOnlyCredentialV1,
-    GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1, GitHubReviewAnchorSeedV1,
-    GitHubReviewProviderIdentityV1,
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1, GitHubHttpReadConfigV1,
+    GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
+    GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
+    GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
 };
 use tracedecay::tracedecay::TraceDecay;
+#[cfg(feature = "test-transport")]
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, CiFailureLocalizationRequestV1,
-    FeedbackPortFuture, GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1,
-    GitHubReviewReadRequestV1,
+    GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1,
 };
+use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::now_micros;
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope, now_micros,
+    RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
@@ -39,10 +49,11 @@ use tracedecay_domain::feedback::{
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros,
-    WorktreeId, canonical_sha256,
+    ActorId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, ProviderId,
+    RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros, WorktreeId,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 mod common;
@@ -97,8 +108,10 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
     }
 }
 
+#[cfg(feature = "test-transport")]
 struct PanicCiSource;
 
+#[cfg(feature = "test-transport")]
 impl CiReadOnlyEvidenceSource for PanicCiSource {
     fn read_localization<'a>(
         &'a self,
@@ -109,8 +122,10 @@ impl CiReadOnlyEvidenceSource for PanicCiSource {
     }
 }
 
+#[cfg(feature = "test-transport")]
 struct PanicGitHubPort;
 
+#[cfg(feature = "test-transport")]
 impl GitHubReviewReadPort for PanicGitHubPort {
     fn read<'a>(
         &'a self,
@@ -121,8 +136,10 @@ impl GitHubReviewReadPort for PanicGitHubPort {
     }
 }
 
+#[cfg(feature = "test-transport")]
 struct PanicGitHubStore;
 
+#[cfg(feature = "test-transport")]
 impl GitHubReviewAtomicRefreshStoreV1 for PanicGitHubStore {
     fn load<'a>(
         &'a self,
@@ -143,8 +160,10 @@ impl GitHubReviewAtomicRefreshStoreV1 for PanicGitHubStore {
     }
 }
 
+#[cfg(feature = "test-transport")]
 struct PanicGitHubSourceAccess;
 
+#[cfg(feature = "test-transport")]
 impl GitHubSourceAccessAuthorityV1 for PanicGitHubSourceAccess {
     fn authorize<'a>(
         &'a self,
@@ -386,6 +405,7 @@ async fn corrupt_provider_identity_fails_production_decoder() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
     let resolved = ResolvedScope::new(
         scope.project_id.clone(),
@@ -418,6 +438,7 @@ fn proximity_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext 
     .unwrap()
 }
 
+#[cfg(feature = "test-transport")]
 fn ci_context(scope: &FeedbackScopeV1, now: UtcMicros) -> RequestContext {
     let resolved = ResolvedScope::new(
         scope.project_id.clone(),
@@ -655,6 +676,7 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
     ));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn unauthorized_ci_request_is_denied_before_provider_read() {
     let fixture =
@@ -674,6 +696,7 @@ async fn unauthorized_ci_request_is_denied_before_provider_read() {
     ));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph() {
     let (_environment, project) = common::IsolatedEnv::acquire().await;
@@ -811,6 +834,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     assert!(stale.generation.is_none());
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn unauthorized_github_refresh_is_denied_before_port_or_store_access() {
     let fixture =
