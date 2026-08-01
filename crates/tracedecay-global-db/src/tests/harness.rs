@@ -20,6 +20,102 @@ pub struct RegisteredGlobalDbHarness {
     registry: Box<dyn ProfileSessionsRuntime>,
 }
 
+/// Standalone registered-database fixture for downstream use-case tests.
+///
+/// This owns only storage registration. Composition-root daemon, transport,
+/// migration, and host-admission adapters deliberately stay outside it.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct RegisteredGlobalDbTestRuntime {
+    profile_registered: Arc<RegisteredGlobalDb>,
+    project_registered: Option<Arc<RegisteredGlobalDb>>,
+    _scope: DaemonDatabaseScope,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl RegisteredGlobalDbTestRuntime {
+    pub async fn profile(
+        profile_root: impl AsRef<std::path::Path>,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        Self::open(profile_root.as_ref(), None).await
+    }
+
+    pub async fn project(
+        profile_root: impl AsRef<std::path::Path>,
+        project_root: impl AsRef<std::path::Path>,
+        project_id: tracedecay_domain::ProjectId,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        let project_root = project_root.as_ref();
+        std::fs::create_dir_all(project_root)?;
+        if tracedecay_runtime_core::storage::read_enrollment_marker(project_root)?.is_none() {
+            tracedecay_runtime_core::storage::write_enrollment_marker(
+                project_root,
+                &tracedecay_runtime_core::storage::EnrollmentMarker {
+                    project_id: project_id.as_str().to_owned(),
+                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+                },
+            )?;
+        }
+        Self::open(profile_root.as_ref(), Some(project_root)).await
+    }
+
+    async fn open(
+        profile_root: &std::path::Path,
+        project_root: Option<&std::path::Path>,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        std::fs::create_dir_all(profile_root)?;
+        let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            profile_root,
+            nonce,
+            "registered-global-db-test-runtime",
+        )?;
+        let profile_registered =
+            open_registered_test_database(&profile_root.join("profile-sessions.db")).await?;
+        let project_registered = match project_root {
+            Some(project_root) => Some(
+                open_registered_test_database(
+                    &project_root.join(".tracedecay").join("project-sessions.db"),
+                )
+                .await?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            profile_registered,
+            project_registered,
+            _scope: scope,
+        })
+    }
+
+    pub fn profile_database(&self) -> &RegisteredGlobalDb {
+        self.profile_registered.as_ref()
+    }
+
+    pub fn profile_database_arc(&self) -> Arc<RegisteredGlobalDb> {
+        Arc::clone(&self.profile_registered)
+    }
+
+    pub fn project_database(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
+        self.project_registered.as_deref().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind registered project test database".to_owned(),
+                message: "registered project database is unavailable".to_owned(),
+            }
+        })
+    }
+
+    pub fn project_database_arc(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+        self.project_registered.clone().ok_or_else(|| {
+            tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind registered project test database".to_owned(),
+                message: "registered project database is unavailable".to_owned(),
+            }
+        })
+    }
+}
+
 impl RegisteredGlobalDbHarness {
     pub async fn open(label: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary registered global database");

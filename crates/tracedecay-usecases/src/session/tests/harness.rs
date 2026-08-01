@@ -18,8 +18,8 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
 
@@ -32,19 +32,17 @@ pub(super) const SAFE_PRIVACY_PAYLOAD: &str = "The billing pipeline regression i
 pub(super) struct RegisteredTemporalHarness {
     pub(super) registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
-    _runtime: HostAdmissionTestRuntimeV1,
+    _runtime: RegisteredGlobalDbTestRuntime,
 }
 
 impl RegisteredTemporalHarness {
     pub(super) async fn open(label: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary registered session store");
         let profile_root = directory.path().join("profile");
-        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        let runtime = RegisteredGlobalDbTestRuntime::profile(&profile_root)
             .await
             .unwrap_or_else(|error| panic!("{label}: registered profile runtime: {error}"));
-        let registered = runtime
-            .registered_database_arc(HostAdmissionScope::Profile)
-            .expect("registered profile database");
+        let registered = runtime.profile_database_arc();
         Self {
             registered,
             _directory: directory,

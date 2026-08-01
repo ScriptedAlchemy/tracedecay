@@ -416,7 +416,7 @@ mod tests {
         let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let project_id = tracedecay_domain::ProjectId::new("project.activity").expect("project id");
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::project(
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
             tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
             project.path(),
             project_id.clone(),
@@ -424,7 +424,7 @@ mod tests {
         .await
         .expect("registered runtime");
         let db = runtime
-            .project_observation_database_for_test()
+            .project_database()
             .expect("project observation database");
 
         publish(
