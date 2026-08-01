@@ -16,7 +16,7 @@ use tracedecay_domain::{
 
 use super::super::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
-use crate::mcp::server::CodeIndexSearchDisplayV1;
+use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationOutcomeV1,
     HydrationPreflightOutcomeV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
