@@ -65,8 +65,7 @@ pub use steering::{
 };
 
 #[cfg(test)]
-use analytics::HOOK_ANALYTICS_FILENAME;
-pub(crate) use analytics::HookCompletedReadinessDistributions;
+use analytics::{HOOK_ANALYTICS_FILENAME, HookCompletedReadinessDistributions};
 #[cfg(test)]
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
@@ -74,6 +73,7 @@ use analytics::{
     record_hook_invoked, record_other_hook_invoked, record_workspace_status_analytics,
 };
 
+#[cfg(test)]
 pub(crate) fn aggregate_hook_completed_readiness(
     rows: &[Value],
 ) -> HookCompletedReadinessDistributions {
