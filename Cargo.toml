@@ -28,6 +28,7 @@ members = [
     "crates/tracedecay-sqlite-parity-protocol",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",
+    "crates/tracedecay-usecases",
 ]
 resolver = "3"
 
@@ -189,6 +190,7 @@ test-transport = [
     "tracedecay-migrate/test-transport",
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-dashboard-api/test-transport",
+    "tracedecay-usecases/test-transport",
 ]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
@@ -200,7 +202,10 @@ rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the
 # immutable catalog pins, never query-time ambient cache discovery. The
 # adapter itself lives in `tracedecay-semantic`, which owns the pins.
-semantic-fastembed = ["tracedecay-semantic/semantic-fastembed"]
+semantic-fastembed = [
+    "tracedecay-semantic/semantic-fastembed",
+    "tracedecay-usecases/semantic-fastembed",
+]
 
 [lib]
 name = "tracedecay"
@@ -264,6 +269,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup"]
 tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0" }
 clap = { version = "4.6", features = ["derive"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
