@@ -8,6 +8,8 @@ pub use tracedecay_usecases::host_admission::*;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use rusqlite::{Connection as RusqliteConnection, OpenFlags, types::ValueRef};
+use sha2::{Digest as _, Sha256};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
@@ -132,6 +134,76 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    pub fn registered_database_arc(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Option<Arc<RegisteredGlobalDb>> {
+        match scope {
+            HostAdmissionScope::Project => self.project_registered.clone(),
+            HostAdmissionScope::Profile => Some(Arc::clone(&self.profile_registered)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn read_snapshot(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> tracedecay_runtime_core::db::engine::Result<
+        tracedecay_runtime_core::db::engine::ReadSnapshot,
+    > {
+        self.registered_database(scope)
+            .ok_or_else(|| {
+                tracedecay_runtime_core::db::engine::Error::invalid_operation(
+                    "registered session test runtime unavailable",
+                )
+            })?
+            .read_snapshot()
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn checkpoint_session_database_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<()> {
+        self.session_database_for_test(scope)?.checkpoint().await;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn session_database_storage_bytes_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<u64> {
+        let database = self.session_database_for_test(scope)?;
+        let mut total = 0u64;
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = database.db_path().as_os_str().to_os_string();
+            path.push(suffix);
+            match std::fs::metadata(PathBuf::from(path)) {
+                Ok(metadata) => total = total.saturating_add(metadata.len()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(TraceDecayError::Database {
+                        operation: "read retained session database storage bytes".to_owned(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    #[doc(hidden)]
+    pub async fn session_domain_sha256_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> Result<[u8; 32]> {
+        self.checkpoint_session_database_for_test(scope).await?;
+        canonical_session_domain_sha256(self.session_database_for_test(scope)?.db_path())
+    }
+
+    #[doc(hidden)]
     pub async fn upsert_session_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -184,6 +256,55 @@ impl HostAdmissionTestRuntimeV1 {
             .session_database_for_test(scope)?
             .get_session(provider, session_id)
             .await)
+    }
+
+    #[doc(hidden)]
+    pub async fn session_message_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        message_id: &str,
+    ) -> Result<Option<tracedecay_sessions::runtime::SessionMessageRecord>> {
+        Ok(self
+            .session_database_for_test(scope)?
+            .get_session_message(provider, message_id)
+            .await)
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_transcript_batch_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        session: &tracedecay_sessions::runtime::SessionRecord,
+        messages: &[tracedecay_sessions::runtime::SessionMessageRecord],
+        source: &str,
+        offset: crate::global_db::ParseOffset,
+    ) -> Result<Vec<i64>> {
+        let database = self.session_database_for_test(scope)?;
+        if !database
+            .upsert_transcript_batch(session, messages, source, offset)
+            .await
+        {
+            return Err(TraceDecayError::Database {
+                operation: "seed registered transcript batch fixture".to_owned(),
+                message: "registered transcript batch write failed".to_owned(),
+            });
+        }
+        let mut store_ids = Vec::with_capacity(messages.len());
+        for message in messages {
+            let raw = database
+                .lcm_load_raw_message(&message.provider, &message.message_id)
+                .await
+                .ok_or_else(|| TraceDecayError::Database {
+                    operation: "read registered transcript fixture store id".to_owned(),
+                    message: format!(
+                        "LCM raw message {}/{} is unavailable after insert",
+                        message.provider, message.message_id
+                    ),
+                })?;
+            store_ids.push(raw.store_id);
+        }
+        Ok(store_ids)
     }
 
     #[doc(hidden)]
@@ -252,12 +373,96 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
-    fn session_database_for_test(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
-        self.registered_database(scope)
+    #[doc(hidden)]
+    pub async fn project_lcm_raw_message_exists_for_test(
+        &self,
+        provider: &str,
+        message_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .project_database_for_test()?
+            .lcm_load_raw_message(provider, message_id)
+            .await
+            .is_some())
+    }
+
+    #[doc(hidden)]
+    pub async fn git_sessions_for_for_test(
+        &self,
+        query: &crate::sessions::git_correlation::SessionsForQuery,
+        relation: crate::sessions::git_correlation::CommitRelationFilter,
+    ) -> std::result::Result<
+        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        let database = self.project_database_for_test().map_err(|error| {
+            crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
+        })?;
+        crate::store::GlobalDbGitCorrelationStore::new(database)
+            .sessions_for_with_relation(query, relation)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
+        self.profile_database
+            .upsert(project_path, tokens_saved)
+            .await;
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_code_project(
+        &self,
+        project_id: &str,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+        git_remote_url: Option<&str>,
+        default_branch: Option<&str>,
+    ) -> Option<crate::global_db::CodeProjectRecord> {
+        self.profile_database
+            .upsert_code_project(
+                project_id,
+                project_root,
+                git_common_dir,
+                git_remote_url,
+                default_branch,
+            )
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_project_alias(
+        &self,
+        alias_path: &Path,
+        project_id: &str,
+    ) -> Option<crate::global_db::ProjectAliasRecord> {
+        self.profile_database
+            .upsert_project_alias(alias_path, project_id)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn upsert_store_instance(
+        &self,
+        upsert: crate::global_db::StoreInstanceUpsert,
+    ) -> Option<crate::global_db::StoreInstanceRecord> {
+        self.profile_database.upsert_store_instance(upsert).await
+    }
+
+    fn project_database_for_test(&self) -> Result<&RegisteredGlobalDb> {
+        self.project_registered
+            .as_deref()
             .ok_or_else(|| TraceDecayError::Database {
-                operation: "bind registered host-admission test runtime".to_owned(),
-                message: "requested registered database scope is unavailable".to_owned(),
+                operation: "bind registered project session test runtime".to_owned(),
+                message: "registered ProjectSessions mount is unavailable".to_owned(),
             })
+    }
+
+    fn session_database_for_test(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
+        match scope {
+            HostAdmissionScope::Project => self.project_database_for_test(),
+            HostAdmissionScope::Profile => Ok(self.profile_registered.as_ref()),
+        }
     }
 
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
@@ -443,6 +648,92 @@ impl HostAdmissionTestRuntimeV1 {
             });
         }
         Ok((store_layout, project_database))
+    }
+}
+
+fn canonical_session_domain_sha256(path: &Path) -> Result<[u8; 32]> {
+    let connection = RusqliteConnection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| session_domain_digest_error("open session database", error))?;
+    let mut table_statement = connection
+        .prepare(
+            "SELECT name
+             FROM sqlite_schema
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name <> 'analytics_events'
+             ORDER BY name",
+        )
+        .map_err(|error| session_domain_digest_error("prepare session table inventory", error))?;
+    let tables = table_statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| session_domain_digest_error("query session table inventory", error))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| session_domain_digest_error("read session table inventory", error))?;
+    drop(table_statement);
+
+    let mut digest = Sha256::new();
+    digest.update(b"tracedecay.session-domain-state.v1\0");
+    for table in tables {
+        digest_len_prefixed(&mut digest, table.as_bytes());
+        let escaped = table.replace('"', "\"\"");
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM \"{escaped}\""))
+            .map_err(|error| session_domain_digest_error("prepare session table read", error))?;
+        let column_count = statement.column_count();
+        let order = (1..=column_count)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT * FROM \"{escaped}\" ORDER BY {order}");
+        drop(statement);
+        statement = connection
+            .prepare(&sql)
+            .map_err(|error| session_domain_digest_error("prepare ordered session read", error))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| session_domain_digest_error("query session table", error))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| session_domain_digest_error("read session table row", error))?
+        {
+            digest.update(b"row\0");
+            for index in 0..column_count {
+                match row.get_ref(index).map_err(|error| {
+                    session_domain_digest_error("decode session table value", error)
+                })? {
+                    ValueRef::Null => digest.update([0]),
+                    ValueRef::Integer(value) => {
+                        digest.update([1]);
+                        digest.update(value.to_le_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        digest.update([2]);
+                        digest.update(value.to_bits().to_le_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        digest.update([3]);
+                        digest_len_prefixed(&mut digest, value);
+                    }
+                    ValueRef::Blob(value) => {
+                        digest.update([4]);
+                        digest_len_prefixed(&mut digest, value);
+                    }
+                }
+            }
+        }
+    }
+    Ok(digest.finalize().into())
+}
+
+fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    digest.update(value);
+}
+
+fn session_domain_digest_error(operation: &str, error: rusqlite::Error) -> TraceDecayError {
+    TraceDecayError::Database {
+        operation: operation.to_owned(),
+        message: error.to_string(),
     }
 }
 
