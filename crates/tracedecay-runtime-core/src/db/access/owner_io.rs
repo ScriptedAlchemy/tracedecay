@@ -219,11 +219,11 @@ pub(super) fn sync_parent_directory(path: &Path, record_name: &str) -> Result<()
             &format!("{record_name} path has no parent directory"),
         )
     })?;
-    // `application::host_admission` re-exports these from the application
-    // crate; the kernel imports the canonical definitions directly.
-    tracedecay_application::framed_log::sync_directory(
+    // `application::host_admission` re-exports these from the domain crate;
+    // the kernel imports the canonical definitions directly.
+    tracedecay_domain::framed_log::sync_directory(
         parent,
-        tracedecay_application::framed_log::DirectorySyncPolicy::Strict,
+        tracedecay_domain::framed_log::DirectorySyncPolicy::Strict,
     )
     .map_err(|error| access_io_error(&format!("sync {record_name} directory"), parent, &error))
 }

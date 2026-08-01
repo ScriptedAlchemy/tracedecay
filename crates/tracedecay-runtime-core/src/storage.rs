@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_application::DirectorySyncPolicy;
+use tracedecay_domain::framed_log::DirectorySyncPolicy;
 
 use crate::config::{self, TRACEDECAY_DIR};
 use crate::errors::{Result, TraceDecayError};
@@ -1549,7 +1549,7 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid_input("private store durable file has no parent directory"))?;
-    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
+    tracedecay_domain::framed_log::sync_directory(parent, DirectorySyncPolicy::Strict)
 }
 
 pub fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
