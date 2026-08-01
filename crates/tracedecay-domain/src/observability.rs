@@ -148,10 +148,11 @@ impl ObservabilityEnvelopeV1 {
             self.watermark.as_str(),
             self.process_boot_id.as_str(),
         ] {
-            if !crate::canonical_text::is_canonical_text_within(
-                value,
-                crate::canonical_text::CANONICAL_TEXT_MAX_BYTES,
-            ) {
+            if value.is_empty()
+                || value.len() > 512
+                || value.trim() != value
+                || value.chars().any(char::is_control)
+            {
                 return Err("identifier");
             }
         }

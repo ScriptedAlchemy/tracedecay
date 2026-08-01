@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::canonical_text::{CANONICAL_TEXT_MAX_BYTES, is_canonical_text_within};
 use tracedecay_domain::{
     EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EntityId, RemoteWriterFenceV1,
     UtcMicros,
@@ -456,10 +455,14 @@ fn validate_authentication(
 }
 
 fn validate_identifier(value: &str) -> Result<(), RemoteRecoveryContractErrorV1> {
-    if is_canonical_text_within(value, CANONICAL_TEXT_MAX_BYTES) {
-        Ok(())
-    } else {
+    if value.is_empty()
+        || value.len() > 512
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
         Err(RemoteRecoveryContractErrorV1::InvalidIdentifier)
+    } else {
+        Ok(())
     }
 }
 

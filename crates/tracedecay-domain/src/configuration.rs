@@ -130,10 +130,54 @@ pub const LEGACY_CONFIG_JSON_SETTING_KEYS_V1: &[&str] = &[
     TELEMETRY_TIMINGS_SETTING_KEY,
 ];
 
-validated_string_newtype!(
-    schema,
-    DomainError,
-    validate_canonical_label;
+macro_rules! configuration_string_id {
+    ($($name:ident => $field:literal),+ $(,)?) => {$(
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, DomainError> {
+                let value = value.into();
+                validate_canonical_label(&value, $field)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn validate(&self) -> Result<(), DomainError> {
+                validate_canonical_label(&self.0, $field)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = DomainError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    )+};
+}
+
+configuration_string_id!(
     UserProfileId => "user profile id",
     SourceBindingId => "source binding id",
     AccessRuleId => "access rule id",
@@ -317,8 +361,15 @@ impl ConfigurationMutationGrantReceiptV1 {
     }
 }
 
-use crate::canonical_text::validate_canonical_string as validate_canonical_label;
-use crate::canonical_text::validated_string_newtype;
+fn validate_canonical_label(value: &str, field: &'static str) -> Result<(), DomainError> {
+    if value.is_empty() {
+        return Err(DomainError::Empty { field });
+    }
+    if value.trim() != value || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(DomainError::NonCanonical { field });
+    }
+    Ok(())
+}
 
 fn validate_setting_key(value: &str) -> Result<(), DomainError> {
     validate_canonical_label(value, "configuration setting key")?;

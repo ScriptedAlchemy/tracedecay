@@ -656,7 +656,12 @@ fn encode_sha256(hasher: Sha256) -> String {
 }
 
 fn is_sha256_identity(value: &str) -> bool {
-    crate::canonical_text::is_tagged_lowercase_hex(value, "sha256:", 64)
+    value.strip_prefix("sha256:").is_some_and(|encoded| {
+        encoded.len() == 64
+            && encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[derive(Default)]

@@ -630,7 +630,12 @@ fn generation_identity_kind(
     }
     match fingerprint {
         None => Ok(GenerationIdentityKind::Legacy),
-        Some(value) if crate::canonical_text::is_lowercase_hex(value, 64) => {
+        Some(value)
+            if value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+        {
             Ok(GenerationIdentityKind::Fingerprinted(value))
         }
         Some(_) => Err(DomainError::NonCanonical {

@@ -1,7 +1,6 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use tracedecay_domain::canonical_text::is_canonical_text;
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId,
     WorktreeId,
@@ -68,8 +67,6 @@ macro_rules! canonical_id {
     };
 }
 
-pub(super) use canonical_id;
-
 // A retained database snapshot is not an evaluation, configuration, or Git
 // repository-state snapshot, so it intentionally does not reuse those domain IDs.
 canonical_id!(StoreSnapshotIdV1, "store snapshot id");
@@ -108,7 +105,7 @@ pub(super) fn validate_canonical_id(
             max,
         });
     }
-    if !is_canonical_text(value) {
+    if value.trim() != value || value.chars().any(char::is_control) {
         return Err(StorageRuntimeContractErrorV1::NonCanonical { field });
     }
     Ok(())
