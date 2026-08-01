@@ -60,8 +60,10 @@ const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
 const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
+const MAX_CACHED_PROJECT_OPEN_FAILURES: usize = 64;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const PROJECT_OPEN_RESOURCE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// Backoff for a persisted-row authority defect, which only an operator can
 /// clear. Reopening re-runs the exhaustive authority audit over every
 /// `observations` row and fails on the same row every time, so the debounce

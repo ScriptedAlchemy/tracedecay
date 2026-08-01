@@ -137,6 +137,22 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
         // noticed the CPU. Decode failures and column-versus-JSON
         // disagreements both land here without being enumerated.
         TraceDecayError::Database { message, operation } => {
+            // A failed code-shard open may already have published its typed
+            // resolver authority. Retrying cannot repair a conflicting binding
+            // and previously repeated the whole warm-up on every hook request.
+            if operation == "register code-shard authority"
+                && message.starts_with("DuplicateCodeAuthority {")
+            {
+                return Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF);
+            }
+            // Code-runtime capacity may clear after another project retires,
+            // but rebuilding this route for every concurrent request only
+            // prolongs the resource pressure that rejected it.
+            if operation == "open registered session runtime"
+                && message.starts_with("ProjectCodeBudgetExhausted {")
+            {
+                return Some(PROJECT_OPEN_RESOURCE_RETRY_BACKOFF);
+            }
             if operation != "ensure global database authority invariants" {
                 return None;
             }
@@ -197,6 +213,46 @@ impl ProjectOpenTaskRegistry {
                 }
             }
         });
+        while self.cached_failure_count() > MAX_CACHED_PROJECT_OPEN_FAILURES {
+            let Some(route) = self
+                .routes
+                .iter()
+                .filter_map(|(route, entry)| {
+                    let ProjectOpenTaskState::Failed(failure) = entry.state.borrow().clone() else {
+                        return None;
+                    };
+                    entry
+                        .task
+                        .is_finished()
+                        .then_some((route.clone(), failure.retry_at))
+                })
+                .min_by_key(|(_, retry_at)| *retry_at)
+                .map(|(route, _)| route)
+            else {
+                break;
+            };
+            self.routes.remove(&route);
+        }
+    }
+
+    fn active_task_count(&self) -> usize {
+        self.routes
+            .values()
+            .filter(|entry| !entry.task.is_finished())
+            .count()
+    }
+
+    fn cached_failure_count(&self) -> usize {
+        self.routes
+            .values()
+            .filter(|entry| {
+                entry.task.is_finished()
+                    && matches!(
+                        entry.state.borrow().clone(),
+                        ProjectOpenTaskState::Failed(_)
+                    )
+            })
+            .count()
     }
 }
 
@@ -233,7 +289,7 @@ impl ProjectOpenTasks {
                 }
             };
         }
-        if registry.routes.len() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
+        if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
             return ProjectOpenTaskClaim::Saturated;
         }
 

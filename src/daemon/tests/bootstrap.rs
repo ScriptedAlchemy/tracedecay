@@ -586,11 +586,121 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
     assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
+#[tokio::test]
+async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
+        let state = match tasks
+            .start(
+                project_open_test_route(&format!("cached-failure-{index}")),
+                async {
+                    Err(authority_invariant_error(
+                        "invalid committed observation authority JSON",
+                    ))
+                },
+            )
+            .await
+        {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("first route attempt must start")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("completed failures must not consume active-task capacity")
+            }
+        };
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("injected authority failure must surface");
+    }
+
+    let healthy = tasks
+        .start(project_open_test_route("healthy-after-failures"), async {
+            Ok(())
+        })
+        .await;
+    let state = match healthy {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("independent healthy route must not reuse a failure")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("cached failures must not block an unrelated open")
+        }
+    };
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect("independent healthy route must open");
+}
+
+#[tokio::test]
+async fn project_open_failure_cache_is_bounded_separately() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    for index in 0..(super::super::MAX_CACHED_PROJECT_OPEN_FAILURES + 8) {
+        let state = match tasks
+            .start(
+                project_open_test_route(&format!("bounded-failure-{index}")),
+                async {
+                    Err(authority_invariant_error(
+                        "invalid committed observation authority JSON",
+                    ))
+                },
+            )
+            .await
+        {
+            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+            super::super::ProjectOpenTaskClaim::Failed(_) => {
+                panic!("each distinct route must start once")
+            }
+            super::super::ProjectOpenTaskClaim::Saturated => {
+                panic!("cached failures must not consume task capacity")
+            }
+        };
+        super::super::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("injected authority failure must surface");
+    }
+    assert!(
+        tasks.tracked_route_count().await <= super::super::MAX_CACHED_PROJECT_OPEN_FAILURES,
+        "failure cache must stay independently bounded"
+    );
+}
+
 fn authority_invariant_error(message: &str) -> crate::errors::TraceDecayError {
     crate::errors::TraceDecayError::Database {
         message: message.to_string(),
         operation: "ensure global database authority invariants".to_string(),
     }
+}
+
+#[test]
+fn deterministic_code_authority_conflicts_do_not_spin_project_warmup() {
+    let error = crate::errors::TraceDecayError::Database {
+        message: "DuplicateCodeAuthority { shard_id: fixture }".to_string(),
+        operation: "register code-shard authority".to_string(),
+    };
+
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
+    );
+}
+
+#[test]
+fn exhausted_code_runtime_capacity_retries_at_resource_cadence() {
+    let error = crate::errors::TraceDecayError::Database {
+        message: "ProjectCodeBudgetExhausted { limit: 4 }".to_string(),
+        operation: "open registered session runtime".to_string(),
+    };
+
+    assert_eq!(
+        super::super::project_open_retry_backoff(&error),
+        Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
+    );
+    assert!(
+        super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF
+            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
+    );
 }
 
 #[test]
