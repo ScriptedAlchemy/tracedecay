@@ -9,14 +9,14 @@ use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 /// Dashboard integration authority assembled at the root composition layer.
 ///
-/// The storage harness remains dependency-clean; this wrapper owns the
-/// product-specific graph and HTTP authority wiring needed by root tests.
+/// This wrapper owns the production registry-backed storage, graph, and HTTP
+/// authority wiring needed by root tests.
 pub(crate) struct DashboardTestRuntimeV1 {
-    databases: RegisteredGlobalDbTestRuntime,
+    profile_database: Arc<RegisteredGlobalDb>,
+    project_database: Arc<RegisteredGlobalDb>,
     graph: dashboard::DashboardGraphTestRuntimeV1,
     project_id: ProjectId,
 }
@@ -39,21 +39,17 @@ impl DashboardTestRuntimeV1 {
             },
         )?;
 
-        let authority_root = profile_root
-            .join("dashboard-test-authorities")
-            .join(project_id.as_str());
-        let databases = RegisteredGlobalDbTestRuntime::project(
-            authority_root.join("profile"),
-            authority_root.join("project"),
-            project_id.clone(),
-        )
-        .await?;
         let graph_profile_root = profile_root
             .join("dashboard-test-graphs")
             .join(project_id.as_str());
         let graph = dashboard::DashboardGraphTestRuntimeV1::open(graph_profile_root).await?;
+        let profile_database = graph.profile_database();
+        let project_database = graph
+            .project_sessions(project_root, project_id.clone())
+            .await?;
         Ok(Self {
-            databases,
+            profile_database,
+            project_database,
             graph,
             project_id,
         })
@@ -72,8 +68,7 @@ impl DashboardTestRuntimeV1 {
             .graph
             .initialize(project_root, self.project_id.clone())
             .await?;
-        self.databases
-            .profile_database()
+        self.profile_database
             .upsert_code_project(self.project_id.as_str(), project_root, None, None, None)
             .await
             .ok_or_else(|| TraceDecayError::Config {
@@ -98,15 +93,15 @@ impl DashboardTestRuntimeV1 {
     ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
         Ok(dashboard::DashboardHostAdmissionTestAuthorityV1::new(
             Arc::clone(self),
-            self.databases.profile_database_arc(),
-            self.databases.project_database_arc()?,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self.project_database),
         ))
     }
 
     fn database(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
         match scope {
-            HostAdmissionScope::Project => self.databases.project_database(),
-            HostAdmissionScope::Profile => Ok(self.databases.profile_database()),
+            HostAdmissionScope::Project => Ok(self.project_database.as_ref()),
+            HostAdmissionScope::Profile => Ok(self.profile_database.as_ref()),
         }
     }
 
@@ -115,9 +110,7 @@ impl DashboardTestRuntimeV1 {
     }
 
     fn primary_session_database(&self) -> &RegisteredGlobalDb {
-        self.databases
-            .project_database()
-            .unwrap_or_else(|_| self.databases.profile_database())
+        self.project_database.as_ref()
     }
 
     pub(crate) async fn upsert_code_project(
@@ -128,8 +121,7 @@ impl DashboardTestRuntimeV1 {
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
     ) -> Option<tracedecay_global_db::CodeProjectRecord> {
-        self.databases
-            .profile_database()
+        self.profile_database
             .upsert_code_project(
                 project_id,
                 project_root,
@@ -184,15 +176,13 @@ impl DashboardTestRuntimeV1 {
         after: u64,
         timestamp: i64,
     ) {
-        self.databases
-            .profile_database()
+        self.profile_database
             .record_savings(project, tool, before, after, timestamp)
             .await;
     }
 
     pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        self.databases
-            .profile_database()
+        self.profile_database
             .upsert(project_path, tokens_saved)
             .await;
     }
@@ -201,14 +191,14 @@ impl DashboardTestRuntimeV1 {
         &self,
         turn: &tracedecay_runtime_core::types::CostTurn,
     ) -> bool {
-        self.databases.profile_database().insert_turn(turn).await
+        self.profile_database.insert_turn(turn).await
     }
 
     pub(crate) async fn insert_turns_for_test(
         &self,
         turns: &[tracedecay_runtime_core::types::CostTurn],
     ) -> usize {
-        self.databases.profile_database().insert_turns(turns).await
+        self.profile_database.insert_turns(turns).await
     }
 
     pub(crate) async fn upsert_session_for_test(
@@ -300,11 +290,7 @@ impl DashboardTestRuntimeV1 {
         observation: &tracedecay::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
-        let transaction = self
-            .databases
-            .project_database()?
-            .begin_write_transaction()
-            .await?;
+        let transaction = self.project_database.begin_write_transaction().await?;
         let span_id =
             tracedecay::sessions::git_correlation::record_span_observation_in_transaction(
                 &transaction,

@@ -82,6 +82,20 @@ impl DashboardGraphTestRuntimeV1 {
         })
     }
 
+    pub fn profile_database(&self) -> std::sync::Arc<crate::global_db::RegisteredGlobalDb> {
+        std::sync::Arc::clone(&self.profile_database)
+    }
+
+    pub async fn project_sessions(
+        &self,
+        project_root: &std::path::Path,
+        project_id: tracedecay_domain::ProjectId,
+    ) -> crate::errors::Result<std::sync::Arc<crate::global_db::RegisteredGlobalDb>> {
+        self.registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await
+    }
+
     pub async fn initialize(
         &self,
         project_root: &std::path::Path,
@@ -110,10 +124,7 @@ impl DashboardGraphTestRuntimeV1 {
                 message: "dashboard graph identity differs from its test authority".to_owned(),
             });
         }
-        let project_database = self
-            .registry
-            .project_sessions(project_id, [project_root.to_path_buf()])
-            .await?;
+        let project_database = self.project_sessions(project_root, project_id).await?;
         crate::tracedecay::TraceDecay::init_with_registered_configuration(
             project_root,
             options,
@@ -154,10 +165,7 @@ impl DashboardGraphTestRuntimeV1 {
                     }
                 })
             })?;
-        let project_database = self
-            .registry
-            .project_sessions(project_id, [project_root.to_path_buf()])
-            .await?;
+        let project_database = self.project_sessions(project_root, project_id).await?;
         crate::tracedecay::TraceDecay::open_with_registered_configuration(
             project_root,
             options,
