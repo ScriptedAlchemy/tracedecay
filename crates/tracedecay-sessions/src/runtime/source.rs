@@ -50,7 +50,7 @@ pub use crate::runtime::shared::{
     usage_counters_from,
 };
 use crate::runtime::{SessionMessageRecord, SessionRecord};
-use crate::store::TranscriptIngestStore;
+use crate::runtime::store_port::TranscriptIngestStore;
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;
 
