@@ -1723,6 +1723,13 @@ mod authority_tests {
                 },
             )
             .expect("dashboard store layout");
+            std::fs::create_dir_all(
+                layout
+                    .graph_db_path
+                    .parent()
+                    .expect("dashboard database parent"),
+            )
+            .expect("dashboard database parent");
             let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
                 &layout.graph_db_path,
                 "dashboard state fixture",
