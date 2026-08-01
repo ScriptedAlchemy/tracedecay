@@ -503,7 +503,7 @@ impl TraceDecay {
                 eprintln!("[tracedecay] background migration re-index complete");
             }
             Err(TraceDecayError::SyncLock { message })
-                if message.contains("another sync is already in progress") =>
+                if message.contains(super::locking::SYNC_IN_PROGRESS_MESSAGE) =>
             {
                 eprintln!(
                     "[tracedecay] background migration re-index deferred while another sync is active"
