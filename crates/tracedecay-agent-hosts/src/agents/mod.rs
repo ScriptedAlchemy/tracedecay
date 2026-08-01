@@ -261,6 +261,21 @@ pub trait AgentIntegration {
         Ok(NonInteractiveInstallOutcome::Ready)
     }
 
+    /// Operator guidance for a host that activates deployed components only
+    /// through an interactive UI, or `None` for a host TraceDecay can activate
+    /// non-interactively.
+    ///
+    /// This is the read-only capability twin of the typed deferral
+    /// [`AgentIntegration::prepare_non_interactive_install`] returns: doctor
+    /// needs the same fact without an `InstallContext` and without staging
+    /// anything. Every integration returning `Some` here must also return
+    /// [`NonInteractiveInstallOutcome::DeferredUserAction`] from preflight —
+    /// otherwise doctor would downgrade a state that an unattended reinstall
+    /// could actually have repaired.
+    fn interactive_activation_guidance(&self) -> Option<String> {
+        None
+    }
+
     /// Refresh tracedecay-generated artifacts (plugin code, baked binary
     /// paths, embedded assets) for every *detected* existing installation,
     /// without writing to any agent config file. Pins, MCP registrations,
@@ -602,6 +617,12 @@ impl host_bundle_v2::HostBundleRegistrationInspectorV1 for AgentRegistrationInsp
             host_bundle_v2::HostBundleRegistrationStateV1::Missing,
             |integration| integration.host_component_registration(component, self.context),
         )
+    }
+
+    fn interactive_activation_guidance(&self, host: host_bundle_v2::HostKindV1) -> Option<String> {
+        get_integration(integration_id_for_host(host))
+            .ok()
+            .and_then(|integration| integration.interactive_activation_guidance())
     }
 }
 

@@ -227,9 +227,12 @@ fn check_host_component_receipts(
 ///
 /// Content drift on a path the component still owns, and a leftover
 /// registration with no owning receipt, both converge under the ordinary
-/// reinstall, so they warn and leave the exit code clean. A contested path,
-/// missing artifacts, and corrupt state each need an operator decision, so
-/// they keep failing.
+/// reinstall, so they warn and leave the exit code clean. A component staged
+/// for a host that only activates through its own UI warns for the same reason
+/// in reverse: no unattended command can converge it, so failing the run would
+/// block every machine whose operator has not clicked through the host yet. A
+/// contested path, missing artifacts, and corrupt state each need an operator
+/// decision, so they keep failing.
 fn report_host_component_state(
     dc: &mut DoctorCounters,
     component: &agents::host_bundle_v2::HostBundleComponentDoctorResultV1,
@@ -257,6 +260,10 @@ fn report_host_component_state(
         )),
         State::OrphanedRegistration => dc.warn(&format!(
             "{label} is still registered with no owning receipt; {}",
+            component.repair_action
+        )),
+        State::ActivationDeferred => dc.warn(&format!(
+            "{label} is staged and waiting on interactive host activation; {}",
             component.repair_action
         )),
         State::Missing => dc.fail(&format!(

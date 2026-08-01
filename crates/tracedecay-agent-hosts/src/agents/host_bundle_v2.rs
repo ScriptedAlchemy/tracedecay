@@ -691,6 +691,19 @@ pub trait HostBundleRegistrationInspectorV1 {
         host: HostKindV1,
         component: HostBundleComponentV1,
     ) -> HostBundleRegistrationStateV1;
+
+    /// Operator guidance for a host that exposes component activation only
+    /// through an interactive UI, or `None` when the host has a supported
+    /// non-interactive activation surface.
+    ///
+    /// This is the single capability signal behind
+    /// [`HostBundleComponentDoctorStateV1::ActivationDeferred`]: a host that
+    /// returns `None` here keeps the blocking `Missing` classification for
+    /// absent receipt-owned artifacts, because for such a host an unattended
+    /// reinstall really can converge the state.
+    fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
+        None
+    }
 }
 
 /// Read-only classification of one installed component (or one of its
@@ -716,6 +729,15 @@ pub enum HostBundleComponentDoctorStateV1 {
     /// still advertising the extension. Reported so the leftover registration
     /// is visible; repairing it is an explicit operator command.
     OrphanedRegistration,
+    /// Every receipt-owned artifact of a component whose host activates only
+    /// through an interactive UI is absent, and the host's staged source bundle
+    /// is present but unactivated. Nothing TraceDecay can drive non-interactively
+    /// deploys these bytes — the host materialises them when the operator
+    /// activates the extension — so this is a pending user action rather than
+    /// receipt drift. Ranked below `Missing`: a component that still holds SOME
+    /// of its receipt-owned bytes lost the rest after activation, which is real
+    /// drift and stays blocking.
+    ActivationDeferred,
     Missing,
     Corrupt,
 }
@@ -1631,6 +1653,7 @@ pub fn inspect_installed_host_bundle_components_at(
                 })
         });
         let registration = registrations.inspect_registration(receipt.host, receipt.component);
+        let activation_guidance = registrations.interactive_activation_guidance(receipt.host);
         let mut artifacts = Vec::with_capacity(receipt.artifacts.len());
         for artifact in &receipt.artifacts {
             // Ownership at a deploy path is proven by receipt evidence, exactly
@@ -1685,7 +1708,14 @@ pub fn inspect_installed_host_bundle_components_at(
             .iter()
             .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Missing)
         {
-            HostBundleComponentDoctorStateV1::Missing
+            if activation_guidance.is_some()
+                && artifacts_are_wholly_unmaterialised(&artifacts)
+                && registration == HostBundleRegistrationStateV1::Repairable
+            {
+                HostBundleComponentDoctorStateV1::ActivationDeferred
+            } else {
+                HostBundleComponentDoctorStateV1::Missing
+            }
         } else if artifacts
             .iter()
             .any(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Drifted)
@@ -1706,6 +1736,13 @@ pub fn inspect_installed_host_bundle_components_at(
                 HostBundleRegistrationStateV1::Corrupt => HostBundleComponentDoctorStateV1::Corrupt,
             }
         };
+        // A deferred activation is finished by the host's own UI, so the host
+        // adapter's exact wording is the repair action; nothing TraceDecay can
+        // run would converge it.
+        let component_repair_action = match (state, activation_guidance) {
+            (HostBundleComponentDoctorStateV1::ActivationDeferred, Some(guidance)) => guidance,
+            _ => repair_action(receipt.host, receipt.component, state, registration),
+        };
         components.push(HostBundleComponentDoctorResultV1 {
             receipt_path,
             host: Some(receipt.host),
@@ -1713,7 +1750,7 @@ pub fn inspect_installed_host_bundle_components_at(
             state,
             registration: Some(registration),
             artifacts,
-            repair_action: repair_action(receipt.host, receipt.component, state, registration),
+            repair_action: component_repair_action,
         });
     }
     let journal_path = control_root.join(HOST_BUNDLE_JOURNAL_FILE);
@@ -2009,6 +2046,23 @@ fn doctor_artifact_state(
     }
 }
 
+/// Whether the receipt's deploy paths carry no evidence that the host ever
+/// materialised this component.
+///
+/// This is what separates a never-activated component from real drift. A
+/// component that holds even one of its receipt-owned files was materialised at
+/// some point, so the absent siblings are bytes that went missing afterwards —
+/// exactly the receipt-integrity failure the blocking `Missing` state exists to
+/// report. Only a wholly absent set can honestly be attributed to an activation
+/// the operator has not performed yet. A receipt with no artifacts at all proves
+/// nothing either way, so it is excluded.
+fn artifacts_are_wholly_unmaterialised(artifacts: &[HostBundleArtifactDoctorResultV1]) -> bool {
+    !artifacts.is_empty()
+        && artifacts
+            .iter()
+            .all(|artifact| artifact.state == HostBundleComponentDoctorStateV1::Missing)
+}
+
 fn corrupt_component_result(
     receipt_path: PathBuf,
     host: Option<HostKindV1>,
@@ -2068,6 +2122,12 @@ fn repair_action(
         ),
         HostBundleComponentDoctorStateV1::OrphanedRegistration => format!(
             "{host} still registers {component} with no owning receipt; run `tracedecay uninstall --agent {host} --component {component} --yes` to finish removing it, or `tracedecay reinstall --component {component} --yes` to re-own it"
+        ),
+        // Reached only when an inspector classifies a deferral without
+        // supplying its host's own wording; recommending a reinstall here would
+        // be the advice that cannot converge, so name the user action instead.
+        HostBundleComponentDoctorStateV1::ActivationDeferred => format!(
+            "{host} activates {component} only through its interactive plugin UI; activate tracedecay there, then re-run doctor"
         ),
         HostBundleComponentDoctorStateV1::Repairable
         | HostBundleComponentDoctorStateV1::Missing
@@ -6981,6 +7041,230 @@ mod tests {
         assert_eq!(
             report.components[0].state,
             HostBundleComponentDoctorStateV1::Corrupt
+        );
+    }
+
+    /// Exactly what Codex's adapter reports: activation lives behind an
+    /// interactive plugin UI, and the staged source bundle the host would
+    /// materialise from is present (`Repairable`) but never activated.
+    const INTERACTIVE_ACTIVATION_GUIDANCE: &str = "Non-interactive Codex plugin activation is unavailable. In Codex's plugin UI, activate \
+         tracedecay from the personal marketplace, then re-run doctor.";
+
+    struct InteractiveActivationRegistration(HostBundleRegistrationStateV1);
+
+    impl HostBundleRegistrationInspectorV1 for InteractiveActivationRegistration {
+        fn inspect_registration(
+            &self,
+            _host: HostKindV1,
+            _component: HostBundleComponentV1,
+        ) -> HostBundleRegistrationStateV1 {
+            self.0
+        }
+
+        fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
+            Some(INTERACTIVE_ACTIVATION_GUIDANCE.to_string())
+        }
+    }
+
+    /// A host TraceDecay can activate without the operator: no guidance, so a
+    /// missing receipt-owned artifact stays a blocking receipt-integrity fault.
+    struct NonInteractiveStagedRegistration;
+
+    impl HostBundleRegistrationInspectorV1 for NonInteractiveStagedRegistration {
+        fn inspect_registration(
+            &self,
+            _host: HostKindV1,
+            _component: HostBundleComponentV1,
+        ) -> HostBundleRegistrationStateV1 {
+            HostBundleRegistrationStateV1::Repairable
+        }
+    }
+
+    /// Write one receipt claiming `artifacts`, materialising only the entries
+    /// whose bytes are `Some`. Absent entries are what the host would have
+    /// created during activation.
+    fn write_component_receipt(
+        artifact_root: &Path,
+        lifecycle_root: &Path,
+        host: HostKindV1,
+        component: HostBundleComponentV1,
+        artifacts: &[(&str, Option<&[u8]>)],
+    ) {
+        let receipt = HostBundleInstallReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: [31; 16],
+            host,
+            component,
+            operation: HostBundleLifecycleOpV1::Install,
+            manifest_digest: Sha256::digest(b"staged-component-set").into(),
+            artifacts: artifacts
+                .iter()
+                .map(|(relative_path, bytes)| HostBundleReceiptArtifactV1 {
+                    relative_path: (*relative_path).to_string(),
+                    artifact_digest: Sha256::digest(bytes.unwrap_or(b"activated")).into(),
+                    ownership_marker: expected_ownership_marker(host, component),
+                })
+                .collect(),
+            rollback_boundary: HostBundleRollbackBoundaryV1::Passed,
+            rollback_history: Vec::new(),
+        };
+        for (relative_path, bytes) in artifacts {
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let path = artifact_root.join(relative_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        std::fs::write(
+            lifecycle_root
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(receipt_file(host, component)),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A host that only activates through its own UI has no command that could
+    /// deploy these bytes, so a component whose receipt-owned artifacts were
+    /// never materialised is a pending user action, not receipt drift. Doctor
+    /// would otherwise fail forever on every machine whose operator has not
+    /// clicked through the host.
+    #[test]
+    fn never_activated_interactive_host_component_defers_instead_of_failing() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        drop(
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap(),
+        );
+        write_component_receipt(
+            artifacts.path(),
+            lifecycle.path(),
+            HostKindV1::Codex,
+            HostBundleComponentV1::ContextMcp,
+            &[(".codex/plugins/tracedecay/.mcp.json", None)],
+        );
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Repairable),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::ActivationDeferred
+        );
+        assert_eq!(
+            report.components[0].repair_action, INTERACTIVE_ACTIVATION_GUIDANCE,
+            "the deferral must carry the host's own activation guidance, never a reinstall that cannot converge"
+        );
+    }
+
+    /// The deferral is scoped to components the host never materialised. Once
+    /// any receipt-owned byte is on disk, an absent sibling is a file that went
+    /// missing after activation — real drift, and still blocking.
+    #[test]
+    fn partially_materialised_interactive_host_component_still_fails() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        drop(
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap(),
+        );
+        write_component_receipt(
+            artifacts.path(),
+            lifecycle.path(),
+            HostKindV1::Codex,
+            HostBundleComponentV1::Core,
+            &[
+                (
+                    ".codex/plugins/tracedecay/.codex-plugin/plugin.json",
+                    Some(b"activated"),
+                ),
+                (".codex/plugins/tracedecay/hooks/hooks.json", None),
+            ],
+        );
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Repairable),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Missing
+        );
+    }
+
+    /// Nothing staged is not a pending activation: with no source bundle the
+    /// operator has nothing to activate, so the component is genuinely missing.
+    #[test]
+    fn unstaged_interactive_host_component_still_fails() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        drop(
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap(),
+        );
+        write_component_receipt(
+            artifacts.path(),
+            lifecycle.path(),
+            HostKindV1::Codex,
+            HostBundleComponentV1::ContextMcp,
+            &[(".codex/plugins/tracedecay/.mcp.json", None)],
+        );
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &InteractiveActivationRegistration(HostBundleRegistrationStateV1::Missing),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Missing
+        );
+    }
+
+    /// Receipt-integrity checking is untouched for every host TraceDecay can
+    /// actually drive: there the reinstall converges the state, so an absent
+    /// receipt-owned artifact keeps blocking.
+    #[test]
+    fn non_interactive_host_missing_artifacts_still_fail() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        drop(
+            HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path())
+                .unwrap(),
+        );
+        write_component_receipt(
+            artifacts.path(),
+            lifecycle.path(),
+            HostKindV1::CursorDesktop,
+            HostBundleComponentV1::ContextMcp,
+            &[(".cursor/plugins/local/tracedecay/mcp.json", None)],
+        );
+
+        let report = inspect_installed_host_bundle_components_at(
+            artifacts.path(),
+            lifecycle.path(),
+            &NonInteractiveStagedRegistration,
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.components[0].state,
+            HostBundleComponentDoctorStateV1::Missing
+        );
+        assert_eq!(
+            report.components[0].repair_action,
+            "run `tracedecay reinstall --component context-mcp --yes`"
         );
     }
 

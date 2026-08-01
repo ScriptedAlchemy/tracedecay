@@ -27,6 +27,13 @@ use super::{
     safe_write_text_file,
 };
 
+/// The one wording for "Codex only activates plugins through its own UI",
+/// shared by the read-only preflight deferral and by the doctor-side
+/// activation-capability probe so the two can never disagree about whether the
+/// host has a non-interactive activation surface.
+const CODEX_INTERACTIVE_ACTIVATION_GUIDANCE: &str = "Non-interactive Codex plugin activation is unavailable. In Codex's plugin UI, activate \
+     tracedecay from the personal marketplace, then re-run doctor.";
+
 /// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
 
@@ -69,13 +76,14 @@ impl AgentIntegration for CodexIntegration {
         // failing on the activation-capability probe.
         Ok(NonInteractiveInstallOutcome::DeferredUserAction(
             DeferredUserAction {
-                remediation: "Non-interactive Codex plugin activation is unavailable. In \
-                              Codex's plugin UI, activate tracedecay from the personal \
-                              marketplace, then re-run doctor."
-                    .to_string(),
+                remediation: CODEX_INTERACTIVE_ACTIVATION_GUIDANCE.to_string(),
                 staged_paths: Vec::new(),
             },
         ))
+    }
+
+    fn interactive_activation_guidance(&self) -> Option<String> {
+        Some(CODEX_INTERACTIVE_ACTIVATION_GUIDANCE.to_string())
     }
 
     fn prepare_non_interactive_install(

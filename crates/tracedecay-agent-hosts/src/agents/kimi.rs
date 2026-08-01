@@ -74,6 +74,10 @@ impl AgentIntegration for KimiIntegration {
         stage_kimi_install_action(ctx).map(NonInteractiveInstallOutcome::DeferredUserAction)
     }
 
+    fn interactive_activation_guidance(&self) -> Option<String> {
+        Some(kimi_official_lifecycle_unavailable("install", None).remediation)
+    }
+
     fn supports_local_install(&self) -> bool {
         true
     }
