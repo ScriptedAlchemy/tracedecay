@@ -206,41 +206,12 @@ impl ObservationExecutor {
             ObservationReadOperationV1::Observation { observation_id } => {
                 let row = snapshot
                     .query_row(
-                        "SELECT observation.sequence, observation.observation_json,
-                                observation.committed_cursor_json, anchor.anchor_json,
-                                anchor.projection_generation, repository.availability_json,
-                                repository.capture_json, repository_anchor.anchor_json,
-                                repository.owner_json,
-                                EXISTS(
-                                    SELECT 1 FROM projection_queue
-                                    WHERE projection_queue.observation_id =
-                                          observation.observation_id
-                                )
-                         FROM observations AS observation
-                         LEFT JOIN observation_retrieval_anchors AS binding
-                           ON binding.observation_id = observation.observation_id
-                         LEFT JOIN retrieval_anchors AS anchor
-                           ON anchor.anchor_id = binding.anchor_id
-                         LEFT JOIN observation_repository_provenance AS repository
-                           ON repository.observation_id = observation.observation_id
-                         LEFT JOIN retrieval_anchors AS repository_anchor
-                           ON repository_anchor.anchor_id = repository.retrieval_anchor_id
-                         WHERE observation.observation_id = ?1",
+                        &format!(
+                            "{OBSERVATION_ROW_PROJECTION}
+                             WHERE observation.observation_id = ?1"
+                        ),
                         [observation_id.as_str()],
-                        |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, Option<String>>(3)?,
-                                row.get::<_, Option<String>>(4)?,
-                                row.get::<_, Option<String>>(5)?,
-                                row.get::<_, Option<String>>(6)?,
-                                row.get::<_, Option<String>>(7)?,
-                                row.get::<_, Option<String>>(8)?,
-                                row.get::<_, i64>(9)?,
-                            ))
-                        },
+                        encoded_observation_row,
                     )
                     .optional()?;
                 let value = row.map(decode_observation_row).transpose()?;
@@ -281,44 +252,15 @@ impl ObservationExecutor {
                 }
                 let after_sequence = i64::try_from(*after_sequence)
                     .map_err(|_| invalid("observation replay frontier exceeds SQLite integer"))?;
-                let mut statement = snapshot.prepare(
-                    "SELECT observation.sequence, observation.observation_json,
-                            observation.committed_cursor_json, anchor.anchor_json,
-                            anchor.projection_generation, repository.availability_json,
-                            repository.capture_json, repository_anchor.anchor_json,
-                            repository.owner_json,
-                            EXISTS(
-                                SELECT 1 FROM projection_queue
-                                WHERE projection_queue.observation_id =
-                                      observation.observation_id
-                            )
-                     FROM observations AS observation
-                     LEFT JOIN observation_retrieval_anchors AS binding
-                       ON binding.observation_id = observation.observation_id
-                     LEFT JOIN retrieval_anchors AS anchor
-                       ON anchor.anchor_id = binding.anchor_id
-                     LEFT JOIN observation_repository_provenance AS repository
-                       ON repository.observation_id = observation.observation_id
-                     LEFT JOIN retrieval_anchors AS repository_anchor
-                       ON repository_anchor.anchor_id = repository.retrieval_anchor_id
+                let mut statement = snapshot.prepare(&format!(
+                    "{OBSERVATION_ROW_PROJECTION}
                      WHERE observation.sequence > ?1
-                     ORDER BY observation.sequence ASC LIMIT ?2",
+                     ORDER BY observation.sequence ASC LIMIT ?2"
+                ))?;
+                let rows = statement.query_map(
+                    params![after_sequence, i64::from(*limit)],
+                    encoded_observation_row,
                 )?;
-                let rows =
-                    statement.query_map(params![after_sequence, i64::from(*limit)], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                            row.get::<_, Option<String>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
-                            row.get::<_, Option<String>>(8)?,
-                            row.get::<_, i64>(9)?,
-                        ))
-                    })?;
                 let mut observations = Vec::new();
                 for row in rows {
                     observations.push(decode_observation_row(row?)?);
@@ -428,6 +370,49 @@ type EncodedObservationRow = (
     Option<String>,
     i64,
 );
+
+/// The single projection every observation read decodes through.
+///
+/// The outer joins are all optional by schema, so the missing halves are
+/// rejected by [`decode_observation_row`] rather than by the query. Callers
+/// append their own `WHERE`/`ORDER BY`/`LIMIT` clauses; the column list and its
+/// order are fixed here because [`encoded_observation_row`] reads them
+/// positionally.
+const OBSERVATION_ROW_PROJECTION: &str = "SELECT observation.sequence, observation.observation_json,
+            observation.committed_cursor_json, anchor.anchor_json,
+            anchor.projection_generation, repository.availability_json,
+            repository.capture_json, repository_anchor.anchor_json,
+            repository.owner_json,
+            EXISTS(
+                SELECT 1 FROM projection_queue
+                WHERE projection_queue.observation_id =
+                      observation.observation_id
+            )
+     FROM observations AS observation
+     LEFT JOIN observation_retrieval_anchors AS binding
+       ON binding.observation_id = observation.observation_id
+     LEFT JOIN retrieval_anchors AS anchor
+       ON anchor.anchor_id = binding.anchor_id
+     LEFT JOIN observation_repository_provenance AS repository
+       ON repository.observation_id = observation.observation_id
+     LEFT JOIN retrieval_anchors AS repository_anchor
+       ON repository_anchor.anchor_id = repository.retrieval_anchor_id";
+
+/// Reads one [`OBSERVATION_ROW_PROJECTION`] row in column order.
+fn encoded_observation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EncodedObservationRow> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, Option<String>>(3)?,
+        row.get::<_, Option<String>>(4)?,
+        row.get::<_, Option<String>>(5)?,
+        row.get::<_, Option<String>>(6)?,
+        row.get::<_, Option<String>>(7)?,
+        row.get::<_, Option<String>>(8)?,
+        row.get::<_, i64>(9)?,
+    ))
+}
 
 fn decode_observation_row(
     (

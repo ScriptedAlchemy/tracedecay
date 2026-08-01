@@ -312,7 +312,8 @@ fn read_derivatives(
 
 // The disposition legality rules are owned by `AnchorDispositionStateV1` in
 // `tracedecay-store`, because the root authority in
-// `src/db/retrieval_anchor_authority.rs` appends to the same tables and the two
+// `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs` appends
+// to the same tables and the two
 // must never disagree about what an anchor's history permits. Only the refusal
 // wording in this module is local, and it is observable, so it stays.
 
