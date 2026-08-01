@@ -80,6 +80,20 @@ Then reproduce the changed host scenario with the ordinary global
 `tracedecay` command. Inspect relevant service/host logs. Restart a host only
 when its integration is in-process or its plugin module cannot hot-reload.
 
+## Boundary recovery
+
+`cargo dogfood` crosses a forward-only migration boundary once the new
+binary replaces the installed one; after that point it will never restore
+or execute an older binary, only recover forward. If a run dies mid-way
+(the marker at `~/.tracedecay/dogfood-migration-boundary.state` reads
+`forward-recovery-required`), fix or rebuild a schema-compatible newer
+binary and rerun `cargo dogfood` — do not touch any prior binary against
+the live stores. For the marker format, the `TRACEDECAY_DOGFOOD_BACKUP` /
+`TRACEDECAY_DOGFOOD_BACKUP_PLAIN` backup contract, and the recovery ladder
+(zero-writer proof → restore/backup → `tracedecay init` rebuilds the
+derived registry from on-disk enrollment markers → rerun `cargo dogfood`),
+see `docs/DOGFOOD-RECOVERY-RUNBOOK.md`.
+
 ## Guardrails
 
 - Invoke ordinary `cargo dogfood` without setting `CARGO_TARGET_DIR` or
