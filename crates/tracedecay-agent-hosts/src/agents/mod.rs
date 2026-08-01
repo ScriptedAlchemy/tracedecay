@@ -17,6 +17,9 @@ pub mod context_scout_v2;
 pub mod copilot;
 pub mod cursor;
 pub(crate) mod cursor_diagnostics;
+/// Legacy Cursor `serve` log marker; the root crate's `src/serve.rs`
+/// re-exports this instead of declaring its own copy.
+pub use cursor_diagnostics::DEGRADED_SERVE_STDERR_MARKER;
 pub mod gemini;
 pub mod hermes;
 pub mod host_bundle_registry;
