@@ -57,6 +57,31 @@ impl SemanticRedundancyProfileV1 {
         let distance = self.distance_micros(cosine)?;
         (distance <= self.maximum_distance_micros).then_some(distance)
     }
+
+    /// Half-width, in normalized-vector coordinate units, of the smallest
+    /// window that still contains every pair this profile could accept.
+    ///
+    /// For unit vectors `u`, `v` we have `‖u − v‖² = 2(1 − cos)`, and every
+    /// single coordinate obeys `|u_k − v_k| ≤ ‖u − v‖`. A pair is accepted only
+    /// when `round((1 − cos)·SCALE) ≤ maximum_distance_micros`, which requires
+    /// `(1 − cos) ≤ (maximum_distance_micros + 0.5)/SCALE` (the `+0.5` bounds
+    /// the rounding). Substituting yields a per-coordinate bound of
+    /// `sqrt(2·(maximum_distance_micros + 0.5)/SCALE)`.
+    ///
+    /// Sorting normalized vectors by any one coordinate and comparing only
+    /// entries within this half-width therefore excludes **no** acceptable pair
+    /// (perfect recall): the returned window is a necessary condition on every
+    /// accepted pair, never a sufficient one, so callers must still re-check
+    /// [`accepts`] on each surviving candidate. A tiny epsilon is added for
+    /// floating-point slack; the value saturates at `2.0` (a window that spans
+    /// the whole normalized range, i.e. no pruning) for permissive profiles.
+    pub fn cosine_projection_window(&self) -> f64 {
+        let allowed = (self.maximum_distance_micros as f64 + 0.5) / SEMANTIC_DISTANCE_SCALE;
+        if allowed <= 0.0 {
+            return 0.0;
+        }
+        ((2.0 * allowed).sqrt() + 1e-9).min(2.0)
+    }
 }
 
 #[derive(Clone)]
