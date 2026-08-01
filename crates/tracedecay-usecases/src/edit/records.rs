@@ -1,4 +1,3 @@
-use sha2::Digest;
 use tracedecay_application::{
     CancellationObservation, EffectReceipt, EffectResult, EffectTermination, OperationBudgetUsage,
     OperationReceipt, OperationTermination, ReconciliationState,
@@ -315,8 +314,8 @@ mod tests {
         AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
     };
     use tracedecay_application::{
-        CancellationObservation, CancellationStage, IdempotencyKey, OperationTermination,
-        SourceEditDiagnosticV1, SourceEditRequest, SourceEditVerificationV1, source_edit_operation,
+        CancellationStage, OperationTermination, SourceEditDiagnosticV1, SourceEditRequest,
+        SourceEditVerificationV1, source_edit_operation,
     };
     use tracedecay_domain::UtcMicros;
 

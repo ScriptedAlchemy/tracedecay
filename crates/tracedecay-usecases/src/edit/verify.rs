@@ -1,4 +1,3 @@
-use sha2::Digest;
 use tracedecay_application::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
@@ -141,7 +140,6 @@ pub(super) fn config_error(message: impl Into<String>) -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::test_support::*;
 
     #[test]
     fn verification_failures_are_typed_and_retained() {

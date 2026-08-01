@@ -180,7 +180,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::test_support::*;
     use std::fs;
     use tempfile::tempdir;
 
