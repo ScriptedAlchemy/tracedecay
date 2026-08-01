@@ -856,6 +856,16 @@ fn classify_mcp_tool_dispatch_group(
         .map(|_| McpToolDispatchGroup::RetainedApplication)
 }
 
+/// Whether a tool's dispatch resolves to the git handler family.
+///
+/// The MCP server uses this to give every git-walking read the same bounded
+/// deadline the catalog-owned git reads already carry. Asking the canonical
+/// binding table keeps that horizon from drifting into a separate name list
+/// that a newly added git tool would silently miss.
+pub(crate) fn tool_dispatches_git_reads(tool_name: &str) -> bool {
+    dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Git)
+}
+
 #[derive(Debug)]
 struct CatalogBoundRetainedMcpRequest {
     operation: RetainedSurfaceOperation,
@@ -1759,6 +1769,26 @@ mod tests {
                 "the reviewed request shape has no in-process handler to fall back to",
             );
         }
+    }
+
+    /// The MCP deadline horizon asks this predicate which reads walk git, so it
+    /// must stay in step with the git dispatch family rather than a name list.
+    #[test]
+    fn git_dispatch_family_is_visible_to_the_server_horizon() {
+        for tool_name in [
+            "tracedecay_pr_context",
+            "tracedecay_diff_context",
+            "tracedecay_changelog",
+            "tracedecay_branch_diff",
+            "tracedecay_affected",
+        ] {
+            assert!(
+                tool_dispatches_git_reads(tool_name),
+                "{tool_name} dispatches through the git family",
+            );
+        }
+        assert!(!tool_dispatches_git_reads("tracedecay_outline"));
+        assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
     }
 
     #[tokio::test]
