@@ -375,7 +375,7 @@ fn warned_corrupt_config_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// Shared by [`UserConfig::load`] and the daemon's per-client config loader
 /// (`user_config_for_client` in `src/daemon.rs`) so both silently-defaulting
 /// readers agree on what "corrupt" means and on not spamming stderr.
-pub(crate) fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
+pub fn parse_or_warn_default<T>(path: &Path, contents: &str) -> T
 where
     T: Default + serde::de::DeserializeOwned,
 {
