@@ -744,3 +744,210 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         "selected project retrieve should return the full selected-project response: {payload}"
     );
 }
+
+/// Runs a git command in `root`, panicking on failure. The git-dispatch
+/// deadline regressions need real refs, so they drive a real repository rather
+/// than a stubbed one.
+fn run_git_in(root: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A deadline `offset_micros` from now, used to hand the git dispatcher a live
+/// budget the way the admission layer does.
+fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after unix epoch")
+        .as_micros() as i64;
+    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+        now.saturating_add(offset_micros),
+    ))
+    .expect("deadline")
+}
+
+/// The carried dispatch deadline used to be discarded (`_options`), so a git
+/// handler on a diverged or pathological ref ran unbounded and hung. An
+/// already-elapsed deadline must now short-circuit *before* the expensive body
+/// runs — proving both the `pr_context` walk and the `admin_branch_add` index
+/// build are bounded and can never hang once the horizon is gone.
+#[tokio::test]
+async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_handler() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-deadline-elapsed");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-deadline-elapsed",
+    )
+    .await
+    .unwrap();
+
+    for tool_name in ["tracedecay_pr_context", "tracedecay_admin_branch_add"] {
+        let options = ToolCallRegistryOptions {
+            application_deadline: Some(
+                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
+            ),
+            ..ToolCallRegistryOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let result = dispatch_git_tools(
+            tool_name,
+            &cg,
+            json!({ "base_ref": "main", "head_ref": "HEAD", "branch": "feature" }),
+            options,
+        )
+        .await
+        .expect("an elapsed-deadline dispatch returns a typed result, not a hard error");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{tool_name} elapsed-deadline path must return fast, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            result.semantic_error(),
+            Some(true),
+            "{tool_name} must surface the exhausted deadline as a semantic error",
+        );
+        assert!(
+            result
+                .failure_message()
+                .is_some_and(|message| message.contains("dispatch deadline")),
+            "{tool_name} must report the dispatch deadline, got {:?}",
+            result.failure_message(),
+        );
+    }
+
+    cg.close();
+}
+
+/// An unresolvable ref must fail fast with a typed git error well inside the
+/// carried deadline — never spinning until the horizon.
+#[tokio::test]
+async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-pr-context-badref");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/lib.rs"), "pub fn only() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "initial"]);
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-pr-context-badref",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+
+    let options = ToolCallRegistryOptions {
+        application_deadline: Some(deadline_from_now(30_000_000)),
+        ..ToolCallRegistryOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let result = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({ "base_ref": "does-not-exist-ref", "head_ref": "HEAD" }),
+        options,
+    )
+    .await
+    .expect("an unresolvable ref returns a typed result");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "unresolvable ref must fail fast, took {:?}",
+        started.elapsed(),
+    );
+    assert_eq!(result.semantic_error(), Some(true));
+    let message = result.failure_message().unwrap_or_default().to_owned();
+    assert!(
+        message.contains("does-not-exist-ref"),
+        "the failure must name the unresolvable ref, got {message:?}",
+    );
+    assert!(
+        !message.contains("dispatch deadline"),
+        "a fast ref failure must not be reported as a deadline timeout: {message:?}",
+    );
+
+    cg.close();
+}
+
+/// A normal PR comparison across a diverged feature branch still succeeds under
+/// a live deadline — the enforcement wrapper does not break the happy path.
+#[tokio::test]
+async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("git-pr-context-ok");
+    fs::create_dir_all(project.join("src")).unwrap();
+    run_git_in(&project, &["init", "-b", "main"]);
+    fs::write(project.join("src/base.rs"), "pub fn base_fn() {}\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "base commit"]);
+    run_git_in(&project, &["switch", "-c", "feature"]);
+    fs::write(
+        project.join("src/feature.rs"),
+        "pub fn feature_fn() {}\n",
+    )
+    .unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "feature commit"]);
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-git-pr-context-ok",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+
+    let options = ToolCallRegistryOptions {
+        application_deadline: Some(deadline_from_now(30_000_000)),
+        ..ToolCallRegistryOptions::default()
+    };
+    let result = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        options,
+    )
+    .await
+    .expect("a normal PR comparison succeeds");
+
+    assert_ne!(
+        result.semantic_error(),
+        Some(true),
+        "the happy path must not be flagged as an error",
+    );
+    let rendered = serde_json::to_string(&result.value).unwrap();
+    assert!(
+        rendered.contains("feature.rs"),
+        "the diverged file must appear in the comparison: {rendered}",
+    );
+    assert!(
+        rendered.contains("files_changed"),
+        "the payload must carry the PR-context summary: {rendered}",
+    );
+
+    cg.close();
+}
