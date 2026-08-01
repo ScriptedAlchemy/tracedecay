@@ -887,7 +887,7 @@ fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {
     };
     let mut roots: Vec<PathBuf> = Vec::new();
     for candidate in candidates {
-        let root = crate::config::discover_project_root(&candidate).unwrap_or(candidate);
+        let root = tracedecay_runtime_core::config::discover_project_root(&candidate).unwrap_or(candidate);
         if !roots.iter().any(|seen| paths_equal(seen, &root)) {
             roots.push(root);
         }
@@ -1581,11 +1581,11 @@ fn event_session_id(event: &Value, transcript_path: &Path) -> String {
 }
 
 fn event_project(event: &Value) -> (String, String) {
-    let cwd_root = event_cwd(event).and_then(|cwd| crate::config::discover_project_root(&cwd));
+    let cwd_root = event_cwd(event).and_then(|cwd| tracedecay_runtime_core::config::discover_project_root(&cwd));
     let candidates = event_project_candidates(event);
     let resolved = candidates
         .iter()
-        .find_map(|candidate| crate::config::discover_project_root(candidate))
+        .find_map(|candidate| tracedecay_runtime_core::config::discover_project_root(candidate))
         .or_else(|| candidates.into_iter().next());
     let project_path = match (cwd_root, resolved) {
         (Some(cwd_root), Some(resolved)) if !paths_equal(&cwd_root, &resolved) => cwd_root,

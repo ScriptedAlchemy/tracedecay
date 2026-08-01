@@ -655,7 +655,7 @@ fn derive_timestamp(provider: &str, record: &Value, carry: &mut TimestampCarry) 
         "claude" | "codex" => record
             .get("timestamp")
             .and_then(Value::as_str)
-            .and_then(crate::accounting::parser::parse_timestamp)
+            .and_then(crate::host_ports::parse_timestamp)
             .and_then(|secs| i64::try_from(secs).ok()),
         // Vibe: numeric `ts`/`timestamp`/`created_at`.
         "vibe" => record

@@ -131,7 +131,7 @@ impl KiroSource {
 
     /// Source rooted at `<home>/.config/Kiro` (or macOS equivalent).
     pub fn with_home(home: &Path) -> Self {
-        let data_dir = crate::agents::kiro_data_dir(home);
+        let data_dir = crate::host_ports::kiro_data_dir(home);
         Self {
             agent_dir: data_dir.join("User/globalStorage/kiro.kiroagent"),
             workspace_storage_dir: data_dir.join("User/workspaceStorage"),
@@ -898,7 +898,7 @@ fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     }
     value
         .as_str()
-        .and_then(crate::accounting::parser::parse_timestamp)
+        .and_then(crate::host_ports::parse_timestamp)
         .map(|secs| secs as i64)
 }
 

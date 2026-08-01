@@ -539,7 +539,21 @@ pub fn span_debounce_key(
         "{provider}\u{1f}{session_id}\u{1f}{}\u{1f}{worktree}",
         branch.unwrap_or("\u{0}")
     );
-    crate::context::read_cache::digest_bytes(material.as_bytes())
+    digest_bytes(material.as_bytes())
+}
+
+/// Hex SHA-256 over raw bytes.
+///
+/// Formerly `crate::context::read_cache::digest_bytes`. That module is a root
+/// read-cache concern and the debounce key only ever needed the digest, so the
+/// two-line helper is owned here instead of holding the session layer above
+/// the root crate.
+fn digest_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

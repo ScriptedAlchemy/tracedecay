@@ -202,7 +202,7 @@ impl ProjectRootMatcher {
                 });
         }
 
-        crate::config::discover_project_root(path)
+        tracedecay_runtime_core::config::discover_project_root(path)
             .as_ref()
             .is_some_and(|discovered| paths_equal(discovered, &self.root))
     }

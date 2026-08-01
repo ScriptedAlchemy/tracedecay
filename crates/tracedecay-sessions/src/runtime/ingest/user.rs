@@ -482,7 +482,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded(
         );
     }
     if provider_runs.stats.messages_upserted > 0 {
-        crate::hooks::schedule_user_session_review(
+        crate::host_ports::session_review::schedule(
             provider.map_or("all", SessionProvider::id),
             None,
         );

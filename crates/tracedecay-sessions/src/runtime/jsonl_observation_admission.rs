@@ -27,7 +27,7 @@ pub enum PersistedCursorUpdate {
     Monotonic,
 }
 
-pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
+pub struct JsonlObservationAdmissionRequest<'request> {
     provider: &'static str,
     path: &'request Path,
     admission: &'request dyn HostAdmission,
@@ -39,7 +39,7 @@ pub struct JsonlObservationAdmissionRequest<'request, 'authority> {
     cancellation: ObservationCancellation,
 }
 
-impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority> {
+impl<'request> JsonlObservationAdmissionRequest<'request> {
     pub fn new(
         provider: &'static str,
         path: &'request Path,
@@ -146,7 +146,7 @@ struct DurableJsonlFrame {
     native_record_id: ObservationId,
 }
 
-struct ActiveAdmission<'request, 'authority> {
+struct ActiveAdmission<'request> {
     provider: &'static str,
     admission: &'request dyn HostAdmission,
     source: ObservationSourceIdentityV1,
@@ -156,7 +156,7 @@ struct ActiveAdmission<'request, 'authority> {
     cancellation: ObservationCancellation,
 }
 
-impl ActiveAdmission<'_, '_> {
+impl ActiveAdmission<'_> {
     fn cursor_at(
         &self,
         end_offset: u64,
@@ -322,7 +322,7 @@ impl ActiveAdmission<'_, '_> {
 }
 
 pub async fn admit_jsonl_observations<State>(
-    request: JsonlObservationAdmissionRequest<'_, '_>,
+    request: JsonlObservationAdmissionRequest<'_>,
     initialize: impl FnOnce(JsonlObservationScan) -> State,
     mut normalize: impl FnMut(
         &mut State,
