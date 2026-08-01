@@ -12,7 +12,8 @@ use thiserror::Error;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, CompactCandidate, CursorPayloadDigest,
     ExactTechnicalTermKindV1, FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId, SymbolOccurrenceId,
+    RetrievalBudget, RetrieverBatch, RetrieverKind, RetrieverOutcome, SourceOccurrenceId,
+    SymbolOccurrenceId,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLaneRequest};
@@ -65,6 +66,16 @@ where
     let bytes = serde_json::to_vec(payload).map_err(contract_error)?;
     CursorPayloadDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
         .map_err(contract_error)
+}
+
+/// How many candidates one lane may commit: the tighter of its own budget and
+/// the shared request budget.
+///
+/// A lane budget can only narrow the request budget, never widen it, so the
+/// two are always read together.
+pub(crate) fn lane_candidate_cap(lane: &RetrievalBudget, base: &RetrievalBudget) -> usize {
+    lane.max_candidates_per_lane
+        .min(base.max_candidates_per_lane) as usize
 }
 
 /// The `(occurrence, anchor, score)` triple lanes commit for each candidate in

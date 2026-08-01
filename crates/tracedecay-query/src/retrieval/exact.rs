@@ -21,7 +21,7 @@ use tracedecay_domain::{
 use super::ports::{
     CodeCandidateBindingV1, CompactCandidateLane, ExactTermPostingReadPort, LaneBoundEvidence,
     LaneEvidenceRejections, RetrievalPortError, candidate_checkpoint_prefix, checkpoint_digest,
-    contract_error, lane_bound_evidence,
+    contract_error, lane_bound_evidence, lane_candidate_cap,
 };
 
 /// Wording the exact lane uses when a port-emitted batch fails the shared
@@ -705,10 +705,7 @@ where
                         .cmp(&right.0.retriever_evidence_anchor)
                 })
         });
-        let cap = request
-            .budget
-            .max_candidates_per_lane
-            .min(request.base.budget.max_candidates_per_lane) as usize;
+        let cap = lane_candidate_cap(&request.budget, &request.base.budget);
         let examined = batch.coverage.examined.max(batch.candidates.len() as u64);
         let truncated = admitted.len().saturating_sub(cap);
         admitted.truncate(cap);
