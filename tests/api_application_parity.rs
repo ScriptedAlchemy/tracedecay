@@ -267,7 +267,7 @@ fn mcp_primitive_definitions_use_application_contracts() {
 }
 
 #[test]
-fn handle_gated_feedback_tools_are_not_advertised_over_mcp() {
+fn handle_gated_feedback_tools_are_advertised_over_mcp() {
     let definitions = get_tool_definitions();
     for tool_name in [
         "tracedecay_feedback_diagnostics",
@@ -280,8 +280,8 @@ fn handle_gated_feedback_tools_are_not_advertised_over_mcp() {
         assert!(
             definitions
                 .iter()
-                .all(|definition| definition.name != tool_name),
-            "{tool_name} must not be advertised"
+                .any(|definition| definition.name == tool_name),
+            "{tool_name} must be advertised"
         );
     }
 }

@@ -135,6 +135,8 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
         });
     }
     if tool_name == "tracedecay_message_search" {
+        // `storage_scope=user` already refused `project_scope` above, so this
+        // profile lane never fans out over the registry.
         return session::message_search::handle_message_search_with_service(
             None,
             session::message_search::SessionRetrievalStoreScope::Profile,
@@ -1451,12 +1453,15 @@ async fn execute_project_retained_application_tool(
             .await
         }
         RetainedSurfaceOperation::MessageSearch => {
-            Box::pin(session::message_search::handle_message_search_with_service(
-                Some(cg.project_root()),
-                session::message_search::SessionRetrievalStoreScope::Project,
-                request.arguments,
-                options.session_authorities.project_retrieval,
-            ))
+            Box::pin(
+                session::message_search::handle_message_search_with_registry(
+                    Some(cg.project_root()),
+                    session::message_search::SessionRetrievalStoreScope::Project,
+                    request.arguments,
+                    options.session_authorities.project_retrieval,
+                    options.project_registry_reads,
+                ),
+            )
             .await
         }
         RetainedSurfaceOperation::SessionsFor => {
@@ -1937,6 +1942,9 @@ mod tests {
         }
 
         for tool_name in [
+            // `tracedecay_search` resolves a daemon-owned code-index search
+            // authority that is bound to the active project, so a selector
+            // would run the active authority against a different graph.
             "tracedecay_search",
             "tracedecay_str_replace",
             "tracedecay_run_affected_tests",
@@ -1947,6 +1955,20 @@ mod tests {
             assert!(
                 !tool_accepts_registered_project_selector(tool_name),
                 "{tool_name} should not be routed by the pure graph-reader selector policy"
+            );
+        }
+
+        // Pure graph reads that need nothing but the selected project's graph
+        // must accept a selector.
+        for tool_name in [
+            "tracedecay_type_hierarchy",
+            "tracedecay_outline",
+            "tracedecay_read",
+            "tracedecay_body",
+        ] {
+            assert!(
+                tool_accepts_registered_project_selector(tool_name),
+                "{tool_name} should route through the graph-reader selector policy"
             );
         }
     }
@@ -2658,11 +2680,6 @@ mod tests {
         let tools = get_tool_definitions();
         for operation in APPLICATION_SURFACE_OPERATIONS {
             let tool_name = format!("tracedecay_{}", operation.as_str());
-            if super::super::definitions::UNADVERTISED_HANDLE_GATED_TOOL_NAMES
-                .contains(&tool_name.as_str())
-            {
-                continue;
-            }
             let tool = tools
                 .iter()
                 .find(|tool| tool.name == tool_name)

@@ -22,28 +22,6 @@ impl DaemonInvocationService {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
-        let multi_root_payload = matches!(
-            &request.payload,
-            DaemonInvocationPayload::MultiRootScopeSetRead { .. }
-                | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
-                | DaemonInvocationPayload::MultiRootExecute { .. }
-        );
-        let multi_root_lsp = matches!(
-            &request.payload,
-            DaemonInvocationPayload::LspOpen {
-                workspace_folders,
-                ..
-            } if workspace_folders.len() > 1
-        );
-        if multi_root_payload || multi_root_lsp {
-            return match request.validate() {
-                Ok(()) => DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::Unavailable,
-                ),
-                Err(problem) => DaemonInvocationResponse::problem(request_id, problem),
-            };
-        }
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project.
         let runtimes = self
@@ -474,7 +452,10 @@ impl DaemonInvocationService {
             DaemonInvocationPayload::MultiRootScopeSetRead { .. }
             | DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap { .. }
             | DaemonInvocationPayload::MultiRootExecute { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+                DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::InvalidRequest,
+                )
             }
             DaemonInvocationPayload::WorkApplication {
                 request,

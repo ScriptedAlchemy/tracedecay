@@ -1616,9 +1616,19 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "standalone_backend"
     };
     let standalone_automation = automation_mode == "standalone_backend";
-    let multi_root = tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
-        "multi-root capability is quarantined",
-    );
+    // Multi-root reads are served by the daemon, never by the dashboard's own
+    // stores. Report the transport the UI would actually have to use rather
+    // than a fixed string: without an admitted application executor there is
+    // no way to reach a scope set at all.
+    let multi_root = if state.application_invocation_executor.is_some() {
+        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
+            "no multi-root scope set is mounted for this project",
+        )
+    } else {
+        tracedecay_api::read_model::multi_root::MultiRootCapabilityV1::unavailable(
+            "the daemon application transport is not admitted for this dashboard",
+        )
+    };
     Json(json!({
         "name": "tracedecay-dashboard",
         "version": crate::version::build_version(),
@@ -1761,7 +1771,7 @@ mod authority_tests {
         assert_eq!(capabilities["multi_root"]["status"], "unavailable");
         assert_eq!(
             capabilities["multi_root"]["reason"],
-            "multi-root capability is quarantined"
+            "the daemon application transport is not admitted for this dashboard"
         );
         assert_eq!(capabilities["features"]["multi_root"], false);
         assert!(
