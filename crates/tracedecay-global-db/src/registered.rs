@@ -598,6 +598,7 @@ impl Executor for RegisteredGlobalDbWriteTransaction<'_> {
 impl tracedecay_sessions::runtime::store_port::SessionWriteTxn
     for RegisteredGlobalDbWriteTransaction<'_>
 {
+    #[allow(clippy::manual_async_fn)]
     fn commit(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
         async move {
             RegisteredGlobalDbWriteTransaction::commit(self)
@@ -606,6 +607,7 @@ impl tracedecay_sessions::runtime::store_port::SessionWriteTxn
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn rollback(self) -> impl Future<Output = tracedecay_runtime_core::errors::Result<()>> + Send {
         async move {
             RegisteredGlobalDbWriteTransaction::rollback(self)
@@ -631,6 +633,7 @@ impl tracedecay_sessions::runtime::store_port::SessionStoreAuthority for Registe
         RegisteredGlobalDb::db_path(self)
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn read_snapshot(
         &self,
     ) -> impl Future<Output = tracedecay_runtime_core::errors::Result<ReadSnapshot>> + Send {
@@ -652,6 +655,7 @@ impl tracedecay_sessions::runtime::store_port::SessionStoreAuthority for Registe
 impl tracedecay_sessions::runtime::git_correlation::GitCorrelationWriteTxn
     for RegisteredGlobalDbWriteTransaction<'_>
 {
+    #[allow(clippy::manual_async_fn)]
     fn commit(
         self,
     ) -> impl Future<
@@ -672,6 +676,7 @@ impl tracedecay_sessions::runtime::git_correlation::GitCorrelationWriteTxn
 impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
     for RegisteredGlobalDbWriteTransaction<'_>
 {
+    #[allow(clippy::manual_async_fn)]
     fn commit(
         self,
     ) -> impl Future<
@@ -984,7 +989,7 @@ mod tests {
         fs::write(&authority_path, []).unwrap();
         fs::write(&other_path, []).unwrap();
         let authority =
-            DatabaseAuthority::for_runtime(&authority_path, "test registered locator").unwrap();
+            DatabaseAuthority::acquire_test(&authority_path, "test registered locator").unwrap();
 
         let result = validate_registered_path(&other_path.canonicalize().unwrap(), &authority);
 
@@ -998,7 +1003,7 @@ mod tests {
         let missing_path = directory.path().join("must-not-be-created.db");
         fs::write(&authority_path, []).unwrap();
         let authority =
-            DatabaseAuthority::for_runtime(&authority_path, "test registered no-create").unwrap();
+            DatabaseAuthority::acquire_test(&authority_path, "test registered no-create").unwrap();
 
         let result = validate_registered_path(&missing_path, &authority);
 

@@ -16,7 +16,7 @@ pub(crate) const UNWIRED_PROFILE_SESSIONS: &str = "tracedecay_global_db::host_po
 pub struct RegisteredGlobalDbHarness {
     pub registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
-    scope: Option<DaemonDatabaseScope>,
+    _scope: Option<DaemonDatabaseScope>,
     registry: Box<dyn ProfileSessionsRuntime>,
 }
 
@@ -37,11 +37,12 @@ impl RegisteredGlobalDbHarness {
         Self {
             registered,
             _directory: directory,
-            scope: Some(scope),
+            _scope: Some(scope),
             registry,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn storage_root(&self) -> &std::path::Path {
         self.registered
             .db_path()
@@ -53,8 +54,9 @@ impl RegisteredGlobalDbHarness {
         self.registry.mount().await
     }
 
+    #[cfg(test)]
     pub(super) fn revoke(&mut self) {
-        drop(self.scope.take());
+        drop(self._scope.take());
     }
 }
 
