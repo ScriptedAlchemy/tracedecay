@@ -16,7 +16,6 @@ use tracedecay_application::ApplicationContractError;
 use crate::application::feedback::observations::{
     FeedbackObservationReadModelV1, Plan26CoverageV1,
 };
-use crate::daemon::DaemonFeedbackRuntimeRegistrar;
 
 use super::DashboardState;
 use super::read_model::{DashboardEnvelopeV1, scope_from_state};
@@ -31,23 +30,20 @@ pub type FeedbackStatusReadFuture = Pin<
 pub type FeedbackStatusReader =
     Arc<dyn Fn(PathBuf) -> FeedbackStatusReadFuture + Send + Sync + 'static>;
 
+pub trait FeedbackStatusRuntime: Send + Sync {
+    fn read_feedback_status(&self, project_root: PathBuf) -> FeedbackStatusReadFuture;
+}
+
 /// Erases the daemon registry behind a read-only, root-addressed application
 /// authority. Dashboard state receives no feedback database or provider owner.
-pub fn feedback_status_reader(runtimes: DaemonFeedbackRuntimeRegistrar) -> FeedbackStatusReader {
+pub fn feedback_status_reader<R>(runtimes: R) -> FeedbackStatusReader
+where
+    R: FeedbackStatusRuntime + 'static,
+{
+    let runtimes = Arc::new(runtimes);
     Arc::new(move |project_root| {
-        let runtimes = runtimes.clone();
-        Box::pin(async move {
-            let store = runtimes.doctor_read_store(&project_root).await.ok_or(
-                ApplicationContractError::Inconsistent {
-                    field: "dashboard feedback status authority",
-                },
-            )?;
-            store.observation_read_model().await.map_err(|_| {
-                ApplicationContractError::Inconsistent {
-                    field: "dashboard feedback status projection",
-                }
-            })
-        })
+        let runtimes = Arc::clone(&runtimes);
+        runtimes.read_feedback_status(project_root)
     })
 }
 

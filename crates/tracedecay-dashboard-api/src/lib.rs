@@ -24,13 +24,12 @@
 pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_hooks as hooks;
 pub use tracedecay_usecases as application;
-pub use tracedecay_usecases::{
-    application_surface, config, git_query, graph, request_identity, user_config,
-};
+pub use tracedecay_usecases::{git_query, graph, request_identity, user_config};
 pub mod tracedecay;
 
 mod accounting;
 pub mod analytics_api;
+pub mod application_surface;
 mod automation_config_api;
 mod automation_fact_proposals_api;
 mod automation_jobs_api;
@@ -45,6 +44,7 @@ mod automation_skills_api;
 mod cloud;
 mod code_diagnostics_api;
 pub mod code_index_freshness_api;
+pub mod config;
 #[doc(hidden)]
 pub mod contract_schema;
 mod delivery_api;
@@ -116,13 +116,7 @@ use tower::ServiceExt;
 
 use tracedecay_api::WorkOperation;
 
-use crate::application_surface::{
-    dashboard_configuration_application_router_with_executor,
-    dashboard_feedback_application_router_with_executor,
-    dashboard_work_application_router_with_executor, http_application_router_with_executor,
-};
-use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
-use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
+use crate::application_surface::DashboardApplicationRuntime;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::backend;
@@ -315,7 +309,7 @@ pub struct DashboardState {
     /// Active-project daemon application transport. Mutating dashboard routes
     /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
-    pub application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+    pub application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -464,7 +458,7 @@ async fn build_state_inner(
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
-    application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+    application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -569,7 +563,7 @@ pub async fn build_state_with_automation_reconciler(
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     >,
-    application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+    application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -918,26 +912,16 @@ struct ActiveProjectApplicationRoutes {
     dashboard_configuration_router: Router,
     dashboard_feedback_router: Router,
     dashboard_work_router: Router,
-    executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+    executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(
         cg: &TraceDecay,
-        executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+        executor: Option<Arc<dyn DashboardApplicationRuntime>>,
     ) -> Result<Self> {
-        let executor = match executor {
-            Some(executor) => executor,
-            None => {
-                let handshake = DaemonHandshake::for_current_client(
-                    Some(cg.project_root().to_path_buf()),
-                    None,
-                    false,
-                    false,
-                )?;
-                Arc::new(DaemonInvocationClient::for_current(handshake)?)
-            }
-        };
+        let executor = executor
+            .ok_or_else(|| config_error("active-project application runtime is not mounted"))?;
         let active_project_id = match project_memory_owner(cg)? {
             FactOwnerV1::Project { project_id } => project_id,
             FactOwnerV1::Profile => {
@@ -946,36 +930,14 @@ impl ActiveProjectApplicationRoutes {
                 ));
             }
         };
-        let http_router = http_application_router_with_executor(
-            Arc::clone(&executor),
-            daemon_operation_event_authority(),
-            active_project_id,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("could not mount application HTTP routes: {error}"),
-        })?;
-        let dashboard_configuration_router =
-            dashboard_configuration_application_router_with_executor(Arc::clone(&executor))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("could not mount dashboard configuration routes: {error}"),
-                })?;
-        let dashboard_feedback_router = dashboard_feedback_application_router_with_executor(
-            Arc::clone(&executor),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("could not mount dashboard feedback routes: {error}"),
-        })?;
-        let dashboard_work_router = dashboard_work_application_router_with_executor(Arc::clone(
-            &executor,
-        ))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("could not mount dashboard Work routes: {error}"),
-        })?;
+        let routes = executor
+            .routers(active_project_id)
+            .map_err(|message| TraceDecayError::Config { message })?;
         Ok(Self {
-            http_router,
-            dashboard_configuration_router,
-            dashboard_feedback_router,
-            dashboard_work_router,
+            http_router: routes.http,
+            dashboard_configuration_router: routes.configuration,
+            dashboard_feedback_router: routes.feedback,
+            dashboard_work_router: routes.work,
             executor: Some(executor),
         })
     }
