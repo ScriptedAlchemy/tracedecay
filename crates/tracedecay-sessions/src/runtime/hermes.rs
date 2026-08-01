@@ -40,7 +40,7 @@ pub use ingest::{
 pub use ingest::{ingest_legacy_pinned_profile, ingest_user_sessions_capped_with_admission};
 
 #[cfg(all(test, windows))]
-pub use coverage::sqlite_incarnation;
+pub(super) use coverage::sqlite_incarnation;
 #[cfg(test)]
 pub use observation::{
     HermesAdmissionAction, HermesObservationRecord, HermesProjectionMetadata,
