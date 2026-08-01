@@ -587,11 +587,10 @@ impl McpServer {
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
-        if let Some(task) = self.startup_catch_up_task.lock().await.take() {
-            task.abort();
-            let _ = task.await;
-            self.startup_catch_up_done.store(true, Ordering::Release);
-        }
+        // Same ordering as before the state machine landed: the index-sync
+        // task is aborted and joined first, then the ingest is cancelled,
+        // joined, and the machine marked cancelled.
+        self.shutdown_startup_catch_up_sync().await;
         self.shutdown_startup_transcript_ingest().await;
     }
 
