@@ -905,11 +905,7 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "base commit"]);
     run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(
-        project.join("src/feature.rs"),
-        "pub fn feature_fn() {}\n",
-    )
-    .unwrap();
+    fs::write(project.join("src/feature.rs"), "pub fn feature_fn() {}\n").unwrap();
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "feature commit"]);
 

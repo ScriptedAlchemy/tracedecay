@@ -47,7 +47,8 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?.to_owned();
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
-    if FactStoreAction::parse(&action).is_some_and(FactStoreAction::writes) && cross_project_selector
+    if FactStoreAction::parse(&action).is_some_and(FactStoreAction::writes)
+        && cross_project_selector
     {
         return Err(config_error(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
