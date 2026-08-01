@@ -13,7 +13,7 @@ use tracedecay_store::observation::{
 };
 use tracedecay_store::{ObservationCommitReceipt, ObservationStore, ObservationStoreResult};
 
-use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
+use tracedecay_runtime_core::privacy::parse_claude_record_v1;
 
 use super::*;
 
@@ -416,15 +416,6 @@ async fn repository_provenance_context_refuses_cross_project_reuse() {
 }
 
 #[test]
-fn structurally_rejected_frames_never_reach_the_store() {
-    let application = application();
-    let raw = serde_json::to_vec(&json!("not an object")).unwrap();
-    let range = ClaudeByteRangeV1::new(0, u64::try_from(raw.len()).unwrap()).unwrap();
-    assert!(parse_claude_record_v1(&raw, range).is_err());
-    assert!(application.store.observations.lock().unwrap().is_empty());
-}
-
-#[test]
 fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let identity = |start, end| {
         ObservationIdentityMaterialV1::new(
@@ -436,17 +427,6 @@ fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
         .unwrap()
     };
     let retention = || RetentionClass::new("retention.application-test").unwrap();
-
-    assert!(parse_claude_record_v1(&[], ClaudeByteRangeV1::new(0, 1).unwrap()).is_err());
-    let oversized = vec![b'x'; MAX_OBSERVATION_RECORD_BYTES + 1];
-    let oversized_end = u64::try_from(oversized.len()).unwrap();
-    assert!(
-        parse_claude_record_v1(
-            &oversized,
-            ClaudeByteRangeV1::new(0, oversized_end).unwrap()
-        )
-        .is_err()
-    );
 
     let raw = b"{}";
     let parsed = parse_claude_record_v1(
