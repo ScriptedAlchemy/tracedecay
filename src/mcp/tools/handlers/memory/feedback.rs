@@ -39,6 +39,20 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         note,
     };
     let memory = memory_application(&target_memory)?;
+    // Validate existence before attempting the write. `record_fact_feedback_v1`
+    // already rejects a missing target inside its write transaction, but
+    // surfacing that here — with the same typed not-found error `fact_store
+    // --action get` returns — keeps the two failure paths consistent and
+    // avoids ever starting a write transaction for a target that cannot
+    // resolve.
+    if memory
+        .get_fact_v1(request.fact_id)
+        .await
+        .map_err(memory_application_error)?
+        .is_none()
+    {
+        return Err(config_error(format!("fact {} not found", request.fact_id)));
+    }
     let result = memory
         .record_fact_feedback_v1(
             request,
