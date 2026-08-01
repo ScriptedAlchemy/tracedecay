@@ -88,6 +88,8 @@ pub mod tracedecay;
 pub mod types;
 #[cfg(windows)]
 pub mod windows_file;
+#[cfg(windows)]
+pub mod windows_security;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay
