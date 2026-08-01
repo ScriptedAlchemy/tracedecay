@@ -151,13 +151,12 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 /// Upper bound on any single memory tool operation (add/search/feedback/…).
 ///
 /// The add path performs a real per-fact holographic encode plus a serialized
-/// write transaction and an optional digest refresh; measured add latency is
-/// flat across fact count (no O(n) blow-up), but a contended write lock or a
-/// starved host can still stretch one operation far past any interactive
-/// budget. Without a bound the tool handler awaits the store indefinitely and
-/// pins the MCP transport open. This deadline degrades such a stall to a typed,
-/// retryable problem instead of an unbounded hang. It is deliberately generous
-/// relative to normal sub-second latency so healthy operations never trip it.
+/// write transaction and an optional digest refresh, so a contended write lock
+/// or a starved host can stretch one operation far past any interactive budget.
+/// Unbounded, the tool handler awaits the store indefinitely and pins the MCP
+/// transport open; this deadline degrades that stall to a typed, retryable
+/// problem. It is deliberately generous relative to normal sub-second latency
+/// so healthy operations never trip it.
 const MEMORY_OPERATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Typed "operation exceeded deadline" problem for a bounded memory operation.
@@ -471,9 +470,8 @@ mod tests {
     }
 
     /// The add path (holographic encode + serialized write) must finish well
-    /// inside the operation deadline in a clean tempdir. This is the direct
-    /// regression for the reported unbounded hang: an add completes promptly
-    /// rather than running until the transport is abandoned.
+    /// inside the operation deadline in a clean tempdir, so the bound is a
+    /// backstop for a stalled store rather than a limit healthy adds approach.
     #[tokio::test]
     async fn add_fact_completes_within_the_operation_deadline() {
         let (_tmp, cg) = empty_memory().await;
@@ -504,44 +502,6 @@ mod tests {
             outcome.fact.is_some(),
             "the bounded add must persist a fact"
         );
-    }
-
-    /// Manual scaling probe (ignored in CI to avoid timing flakiness). Recorded
-    /// evidence: per-add latency is flat from add #1 through #600 (~50ms each in
-    /// a debug build), confirming the add path is not O(n) over existing facts.
-    /// Run with `--ignored --nocapture` to reproduce the per-milestone timings.
-    #[ignore = "manual timing probe: documents flat (non-O(n)) add scaling"]
-    #[tokio::test]
-    async fn add_fact_latency_is_flat_across_fact_count_probe() {
-        let (_tmp, cg) = empty_memory().await;
-        let owner = active_project_memory_owner(&cg).unwrap();
-        let memory = active_memory(&cg);
-        let mut milestones = Vec::new();
-        for i in 0..600usize {
-            let content = format!("timing probe fact number {i} with some distinct payload text");
-            let start = std::time::Instant::now();
-            memory
-                .add_fact_v1(
-                    AddFactRequest {
-                        content: content.clone(),
-                        category: MemoryCategory::General,
-                        source: None,
-                        tags: Vec::new(),
-                        entities: vec![format!("entity-{}", i % 7)],
-                        trust: None,
-                        metadata: json!({}),
-                    },
-                    MemoryOperationContext::generated(&owner, &content, None).unwrap(),
-                )
-                .await
-                .unwrap();
-            let elapsed = start.elapsed();
-            if matches!(i, 0 | 9 | 49 | 99 | 199 | 299 | 399 | 499 | 599) {
-                milestones.push((i + 1, elapsed));
-                eprintln!("ADD #{:>4} took {:?}", i + 1, elapsed);
-            }
-        }
-        eprintln!("TIMING_PROBE_MILESTONES {milestones:?}");
     }
 
     #[tokio::test]

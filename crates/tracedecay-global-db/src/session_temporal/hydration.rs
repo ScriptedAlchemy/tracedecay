@@ -662,17 +662,17 @@ async fn resolve_occurrence(
                 )));
             }
         };
-    // Bind the occurrence's message_id to a canonical projection output of this
-    // digest-verified observation. `derive_canonical_projection` derives the
-    // message id from the tool-dispatch identity, else the envelope's
+    // The occurrence's message_id must bind to a canonical projection output of
+    // this digest-verified observation. `derive_canonical_projection` keys the
+    // message on the tool-dispatch identity, else the envelope's
     // relations.message_id, else its stable record id — so an occurrence whose
-    // id legitimately falls back to the stable record id has no
-    // relations.message_id at all. Verifying the binding through the projection
-    // (rather than the single relations.message_id field) accepts every message
-    // the projection legitimately produced while still refusing an occurrence
-    // whose message_id does not correspond to this envelope. The relations
-    // fast-path preserves prior acceptance for messages the envelope names
-    // directly even when the projection re-keys them (derived/tool outputs).
+    // id legitimately falls back to the stable record id carries no
+    // relations.message_id at all, and checking that single field alone would
+    // refuse it. Binding through the projection accepts every message the
+    // projection can produce while still refusing a message_id that
+    // corresponds to no output of this envelope. The relations fast-path covers
+    // the inverse case: a message the envelope names directly but the
+    // projection re-keys (derived/tool outputs).
     let canonical_message =
         canonical_projected_message(&observation, &message_id, projection_output_ordinal);
     let relations_bind = envelope
@@ -1930,8 +1930,7 @@ mod tests {
     /// Build an observation whose canonical envelope carries no
     /// `relations.message_id`. `derive_canonical_projection` then keys the
     /// projected message on the stable record id, so the persisted occurrence's
-    /// `message_id` equals the record id — the exact shape that previously
-    /// tripped the hydration `UnverifiableLegacy` misclassification.
+    /// `message_id` equals the record id.
     fn observation_without_relation_message_id(
         ordinal: u64,
         session_id: &str,
@@ -2032,15 +2031,12 @@ mod tests {
         assert_eq!(message.source_offset, Some(0));
     }
 
-    /// Pure-projection proof for the `resolve_occurrence` fix: when the
-    /// canonical envelope omits `relations.message_id`, the projection keys the
-    /// occurrence on the stable record id. The pre-fix gate
-    /// (`relations().message_id().is_none_or(..)`) therefore misclassified every
-    /// such occurrence as `UnverifiableLegacy`, dropping real matches. The fix
-    /// binds through `canonical_projected_message` instead, which resolves the
-    /// stable-record-id key yet still returns `None` for a message_id the
-    /// projection never produced — so acceptance widens only to
-    /// projection-verified bindings.
+    /// Pure-projection proof that `canonical_projected_message` is the right
+    /// binding authority: when the canonical envelope omits
+    /// `relations.message_id` the projection keys the occurrence on the stable
+    /// record id, which the projection resolves — yet it still returns `None`
+    /// for a message_id the projection never produced, so acceptance covers
+    /// only projection-verified bindings.
     #[test]
     fn stable_record_id_binds_projection_when_relations_message_id_absent() {
         let observation = observation_without_relation_message_id(1, "session-1");
@@ -2048,19 +2044,15 @@ mod tests {
             serde_json::from_value(observation.payload().clone()).expect("canonical envelope");
         assert!(
             envelope.relations().message_id().is_none(),
-            "fixture must omit relations.message_id so the pre-fix gate rejected it"
+            "fixture must omit relations.message_id to exercise the record-id key"
         );
         let record_message_id = envelope.stable_record_id().as_str().to_string();
 
-        // Accepted direction: the stable-record-id key binds to a projection
-        // output, which is exactly the signal the fix now trusts.
         let bound = canonical_projected_message(&observation, &record_message_id, 0)
             .expect("stable-record-id message must bind to a projection output");
         assert_eq!(bound.text, "payload-1");
         assert_eq!(bound.message_id, record_message_id);
 
-        // Refused direction: a message_id that no projection output produces has
-        // no binding, so the fix still returns UnverifiableLegacy for it.
         assert!(
             canonical_projected_message(&observation, "does-not-project", 0).is_none(),
             "an unprojected message_id must not bind, preserving the legacy refusal"
@@ -2372,11 +2364,10 @@ mod tests {
         assert!(denied_output.is_empty());
     }
 
-    /// Regression: an occurrence whose `message_id` was projected from the
-    /// stable record id (because the canonical envelope carries no
-    /// `relations.message_id`) must hydrate. Before the fix, `resolve_occurrence`
-    /// rejected every such occurrence as `UnverifiableLegacy` — the defect that
-    /// dropped real `lcm_grep`/`lcm_expand` matches into
+    /// An occurrence whose `message_id` was projected from the stable record id
+    /// (because the canonical envelope carries no `relations.message_id`) must
+    /// hydrate; refusing it as `UnverifiableLegacy` drops real
+    /// `lcm_grep`/`lcm_expand` matches into
     /// `omissions: reason=unverifiable_legacy`.
     #[tokio::test]
     async fn occurrence_keyed_on_stable_record_id_resolves_when_relations_message_id_absent() {
@@ -2409,7 +2400,7 @@ mod tests {
         let snapshot = authorized_snapshot(&anchor);
         let read = runtime.hydration_read_for_test().await;
         let adapter = read.adapter();
-        // Live direction: the stable-record-id-keyed occurrence must resolve.
+        // The stable-record-id-keyed occurrence must resolve.
         assert_eq!(
             adapter.authorize(&snapshot, anchor.anchor_id()).await,
             Ok(HydrationAuthorization::Authorized)
@@ -2424,10 +2415,10 @@ mod tests {
             .expect("stable-record-id occurrence hydration");
         assert_eq!(output, canonical_payload.as_bytes());
 
-        // Negative direction: an occurrence whose message_id corresponds to no
-        // projection output of its digest-verified observation must still be
-        // refused, proving the fix binds through the projection rather than
-        // widening acceptance for unverifiable rows.
+        // An occurrence whose message_id corresponds to no projection output of
+        // its digest-verified observation must still be refused: the binding
+        // runs through the projection rather than widening acceptance for
+        // unverifiable rows.
         drop(read);
         runtime
             .corrupt_hydration_occurrence_message_id_for_test("session-1", "does-not-project")

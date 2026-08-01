@@ -23,9 +23,9 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
             "cross-project fact_feedback writes are not supported; omit project_selector to write the active project",
         ));
     }
-    // Feedback shares the unbounded-await shape of the add path (a lane saw it
-    // hang on a nonexistent id), so bound the whole store-touching operation on
-    // one deadline rather than let it pin the transport open.
+    // Feedback shares the unbounded-await shape of the add path, so the whole
+    // store-touching operation is bound by one deadline rather than left to pin
+    // the transport open.
     with_memory_deadline("fact_feedback", async move {
         let note = args
             .get("note")

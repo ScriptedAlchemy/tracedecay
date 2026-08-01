@@ -122,6 +122,10 @@ pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
 }
 
 /// Rejects a zero result limit with a typed error.
+///
+/// Handlers clamp a caller-supplied limit with `min(max)`, which leaves an
+/// explicit `"limit": 0` intact, so zero is caller input rather than an
+/// invariant the handler can assume away.
 pub(crate) fn require_positive_limit(limit: usize, tool_name: &str) -> Result<()> {
     if limit == 0 {
         return Err(TraceDecayError::Config {
@@ -582,10 +586,9 @@ mod tests {
         assert!(require_node_id(&args).is_err());
     }
 
-    /// A blank node id used to travel all the way into graph traversal and
-    /// trip a `debug_assert!`, panicking the daemon's client task; the caller
-    /// only saw "daemon closed the connection". Every node-id handler shares
-    /// this guard, so the rejection must name the offending parameter.
+    /// Every node-id handler shares this one guard, so a blank value must be
+    /// rejected here — naming the offending parameter — rather than reaching
+    /// graph traversal.
     #[test]
     fn require_node_id_rejects_blank_values() {
         for args in [

@@ -829,10 +829,6 @@ mod tests {
             SessionRootId::new("root.profile.primary").unwrap(),
         );
 
-        // Session requests may address the profile-owned session store, so the
-        // session scope is total where the project-only scope fails closed. The
-        // scope is built from the identity's own identifiers under the reserved
-        // prefix: no path, CWD, or sibling root is consulted.
         let scope = identity.session_request_scope().unwrap();
         assert_eq!(
             scope.project_id.as_str(),
