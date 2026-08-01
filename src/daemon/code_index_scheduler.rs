@@ -2008,6 +2008,7 @@ mod overlay_ephemerality_tests;
 #[cfg(test)]
 mod tests;
 
+mod activation;
 mod cadence;
 mod classification;
 pub(crate) mod identity;
@@ -2019,6 +2020,9 @@ pub(crate) mod semantic_query_runtime;
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
+pub(in crate::daemon) use activation::{
+    CodeIndexActivationHintSinkV1, CodeIndexActivationMountV1, CodeIndexActivationV1,
+};
 pub(crate) use cadence::{
     CodeIndexArrivalV1, CodeIndexCadenceOutcomeV1, CodeIndexCadenceReadModelV1,
     CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,

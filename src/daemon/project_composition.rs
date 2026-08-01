@@ -311,14 +311,6 @@ pub(super) async fn production_project_server(
     let profile_identity = store_administration.profile_identity()?.clone();
     let accounting_db =
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registered_profile_db));
-    // Route after-edit hooks into the code-index scheduler queue on the
-    // portable broker path too (mirrors the Unix `open_project_server`).
-    let code_index_schedulers = invocation.code_index_schedulers.clone();
-    let code_index_hook_sink: crate::mcp::server::CodeIndexHookSink =
-        Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
-            let schedulers = code_index_schedulers.clone();
-            Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
-        });
     let code_index_publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver =
         Arc::new(invocation.code_index_schedulers.clone());
     let code_search_project_id =
@@ -347,6 +339,185 @@ pub(super) async fn production_project_server(
         code_search_project_id.clone(),
         Arc::clone(&route_registered),
     );
+    let code_index_mount: code_index_scheduler::CodeIndexActivationMountV1 = {
+        let invocation = invocation.clone();
+        let project_id = code_search_project_id.clone();
+        let project_root = canonical_project_path.to_path_buf();
+        let store_root = code_index_store_root.clone();
+        let semantic_runtime = semantic_runtime.clone();
+        let semantic_database = Arc::clone(&semantic_database);
+        let semantic_lifecycle = semantic_lifecycle.clone();
+        let semantic_resources = *semantic_resources;
+        let scope = code_search_scope.clone();
+        let route_registered = Arc::clone(&route_registered);
+        let cancellation = cancellation.clone();
+        Arc::new(move || {
+            let invocation = invocation.clone();
+            let project_id = project_id.clone();
+            let project_root = project_root.clone();
+            let store_root = store_root.clone();
+            let semantic_runtime = semantic_runtime.clone();
+            let semantic_database = Arc::clone(&semantic_database);
+            let semantic_lifecycle = semantic_lifecycle.clone();
+            let semantic_resources = semantic_resources;
+            let scope = scope.clone();
+            let route_registered = Arc::clone(&route_registered);
+            let cancellation = cancellation.clone();
+            Box::pin(async move {
+                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    return Err("project route was revoked before code-index mount".to_owned());
+                }
+                let mut publications = invocation
+                    .code_index_schedulers
+                    .subscribe_generation_publications();
+                let mount = invocation.mount_code_index(
+                    project_id,
+                    &project_root,
+                    store_root,
+                    Some(&semantic_runtime),
+                    Some(semantic_database),
+                    semantic_lifecycle,
+                    Some(semantic_resources),
+                );
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {
+                        return Err("project route was cancelled during code-index mount".to_owned());
+                    }
+                    outcome = mount => outcome.map_err(|error| error.to_string())?,
+                }
+                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
+                    return Err("project route was revoked after code-index mount".to_owned());
+                }
+
+                // Query authority depends on the first sealed generation, but
+                // hook hints must become deliverable as soon as the scheduler is
+                // mounted. Keep that wait in its own route-fenced task.
+                let authority_invocation = invocation.clone();
+                let authority_project = project_root.clone();
+                let authority_scope = scope.clone();
+                let authority_route_registered = Arc::clone(&route_registered);
+                let authority_cancellation = cancellation.clone();
+                tokio::spawn(async move {
+                    let mut route_poll = tokio::time::interval(std::time::Duration::from_secs(1));
+                    route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let generation_ready = if authority_invocation
+                        .code_index_schedulers
+                        .latest_generation_id(&authority_project)
+                        .await
+                        .is_some()
+                    {
+                        true
+                    } else {
+                        loop {
+                            if !authority_route_registered.load(Ordering::Acquire) {
+                                break false;
+                            }
+                            tokio::select! {
+                                () = authority_cancellation.cancelled() => break false,
+                                _ = route_poll.tick() => {
+                                    if !authority_route_registered.load(Ordering::Acquire) {
+                                        break false;
+                                    }
+                                }
+                                publication = publications.recv() => match publication {
+                                    Ok(publication)
+                                        if publication.project_root == authority_project =>
+                                    {
+                                        break true;
+                                    }
+                                    Ok(_) => {}
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        if authority_invocation
+                                            .code_index_schedulers
+                                            .latest_generation_id(&authority_project)
+                                            .await
+                                            .is_some()
+                                        {
+                                            break true;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        break false;
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    if !generation_ready
+                        || authority_cancellation.is_cancelled()
+                        || !authority_route_registered.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let outcome = tokio::select! {
+                        biased;
+                        () = authority_cancellation.cancelled() => return,
+                        outcome = authority_invocation.mount_query_authority_for_project(
+                            &authority_project,
+                            &authority_scope,
+                        ) => outcome,
+                    };
+                    if authority_cancellation.is_cancelled()
+                        || !authority_route_registered.load(Ordering::Acquire)
+                    {
+                        return;
+                    }
+                    let mut fields = vec![
+                        ("project", authority_project.display().to_string()),
+                        ("phase", "code_index_query_authority".to_owned()),
+                    ];
+                    match outcome {
+                        Ok(()) => fields.push(("outcome", "mounted".to_owned())),
+                        Err(error) => {
+                            fields.push(("outcome", "degraded".to_owned()));
+                            fields.push(("error", error.to_string()));
+                        }
+                    }
+                    log_daemon_event("project_open_phase", &fields);
+                });
+                Ok(())
+            })
+        })
+    };
+    let code_index_hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 = {
+        let schedulers = invocation.code_index_schedulers.clone();
+        let project_root = canonical_project_path.to_path_buf();
+        Arc::new(move |batch| {
+            let schedulers = schedulers.clone();
+            let project_root = project_root.clone();
+            Box::pin(async move {
+                let paths_accepted = if batch.paths.is_empty() {
+                    true
+                } else {
+                    schedulers
+                        .notify_hook_paths(&project_root, &batch.paths)
+                        .await
+                };
+                let overflow_accepted = if batch.overflow {
+                    schedulers.notify_hook_overflow(&project_root).await
+                } else {
+                    true
+                };
+                paths_accepted && overflow_accepted
+            })
+        })
+    };
+    let code_index_activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
+        canonical_project_path,
+        Arc::clone(&route_registered),
+        cancellation.clone(),
+        code_index_mount,
+        code_index_hint_sink,
+    ));
+    // Accept after-edit hints before mount completes. The activation owner
+    // bounds/coalesces them and keeps this hook path independent of indexing.
+    let hook_activation = Arc::clone(&code_index_activation);
+    let code_index_hook_sink: crate::mcp::server::CodeIndexHookSink =
+        Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
+            let activation = Arc::clone(&hook_activation);
+            Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
+        });
     // `load_settings` returns defaults as `Ok` when no settings file exists,
     // so an `Err` is an unreadable or unparsable file. Serving silent defaults
     // there would drop the user's `custom_adapters`; record the degradation on
@@ -477,6 +648,16 @@ pub(super) async fn production_project_server(
         if cancellation.is_cancelled() {
             resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
+        }
+        if !invocation
+            .code_index_schedulers
+            .register_activation(&code_search_scope, &code_index_activation)
+        {
+            route_registered.store(false, Ordering::Release);
+            resolved.cancel_startup_transcript_ingest();
+            return Err(TraceDecayError::Config {
+                message: "code-index activation scope does not match the project route".to_owned(),
+            });
         }
         // The core's own lane never opens: only the full server reaches a Git
         // transaction authority. Its gate is kept so a rolled-back publication
@@ -799,118 +980,6 @@ pub(super) async fn production_project_server(
                     log_full_setup_phase("independent_owners_registered");
                     Some(state)
                 };
-                let code_index_invocation = invocation.clone();
-                let code_index_project_id = code_search_project_id.clone();
-                let code_index_scope = code_search_scope.clone();
-                let code_index_project = canonical_project_path.to_path_buf();
-                let code_index_semantic_runtime = semantic_runtime.clone();
-                let code_index_semantic_lifecycle = semantic_lifecycle.clone();
-                let code_index_semantic_resources = *semantic_resources;
-                let code_index_route_registered = Arc::clone(&route_registered);
-                let code_index_cancellation = cancellation.clone();
-                tokio::spawn(async move {
-                    if code_index_cancellation.is_cancelled()
-                        || !code_index_route_registered.load(Ordering::Acquire)
-                    {
-                        return;
-                    }
-                    let started = Instant::now();
-                    let mut code_index_publications = code_index_invocation
-                        .code_index_schedulers
-                        .subscribe_generation_publications();
-                    let outcome = code_index_invocation
-                        .mount_code_index(
-                            code_index_project_id,
-                            &code_index_project,
-                            code_index_store_root,
-                            Some(&code_index_semantic_runtime),
-                            Some(semantic_database),
-                            code_index_semantic_lifecycle,
-                            Some(code_index_semantic_resources),
-                        )
-                        .await;
-                    let generation_ready = if outcome.is_ok() {
-                        if code_index_invocation
-                            .code_index_schedulers
-                            .latest_generation_id(&code_index_project)
-                            .await
-                            .is_some()
-                        {
-                            true
-                        } else {
-                            loop {
-                                if !code_index_route_registered.load(Ordering::Acquire) {
-                                    break false;
-                                }
-                                tokio::select! {
-                                    () = code_index_cancellation.cancelled() => break false,
-                                    publication = code_index_publications.recv() => match publication {
-                                        Ok(publication)
-                                            if publication.project_root == code_index_project =>
-                                        {
-                                            break true;
-                                        }
-                                        Ok(_) => {}
-                                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                            if code_index_invocation
-                                                .code_index_schedulers
-                                                .latest_generation_id(&code_index_project)
-                                                .await
-                                                .is_some()
-                                            {
-                                                break true;
-                                            }
-                                        }
-                                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                            break false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    let query_authority_outcome =
-                        if generation_ready
-                            && !code_index_cancellation.is_cancelled()
-                            && code_index_route_registered.load(Ordering::Acquire)
-                        {
-                            Some(
-                                code_index_invocation
-                                    .mount_query_authority_for_project(
-                                        &code_index_project,
-                                        &code_index_scope,
-                                    )
-                                    .await,
-                            )
-                        } else {
-                            None
-                        };
-                    let mut fields = vec![
-                        ("project", code_index_project.display().to_string()),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ];
-                    match outcome {
-                        Ok(()) => fields.push(("phase", "code_index_mounted".to_owned())),
-                        Err(error) => {
-                            fields.push(("phase", "code_index_mount_degraded".to_owned()));
-                            fields.push(("error", error.to_string()));
-                        }
-                    }
-                    match query_authority_outcome {
-                        Some(Ok(())) => {
-                            fields.push(("query_authority", "mounted".to_owned()));
-                        }
-                        Some(Err(error)) => {
-                            fields.push(("query_authority", "unavailable".to_owned()));
-                            fields.push(("query_authority_error", error.to_string()));
-                        }
-                        None => {}
-                    }
-                    log_daemon_event("project_open_phase", &fields);
-                });
-                log_full_setup_phase("code_index_mount_scheduled");
                 project_open_cancellation_checkpoint(cancellation)?;
                 match invocation
                     .semantic_runtime_registrar()

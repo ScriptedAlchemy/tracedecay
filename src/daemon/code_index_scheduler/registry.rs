@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
@@ -20,7 +20,8 @@ use super::{
     CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
     CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
+    DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
+    newly_eligible_percentile, now_micros,
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
@@ -70,7 +71,9 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     )>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
+    epoch: Arc<AtomicU64>,
     /// Unix micros of the earliest pending wake not yet consumed by a receipt.
     pending_wake_micros: Arc<AtomicU64>,
     /// Packed [`CodeIndexCadenceTriggerV1`] for the pending wake.
@@ -95,6 +98,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
+    activations: Arc<Mutex<BTreeMap<ManifestDigest, Weak<super::CodeIndexActivationV1>>>>,
     test_attribution_authorities: Arc<
         RwLock<
             BTreeMap<
@@ -124,8 +128,75 @@ impl CodeIndexSchedulerRegistryV1 {
             )),
             generation_publications,
             cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
+            activations: Arc::new(Mutex::new(BTreeMap::new())),
             test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    pub(in crate::daemon) fn register_activation(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        activation: &Arc<super::CodeIndexActivationV1>,
+    ) -> bool {
+        if scope.validate().is_err() {
+            return false;
+        }
+        if activation.identity().is_none() {
+            return true;
+        }
+        if !activation.authorizes_scope(scope) {
+            return false;
+        }
+        let mut activations = self
+            .activations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        activations.retain(|_, activation| activation.strong_count() > 0);
+        let scope_digest = scope.scope_digest.clone();
+        let registered = Arc::downgrade(activation);
+        activations.insert(scope_digest.clone(), registered.clone());
+        drop(activations);
+        let activations = Arc::clone(&self.activations);
+        activation.install_retirement(Box::new(move || {
+            let mut activations = activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if activations
+                .get(&scope_digest)
+                .is_some_and(|current| Weak::ptr_eq(current, &registered))
+            {
+                activations.remove(&scope_digest);
+            }
+        }));
+        true
+    }
+
+    fn activate_for_scope(&self, scope: &tracedecay_application::ResolvedScope) -> bool {
+        let activation = {
+            let mut activations = self
+                .activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let activation = activations.get(&scope.scope_digest).and_then(Weak::upgrade);
+            if activation
+                .as_ref()
+                .is_none_or(|activation| !activation.authorizes_scope(scope))
+            {
+                activations.remove(&scope.scope_digest);
+                None
+            } else {
+                activation
+            }
+        };
+        activation.is_some_and(|activation| activation.activate())
+    }
+
+    #[cfg(test)]
+    pub(super) fn activation_count(&self) -> usize {
+        self.activations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     /// Construct a registry with an explicit background-reconcile permit count so
@@ -508,17 +579,12 @@ impl CodeIndexSchedulerRegistryV1 {
         // Serve any retained complete generation immediately so admission stays
         // non-blocking, but never treat restore as a verified freshness claim.
         let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
+        let hints = Arc::clone(&opened.hints);
+        let wake = Arc::clone(&opened.wake);
+        let epoch = Arc::clone(&opened.epoch);
+        let shutting_down = Arc::clone(&opened.shutting_down);
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
-        let (wake, shutting_down) = {
-            let scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (
-                Arc::clone(&scheduler.wake),
-                Arc::clone(&scheduler.shutting_down),
-            )
-        };
         let pending_wake_micros = Arc::new(AtomicU64::new(0));
         let pending_wake_trigger = Arc::new(AtomicU64::new(0));
         let worker_scheduler = Arc::clone(&scheduler);
@@ -631,7 +697,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 semantic_query_authority: None,
                 scheduler,
                 serving_generation,
+                hints,
                 wake: Arc::clone(&wake),
+                epoch,
                 pending_wake_micros: Arc::clone(&pending_wake_micros),
                 pending_wake_trigger: Arc::clone(&pending_wake_trigger),
                 shutting_down,
@@ -743,6 +811,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<tracedecay_query::retrieval::QueryAuthorityV1>> {
+        self.activate_for_scope(scope);
         let mounted = self.mounted.try_lock().ok()?;
         let mut matched = None;
         for worktree in mounted.values() {
@@ -786,31 +855,29 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (scheduler, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
             (
-                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.epoch),
                 Arc::clone(&worktree.pending_wake_micros),
                 Arc::clone(&worktree.pending_wake_trigger),
             )
         };
-        scheduler
+        hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .notify_path(path);
-        // Scheduler wake already fired; stamp the cadence clock for the receipt.
-        let _ = pending_wake_micros.compare_exchange(
-            0,
-            u64::try_from(now_micros().0).unwrap_or(u64::MAX),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        pending_wake_trigger.store(
-            Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
-            Ordering::Release,
+            .path(path);
+        DaemonCodeIndexControlV1::advance(&epoch);
+        Self::note_wake(
+            &pending_wake_micros,
+            &pending_wake_trigger,
+            &wake,
+            CodeIndexCadenceTriggerV1::HookHint,
         );
         true
     }
@@ -823,13 +890,15 @@ impl CodeIndexSchedulerRegistryV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return false;
         };
-        let (scheduler, pending_wake_micros, pending_wake_trigger) = {
+        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let Some(worktree) = mounted.get(&project_root) else {
                 return false;
             };
             (
-                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.epoch),
                 Arc::clone(&worktree.pending_wake_micros),
                 Arc::clone(&worktree.pending_wake_trigger),
             )
@@ -838,19 +907,54 @@ impl CodeIndexSchedulerRegistryV1 {
             .iter()
             .map(|rel| project_root.join(rel))
             .collect::<Vec<_>>();
-        scheduler
+        {
+            let mut hints = hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for path in absolute {
+                hints.path(path);
+            }
+        }
+        DaemonCodeIndexControlV1::advance(&epoch);
+        Self::note_wake(
+            &pending_wake_micros,
+            &pending_wake_trigger,
+            &wake,
+            CodeIndexCadenceTriggerV1::HookHint,
+        );
+        true
+    }
+
+    /// Preserve correctness when the pre-mount activation queue exceeds its
+    /// bounded exact-path capacity. Overflow requests one authoritative scan for
+    /// this exact mounted worktree; it never aliases a sibling worktree.
+    pub async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
+        let Ok(project_root) = project_root.canonicalize() else {
+            return false;
+        };
+        let (hints, wake, epoch, pending_wake_micros, pending_wake_trigger) = {
+            let mounted = self.mounted.lock().await;
+            let Some(worktree) = mounted.get(&project_root) else {
+                return false;
+            };
+            (
+                Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.wake),
+                Arc::clone(&worktree.epoch),
+                Arc::clone(&worktree.pending_wake_micros),
+                Arc::clone(&worktree.pending_wake_trigger),
+            )
+        };
+        hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .notify_hook_paths(absolute);
-        let _ = pending_wake_micros.compare_exchange(
-            0,
-            u64::try_from(now_micros().0).unwrap_or(u64::MAX),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        pending_wake_trigger.store(
-            Self::pack_trigger(CodeIndexCadenceTriggerV1::HookHint),
-            Ordering::Release,
+            .overflow();
+        DaemonCodeIndexControlV1::advance(&epoch);
+        Self::note_wake(
+            &pending_wake_micros,
+            &pending_wake_trigger,
+            &wake,
+            CodeIndexCadenceTriggerV1::Overflow,
         );
         true
     }
@@ -1235,6 +1339,9 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
+        // MCP search resolves its generation before it asks for query authority,
+        // so this is the first authenticated demand boundary on that path.
+        self.activate_for_scope(scope);
         let root = {
             let mounted = self.mounted.try_lock().ok()?;
             let mut matched = None;
