@@ -31,8 +31,10 @@ pub mod inventory;
 pub mod manifest;
 pub mod memory_cutover;
 pub mod profile_backup;
+mod profile_identity;
 pub mod registry;
 pub mod root_seam;
+mod session_runtime;
 
 pub use final_v2::*;
 pub use final_v2_executor::*;

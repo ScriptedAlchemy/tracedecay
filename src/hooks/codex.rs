@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
 use super::memory_inject;
@@ -79,10 +80,8 @@ pub async fn hook_codex_session_start() -> i32 {
     0
 }
 
-fn codex_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
-    event_cwd_from_parsed(parsed).map(|cwd| {
-        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Codex, cwd)
-    })
+fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
+    event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
 }
 
 /// Codex `UserPromptSubmit` hook handler.
@@ -782,7 +781,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(event.agent, crate::daemon::HookAgent::Codex.as_wire());
+        assert_eq!(event.agent, HookAgent::Codex.as_wire());
         assert_eq!(event.event, "sessionStart");
         assert_eq!(
             event.cwd.as_deref(),

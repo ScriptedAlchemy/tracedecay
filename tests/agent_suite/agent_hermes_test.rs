@@ -2,7 +2,7 @@
 //! behavior, config rewriting, and Hermes healthchecks.
 
 use crate::agent_test_support::*;
-use crate::common::{PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
+use crate::common::{PYYAML_FALLBACK_PRELUDE, host_sources, write_pyyaml_shim};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay::agents::*;
@@ -123,15 +123,15 @@ fn test_hermes_user_install_writes_single_plugin() {
 
 #[test]
 fn test_hermes_generated_plugin_templates_live_outside_installer() {
-    let installer_source = include_str!("../../src/agents/hermes.rs");
+    let installer_source = host_sources::HERMES_INSTALLER;
     // The template module plus its embedded asset payloads: the large Python
-    // bodies live in src/agents/hermes/templates/ files pulled in via
-    // include_str!, not as Rust string literals.
+    // bodies live in the host crate's agents/hermes/templates/ files pulled in
+    // via include_str!, not as Rust string literals.
     let template_sources = [
-        include_str!("../../src/agents/hermes/templates.rs"),
-        include_str!("../../src/agents/hermes/templates/plugin_init.py"),
-        include_str!("../../src/agents/hermes/templates/cli.py"),
-        include_str!("../../src/agents/hermes/templates/skill.md"),
+        host_sources::HERMES_TEMPLATES_MODULE,
+        host_sources::HERMES_PLUGIN_INIT_PY,
+        host_sources::HERMES_CLI_PY,
+        host_sources::HERMES_SKILL_MD,
     ];
 
     for marker in [
@@ -143,7 +143,7 @@ fn test_hermes_generated_plugin_templates_live_outside_installer() {
     ] {
         assert!(
             !installer_source.contains(marker),
-            "large generated plugin template marker should not live in src/agents/hermes.rs: {marker}"
+            "large generated plugin template marker should not live in agents/hermes.rs: {marker}"
         );
         assert!(
             template_sources
@@ -174,7 +174,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
         "unexpected provenance header: {header}"
     );
     assert!(
-        body == include_str!("../../src/agents/hermes/templates/plugin_init.py"),
+        body == host_sources::HERMES_PLUGIN_INIT_PY,
         "generated __init__.py body must be a verbatim copy of templates/plugin_init.py"
     );
 

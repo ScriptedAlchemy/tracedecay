@@ -6,7 +6,7 @@ use tracedecay_store::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V4,
 };
 
-use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
+use tracedecay_runtime_core::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 
 use super::apply::{apply_effect, derive_projection_with_alias, seed_predecessor_message_lineage};
 use super::rebuild::{

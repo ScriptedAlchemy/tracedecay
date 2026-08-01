@@ -19,19 +19,25 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower = "0.5"
 tracing = "0.1"
 tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
+tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
+tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 
 [features]
 default = []
 # Mirrors the root crate's features; the root forwards its own selections here.
-token-counting = ["dep:tiktoken-rs"]
-test-transport = []
+token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting"]
+test-transport = ["tracedecay-agent-hosts/test-transport"]
 
 [dev-dependencies]
 tempfile = "3"

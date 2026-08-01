@@ -4,9 +4,14 @@ use crate::runtime::git_correlation::{
     record_span_observation_in_transaction,
 };
 
-fn test_conn() -> (tempfile::TempDir, tracedecay_runtime_core::db::engine::TestConnection) {
+fn test_conn() -> (
+    tempfile::TempDir,
+    tracedecay_runtime_core::db::engine::TestConnection,
+) {
     let directory = tempfile::tempdir().unwrap();
-    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(&directory.path().join("sessions.db"));
+    let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+        &directory.path().join("sessions.db"),
+    );
     (directory, connection)
 }
 

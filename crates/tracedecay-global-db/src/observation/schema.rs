@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 
@@ -13,7 +13,7 @@ pub(super) const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str =
 
 pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
-async fn observation_table_exists(conn: &impl QueryExecutor) -> crate::errors::Result<bool> {
+async fn observation_table_exists(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'",
@@ -27,7 +27,7 @@ async fn observation_table_exists(conn: &impl QueryExecutor) -> crate::errors::R
         .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn observation_columns(conn: &impl QueryExecutor) -> crate::errors::Result<BTreeSet<String>> {
+async fn observation_columns(conn: &impl QueryExecutor) -> tracedecay_runtime_core::errors::Result<BTreeSet<String>> {
     let mut rows = conn
         .query("SELECT name FROM pragma_table_xinfo('observations')", ())
         .await
@@ -49,7 +49,7 @@ async fn observation_columns(conn: &impl QueryExecutor) -> crate::errors::Result
 pub(super) async fn migration_recorded(
     conn: &impl QueryExecutor,
     migration: &str,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
@@ -66,7 +66,7 @@ pub(super) async fn migration_recorded(
 async fn migrate_observation_schema(
     conn: &impl Executor,
     table_preexisted: bool,
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let columns = observation_columns(conn).await?;
     let required = [
         "sequence",
@@ -154,7 +154,7 @@ async fn migrate_observation_schema(
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
 }
 
-async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> crate::errors::Result<()> {
+async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
             "SELECT name FROM pragma_table_xinfo('source_cursor_advances')",
@@ -236,9 +236,9 @@ async fn migrate_source_cursor_advances_schema(conn: &impl Executor) -> crate::e
 
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
-) -> crate::errors::Result<()> {
+) -> tracedecay_runtime_core::errors::Result<()> {
     let table_preexisted = observation_table_exists(conn).await?;
-    crate::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
+    tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,
         OBSERVATION_SCHEMA_OPERATION,
     )

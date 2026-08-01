@@ -74,6 +74,22 @@ the root deletes its copies and re-exports:
 | `src/application/host_admission.rs` | Take `HostAdmissionOutcome`, `HostProjectionDrainOutcome`, `HostAdmissionScope` from `tracedecay_sessions::admission`; delete the local copies and the two `*AdmissionPort` traits. |
 | `src/store/mod.rs` | Delete the local `TranscriptIngestStore` trait; `pub use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;`. |
 
+Two of those moved-down modules arrived carrying a `#[cfg(test)] #[path = …]`
+declaration for a test file the split did not move: `observation.rs` named
+`observation_test.rs` and `repository_provenance.rs` named
+`repository_provenance_test.rs`. Both files exist only at the root
+(`src/application/observation_test.rs`, `src/repository_provenance_test.rs`),
+so the declarations named nothing — enough to abort module resolution before
+`cargo fmt` or `cargo test -p tracedecay-sessions` could look at the crate at
+all. The dangling declarations are removed; the root keeps both test files and
+runs them against its re-export, as the table above intends.
+
+`repository_provenance_test.rs` imports only `std`, `tempfile` and `super::*`,
+so it would compile unchanged inside this crate if the lead would rather this
+crate own that coverage directly. `observation_test.rs` would additionally need
+`crate::privacy::…` repointed at `tracedecay_runtime_core::privacy::…` plus
+`tracedecay-domain`/`tracedecay-store` dev-dependencies.
+
 ### 2. Implement the inverted ports
 
 | Port | Implement for |

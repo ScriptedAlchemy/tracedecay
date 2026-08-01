@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use crate::db::engine::Value;
+use tracedecay_runtime_core::db::engine::Value;
 
 use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
@@ -49,7 +49,7 @@ impl RegisteredGlobalDb {
                  FROM analytics_events
                  WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
                  LIMIT 1",
-                crate::db::engine::params![
+                tracedecay_runtime_core::db::engine::params![
                     event.provider.as_str(),
                     event.project_id.as_str(),
                     event.hint_id.as_deref()
@@ -360,7 +360,7 @@ async fn append_analytics_event_in_existing_tx(
                   metadata_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  RETURNING id",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 event.provider.as_str(),
                 event.project_id.as_str(),
                 event.session_id.as_deref(),

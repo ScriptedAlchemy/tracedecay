@@ -4,7 +4,7 @@
 //! context metadata only. Persistence, policy, hydration, and query execution
 //! remain outside the domain crate.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -157,13 +157,10 @@ impl MessageOccurrenceIdV1 {
         hasher.update(MESSAGE_OCCURRENCE_ID_DOMAIN);
         hasher.update(observation_id.as_str().as_bytes());
         hasher.update(output_ordinal.value().to_be_bytes());
-        let digest = hasher.finalize();
-        let mut encoded = String::with_capacity(71);
-        encoded.push_str("sha256:");
-        for byte in digest {
-            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        Self(encoded)
+        Self(crate::canonical_text::encode_tagged_lowercase_hex(
+            "sha256:",
+            &hasher.finalize(),
+        ))
     }
 
     pub fn new(value: impl Into<String>) -> Result<Self, SessionContractError> {

@@ -370,10 +370,10 @@ async fn fresh_direct_root_reuses_configuration_session_storage() {
 }
 
 #[tokio::test]
-async fn transport_selects_one_service_and_all_registered_never_invokes() {
+async fn transport_selects_one_service_and_all_registered_stays_project_scoped() {
     let (server, _dir, _pin) = server_with_authorities().await;
 
-    let deferred = message_search(
+    let all_registered = message_search(
         &server,
         json!({
             "query": "database backup",
@@ -382,17 +382,16 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         }),
     )
     .await;
-    assert_eq!(deferred["outcome"], "deferred");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        0
-    );
+    assert_eq!(all_registered["project_scope"], "all_registered");
+    // The fan-out is a project-scoped read: it never crosses into the profile
+    // retrieval service, whatever the registry answers.
     assert_eq!(
         server.user_session_retrieval_calls.load(Ordering::Relaxed),
         0
     );
+    let after_all_registered = server
+        .project_session_retrieval_calls
+        .load(Ordering::Relaxed);
 
     let project = message_search(
         &server,
@@ -406,7 +405,7 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         server
             .project_session_retrieval_calls
             .load(Ordering::Relaxed),
-        1
+        after_all_registered + 1
     );
     assert_eq!(
         server.user_session_retrieval_calls.load(Ordering::Relaxed),
@@ -427,7 +426,7 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         server
             .project_session_retrieval_calls
             .load(Ordering::Relaxed),
-        1
+        after_all_registered + 1
     );
     assert_eq!(
         server.user_session_retrieval_calls.load(Ordering::Relaxed),
@@ -448,7 +447,7 @@ async fn transport_selects_one_service_and_all_registered_never_invokes() {
         server
             .project_session_retrieval_calls
             .load(Ordering::Relaxed),
-        2
+        after_all_registered + 2
     );
     server.shutdown().await;
 }

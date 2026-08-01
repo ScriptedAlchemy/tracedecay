@@ -1,4 +1,4 @@
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_domain::{
     DerivedEvidenceKindV1, DerivedEvidenceOccurrenceRefV1, MessageId, MessageOccurrenceIdV1,
     RetrievalAnchorId, SESSION_DERIVED_SPAN_MAX_MEMBERS_V1, SessionDerivedEvidencePolicyV1,

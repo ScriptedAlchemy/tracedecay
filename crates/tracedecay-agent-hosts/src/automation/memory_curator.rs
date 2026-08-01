@@ -19,7 +19,7 @@ use crate::dashboard::memory_curate::{
 };
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::RegisteredGlobalDb;
+use tracedecay_global_db::RegisteredGlobalDb;
 use crate::memory::user::open_user_memory_db;
 use crate::store::memory::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;

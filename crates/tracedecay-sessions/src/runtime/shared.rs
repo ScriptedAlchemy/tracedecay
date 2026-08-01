@@ -208,6 +208,61 @@ impl ProjectRootMatcher {
     }
 }
 
+/// Decides whether one transcript record belongs to the scope currently being
+/// ingested.
+///
+/// Every file-backed provider draws the same line, because the two ingest
+/// scopes partition the same records between them:
+///
+/// * **Project** scope keeps a record when its working directory belongs to
+///   the project being ingested.
+/// * **Profile** (user-global) scope keeps a record when its working directory
+///   belongs to *no* registered project — records with no working directory at
+///   all are user-global by definition. That is exactly the complement of the
+///   project scopes, so each record lands in one store and not both.
+///
+/// Resolving the fixed root side once is the point: the equivalent per-record
+/// [`path_belongs_to_project`] call re-runs `git_worktree_root` and
+/// `git_common_dir` against the same unchanging root for every record.
+pub enum TranscriptScopeMatcher {
+    Project(ProjectRootMatcher),
+    Profile(Vec<ProjectRootMatcher>),
+}
+
+impl TranscriptScopeMatcher {
+    /// Project scope over a single root.
+    pub fn project(project_root: &Path) -> Self {
+        Self::Project(ProjectRootMatcher::new(project_root))
+    }
+
+    /// Profile scope over every registered project root.
+    pub fn profile(registered_roots: &[PathBuf]) -> Self {
+        Self::Profile(
+            registered_roots
+                .iter()
+                .map(|root| ProjectRootMatcher::new(root))
+                .collect(),
+        )
+    }
+
+    /// Profile scope when `registered_roots` is present, project scope
+    /// otherwise — the shape every provider source carries as an
+    /// `Option<Vec<PathBuf>>` user scope beside its project root.
+    pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
+        registered_roots.map_or_else(|| Self::project(project_root), |roots| Self::profile(roots))
+    }
+
+    /// True when a record with this working directory belongs to the scope.
+    pub fn accepts(&self, cwd: Option<&Path>) -> bool {
+        match self {
+            Self::Project(project) => cwd.is_some_and(|cwd| project.contains(cwd)),
+            Self::Profile(registered) => {
+                cwd.is_none_or(|cwd| !registered.iter().any(|root| root.contains(cwd)))
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
     fn normalize(path: &Path) -> String {
@@ -288,10 +343,7 @@ pub fn content_storage_text_and_tools(
     (message_storage_text(content), tools)
 }
 
-pub fn append_tool_calls_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    message: &Value,
-) {
+pub fn append_tool_calls_metadata(map: &mut serde_json::Map<String, Value>, message: &Value) {
     if let Some(tool_calls) = message.get("tool_calls") {
         map.insert("tool_calls".to_string(), tool_calls.clone());
     }
@@ -331,10 +383,7 @@ impl io::Write for ByteCountSink {
 /// Records bounded per-call tool metadata (byte counts and identifiers only,
 /// never content) for `tool_use`/`tool_result` blocks found in `content`.
 /// Inserts the `tool_events` key only when at least one entry was collected.
-pub fn append_tool_event_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    content: &Value,
-) {
+pub fn append_tool_event_metadata(map: &mut serde_json::Map<String, Value>, content: &Value) {
     let Some(items) = content.as_array() else {
         return;
     };
@@ -399,11 +448,7 @@ pub struct TranscriptLocationMetadataKeys {
 }
 
 impl TranscriptLocationMetadataKeys {
-    pub const fn new(
-        cwd: &'static str,
-        worktree: &'static str,
-        provenance: &'static str,
-    ) -> Self {
+    pub const fn new(cwd: &'static str, worktree: &'static str, provenance: &'static str) -> Self {
         Self {
             cwd,
             worktree,
@@ -485,10 +530,7 @@ pub fn usage_counters_from(value: &Value) -> Option<Value> {
 /// Inserts transcript-recorded token usage into message metadata under the
 /// `usage` key the savings dashboard reads. Probes each candidate value in
 /// order and keeps the first recognized counters object.
-pub fn append_usage_metadata(
-    map: &mut serde_json::Map<String, Value>,
-    candidates: &[&Value],
-) {
+pub fn append_usage_metadata(map: &mut serde_json::Map<String, Value>, candidates: &[&Value]) {
     if map.contains_key("usage") {
         return;
     }

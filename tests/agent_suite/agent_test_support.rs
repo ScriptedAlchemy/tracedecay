@@ -17,19 +17,31 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 // 3. Install / config creation tests (with tempdir)
 // ---------------------------------------------------------------------------
 
-/// Install contexts in this suite disable the Hermes dashboard-wrapper
-/// deploy: none of these tests assert on the deployed `dashboard/` page
-/// (that coverage lives in `hermes_dashboard_test`), and skipping it avoids
-/// rewriting ~300KB of embedded UI bundles per install — a real cost on
-/// Windows CI. Agents other than Hermes ignore the flag entirely.
-pub fn make_install_ctx(home: &Path) -> InstallContext {
+/// The fake binary path baked into every install context that does not need a
+/// real file on disk.
+pub const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
+
+/// Install context against `home` with an explicit dashboard-deploy choice.
+///
+/// Most of this suite disables the Hermes dashboard-wrapper deploy: those
+/// tests do not assert on the deployed `dashboard/` page (that coverage lives
+/// in the `hermes_suite` dashboard module), and skipping it avoids rewriting
+/// ~300KB of embedded UI bundles per install — a real cost on Windows CI.
+/// Agents other than Hermes ignore the flag entirely, so the Claude modules
+/// pass `true` without paying for it.
+pub fn install_ctx(home: &Path, dashboard: bool) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tracedecay_bin: FIXTURE_TRACEDECAY_BIN.to_string(),
         tool_permissions: expected_tool_perms(),
         project_root: None,
-        dashboard: false,
+        dashboard,
     }
+}
+
+/// [`install_ctx`] with the dashboard deploy disabled — the suite default.
+pub fn make_install_ctx(home: &Path) -> InstallContext {
+    install_ctx(home, false)
 }
 
 /// The Hermes plugin generated for [`make_install_ctx`] is identical for
@@ -860,9 +872,15 @@ pub fn assert_install_backs_up_and_preserves(
     );
 }
 
-/// Creates a fake tracedecay binary in a temp dir and returns the path string.
-/// This allows healthchecks to verify binary existence.
+/// [`install_ctx_with_real_bin`] with the dashboard deploy disabled.
 pub fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
+    install_ctx_with_real_bin(home, false)
+}
+
+/// Like [`install_ctx`], but writes an executable stub at `<home>/bin/tracedecay`
+/// and points the context at it, so healthchecks that verify binary existence
+/// see a real file.
+pub fn install_ctx_with_real_bin(home: &Path, dashboard: bool) -> InstallContext {
     let bin_dir = home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let bin_path = bin_dir.join("tracedecay");
@@ -873,10 +891,7 @@ pub fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     InstallContext {
-        home: home.to_path_buf(),
         tracedecay_bin: bin_path.to_string_lossy().to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: false,
+        ..install_ctx(home, dashboard)
     }
 }

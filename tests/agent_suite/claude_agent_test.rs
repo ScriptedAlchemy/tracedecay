@@ -6,6 +6,8 @@ use tracedecay::agents::{
     expected_tool_perms, tool_names,
 };
 
+use crate::agent_test_support::{install_ctx, install_ctx_with_real_bin};
+
 /// Prefix for the plugin-namespace tool permission entries the installer writes
 /// so the plugin MCP server's tools are auto-approved.
 const PLUGIN_PERM_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
@@ -22,35 +24,17 @@ fn expected_plugin_tool_perms() -> Vec<String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// The Claude modules install with the dashboard deploy enabled; Claude
+/// ignores the flag, so it costs nothing here and keeps the installed shape
+/// closest to a real user install.
 fn make_install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: true,
-    }
+    install_ctx(home, true)
 }
 
 /// Creates a fake tracedecay binary in a temp dir so healthcheck binary-exists
 /// checks pass.
 fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
-    let bin_dir = home.join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let bin_path = bin_dir.join("tracedecay");
-    std::fs::write(&bin_path, "#!/bin/sh\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: bin_path.to_string_lossy().to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: true,
-    }
+    install_ctx_with_real_bin(home, true)
 }
 
 fn read_json(path: &Path) -> serde_json::Value {

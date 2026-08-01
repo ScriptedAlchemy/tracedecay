@@ -543,8 +543,16 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         !root.join("plugin/overlays/cursor/agents").exists(),
         "Cursor adapters must be generated, not hand-authored"
     );
+    // The host installers moved to `tracedecay-agent-hosts` in the crate
+    // split; assert against the live tree so this stays a real check and not
+    // a path that can never exist.
+    let host_agents = root.join("crates/tracedecay-agent-hosts/src/agents");
     assert!(
-        !root.join("src/agents/codex_agents").exists(),
+        host_agents.is_dir(),
+        "host installer sources moved; update this guard to the new location"
+    );
+    assert!(
+        !host_agents.join("codex_agents").exists(),
         "Codex adapters must be generated, not hand-authored"
     );
 

@@ -1586,7 +1586,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
             let receipt_id = SanitizationReceiptId::new(format!(
                 "{}{}",
                 self.receipt_domain.id_prefix(),
-                format_hex(&hasher.finalize())
+                crate::canonical_text::encode_lowercase_hex(&hasher.finalize())
             ))
             .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
             return SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
@@ -1609,7 +1609,7 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
         let receipt_id = SanitizationReceiptId::new(format!(
             "{}{}",
             self.receipt_domain.id_prefix(),
-            format_hex(&hasher.finalize())
+            crate::canonical_text::encode_lowercase_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
         SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
@@ -1949,15 +1949,5 @@ fn sha256_digest(bytes: &[u8]) -> String {
 }
 
 fn format_sha256(digest: &[u8]) -> String {
-    format!("sha256:{}", format_hex(digest))
-}
-
-fn format_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
+    crate::canonical_text::encode_tagged_lowercase_hex("sha256:", digest)
 }

@@ -16,8 +16,8 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{DomainError, ManifestDigest, UtcMicros};
 
-use crate::config::registry::{ConfigurationRegistry, ConfigurationRegistryError};
-use crate::config::resolver::{
+use super::registry::{ConfigurationRegistry, ConfigurationRegistryError};
+use super::resolver::{
     ConfigurationLayerV1, ConfigurationResolutionError, ConfigurationResolutionInputSourceV1,
     ConfigurationResolutionInputV1, ConfigurationResolutionV1, resolve_configuration_inputs,
 };

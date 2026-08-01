@@ -1,64 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-checker="$repo_root/scripts/check-dashboard-bundle.py"
-fixture=$(mktemp -d)
-trap 'rm -rf "$fixture"' EXIT
+# shellcheck source=../scripts/lib/gate-test.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/lib/gate-test.sh"
 
-expect_rejected() {
-  local name=$1
-  local expected=$2
-  shift 2
+checker="$GATE_REPO_ROOT/scripts/check-dashboard-bundle.py"
 
-  if output=$("$@" 2>&1); then
-    echo "$name: invalid dashboard bundle was accepted" >&2
-    exit 1
-  fi
-  if [[ $output != *"$expected"* ]]; then
-    echo "$name: expected error containing '$expected', got:" >&2
-    echo "$output" >&2
-    exit 1
-  fi
+# Each rejection case: a directory name, the substring the checker must print,
+# and the builder that stages that flavor of broken bundle. Table-driven so a
+# new rejection reason is one row, not another copy of the run-and-assert pair.
+build_missing() {
+  : # deliberately never created
 }
 
-expect_rejected \
-  "missing bundle" \
-  "bundle directory is missing" \
-  python3 "$checker" "$fixture/missing"
+build_stub() {
+  mkdir -p "$1"
+  printf '<!doctype html><div id="root"></div>\n' >"$1/index.html"
+}
 
-mkdir -p "$fixture/stub"
-printf '<!doctype html><div id="root"></div>\n' >"$fixture/stub/index.html"
-expect_rejected \
-  "stub index" \
-  "does not load a local JavaScript asset" \
-  python3 "$checker" "$fixture/stub"
+build_missing_asset() {
+  mkdir -p "$1"
+  printf '<script src="/static/js/app.js"></script>\n' >"$1/index.html"
+}
 
-mkdir -p "$fixture/missing-asset"
-printf '<script src="/static/js/app.js"></script>\n' >"$fixture/missing-asset/index.html"
-expect_rejected \
-  "missing referenced asset" \
-  "referenced asset is missing" \
-  python3 "$checker" "$fixture/missing-asset"
+build_empty_asset() {
+  mkdir -p "$1/static/js"
+  printf '<script src="/static/js/app.js"></script>\n' >"$1/index.html"
+  : >"$1/static/js/app.js"
+}
 
-mkdir -p "$fixture/empty-asset/static/js"
-printf '<script src="/static/js/app.js"></script>\n' >"$fixture/empty-asset/index.html"
-: >"$fixture/empty-asset/static/js/app.js"
-expect_rejected \
-  "empty referenced asset" \
-  "referenced asset is empty" \
-  python3 "$checker" "$fixture/empty-asset"
+build_placeholder() {
+  mkdir -p "$1/static/js"
+  printf '<script src="/static/js/app.js"></script>\n' >"$1/index.html"
+  printf 'console.log("placeholder");\n' >"$1/static/js/app.js"
+}
 
-mkdir -p "$fixture/placeholder/static/js"
-printf '<script src="/static/js/app.js"></script>\n' >"$fixture/placeholder/index.html"
-printf 'console.log("placeholder");\n' >"$fixture/placeholder/static/js/app.js"
-expect_rejected \
-  "placeholder JavaScript" \
-  "JavaScript payload is placeholder-sized" \
-  python3 "$checker" "$fixture/placeholder"
+rejected=0
+while IFS='|' read -r name builder expected; do
+  [[ -n $name ]] || continue
+  bundle="$GATE_SCRATCH/$name"
+  "$builder" "$bundle"
+  gate_run python3 "$checker" "$bundle"
+  gate_expect_failure "$name"
+  gate_output_contains "$name" "$expected"
+  rejected=$((rejected + 1))
+done <<'CASES'
+missing|build_missing|bundle directory is missing
+stub|build_stub|does not load a local JavaScript asset
+missing-asset|build_missing_asset|referenced asset is missing
+empty-asset|build_empty_asset|referenced asset is empty
+placeholder|build_placeholder|JavaScript payload is placeholder-sized
+CASES
 
-mkdir -p "$fixture/valid/static/js" "$fixture/valid/static/css"
-cat >"$fixture/valid/index.html" <<'HTML'
+# A here-doc that stops feeding the loop would turn every rejection case above
+# into a silent no-op, so assert the table was actually walked.
+[[ $rejected -eq 5 ]] ||
+  gate_fail "expected 5 rejection cases to run, ran $rejected"
+
+valid="$GATE_SCRATCH/valid"
+mkdir -p "$valid/static/js" "$valid/static/css"
+cat >"$valid/index.html" <<'HTML'
 <!doctype html>
 <html>
   <head>
@@ -68,8 +69,8 @@ cat >"$fixture/valid/index.html" <<'HTML'
   <body><div id="root"></div></body>
 </html>
 HTML
-printf 'body { color: #fff; }\n' >"$fixture/valid/static/css/app.css"
-python3 - "$fixture/valid/static/js/app.js" <<'PY'
+printf 'body { color: #fff; }\n' >"$valid/static/css/app.css"
+python3 - "$valid/static/js/app.js" <<'PY'
 import pathlib
 import sys
 
@@ -78,4 +79,5 @@ pathlib.Path(sys.argv[1]).write_text(
     encoding="utf-8",
 )
 PY
-python3 "$checker" "$fixture/valid"
+gate_run python3 "$checker" "$valid"
+gate_expect_success "valid bundle"

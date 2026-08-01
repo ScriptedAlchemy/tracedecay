@@ -5,14 +5,14 @@ use sha2::{Digest, Sha256};
 pub const MAX_DERIVED_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_DERIVED_SNIPPET_CHARS: usize = 4 * 1024;
 pub const DERIVED_TRUNCATION_MARKER: &str = "\n[derived snippet truncated by tracedecay]";
-pub(crate) const RERANK_OVERFETCH_FACTOR: usize = 4;
+pub const RERANK_OVERFETCH_FACTOR: usize = 4;
 
-pub(crate) struct RelatedMessageCopyIdentity<'a> {
-    pub(crate) provider: &'a str,
-    pub(crate) family_session_id: &'a str,
-    pub(crate) session_id: &'a str,
-    pub(crate) is_subagent: bool,
-    pub(crate) content: &'a str,
+pub struct RelatedMessageCopyIdentity<'a> {
+    pub provider: &'a str,
+    pub family_session_id: &'a str,
+    pub session_id: &'a str,
+    pub is_subagent: bool,
+    pub content: &'a str,
 }
 
 pub fn projected_content_hash(content: &str) -> String {
@@ -27,14 +27,14 @@ pub fn derived_text_for_snippet(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_SNIPPET_CHARS)
 }
 
-pub(crate) fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
+pub fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
     limit
         .saturating_mul(RERANK_OVERFETCH_FACTOR)
         .min(max_fetch)
         .max(limit)
 }
 
-pub(crate) fn dedupe_related_message_copies<T>(
+pub fn dedupe_related_message_copies<T>(
     rows: Vec<T>,
     identity: impl for<'a> Fn(&'a T) -> RelatedMessageCopyIdentity<'a>,
 ) -> Vec<T> {
@@ -77,7 +77,7 @@ pub(crate) fn dedupe_related_message_copies<T>(
     kept
 }
 
-pub(crate) fn is_inventory_text(text: &str) -> bool {
+pub fn is_inventory_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let mentions_transcript_dir = lower.contains(".jsonl")
         || lower.contains("sessions/")

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use serde_json::json;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CopyProofV1, LogicalCopyRecordV1, MessageId,

@@ -10,7 +10,7 @@ use crate::plugin_validation_support::{
     relative_files_under, repo_path,
 };
 use tempfile::TempDir;
-use tracedecay::agents::{InstallContext, expected_tool_perms, get_integration};
+use tracedecay::agents::{InstallContext, get_integration};
 
 const CODEX_SKILL_ROOT: &str = "plugin/skills";
 const REPO_LOCAL_SKILL_ROOT: &str = ".codex/skills";
@@ -194,11 +194,8 @@ fn produced_plugin_skills_meet_the_metadata_budget_and_openai_contract() {
 
 fn install_ctx(home: &Path) -> InstallContext {
     InstallContext {
-        home: home.to_path_buf(),
         tracedecay_bin: "/tmp/tracedecay-test-bin".to_string(),
-        tool_permissions: expected_tool_perms(),
-        project_root: None,
-        dashboard: true,
+        ..crate::agent_test_support::install_ctx(home, true)
     }
 }
 

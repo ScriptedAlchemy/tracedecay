@@ -8,7 +8,6 @@
 //! mutable line numbers never affect identity.
 
 use std::fmt;
-use std::fmt::Write as _;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -119,12 +118,8 @@ impl ContentDigest {
     /// content digest without depending on the code-index crate call it
     /// directly rather than re-deriving the encoding.
     pub fn of_bytes(bytes: &[u8]) -> Self {
-        let digest = Sha256::digest(bytes);
-        let mut encoded = String::with_capacity("sha256:".len() + 64);
-        encoded.push_str("sha256:");
-        for byte in digest {
-            write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
-        }
+        let encoded =
+            crate::canonical_text::encode_tagged_lowercase_hex("sha256:", &Sha256::digest(bytes));
         Self::new(encoded).expect("sha256 hex is a valid content digest")
     }
 }

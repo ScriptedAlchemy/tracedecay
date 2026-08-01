@@ -1,4 +1,4 @@
-use crate::db::engine;
+use tracedecay_runtime_core::db::engine;
 
 #[derive(Clone, Copy)]
 pub(super) enum TemporalSqlRead<'a> {

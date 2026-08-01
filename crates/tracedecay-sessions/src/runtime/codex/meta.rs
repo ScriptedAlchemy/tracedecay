@@ -21,7 +21,7 @@ pub struct CodexMeta {
     pub thread_source: Option<String>,
 }
 
-pub struct CodexMetaWithProvenance {
+pub(super) struct CodexMetaWithProvenance {
     pub meta: CodexMeta,
     pub native_thread_id: Option<String>,
 }
@@ -32,11 +32,11 @@ pub struct CodexTurnContext {
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
-pub fn session_meta(path: &Path) -> Option<CodexMeta> {
+pub(super) fn session_meta(path: &Path) -> Option<CodexMeta> {
     session_meta_with_provenance(path).map(|parsed| parsed.meta)
 }
 
-pub fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
+pub(super) fn session_meta_with_provenance(path: &Path) -> Option<CodexMetaWithProvenance> {
     let file = std::fs::File::open(path).ok()?;
     let mut frames = RawJsonlFrameReader::new(BufReader::new(file), MAX_JSONL_RECORD_BYTES);
     for _ in 0..4 {
@@ -126,7 +126,7 @@ fn session_meta_with_provenance_from_record(
     })
 }
 
-pub fn string_field(payload: &Value, key: &str) -> Option<String> {
+pub(super) fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -134,7 +134,7 @@ pub fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-pub fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+pub(super) fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)

@@ -258,7 +258,7 @@ pub enum WriterOwnership {
 
 impl DatabaseAuthority {
     #[cfg(test)]
-    pub fn acquire_daemon(db_path: &Path, intent: &str) -> Result<Self> {
+    pub(crate) fn acquire_daemon(db_path: &Path, intent: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if !DAEMON_SCOPES
             .lock()
@@ -275,7 +275,7 @@ impl DatabaseAuthority {
     }
 
     #[cfg(test)]
-    pub fn acquire_maintenance(db_path: &Path, intent: &str) -> Result<Self> {
+    pub(crate) fn acquire_maintenance(db_path: &Path, intent: &str) -> Result<Self> {
         Self::acquire(db_path, DatabaseAuthorityRole::Maintenance, intent)
     }
 
@@ -495,7 +495,7 @@ impl DatabaseAuthority {
         &self.inner.identity.database_path
     }
 
-    pub fn database_identity_key(&self) -> &Path {
+    pub(crate) fn database_identity_key(&self) -> &Path {
         &self.inner.identity.database_key
     }
 }

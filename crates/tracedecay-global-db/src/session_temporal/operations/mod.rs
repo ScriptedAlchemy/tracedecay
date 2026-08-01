@@ -5,12 +5,12 @@ mod sources;
 
 use std::collections::BTreeMap;
 
-use crate::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::application::session::compatibility::projected_content_hash;
-use crate::sessions::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
 pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 

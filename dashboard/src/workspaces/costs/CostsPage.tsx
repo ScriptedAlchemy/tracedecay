@@ -1,5 +1,6 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { LegacyBoundary, ReadFailure } from '../../ui/LegacyStates.tsx';
+import { ReadFailure } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';

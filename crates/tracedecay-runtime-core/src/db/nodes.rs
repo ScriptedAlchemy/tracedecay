@@ -22,7 +22,7 @@ impl Database {
         transaction.commit().await
     }
 
-    pub async fn insert_node_unguarded(
+    pub(crate) async fn insert_node_unguarded(
         &self,
         transaction: &DatabaseWriteTransaction<'_>,
         node: &Node,

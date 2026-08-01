@@ -15,7 +15,8 @@ const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 #[derive(Debug)]
 pub(super) struct MaintenanceCadence {
     interval: Duration,
-    last_success: Option<Instant>,
+    retry_delay: Duration,
+    not_before: Option<Instant>,
     in_flight: bool,
 }
 
@@ -23,28 +24,29 @@ impl MaintenanceCadence {
     pub(super) fn new(interval: Duration) -> Self {
         Self {
             interval,
-            last_success: None,
+            retry_delay: interval.min(Duration::from_mins(1)),
+            not_before: None,
             in_flight: false,
         }
     }
 
     pub(super) fn reserve(&mut self, now: Instant) -> bool {
-        if self.in_flight
-            || self
-                .last_success
-                .is_some_and(|last| now.saturating_duration_since(last) < self.interval)
-        {
+        if self.in_flight || self.not_before.is_some_and(|not_before| now < not_before) {
             return false;
         }
         self.in_flight = true;
         true
     }
 
-    pub(super) fn finish(&mut self, now: Instant, succeeded: bool) {
+    pub(super) fn finish(&mut self, now: Instant, succeeded: bool) -> Duration {
         self.in_flight = false;
-        if succeeded {
-            self.last_success = Some(now);
-        }
+        let delay = if succeeded {
+            self.interval
+        } else {
+            self.retry_delay
+        };
+        self.not_before = Some(now + delay);
+        delay
     }
 }
 
@@ -162,8 +164,7 @@ impl MaintenanceCoordinator {
         interval: Duration,
     ) {
         let mut cadence = MaintenanceCadence::new(interval);
-        let retry_delay = interval.min(Duration::from_mins(1));
-        let mut next_delay = retry_delay;
+        let mut next_delay = cadence.retry_delay;
         loop {
             tokio::select! {
                 biased;
@@ -186,8 +187,7 @@ impl MaintenanceCoordinator {
                     &retention,
                 )
                 .await;
-            cadence.finish(Instant::now(), succeeded);
-            next_delay = if succeeded { interval } else { retry_delay };
+            next_delay = cadence.finish(Instant::now(), succeeded);
         }
     }
 
@@ -485,17 +485,19 @@ mod tests {
     };
 
     #[test]
-    fn cadence_retries_failures_without_waiting_and_bounds_successes() {
+    fn cadence_rate_limits_failures_and_successes() {
         let started = Instant::now();
         let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
         assert!(!cadence.reserve(started));
-        cadence.finish(started, false);
-        assert!(cadence.reserve(started));
-        cadence.finish(started, true);
+        assert_eq!(cadence.finish(started, false), Duration::from_mins(1));
         assert!(!cadence.reserve(started + Duration::from_secs(59)));
-        assert!(cadence.reserve(started + Duration::from_mins(1)));
+        let retried = started + Duration::from_mins(1);
+        assert!(cadence.reserve(retried));
+        assert_eq!(cadence.finish(retried, true), Duration::from_mins(1));
+        assert!(!cadence.reserve(retried + Duration::from_secs(59)));
+        assert!(cadence.reserve(retried + Duration::from_mins(1)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::admission::HostAdmission;
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
+use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{self, TranscriptDiscoveryBounds, TranscriptSource};
@@ -246,7 +246,9 @@ pub async fn ingest_user_global_sources_for_provider_with_authorities<A: Session
     .await
 }
 
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots<A: SessionIngestAuthority>(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots<
+    A: SessionIngestAuthority,
+>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &A,
@@ -266,7 +268,9 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots<A: Sessio
     .await
 }
 
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation<A: SessionIngestAuthority>(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation<
+    A: SessionIngestAuthority,
+>(
     brain_id: &BrainId,
     profile_id: &UserProfileId,
     registered: &A,
@@ -288,7 +292,9 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cance
 }
 
 #[cfg(test)]
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<A: SessionIngestAuthority>(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<
+    A: SessionIngestAuthority,
+>(
     _db: &A,
     _profile_root: &Path,
     provider: Option<SessionProvider>,
@@ -303,7 +309,9 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_without_r
 }
 
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.
-pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded<A: SessionIngestAuthority>(
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded<
+    A: SessionIngestAuthority,
+>(
     registered: (&BrainId, &UserProfileId, &A),
     profile_root: &Path,
     provider: Option<SessionProvider>,

@@ -163,7 +163,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
-    pub fn release_lease(
+    pub(crate) fn release_lease(
         &self,
         binding: &StoreRuntimeBindingV1,
         lease_id: &RuntimeLeaseIdV1,

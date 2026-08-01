@@ -405,7 +405,7 @@ impl DatabaseDeletionStates {
     }
 
     #[cfg(test)]
-    pub fn has_deleting(self) -> bool {
+    pub(crate) fn has_deleting(self) -> bool {
         self.deleting != 0
     }
 
@@ -476,7 +476,7 @@ impl DatabaseDeletionFence {
     }
 
     #[cfg(test)]
-    pub fn tombstone_states(&self) -> Result<DatabaseDeletionStates> {
+    pub(crate) fn tombstone_states(&self) -> Result<DatabaseDeletionStates> {
         classify_tombstone_states(
             &self.entries,
             &self.transaction_id,

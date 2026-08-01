@@ -2,12 +2,14 @@ mod common;
 
 use tracedecay_tool_catalog::{
     ApplicationHandlerDescriptorV1, CatalogContributionInputV1, CatalogContributionV1,
-    CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId, ProfileBudget,
-    ProfileDefinition, ProfileDefinitionInputV1, ProfileKind, RoutingFixtureExpectation,
-    RoutingFixtureV1,
+    CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId, ProfileDefinition,
+    ProfileDefinitionInputV1, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
 };
 
-use common::{capability_id, handler_for, profile, profile_id, read_manifest, schema, use_case_id};
+use common::{
+    ample_budget, capability_id, handler_for, profile, profile_id, read_manifest, schema,
+    use_case_id,
+};
 
 #[test]
 fn snapshots_have_insertion_order_independent_canonical_digests() {
@@ -49,7 +51,7 @@ fn snapshots_have_insertion_order_independent_canonical_digests() {
     let profile = profile(
         profile_id,
         vec![first_capability_id, second_capability_id],
-        ProfileBudget::DEFAULT,
+        ample_budget(),
     );
 
     let mut first_builder = CatalogSnapshotBuilderV1::new();
@@ -110,7 +112,7 @@ fn snapshots_canonicalize_routing_fixture_order_before_digesting() {
             capability_ids: vec![capability_id.clone()],
             enabled_surfaces: Vec::new(),
             requires_cli_mcp_pairing: false,
-            budget: ProfileBudget::DEFAULT,
+            budget: ample_budget(),
             routing_fixtures,
         })
         .unwrap()
@@ -172,7 +174,7 @@ fn snapshot_rejects_duplicate_capability_ids() {
         .add_profile(profile(
             profile_id,
             vec![capability_id.clone()],
-            ProfileBudget::DEFAULT,
+            ample_budget(),
         ));
 
     assert_eq!(
@@ -207,11 +209,7 @@ fn snapshot_rejects_duplicate_contribution_ids_before_folding_records() {
         .add_contribution(contribution.clone())
         .add_contribution(contribution)
         .add_handler(handler_for(&manifest))
-        .add_profile(profile(
-            profile_id,
-            vec![capability_id],
-            ProfileBudget::DEFAULT,
-        ));
+        .add_profile(profile(profile_id, vec![capability_id], ample_budget()));
 
     assert_eq!(
         builder.build(),
@@ -258,7 +256,7 @@ fn snapshot_deduplicates_shared_schema_identity() {
         .add_profile(profile(
             profile_id,
             vec![first_capability_id, second_capability_id],
-            ProfileBudget::DEFAULT,
+            ample_budget(),
         ));
 
     let snapshot = builder.build().unwrap();
@@ -305,7 +303,7 @@ fn snapshot_rejects_handler_schema_drift() {
         .add_profile(profile(
             profile_id,
             vec![capability_id.clone()],
-            ProfileBudget::DEFAULT,
+            ample_budget(),
         ));
 
     assert_eq!(
@@ -348,7 +346,7 @@ fn snapshot_rejects_handler_capability_drift() {
         .add_profile(profile(
             profile_id,
             vec![manifest_capability_id.clone()],
-            ProfileBudget::DEFAULT,
+            ample_budget(),
         ));
 
     assert_eq!(

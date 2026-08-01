@@ -18,11 +18,12 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::DaemonDatabaseScope;
-use crate::db::engine::params;
 use crate::RegisteredGlobalDb;
-use crate::sessions::lcm::payload::{upsert_payload_metadata, write_external_payload};
+use crate::host_ports::profile_sessions::{self, ProfileSessionsRuntime};
+use crate::tests::harness::UNWIRED_PROFILE_SESSIONS;
+use tracedecay_runtime_core::db::DaemonDatabaseScope;
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
 pub(super) const INLINE_PAYLOAD: &str = "non-empty inline occurrence payload";
@@ -34,24 +35,21 @@ pub(super) struct RegisteredTemporalHarness {
     pub(super) registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
     _scope: DaemonDatabaseScope,
-    _registry: DaemonSessionRuntimeRegistryV1,
+    _registry: Box<dyn ProfileSessionsRuntime>,
 }
 
 impl RegisteredTemporalHarness {
     pub(super) async fn open(label: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary registered session store");
         let profile_root = directory.path().join("profile");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("profile identity");
-        let scope = crate::db::enter_daemon_database_scope(&profile_root, 1, label)
+        // The scope guard is entered before the runtime opens; the root opener
+        // creates the profile identity on its way to the session registry.
+        let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, 1, label)
             .expect("daemon database scope");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("session runtime registry");
-        let registered = registry
-            .profile_sessions()
-            .await
-            .expect("registered profile sessions");
+        let registry = profile_sessions::open(profile_root)
+            .expect(UNWIRED_PROFILE_SESSIONS)
+            .await;
+        let registered = registry.mount().await;
         Self {
             registered,
             _directory: directory,

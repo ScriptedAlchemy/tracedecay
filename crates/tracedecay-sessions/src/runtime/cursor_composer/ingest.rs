@@ -17,7 +17,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::path_belongs_to_project;
+use crate::runtime::shared::TranscriptScopeMatcher;
 
 use super::PROVIDER;
 use super::capture::{
@@ -40,11 +40,11 @@ use super::store::{
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
 pub const DEFAULT_COMPOSER_ENVELOPE_CAP: usize = 256;
 
-pub fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
+pub(super) fn directory_entry_is_real_dir(entry: &std::fs::DirEntry) -> bool {
     entry.file_type().is_ok_and(|kind| kind.is_dir())
 }
 
-pub fn path_is_regular_file_no_follow(path: &Path) -> bool {
+pub(super) fn path_is_regular_file_no_follow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
@@ -54,6 +54,27 @@ struct ComposerIngestContext<'facade, 'root> {
     project_root: Option<&'root Path>,
     registered_roots: &'root [PathBuf],
     cancellation: &'root ObservationCancellation,
+}
+
+impl ComposerIngestContext<'_, '_> {
+    /// Resolve this sweep's scope boundary once, rather than per composer
+    /// envelope and per workspace directory.
+    fn scope_matcher(&self) -> TranscriptScopeMatcher {
+        self.project_root.map_or_else(
+            || TranscriptScopeMatcher::profile(self.registered_roots),
+            TranscriptScopeMatcher::project,
+        )
+    }
+
+    /// The project label stored for an accepted workspace: its real path under
+    /// project scope, the shared `"user"` bucket under profile scope.
+    fn scoped_project_label(&self, workspace_path: &str) -> String {
+        if self.project_root.is_some() {
+            workspace_path.to_string()
+        } else {
+            "user".to_string()
+        }
+    }
 }
 
 async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_>) {
@@ -78,7 +99,7 @@ fn cursor_composer_source(composer_id: &str) -> Result<ObservationSourceIdentity
     .map_err(|error| format!("invalid Cursor composer source: {error}"))
 }
 
-pub fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
+pub(super) fn snapshot_generation(path: &Path) -> Option<ObservationSourceGenerationV1> {
     let identity = tracedecay_runtime_core::db::sqlite_generation_identity(path).ok()?;
     ObservationSourceGenerationV1::new(identity).ok()
 }
@@ -339,6 +360,7 @@ impl CursorComposerSource {
             return;
         };
         let conn = &ro.conn;
+        let scope_matcher = context.scope_matcher();
         // Indexed prefix scan of keys + byte lengths only — never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
@@ -448,23 +470,11 @@ impl CursorComposerSource {
                         byte_budget.defer();
                     }
                 }
-                let selected_project = match context.project_root {
-                    Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
-                        ComposerProject {
-                            path: project.path.clone(),
-                        }
-                    }
-                    Some(_) => continue,
-                    None if context
-                        .registered_roots
-                        .iter()
-                        .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
-                    {
-                        continue;
-                    }
-                    None => ComposerProject {
-                        path: "user".to_string(),
-                    },
+                if !scope_matcher.accepts(Some(Path::new(&project.path))) {
+                    continue;
+                }
+                let selected_project = ComposerProject {
+                    path: context.scoped_project_label(&project.path),
                 };
                 // Keep JSONL dedupe state bounded independently of SQLite row count.
                 if outcome.owned_session_ids.contains(&composer_id)
@@ -752,6 +762,7 @@ impl CursorComposerSource {
         let Ok(ws_entries) = std::fs::read_dir(&self.chats_dir) else {
             return;
         };
+        let scope_matcher = context.scope_matcher();
         for ws_entry in ws_entries.flatten() {
             if context.cancellation.is_cancelled() {
                 return;
@@ -761,21 +772,13 @@ impl CursorComposerSource {
             }
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
             // Scope by ws-hash -> project mapping harvested from the envelopes.
-            let project_path = match (workspace_paths.get(&ws_hash), context.project_root) {
-                (Some(path), Some(root)) if path_belongs_to_project(Path::new(path), root) => {
-                    path.clone()
-                }
-                (Some(_), Some(_)) | (None, _) => continue,
-                (Some(path), None)
-                    if context
-                        .registered_roots
-                        .iter()
-                        .any(|root| path_belongs_to_project(Path::new(path), root)) =>
-                {
-                    continue;
-                }
-                (Some(_), None) => "user".to_string(),
+            let Some(path) = workspace_paths.get(&ws_hash) else {
+                continue;
             };
+            if !scope_matcher.accepts(Some(Path::new(path))) {
+                continue;
+            }
+            let project_path = context.scoped_project_label(path);
             let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {
                 continue;
             };

@@ -26,16 +26,16 @@ use tracedecay_store::{
 
 use super::prepare_projection_version_migration_with_engine;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::db::engine::{TestConnection, params};
+use tracedecay_runtime_core::db::engine::{TestConnection, params};
 use crate::RegisteredGlobalDb;
-use crate::sessions::cursor_composer::{
+use tracedecay_sessions::runtime::cursor_composer::{
     normalize_cursor_composer_observation,
     normalize_cursor_composer_observation_with_projected_message_id,
 };
 
 async fn registered_runtime(
     profile_root: &std::path::Path,
-) -> crate::errors::Result<HostAdmissionTestRuntimeV1> {
+) -> tracedecay_runtime_core::errors::Result<HostAdmissionTestRuntimeV1> {
     HostAdmissionTestRuntimeV1::profile(profile_root).await
 }
 
@@ -1522,14 +1522,14 @@ async fn registered_engine_migration_replay_preserves_completed_version_receipt(
     connection
         .execute(
             "INSERT INTO observation_projection_checkpoints VALUES (?1, 7)",
-            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            tracedecay_runtime_core::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
         )
         .await
         .unwrap();
     connection
         .execute(
             "INSERT INTO observation_projection_migrations VALUES (?1, ?2, 7, 7, 1)",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V3,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
             ],
@@ -1549,7 +1549,7 @@ async fn registered_engine_migration_replay_preserves_completed_version_receipt(
             "SELECT source_frontier, migrated_through, completed, COUNT(*)
              FROM observation_projection_migrations
              WHERE source_projector_version = ?1 AND target_projector_version = ?2",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V3,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4
             ],
@@ -1571,14 +1571,14 @@ async fn registered_schema_rejects_inconsistent_resume_receipt() {
     connection
         .execute(
             "INSERT INTO observation_projection_checkpoints VALUES (?1, 7)",
-            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            tracedecay_runtime_core::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
         )
         .await
         .unwrap();
     let error = connection
         .execute(
             "INSERT INTO observation_projection_migrations VALUES (?1, ?2, 7, 6, 1)",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 SESSION_MESSAGE_PROJECTOR_VERSION_V3,
                 SESSION_MESSAGE_PROJECTOR_VERSION_V4,
             ],
@@ -1632,7 +1632,7 @@ async fn registered_engine_migration_rechecks_actor_time_authority_before_progre
     connection
         .execute(
             "INSERT INTO observation_projection_checkpoints VALUES (?1, 1)",
-            crate::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
+            tracedecay_runtime_core::db::engine::params![SESSION_MESSAGE_PROJECTOR_VERSION_V3],
         )
         .await
         .unwrap();

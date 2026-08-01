@@ -23,9 +23,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocationMetadataKeys, path_belongs_to_project,
+    StoredCursor, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -35,6 +34,7 @@ use crate::runtime::source::{
     TranscriptCursorKey, TranscriptDiscoveryBounds, TranscriptSource, bound_path_list,
     collect_files_with_ext_bounded, path_byte_len,
 };
+use tracedecay_runtime_core::privacy::protect_sensitive_structural_id;
 mod canonical_projection;
 mod cursor;
 mod frames;
@@ -208,26 +208,18 @@ impl ClaudeSource {
                     .as_ref()
                     .and_then(|info| transcript_cwd(&info.parent_transcript_path))
             });
+        let scope_matcher = TranscriptScopeMatcher::for_scope(
+            project_root,
+            self.user_scope
+                .as_ref()
+                .map(|scope| scope.registered_roots.as_slice()),
+        );
         let mut retained = Vec::with_capacity(scan.frames.len());
         let mut excluded = Vec::new();
         for frame in scan.frames.drain(..) {
             let record = frame.scope_value();
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = self.user_scope.as_ref().map_or_else(
-                || {
-                    line_cwd
-                        .as_deref()
-                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
-                },
-                |scope| {
-                    line_cwd.as_deref().is_none_or(|cwd| {
-                        !scope
-                            .registered_roots
-                            .iter()
-                            .any(|root| path_belongs_to_project(cwd, root))
-                    })
-                },
-            );
+            let include = scope_matcher.accepts(line_cwd.as_deref());
             if include {
                 retained.push(frame);
             } else {

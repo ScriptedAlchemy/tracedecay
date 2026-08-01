@@ -161,6 +161,16 @@ pub fn spawn_rust_diagnostics_prewarm(project_root: &Path) -> Result<()> {
         })
 }
 
+/// Which compiler levels become diagnostics. Every driver reports "error" and
+/// "warning"; advisory levels ("note", "help", "failure-note", pyright's
+/// "information") are dropped because they either double-count a diagnostic
+/// that already has its own entry or carry no actionable span.
+///
+/// One home for the policy so the drivers cannot drift apart on it.
+fn is_diagnostic_level(level: &str) -> bool {
+    matches!(level, "error" | "warning")
+}
+
 fn canonicalise_file(file_name: &str, project_root: &Path) -> String {
     let abs = if Path::new(file_name).is_absolute() {
         PathBuf::from(file_name)

@@ -2,10 +2,12 @@ use std::path::Path;
 
 use serde_json::Value as JsonValue;
 
-use crate::{
-    application::session::compatibility::projected_content_hash,
-    db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params},
-    sessions::{
+use tracedecay_runtime_core::db::engine::{
+    Executor, IntoParams, QueryExecutor, Rows, Value, params,
+};
+use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_sessions::{
+    runtime::{
         SessionMessageRecord,
         lcm::{
             LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
@@ -33,7 +35,7 @@ const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
 );
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -42,14 +44,14 @@ impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
 }
 
 impl Executor for RegisteredGlobalDbWriterConnection<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
         RegisteredGlobalDbWriterConnection::execute(self, sql, params).await
     }
 
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }
 }
@@ -387,7 +389,7 @@ impl RegisteredGlobalDb {
             return Err(LcmError::SummaryNodeNotFound);
         }
         draft.summary_text = summary_text.trim().to_string();
-        draft.summary_token_count = i64::from(crate::context::read_modes::estimate_tokens(
+        draft.summary_token_count = i64::from(crate::estimate_tokens(
             &draft.summary_text,
         ));
         metadata.insert(
@@ -408,7 +410,7 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let summary_hash = projected_content_hash(&draft.summary_text);
-        let mut successor_id = crate::sessions::lcm::dag::summary_node_id(
+        let mut successor_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -426,7 +428,7 @@ impl RegisteredGlobalDb {
         }
         let receipt = session_temporal_operations::publish_immutable_summary(
             &transaction,
-            crate::sessions::lcm::types::LcmImmutableSummaryPublication {
+            tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
                 summary_id: successor_id,
                 predecessor_summary_id: Some(node_id.to_string()),
                 draft,

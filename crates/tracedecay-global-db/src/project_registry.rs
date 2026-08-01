@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
-use crate::project_registry::{
-    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry,
-};
+use std::fmt::Write as _;
+
+use serde::{Deserialize, Serialize};
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
@@ -13,6 +13,153 @@ use super::{
     StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
     global_db_operation_message,
 };
+
+// ---------------------------------------------------------------------------
+// Registry reap contract
+// ---------------------------------------------------------------------------
+//
+// `plan_registry_reap` below is the only producer of these values, so the
+// contract lives beside its producer rather than in the composition root that
+// merely prints it. Moving it down is what keeps this crate from needing an
+// upward `crate::project_registry::…` edge; the root re-exports these names
+// through its `tracedecay_global_db::*` shim.
+
+/// Prefix marking a `project_aliases` row that keys a repository's git common
+/// directory rather than a checkout path.
+pub const GIT_COMMON_DIR_ALIAS_PREFIX: &str = "git-common-dir:";
+
+/// Which registry table a reap candidate belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReapEntryKind {
+    /// A `projects` row: the cross-project savings ledger, which despite the
+    /// table name is an accounting record and not a project registry.
+    SavingsLedgerPath,
+    /// A `project_aliases` row keyed by a filesystem path.
+    ProjectAlias,
+    /// A `code_projects` row: the V2 canonical identity authority.
+    CodeProject,
+}
+
+impl ReapEntryKind {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SavingsLedgerPath => "savings-ledger path",
+            Self::ProjectAlias => "project alias",
+            Self::CodeProject => "project authority",
+        }
+    }
+}
+
+/// One registry row whose referenced path is gone from disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryReapEntry {
+    pub kind: ReapEntryKind,
+    /// Primary key of the row: ledger path, alias key, or project id.
+    pub key: String,
+    /// The filesystem path that no longer exists.
+    pub missing_path: String,
+    pub project_id: Option<String>,
+}
+
+/// A dead-looking row that reaping deliberately leaves alone, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedRegistryEntry {
+    pub entry: RegistryReapEntry,
+    pub reason: String,
+}
+
+/// The outcome of classifying the registry: what may be removed and what is
+/// deliberately kept. Reaping only ever deletes rows; no store directory,
+/// database, or session artifact is touched by any part of this plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryReapPlan {
+    pub reapable: Vec<RegistryReapEntry>,
+    pub retained: Vec<RetainedRegistryEntry>,
+}
+
+impl RegistryReapPlan {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reapable.is_empty()
+    }
+
+    /// One line per row, for a dry-run report.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "{} reapable, {} retained\n",
+            self.reapable.len(),
+            self.retained.len()
+        );
+        for entry in &self.reapable {
+            let _ = writeln!(
+                out,
+                "  reap    {} {} (missing {})",
+                entry.kind.label(),
+                entry.key,
+                entry.missing_path
+            );
+        }
+        for retained in &self.retained {
+            let _ = writeln!(
+                out,
+                "  retain  {} {} — {}",
+                retained.entry.kind.label(),
+                retained.entry.key,
+                retained.reason
+            );
+        }
+        out
+    }
+}
+
+/// The path a `project_aliases` key refers to, or `None` when the key is not
+/// path-shaped (a `git-remote-name:` search alias, say) and therefore can
+/// never be judged dead by checking the filesystem.
+#[must_use]
+pub fn alias_key_path(alias: &str) -> Option<&Path> {
+    let candidate = alias
+        .strip_prefix(GIT_COMMON_DIR_ALIAS_PREFIX)
+        .unwrap_or(alias);
+    let path = Path::new(candidate);
+    path.is_absolute().then_some(path)
+}
+
+/// Whether `path` lives under the OS temporary directory.
+///
+/// Canonicalizes both sides where possible so a `/tmp` symlinked to
+/// `/private/tmp` (macOS) still matches.
+#[must_use]
+pub fn is_ephemeral_path(path: &Path) -> bool {
+    let temp_root = std::env::temp_dir();
+    let temp_root = temp_root.canonicalize().unwrap_or(temp_root);
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(&temp_root)
+}
+
+/// Registry admission policy for a project root, returning the refusal reason
+/// when the root must not become a durable project authority.
+///
+/// A checkout under the OS temporary directory is throwaway by construction —
+/// `mktemp -d` fixtures, extracted archives, scratch clones — yet registering
+/// one writes a `code_projects` row and a shard that outlive it by years.
+/// The comparison is against the *profile*, not absolute: a hermetic profile
+/// that itself lives under the temp directory is equally throwaway, so test
+/// fixtures and sandboxed runs keep working. Only a durable profile refuses an
+/// ephemeral root.
+#[must_use]
+pub fn ephemeral_root_rejection(project_root: &Path, profile_root: &Path) -> Option<String> {
+    (is_ephemeral_path(project_root) && !is_ephemeral_path(profile_root)).then(|| {
+        format!(
+            "project root '{}' is under the OS temporary directory and cannot be \
+             registered as a durable authority in profile '{}'",
+            project_root.display(),
+            profile_root.display()
+        )
+    })
+}
 
 pub(super) const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
 
@@ -43,7 +190,7 @@ impl LegacyPathAliasKind {
 }
 
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
-    crate::lifecycle_lease::canonical_or_original(project_path)
+    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(project_path)
 }
 
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {
@@ -77,7 +224,7 @@ pub(super) fn native_project_path_platform() -> &'static str {
 }
 
 pub(super) fn encode_native_project_path(path: &Path) -> Vec<u8> {
-    crate::os_str_bytes::native_os_str_bytes(path.as_os_str())
+    tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(path.as_os_str())
 }
 
 #[cfg(unix)]
@@ -176,7 +323,7 @@ fn native_project_path_alias_decode_error(error: String) -> String {
 
 pub(super) async fn migrate_project_rows_to_canonical_keys(
     conn: &impl Executor,
-) -> crate::db::engine::Result<()> {
+) -> tracedecay_runtime_core::db::engine::Result<()> {
     let mut rows = conn
         .query("SELECT path, tokens_saved FROM projects", ())
         .await?;
@@ -210,7 +357,7 @@ pub(super) async fn migrate_project_rows_to_canonical_keys(
 #[derive(Clone, Copy)]
 struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 
-struct ProjectRegistryReadSnapshot(crate::db::engine::ReadSnapshot);
+struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::engine::ReadSnapshot);
 
 struct ProjectRegistryWriteTransaction<'db>(RegisteredGlobalDbWriteTransaction<'db>);
 
@@ -218,7 +365,7 @@ impl<'db> ProjectRegistryDatabase<'db> {
     async fn read_snapshot(
         self,
         operation: &'static str,
-    ) -> crate::errors::Result<ProjectRegistryReadSnapshot> {
+    ) -> tracedecay_runtime_core::errors::Result<ProjectRegistryReadSnapshot> {
         self.0
             .read_snapshot()
             .await
@@ -229,7 +376,7 @@ impl<'db> ProjectRegistryDatabase<'db> {
     async fn begin_write_transaction(
         self,
         operation: &'static str,
-    ) -> crate::errors::Result<ProjectRegistryWriteTransaction<'db>> {
+    ) -> tracedecay_runtime_core::errors::Result<ProjectRegistryWriteTransaction<'db>> {
         self.0
             .begin_write_transaction()
             .await
@@ -239,7 +386,7 @@ impl<'db> ProjectRegistryDatabase<'db> {
 }
 
 impl QueryExecutor for ProjectRegistryReadSnapshot {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -248,7 +395,7 @@ impl QueryExecutor for ProjectRegistryReadSnapshot {
 }
 
 impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
+    async fn query<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<Rows>
     where
         P: IntoParams,
     {
@@ -257,27 +404,27 @@ impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
 }
 
 impl Executor for ProjectRegistryWriteTransaction<'_> {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
+    async fn execute<P>(&self, sql: &str, params: P) -> tracedecay_runtime_core::db::engine::Result<u64>
     where
         P: IntoParams,
     {
         Executor::execute(&self.0, sql, params).await
     }
 
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
+    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         Executor::execute_batch(&self.0, sql).await
     }
 }
 
 impl ProjectRegistryWriteTransaction<'_> {
-    async fn commit(self, operation: &'static str) -> crate::errors::Result<()> {
+    async fn commit(self, operation: &'static str) -> tracedecay_runtime_core::errors::Result<()> {
         self.0
             .commit()
             .await
             .map_err(|error| global_db_operation_error(operation, error))
     }
 
-    async fn rollback(self, operation: &'static str) -> crate::errors::Result<()> {
+    async fn rollback(self, operation: &'static str) -> tracedecay_runtime_core::errors::Result<()> {
         self.0
             .rollback()
             .await
@@ -288,14 +435,14 @@ impl ProjectRegistryWriteTransaction<'_> {
 pub(super) async fn list_registered_code_project_paths(
     db: &RegisteredGlobalDb,
     limit: usize,
-) -> crate::errors::Result<Vec<PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     list_code_project_paths_from(ProjectRegistryDatabase(db), limit).await
 }
 
 async fn list_code_project_paths_from(
     db: ProjectRegistryDatabase<'_>,
     limit: usize,
-) -> crate::errors::Result<Vec<PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     const OPERATION: &str = "list native code project paths";
 
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -307,7 +454,7 @@ async fn list_code_project_paths_from(
              FROM code_projects
              ORDER BY last_seen_at DESC, project_id
              LIMIT ?1",
-            crate::db::engine::params![limit],
+            tracedecay_runtime_core::db::engine::params![limit],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -432,14 +579,14 @@ async fn project_alias_is_current(
     project_id: &str,
     path: &Path,
     last_seen_at: i64,
-) -> crate::errors::Result<bool> {
+) -> tracedecay_runtime_core::errors::Result<bool> {
     const OPERATION: &str = "list native code project paths";
     let alias = project_path_alias_key(path);
     let mut rows = read
         .query(
             "SELECT 1 FROM project_aliases
              WHERE project_id = ?1 AND alias_path = ?2 AND last_seen_at = ?3",
-            crate::db::engine::params![project_id, alias, last_seen_at],
+            tracedecay_runtime_core::db::engine::params![project_id, alias, last_seen_at],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -468,13 +615,13 @@ async fn legacy_code_project_path(
     canonical_root: &str,
     display_root: &str,
     last_seen_at: i64,
-) -> crate::errors::Result<PathEvidenceVerdict> {
+) -> tracedecay_runtime_core::errors::Result<PathEvidenceVerdict> {
     const OPERATION: &str = "list native code project paths";
     let mut rows = read
         .query(
             "SELECT alias_path, last_seen_at FROM project_aliases
              WHERE project_id = ?1 ORDER BY alias_path",
-            crate::db::engine::params![project_id],
+            tracedecay_runtime_core::db::engine::params![project_id],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -531,7 +678,7 @@ async fn legacy_code_project_path(
              WHERE project_id = ?4 AND last_seen_at = ?3
                AND primary_root_platform IS NULL AND primary_root_bytes IS NULL
                AND primary_root_last_seen_at IS NULL",
-            crate::db::engine::params![
+            tracedecay_runtime_core::db::engine::params![
                 native_project_path_platform(),
                 encode_native_project_path(&path),
                 last_seen_at,
@@ -561,7 +708,7 @@ pub(super) async fn list_registered_lossless_paths(
     db: &RegisteredGlobalDb,
     sql: &str,
     operation: &'static str,
-) -> crate::errors::Result<Vec<PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     list_lossless_paths_from(ProjectRegistryDatabase(db), sql, operation).await
 }
 
@@ -569,7 +716,7 @@ async fn list_lossless_paths_from(
     db: ProjectRegistryDatabase<'_>,
     sql: &str,
     operation: &'static str,
-) -> crate::errors::Result<Vec<PathBuf>> {
+) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
     let read = db.read_snapshot(operation).await?;
     let mut rows = read
         .query(sql, ())
@@ -639,11 +786,11 @@ impl RegisteredGlobalDb {
                 || selector.contains('\\'))
     }
 
-    /// Applies [`crate::project_registry::ephemeral_root_rejection`] against
+    /// Applies [`self::ephemeral_root_rejection`] against
     /// the profile this database belongs to (`<profile>/global.db`).
     fn ephemeral_root_rejection(&self, project_root: &Path) -> Option<String> {
         let profile_root = self.db_path().parent()?;
-        crate::project_registry::ephemeral_root_rejection(project_root, profile_root)
+        self::ephemeral_root_rejection(project_root, profile_root)
     }
 
     pub async fn upsert_code_project(
@@ -662,7 +809,7 @@ impl RegisteredGlobalDb {
             eprintln!("warning: refusing to register a TraceDecay project — {reason}");
             return None;
         }
-        let now = crate::tracedecay::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
         let current_root_alias = project_path_alias_key(&canonical_project_root);
@@ -734,7 +881,7 @@ impl RegisteredGlobalDb {
         alias: &str,
         project_id: &str,
     ) -> Option<ProjectAliasRecord> {
-        let now = crate::tracedecay::current_timestamp();
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let transaction = self.begin_write_transaction().await.ok()?;
         transaction
             .execute(
@@ -791,7 +938,7 @@ impl RegisteredGlobalDb {
                     upsert.storage_mode.as_str(),
                     upsert.store_relpath.as_str(),
                     upsert.manifest_relpath.as_deref(),
-                    crate::tracedecay::current_timestamp(),
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
                     upsert.last_verified_at,
                     upsert.last_write_at
                 ],
@@ -976,7 +1123,7 @@ impl RegisteredGlobalDb {
         &self,
         query: &str,
         limit: usize,
-    ) -> crate::errors::Result<Vec<CodeProjectRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<CodeProjectRecord>> {
         const OPERATION: &str = "search registered code projects";
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut patterns = query
@@ -1059,12 +1206,12 @@ impl RegisteredGlobalDb {
     pub async fn try_resolve_project_store_record_by_alias(
         &self,
         alias_path: &Path,
-    ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<StoreInstanceRecord>> {
         async fn query(
             db: &RegisteredGlobalDb,
             alias: &str,
             canonical_root: Option<&str>,
-        ) -> crate::errors::Result<Option<StoreInstanceRecord>> {
+        ) -> tracedecay_runtime_core::errors::Result<Option<StoreInstanceRecord>> {
             const OPERATION: &str = "resolve project store by alias";
 
             let mut sql = String::from(
@@ -1168,7 +1315,7 @@ impl RegisteredGlobalDb {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> crate::errors::Result<Option<ProjectStoreResolution>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<ProjectStoreResolution>> {
         let Some(project_id) = self
             .project_id_by_identity(project_root, git_common_dir)
             .await?
@@ -1201,7 +1348,7 @@ impl RegisteredGlobalDb {
     pub async fn project_registry_context_by_alias(
         &self,
         alias_path: &Path,
-    ) -> crate::errors::Result<Option<ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<ProjectRegistryContext>> {
         let Some(project_id) = self
             .project_id_by_native_path_alias(alias_path, LegacyPathAliasKind::ProjectRoot)
             .await?
@@ -1215,7 +1362,7 @@ impl RegisteredGlobalDb {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> crate::errors::Result<Option<ProjectRegistryContext>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<ProjectRegistryContext>> {
         let Some(project_id) = self
             .project_id_by_identity(project_root, git_common_dir)
             .await?
@@ -1229,9 +1376,9 @@ impl RegisteredGlobalDb {
         &self,
         project_root: &Path,
         git_common_dir: Option<&Path>,
-    ) -> crate::errors::Result<Option<String>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
         Ok(
-            match crate::storage::read_repository_identity_marker(project_root)? {
+            match tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)? {
                 Some(marker) => Some(marker.project_id),
                 None => {
                     if let Some(project_id) = self
@@ -1260,13 +1407,13 @@ impl RegisteredGlobalDb {
         &self,
         path: &Path,
         kind: LegacyPathAliasKind,
-    ) -> crate::errors::Result<Option<String>> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
         const OPERATION: &str = "resolve project identity alias";
 
         async fn project_id_by_alias_key(
             db: &RegisteredGlobalDb,
             alias: &str,
-        ) -> crate::errors::Result<Option<String>> {
+        ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
             const OPERATION: &str = "resolve project identity alias";
             let snapshot = db
                 .read_snapshot()
@@ -1347,7 +1494,7 @@ impl RegisteredGlobalDb {
                 params![
                     native_alias.as_str(),
                     legacy_project_id.as_str(),
-                    crate::tracedecay::current_timestamp()
+                    tracedecay_runtime_core::tracedecay::current_timestamp()
                 ],
             )
             .await
@@ -1442,12 +1589,12 @@ impl RegisteredGlobalDb {
     pub async fn try_list_code_project_paths(
         &self,
         limit: usize,
-    ) -> crate::errors::Result<Vec<PathBuf>> {
+    ) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         list_registered_code_project_paths(self, limit).await
     }
 
     /// Returns legacy project paths with native path bytes preserved.
-    pub async fn try_list_project_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT path FROM projects ORDER BY path",
@@ -1457,7 +1604,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Returns modern registry aliases with native path bytes preserved.
-    pub async fn try_list_project_alias_paths(&self) -> crate::errors::Result<Vec<PathBuf>> {
+    pub async fn try_list_project_alias_paths(&self) -> tracedecay_runtime_core::errors::Result<Vec<PathBuf>> {
         list_registered_lossless_paths(
             self,
             "SELECT alias_path FROM project_aliases ORDER BY alias_path",
@@ -1485,7 +1632,7 @@ impl RegisteredGlobalDb {
     /// operation. Nothing in planning or applying a reap deletes a file.
     ///
     /// [`apply_registry_reap`]: Self::apply_registry_reap
-    pub async fn plan_registry_reap(&self) -> crate::errors::Result<RegistryReapPlan> {
+    pub async fn plan_registry_reap(&self) -> tracedecay_runtime_core::errors::Result<RegistryReapPlan> {
         const OPERATION: &str = "plan registry reap";
         let profile_root = self
             .db_path()
@@ -1544,7 +1691,7 @@ impl RegisteredGlobalDb {
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
             // A non-path alias (a remote-name search key) can never be judged
             // dead by consulting the filesystem, so it is never a candidate.
-            let missing_path = match crate::project_registry::alias_key_path(&alias) {
+            let missing_path = match self::alias_key_path(&alias) {
                 Some(path) if !path.exists() => path.to_string_lossy().into_owned(),
                 // Either a non-path alias, which the filesystem can never
                 // judge dead, or a path that is still there.
@@ -1596,7 +1743,7 @@ impl RegisteredGlobalDb {
                 missing_path: canonical_root,
                 project_id: Some(project_id.clone()),
             };
-            let store_root = crate::storage::profile_sharded_data_root(&profile_root, &project_id);
+            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(&profile_root, &project_id);
             if store_root.exists() {
                 plan.retained.push(RetainedRegistryEntry {
                     entry,
@@ -1623,7 +1770,7 @@ impl RegisteredGlobalDb {
     pub async fn apply_registry_reap(
         &self,
         plan: &RegistryReapPlan,
-    ) -> crate::errors::Result<usize> {
+    ) -> tracedecay_runtime_core::errors::Result<usize> {
         const OPERATION: &str = "apply registry reap";
         let transaction = self
             .begin_write_transaction()

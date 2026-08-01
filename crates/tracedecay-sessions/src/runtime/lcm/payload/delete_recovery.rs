@@ -111,7 +111,7 @@ pub fn reconcile_committed_payload_drain(
     }
 }
 
-pub async fn delete_external_payload_in_transaction(
+pub(super) async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,

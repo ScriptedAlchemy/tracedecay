@@ -11,11 +11,11 @@ use tracedecay_store::{
     WorkflowFactRecord, derive_canonical_projection, workflow_semantic_kind,
 };
 
-use crate::application::session::compatibility::{
+use tracedecay_sessions::compatibility::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
-use crate::db::engine::{Executor, QueryExecutor, params};
-use crate::sessions::claude::{
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_sessions::runtime::claude::{
     ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record,
 };
 
