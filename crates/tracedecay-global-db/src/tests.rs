@@ -849,16 +849,8 @@ async fn migrate_project_rows_to_canonical_keys_merges_drifted_collisions() {
     let db = &harness.registered;
     let root = harness.storage_root().join("canon-merge-project");
     std::fs::create_dir_all(root.join("sub")).unwrap();
-    let canonical = root
-        .canonicalize()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let drifted_via_parent = root
-        .join("sub")
-        .join("..")
-        .to_string_lossy()
-        .into_owned();
+    let canonical = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let drifted_via_parent = root.join("sub").join("..").to_string_lossy().into_owned();
     let drifted_via_dot = root.join(".").to_string_lossy().into_owned();
     assert_ne!(drifted_via_parent, canonical);
     assert_ne!(drifted_via_dot, canonical);
@@ -904,10 +896,7 @@ async fn migrate_project_rows_to_canonical_keys_merges_drifted_collisions() {
         .unwrap();
     let mut remaining = std::collections::BTreeMap::new();
     while let Some(row) = total_rows.next().await.unwrap() {
-        remaining.insert(
-            row.get::<String>(0).unwrap(),
-            row.get::<i64>(1).unwrap(),
-        );
+        remaining.insert(row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap());
     }
     drop(total_rows);
 

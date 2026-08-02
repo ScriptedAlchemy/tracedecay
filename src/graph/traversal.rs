@@ -127,8 +127,10 @@ impl<'a> GraphTraverser<'a> {
                 }
             }
             let neighbor_nodes = self.db.get_nodes_by_ids(&neighbor_ids).await?;
-            let neighbor_map: HashMap<String, Node> =
-                neighbor_nodes.into_iter().map(|n| (n.id.clone(), n)).collect();
+            let neighbor_map: HashMap<String, Node> = neighbor_nodes
+                .into_iter()
+                .map(|n| (n.id.clone(), n))
+                .collect();
 
             // For incoming traversals, prefetch children of every container
             // neighbor in one query so the `Contains` synthesis below is not a
@@ -771,7 +773,9 @@ impl<'a> GraphTraverser<'a> {
 
             let level_ids: Vec<String> = level.iter().map(|(id, _)| id.clone()).collect();
             let edges_by_source = Self::group_by(
-                self.db.get_outgoing_edges_bulk(&level_ids, edge_kinds).await?,
+                self.db
+                    .get_outgoing_edges_bulk(&level_ids, edge_kinds)
+                    .await?,
                 |e| e.source.clone(),
             );
 
@@ -1196,15 +1200,24 @@ mod batching_tests {
                 break;
             }
             let edges = match &opts.direction {
-                TraversalDirection::Outgoing => {
-                    db.get_outgoing_edges(&current_id, edge_filter).await.unwrap()
-                }
-                TraversalDirection::Incoming => {
-                    db.get_incoming_edges(&current_id, edge_filter).await.unwrap()
-                }
+                TraversalDirection::Outgoing => db
+                    .get_outgoing_edges(&current_id, edge_filter)
+                    .await
+                    .unwrap(),
+                TraversalDirection::Incoming => db
+                    .get_incoming_edges(&current_id, edge_filter)
+                    .await
+                    .unwrap(),
                 TraversalDirection::Both => {
-                    let mut e = db.get_outgoing_edges(&current_id, edge_filter).await.unwrap();
-                    e.extend(db.get_incoming_edges(&current_id, edge_filter).await.unwrap());
+                    let mut e = db
+                        .get_outgoing_edges(&current_id, edge_filter)
+                        .await
+                        .unwrap();
+                    e.extend(
+                        db.get_incoming_edges(&current_id, edge_filter)
+                            .await
+                            .unwrap(),
+                    );
                     e
                 }
             };
@@ -1293,7 +1306,10 @@ mod batching_tests {
             if depth >= max_depth {
                 continue;
             }
-            let outgoing = db.get_outgoing_edges(&current_id, edge_kinds).await.unwrap();
+            let outgoing = db
+                .get_outgoing_edges(&current_id, edge_kinds)
+                .await
+                .unwrap();
             for edge in outgoing {
                 let neighbor = edge.target.clone();
                 if visited.contains(&neighbor) {
@@ -1354,7 +1370,10 @@ mod batching_tests {
             }
         }
         // Sanity: hub really is a wide fan-in.
-        assert_eq!(ids(&traverser.get_callers("hub", 1).await.unwrap()).len(), 5);
+        assert_eq!(
+            ids(&traverser.get_callers("hub", 1).await.unwrap()).len(),
+            5
+        );
     }
 
     #[tokio::test]
@@ -1410,17 +1429,29 @@ mod batching_tests {
                 include_start: true,
             };
             let expected = ref_traverse_bfs(&db, "endpoint", &opts).await;
-            let actual = traverser.get_impact_radius("endpoint", depth).await.unwrap();
-            assert_eq!(actual.nodes, expected.nodes, "impact nodes diverged @depth {depth}");
-            assert_eq!(actual.edges, expected.edges, "impact edges diverged @depth {depth}");
-            assert_eq!(actual.roots, expected.roots, "impact roots diverged @depth {depth}");
+            let actual = traverser
+                .get_impact_radius("endpoint", depth)
+                .await
+                .unwrap();
+            assert_eq!(
+                actual.nodes, expected.nodes,
+                "impact nodes diverged @depth {depth}"
+            );
+            assert_eq!(
+                actual.edges, expected.edges,
+                "impact edges diverged @depth {depth}"
+            );
+            assert_eq!(
+                actual.roots, expected.roots,
+                "impact roots diverged @depth {depth}"
+            );
         }
         // The Contains synthesis actually fired.
         let sub = traverser.get_impact_radius("endpoint", 4).await.unwrap();
         assert!(
-            sub.edges.iter().any(|e| e.kind == EdgeKind::Contains
-                && e.source == "S"
-                && e.target == "m1"),
+            sub.edges
+                .iter()
+                .any(|e| e.kind == EdgeKind::Contains && e.source == "S" && e.target == "m1"),
             "expected synthesized Contains S->m1"
         );
     }
@@ -1443,8 +1474,14 @@ mod batching_tests {
             };
             let expected = ref_traverse_bfs(&db, "hub", &opts).await;
             let actual = traverser.traverse_bfs("hub", &opts).await.unwrap();
-            assert_eq!(actual.nodes, expected.nodes, "limited nodes diverged @limit {limit}");
-            assert_eq!(actual.edges, expected.edges, "limited edges diverged @limit {limit}");
+            assert_eq!(
+                actual.nodes, expected.nodes,
+                "limited nodes diverged @limit {limit}"
+            );
+            assert_eq!(
+                actual.edges, expected.edges,
+                "limited edges diverged @limit {limit}"
+            );
         }
     }
 
@@ -1502,7 +1539,10 @@ mod batching_tests {
         let actual = traverser.get_callers("hub", 3).await.unwrap();
         let new_ms = t1.elapsed().as_secs_f64() * 1e3;
 
-        assert_eq!(actual, expected, "wide-frontier callers diverged from reference");
+        assert_eq!(
+            actual, expected,
+            "wide-frontier callers diverged from reference"
+        );
         assert_eq!(actual.len(), FANIN);
 
         // Round-trips over the two BFS levels that do work (depth 0 expands the

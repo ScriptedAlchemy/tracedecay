@@ -368,7 +368,10 @@ where
             if cap == 0 {
                 return Ok(());
             }
-            let entry = SemanticRankedEntryV1 { candidate, evidence };
+            let entry = SemanticRankedEntryV1 {
+                candidate,
+                evidence,
+            };
             if ranked.len() < cap {
                 ranked.push(entry);
             } else if ranked

@@ -92,8 +92,7 @@ const PROJECT_OPEN_CAPACITY_ERROR_KINDS: [&str; 2] = [
     "project_server_capacity_reached",
 ];
 /// Message fragments emitted when a daemon request misses its read deadline.
-const DAEMON_READ_DEADLINE_MESSAGES: [&str; 2] =
-    ["before deadline", "deadline already elapsed"];
+const DAEMON_READ_DEADLINE_MESSAGES: [&str; 2] = ["before deadline", "deadline already elapsed"];
 
 /// True when a daemon error message carries the project warming hint.
 pub(crate) fn error_message_is_project_warming(message: &str) -> bool {

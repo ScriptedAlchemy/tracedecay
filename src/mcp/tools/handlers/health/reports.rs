@@ -73,9 +73,7 @@ pub(crate) async fn handle_gini(
                 .symbol_complexity()
                 .await?
                 .into_iter()
-                .filter(|(file, _, _)| {
-                    crate::path_scope::path_matches_scope(file, path_prefix)
-                })
+                .filter(|(file, _, _)| crate::path_scope::path_matches_scope(file, path_prefix))
                 .map(|(file, name, value)| (format!("{file}:{name}"), value))
                 .collect()
         }
@@ -134,10 +132,7 @@ pub(crate) async fn handle_gini(
 /// nodes before the per-file fold: every node in a file shares that file's
 /// path, so a scope predicate keyed on `file_path` partitions whole groups and
 /// never splits a per-file sum.
-fn scope_filter_pairs(
-    pairs: Vec<(String, f64)>,
-    path_prefix: Option<&str>,
-) -> Vec<(String, f64)> {
+fn scope_filter_pairs(pairs: Vec<(String, f64)>, path_prefix: Option<&str>) -> Vec<(String, f64)> {
     pairs
         .into_iter()
         .filter(|(file, _)| crate::path_scope::path_matches_scope(file, path_prefix))

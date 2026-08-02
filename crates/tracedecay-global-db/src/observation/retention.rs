@@ -643,7 +643,11 @@ async fn run_anchor_pass(
         );
         let mut values = Vec::with_capacity(chunk.len() + 1);
         values.push(Value::Text(ANCHOR_RELEASED_MARKER.to_string()));
-        values.extend(chunk.iter().map(|target| Value::Text(target.anchor_id.clone())));
+        values.extend(
+            chunk
+                .iter()
+                .map(|target| Value::Text(target.anchor_id.clone())),
+        );
         match txn.execute(&sql, values).await {
             Ok(count) => {
                 report.acted = report.acted.saturating_add(count);
@@ -815,9 +819,7 @@ async fn run_observation_pass(
                 report.acted = report.acted.saturating_add(count);
                 let reclaimed: u64 = chunk
                     .iter()
-                    .map(|target| {
-                        reclaimed_bytes(target.original_len, OBSERVATION_RELEASED_MARKER)
-                    })
+                    .map(|target| reclaimed_bytes(target.original_len, OBSERVATION_RELEASED_MARKER))
                     .sum();
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
             }
@@ -961,9 +963,7 @@ async fn run_provenance_pass(
                 report.acted = report.acted.saturating_add(count);
                 let reclaimed: u64 = chunk
                     .iter()
-                    .map(|target| {
-                        reclaimed_bytes(target.original_len, PROVENANCE_RELEASED_MARKER)
-                    })
+                    .map(|target| reclaimed_bytes(target.original_len, PROVENANCE_RELEASED_MARKER))
                     .sum();
                 report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(reclaimed);
             }
