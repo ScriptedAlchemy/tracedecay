@@ -463,6 +463,22 @@ async fn test_tools_call_timings_enabled_by_default() {
         dur < 5_000_000,
         "duration_us should be well under 5 s, got {dur}"
     );
+    let receipt = &resp["result"]["_meta"]["tracedecay/execution_receipt"];
+    let queue_us = receipt["queue_us"].as_u64().expect("queue timing");
+    let route_admission_us = receipt["route_admission_us"]
+        .as_u64()
+        .expect("route admission timing");
+    let handler_us = receipt["handler_us"].as_u64().expect("handler timing");
+    let materialization_us = receipt["result_materialization_us"]
+        .as_u64()
+        .expect("result materialization timing");
+    let total_us = receipt["total_us"].as_u64().expect("total timing");
+    assert!(
+        total_us >= queue_us + route_admission_us + handler_us + materialization_us,
+        "execution receipt must account for every measured stage: {receipt}"
+    );
+    assert_eq!(receipt["terminal"], "completed");
+    assert_eq!(receipt["worker_settlement"], "joined");
 }
 
 #[tokio::test]

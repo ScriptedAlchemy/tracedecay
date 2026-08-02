@@ -2032,6 +2032,10 @@ impl McpServer {
 
 #[cfg(test)]
 mod execution_control_tests {
+    use std::time::{Duration, Instant};
+
+    use serde_json::json;
+
     use super::*;
     use crate::mcp::tools::get_tool_definitions;
 
@@ -2081,5 +2085,58 @@ mod execution_control_tests {
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }
         assert!(!registry.lock().expect("registry").contains_key(&request_id));
+    }
+
+    #[test]
+    fn deadline_error_receipt_preserves_the_typed_problem_and_timing_contract() {
+        let control = McpToolDispatchControl::new(
+            "tracedecay_deadline_fixture",
+            crate::mcp::tools::McpToolExecutionPolicyV1::interactive_read(1_000),
+            tracedecay_application::CancellationSignal::active("cancel.receipt.deadline")
+                .expect("cancellation"),
+        )
+        .expect("dispatch control");
+        let timing = McpToolCallTiming {
+            queue_us: 11,
+            entered_at: Instant::now() - Duration::from_micros(100),
+            route_admission_us: 17,
+            handler_us: 19,
+            result_materialization_us: 23,
+        };
+        let error = TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_deadline_exceeded",
+            "handler",
+            true,
+            "fixture deadline",
+        );
+        let response = finish_tool_call_response(
+            tool_error_response(json!(7), "tracedecay_deadline_fixture", &error),
+            &timing,
+            Some(&control),
+            None,
+        );
+        let data = response
+            .error
+            .as_ref()
+            .and_then(|error| error.data.as_ref())
+            .expect("error data");
+        assert_eq!(data["reason_code"], "tool_dispatch_deadline_exceeded");
+        assert_eq!(data["stage"], "handler");
+        let receipt = &data[EXECUTION_RECEIPT_KEY];
+        assert_eq!(receipt["terminal"], "deadline_exceeded");
+        assert_eq!(receipt["worker_settlement"], "joined");
+        let total = receipt["total_us"].as_u64().expect("total timing");
+        assert!(
+            total
+                >= receipt["queue_us"].as_u64().expect("queue")
+                    + receipt["route_admission_us"]
+                        .as_u64()
+                        .expect("route admission")
+                    + receipt["handler_us"].as_u64().expect("handler")
+                    + receipt["result_materialization_us"]
+                        .as_u64()
+                        .expect("materialization"),
+            "total must cover all measured receipt stages: {receipt}"
+        );
     }
 }

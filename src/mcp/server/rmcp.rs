@@ -380,6 +380,73 @@ mod tests {
     }
 
     #[test]
+    fn response_conversion_preserves_execution_receipts_for_tools_and_errors() {
+        let receipt = json!({
+            "queue_us": 1,
+            "route_admission_us": 2,
+            "handler_us": 3,
+            "result_materialization_us": 4,
+            "total_us": 10,
+            "terminal": "completed",
+            "worker_settlement": "joined",
+        });
+        let complete: CallToolResponse =
+            RmcpConnectionAdapter::response_result::<CallToolResult>(JsonRpcResponse::success(
+                json!(7),
+                json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "_meta": {"tracedecay/execution_receipt": receipt.clone()},
+                }),
+            ))
+            .map(Into::into)
+            .expect("tool response");
+        let CallToolResponse::Complete(result) = complete else {
+            panic!("ordinary TraceDecay tool responses must stay complete");
+        };
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("tracedecay/execution_receipt")),
+            Some(&receipt)
+        );
+
+        let error = RmcpConnectionAdapter::response_result::<CallToolResult>(
+            JsonRpcResponse::error_with_data(
+                json!(8),
+                crate::mcp::transport::ErrorCode::InternalError,
+                "deadline".to_owned(),
+                Some(json!({
+                    "reason_code": "tool_dispatch_deadline_exceeded",
+                    "stage": "handler",
+                    "tracedecay/execution_receipt": {
+                        "queue_us": 1,
+                        "route_admission_us": 2,
+                        "handler_us": 3,
+                        "result_materialization_us": 4,
+                        "total_us": 10,
+                        "terminal": "deadline_exceeded",
+                        "worker_settlement": "indeterminate",
+                    },
+                })),
+            ),
+        )
+        .expect_err("typed deadline response must remain an RMCP error");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("reason_code")),
+            Some(&json!("tool_dispatch_deadline_exceeded"))
+        );
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("tracedecay/execution_receipt"))
+                .and_then(|receipt| receipt.get("terminal")),
+            Some(&json!("deadline_exceeded"))
+        );
+    }
+
+    #[test]
     fn adapter_accepts_the_legacy_initialize_response_shape() {
         let initialized: InitializeResult =
             RmcpConnectionAdapter::response_result(JsonRpcResponse::success(

@@ -771,6 +771,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
                 || message.contains(RUNTIME_TELEMETRY_PENDING)
         }
         crate::errors::TraceDecayError::ProjectRoute { retryable, .. } => *retryable,
+        crate::errors::TraceDecayError::McpToolDispatch { retryable, .. } => *retryable,
         crate::errors::TraceDecayError::Automation(error) => {
             tracedecay_automation::backend::classify_agent_task_error_message(&error.to_string())
                 .is_retryable()
