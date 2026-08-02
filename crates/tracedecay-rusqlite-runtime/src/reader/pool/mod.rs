@@ -34,6 +34,14 @@ use outcome::{interruption, validate_probe};
 pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
 
+/// How long a worker that outran [`SNAPSHOT_END_GRACE`] has to confirm its
+/// rollback before the pool writes it off and replaces it.
+///
+/// This must stay comfortably below the attachment drain timeout (5s): a
+/// shutdown that starts while a worker is in limbo has to be able to wait the
+/// limbo out and still converge.
+pub(super) const DEFERRED_SNAPSHOT_END_LIMIT: Duration = Duration::from_secs(2);
+
 /// General-lane workers reachable only by interactive acquisitions.
 ///
 /// Foreground and background reads share one lane of workers, so without a
@@ -107,6 +115,14 @@ pub(super) struct PoolState {
     health: VecDeque<AvailableWorker>,
     pub(super) leased_general: u16,
     pub(super) leased_health: u16,
+    /// Workers whose snapshot end outran [`SNAPSHOT_END_GRACE`].
+    ///
+    /// Their lease has ended but the worker has not confirmed its rollback, so
+    /// it is neither available nor leased. It is still counted here — a limbo
+    /// worker that vanished from the accounting would silently shrink the lane
+    /// and let a shutdown declare quiescence with work still in flight.
+    pub(super) limbo_general: u16,
+    pub(super) limbo_health: u16,
 }
 
 impl PoolState {
@@ -115,6 +131,27 @@ impl PoolState {
             .values()
             .filter(|record| record.lane == lane)
             .count() as u16
+    }
+
+    /// Workers this lane can actually hand out: its records minus the ones
+    /// stuck finishing a snapshot. Excluding limbo lets the lane spawn a
+    /// replacement instead of running degraded until the straggler resolves.
+    fn serviceable_workers(&self, lane: ReaderLane) -> u16 {
+        self.workers(lane).saturating_sub(self.limbo(lane))
+    }
+
+    pub(super) const fn limbo(&self, lane: ReaderLane) -> u16 {
+        match lane {
+            ReaderLane::General => self.limbo_general,
+            ReaderLane::ReservedHealth => self.limbo_health,
+        }
+    }
+
+    pub(super) const fn limbo_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.limbo_general,
+            ReaderLane::ReservedHealth => &mut self.limbo_health,
+        }
     }
 
     pub(super) fn available(&mut self, lane: ReaderLane) -> &mut VecDeque<AvailableWorker> {
@@ -246,6 +283,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 health: VecDeque::new(),
                 leased_general: 0,
                 leased_health: 0,
+                limbo_general: 0,
+                limbo_health: 0,
             }),
             capacity_changed: Condvar::new(),
         });
@@ -374,6 +413,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             available_health: state.health.len() as u16,
             leased_general: state.leased_general,
             leased_health: state.leased_health,
+            limbo_general: state.limbo_general,
+            limbo_health: state.limbo_health,
         }
     }
 
@@ -421,6 +462,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             && state.opening_health == 0
             && state.leased_general == 0
             && state.leased_health == 0
+            // A worker still finishing a deferred snapshot end is in flight
+            // even though nothing holds its lease. Dropping the pool now would
+            // join a worker mid-rollback with no bound.
+            && state.limbo_general == 0
+            && state.limbo_health == 0
             && Arc::strong_count(&self.inner) == 1
     }
 
@@ -563,7 +609,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     ReaderLane::General => self.inner.budget.max_per_hot_shard,
                     ReaderLane::ReservedHealth => 1,
                 };
-                if state.workers(lane).saturating_add(state.opening(lane)) < lane_capacity {
+                if state
+                    .serviceable_workers(lane)
+                    .saturating_add(state.opening(lane))
+                    < lane_capacity
+                {
                     *state.opening_mut(lane) += 1;
                     drop(state);
                     let spawned =
