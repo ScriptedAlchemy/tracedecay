@@ -900,6 +900,11 @@ impl CodeIndexPublishedGenerationV1 {
     /// Restore a complete sealed generation and repeat every canonical
     /// generation, chunk, graph, capability, and projection receipt check.
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
+        if !Self::sealed_format_is_compatible(bytes)? {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            ));
+        }
         Self::decode_sealed_reader(Cursor::new(bytes))
     }
 

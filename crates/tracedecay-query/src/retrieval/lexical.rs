@@ -27,6 +27,7 @@ mod projection;
 
 pub use self::projection::{
     CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1,
+    code_lexical_ngram_resident_upper_bound_v1,
 };
 
 /// Wording the lexical lane uses when a port-emitted batch fails the shared

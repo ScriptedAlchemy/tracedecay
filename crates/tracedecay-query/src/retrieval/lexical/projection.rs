@@ -37,6 +37,15 @@ const PHRASE_SCORE_MILLIS: u64 = 2_000;
 const ECHO_SCORE_MILLIS: u64 = 750;
 const BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1: usize = 512 * 1024 * 1024;
 
+/// Conservative retained-byte ceiling for the raw and normalized n-gram
+/// postings produced from a bounded source payload.
+pub fn code_lexical_ngram_resident_upper_bound_v1(source_bytes: u64) -> u64 {
+    postings::resident_upper_bound(
+        source_bytes,
+        BYTE_NGRAM_POSTINGS_MEMORY_BUDGET_BYTES_V1 as u64,
+    )
+}
+
 /// Generation and source metadata bound to one immutable lexical projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeLexicalProjectionMetadataV1 {

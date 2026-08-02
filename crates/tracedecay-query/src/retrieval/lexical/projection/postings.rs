@@ -7,6 +7,19 @@ use roaring::RoaringBitmap;
 const NGRAM_KEY_ESTIMATED_BYTES: usize = 64;
 const NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES: usize = 8;
 
+pub(super) fn resident_upper_bound(source_bytes: u64, maximum_bytes: u64) -> u64 {
+    source_bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_mul(3))
+        .and_then(|occurrences| {
+            occurrences.checked_mul(
+                (NGRAM_KEY_ESTIMATED_BYTES + NGRAM_DOCUMENT_POSTING_ESTIMATED_BYTES) as u64,
+            )
+        })
+        .unwrap_or(maximum_bytes)
+        .min(maximum_bytes)
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct ByteNgramPostings {
     postings: BTreeMap<u32, RoaringBitmap>,
@@ -225,6 +238,12 @@ mod tests {
         let error = ByteNgramPostings::from_documents([b"abcdef".as_slice()], &mut budget)
             .expect_err("posting memory must be bounded");
         assert!(error.contains("n-gram posting memory budget"));
+    }
+
+    #[test]
+    fn resident_upper_bound_scales_then_caps_at_the_runtime_budget() {
+        assert_eq!(resident_upper_bound(1, 1_000), 432);
+        assert_eq!(resident_upper_bound(u64::MAX, 1_000), 1_000);
     }
 
     #[test]

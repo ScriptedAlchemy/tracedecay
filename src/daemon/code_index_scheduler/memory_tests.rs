@@ -47,6 +47,35 @@ fn fixture() -> TempDir {
     root
 }
 
+fn realistic_corpus_fixture() -> TempDir {
+    let root = TempDir::new().expect("fixture root");
+    git(root.path(), &["init", "-q"]);
+    git(
+        root.path(),
+        &["config", "user.email", "memory@test.invalid"],
+    );
+    git(root.path(), &["config", "user.name", "Memory Test"]);
+    fs::create_dir_all(root.path().join("src/modules")).expect("create corpus directory");
+    for module in 0..64 {
+        let mut source = String::with_capacity(16 * 1024);
+        for function in 0..64 {
+            source.push_str(&format!(
+                "pub fn module_{module}_function_{function}(value: u64) -> u64 {{ value.wrapping_mul({}).wrapping_add({}) }}\n",
+                function + 1,
+                module + 1,
+            ));
+        }
+        fs::write(
+            root.path().join(format!("src/modules/module_{module}.rs")),
+            source,
+        )
+        .expect("write corpus module");
+    }
+    git(root.path(), &["add", "src/modules"]);
+    git(root.path(), &["commit", "-q", "-m", "realistic corpus"]);
+    root
+}
+
 #[test]
 fn latest_complete_reuses_the_immutable_generation_allocation() {
     let project = fixture();
@@ -285,7 +314,7 @@ fn lane_admission_denies_before_publishing_any_derived_owner() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(256 * 1024 * 1024).expect("resident limit"),
+        NonZeroU64::new(32 * 1024 * 1024).expect("resident limit"),
     ));
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
         ProjectId::new("project.code-index-lane-denial").expect("project id"),
@@ -343,6 +372,50 @@ fn in_flight_lane_arc_retains_charge_until_its_final_reader_drops() {
         "in-flight lane owner must retain its reservation"
     );
     drop(owners);
+    assert_eq!(resident_memory.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn realistic_corpus_retains_every_serving_component_within_authority() {
+    let project = realistic_corpus_fixture();
+    let store = TempDir::new().expect("store root");
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(2 * 1024 * 1024 * 1024).expect("resident limit"),
+    ));
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+        ProjectId::new("project.code-index-realistic-corpus").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        Arc::clone(&resident_memory),
+    )
+    .expect("scheduler");
+    scheduler.reconcile_now().expect("generation");
+    let latest = scheduler.latest_complete().expect("latest");
+    latest
+        .warm_serving_caches()
+        .expect("warm serving components");
+
+    let snapshot = resident_memory.snapshot();
+    assert!(snapshot.used_bytes <= snapshot.limit_bytes);
+    for component in [
+        "code_index.capture_working_set.v1",
+        "code_index.canonical_generation.v1",
+        "code_index.record_index.v1",
+        "code_index.exact_lexical.v1",
+        "code_index.graph.v1",
+    ] {
+        assert!(
+            snapshot
+                .charges
+                .iter()
+                .any(|charge| charge.key.component.as_str() == component),
+            "missing resident charge for {component}"
+        );
+    }
+
+    drop(latest);
+    drop(scheduler);
     assert_eq!(resident_memory.snapshot().used_bytes, 0);
 }
 

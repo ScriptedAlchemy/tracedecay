@@ -10,7 +10,7 @@ use tracedecay_query::retrieval::exact::{CentralExactAdmissionAuthorityV1, Exact
 use tracedecay_query::retrieval::graph::{CodeGraphEvidenceAdapterV1, GraphLane};
 use tracedecay_query::retrieval::lexical::{
     CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1,
-    LexicalLane,
+    LexicalLane, code_lexical_ngram_resident_upper_bound_v1,
 };
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 use tracedecay_runtime_core::resident_memory::{
@@ -130,6 +130,22 @@ pub(super) fn conservative_lane_reservation(
         })
 }
 
+fn conservative_exact_lexical_reservation(
+    sealed_bytes: u64,
+    chunks: usize,
+) -> Result<u64, RetrievalPortError> {
+    let ngram_bytes = code_lexical_ngram_resident_upper_bound_v1(sealed_bytes);
+    let retained_payload = sealed_bytes
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(ngram_bytes))
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "exact/lexical resident reservation exceeds u64".to_owned(),
+            )
+        })?;
+    conservative_lane_reservation(retained_payload, chunks, 4_096, 8 * 1024 * 1024)
+}
+
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn record_index(
         &self,
@@ -209,11 +225,9 @@ impl LatestCompleteCodeIndexV1 {
 
         let exact_lexical_reservation = self.reserve_serving_component(
             "code_index.exact_lexical.v1",
-            conservative_lane_reservation(
-                self.generation.sealed_bytes.saturating_mul(2),
+            conservative_exact_lexical_reservation(
+                self.generation.sealed_bytes,
                 self.generation.chunks().chunks().len(),
-                1_024,
-                512 * 1024 * 1024,
             )?,
         )?;
         let exact_lexical_value = self.build_exact_lexical_owners()?;

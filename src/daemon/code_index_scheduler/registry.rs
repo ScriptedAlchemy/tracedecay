@@ -133,8 +133,6 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     reconcile_in_progress: Arc<AtomicBool>,
     active_generation_encoded_bytes: Arc<AtomicU64>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
-    mount_warm_control: Option<Arc<super::ServingWarmControlV1>>,
-    pub(super) warm_task: Option<tokio::task::JoinHandle<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 
@@ -737,6 +735,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 opened.replace_semantic_schedule_hook(Some(hook));
             }
             let restored = opened.try_latest_complete()?;
+            if let Some(latest) = restored.as_ref() {
+                latest
+                    .warm_serving_caches()
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Serving(error.to_string()))?;
+            }
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
         })
         .await
@@ -754,9 +757,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        // Serve any retained complete generation immediately so admission stays
-        // non-blocking, but never treat restore as a verified freshness claim.
-        let serving_generation = Arc::new(RwLock::new(None));
+        // Mount is atomic: a retained generation becomes visible only after all
+        // serving lanes are resident-ready.
+        let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
@@ -940,24 +943,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is exhausted".to_owned(),
             ));
         }
-        let warm_serving_generation = Arc::clone(&serving_generation);
-        let mount_warm_control = restored_generation
-            .as_ref()
-            .map(|latest| Arc::clone(&latest.warm_control));
-        let warm_task = restored_generation.clone().map(|latest| {
-            tokio::spawn(async move {
-                let warmed = tokio::task::spawn_blocking({
-                    let latest = latest.clone();
-                    move || latest.warm_serving_caches()
-                })
-                .await;
-                if matches!(warmed, Ok(Ok(()))) {
-                    *warm_serving_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest);
-                }
-            })
-        });
         mounted.insert(
             project_root,
             MountedCodeIndexWorktreeV1 {
@@ -976,8 +961,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 reconcile_in_progress,
                 active_generation_encoded_bytes,
                 semantic_evaluation_publication_gate,
-                mount_warm_control,
-                warm_task,
                 task,
             },
         );
@@ -2023,19 +2006,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .clear();
         for worktree in mounted.values() {
             worktree.shutting_down.store(true, Ordering::Release);
-            if let Some(control) = &worktree.mount_warm_control {
-                control.cancel();
-            }
             *worktree
                 .serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             worktree.wake.notify_one();
         }
-        for (_, mut worktree) in mounted {
-            if let Some(task) = worktree.warm_task.take() {
-                let _ = task.await;
-            }
+        for (_, worktree) in mounted {
             let _ = worktree.task.await;
         }
     }
@@ -2045,21 +2022,15 @@ impl CodeIndexSchedulerRegistryV1 {
             Ok(root) => root,
             Err(_) => project_root.to_path_buf(),
         };
-        let Some(mut worktree) = self.mounted.lock().await.remove(&project_root) else {
+        let Some(worktree) = self.mounted.lock().await.remove(&project_root) else {
             return false;
         };
         worktree.shutting_down.store(true, Ordering::Release);
-        if let Some(control) = &worktree.mount_warm_control {
-            control.cancel();
-        }
         *worktree
             .serving_generation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         worktree.wake.notify_one();
-        if let Some(task) = worktree.warm_task.take() {
-            let _ = task.await;
-        }
         let _ = worktree.task.await;
         self.test_attribution_authorities
             .write()
