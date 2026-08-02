@@ -38,9 +38,7 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 /// worktrees (which write to path-scoped stores) reconcile in parallel; it can
 /// never overlap two reconciles for the same worktree/store.
 fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism()
-        .map(|cores| (cores.get() / 2).clamp(1, 4))
-        .unwrap_or(1)
+    std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).clamp(1, 4))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

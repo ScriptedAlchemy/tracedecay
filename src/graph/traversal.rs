@@ -842,14 +842,8 @@ impl<'a> GraphTraverser<'a> {
             Some(&(_, d)) => d,
             None => return Vec::new(),
         };
-        let mut level = Vec::new();
-        while let Some(&(_, d)) = queue.front() {
-            if d != depth {
-                break;
-            }
-            level.push(queue.pop_front().expect("front peeked above"));
-        }
-        level
+        let level_len = queue.iter().take_while(|&&(_, d)| d == depth).count();
+        queue.drain(..level_len).collect()
     }
 
     /// Fetches every edge touching the whole frontier in one bulk query per
