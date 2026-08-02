@@ -293,6 +293,40 @@ fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
     assert!(pool.opened_file_identity().is_some());
 }
 
+#[cfg(unix)]
+#[test]
+fn pinned_reader_quarantines_after_an_observed_wal_is_unlinked() {
+    let store = TestStore::new();
+    let opened = OpenedDatabaseFile::pin(&store.path).unwrap();
+    let locator = store.locator().with_opened_database(opened);
+    let pool = ReaderPool::start(locator, two_reader_budget(), CountExecutor).unwrap();
+    let writer = Connection::open(&store.path).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    {
+        let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        snapshot.execute(read.clone(), &probe).unwrap();
+    }
+    std::fs::remove_file(format!("{}-wal", store.path.display())).unwrap();
+
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    assert!(matches!(
+        lease.begin_snapshot(),
+        Err(ReaderWorkerError::SqliteFamily(
+            crate::SqliteFamilyIntegrityError::Quarantined {
+                component: crate::SqliteFamilyComponent::Wal,
+                ..
+            }
+        ))
+    ));
+    drop(writer);
+}
+
 #[test]
 fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
     let store = TestStore::new();

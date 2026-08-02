@@ -15,7 +15,12 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
-use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
+use crate::{
+    SqliteFamilyIntegrityError,
+    connection::{
+        self, ConnectionMode, OpenedDatabaseFile, file_family::SqliteFamilyGuard,
+    },
+};
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
 };
@@ -54,6 +59,7 @@ pub enum ReaderWorkerError {
     SnapshotAlreadyActive,
     SnapshotNotActive,
     Interrupted { reason: UnavailableReasonV1 },
+    SqliteFamily(SqliteFamilyIntegrityError),
     Storage(StorageRuntimeErrorV1),
 }
 
@@ -66,6 +72,7 @@ impl fmt::Display for ReaderWorkerError {
             Self::Interrupted { reason } => {
                 write!(f, "SQLite reader query interrupted: {reason:?}")
             }
+            Self::SqliteFamily(error) => write!(f, "SQLite reader quarantined: {error}"),
             Self::Storage(error) => write!(f, "SQLite reader failed: {error}"),
         }
     }
@@ -74,6 +81,7 @@ impl fmt::Display for ReaderWorkerError {
 impl Error for ReaderWorkerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::SqliteFamily(error) => Some(error),
             Self::Storage(error) => Some(error),
             _ => None,
         }
@@ -281,6 +289,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     mut executor: E,
 ) -> Result<SpawnedWorker, ReaderStartError> {
     let worker_open_path = locator.worker_open_path()?;
+    let family_guard = locator.family_guard();
     let (sender, receiver) = mpsc::channel();
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
@@ -303,6 +312,12 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 let _ = started.send(Err(error));
                 return;
             }
+            if let Some(guard) = family_guard.as_deref()
+                && let Err(error) = guard.observe_visible_sidecars().and_then(|()| guard.probe())
+            {
+                let _ = started.send(Err(ReaderStartError::SqliteFamily(error)));
+                return;
+            }
             let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
                 Ok(opened) => opened.identity(),
                 Err(error) => {
@@ -318,7 +333,13 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             {
                 return;
             }
-            run(connection, receiver, worker_snapshot_sender, &mut executor);
+            run(
+                connection,
+                receiver,
+                worker_snapshot_sender,
+                &mut executor,
+                family_guard.as_deref(),
+            );
         })
         .map_err(ReaderStartError::ThreadSpawn)?;
     let (interrupt, opened_file_identity) = startup
@@ -340,11 +361,16 @@ fn run<E: ReaderQueryExecutor>(
     receiver: Receiver<WorkerCommand>,
     published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
     executor: &mut E,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::Begin { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(|error| {
@@ -361,7 +387,7 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor) {
+                        if run_snapshot(transaction, commands, executor, family_guard) {
                             return;
                         }
                     }
@@ -381,10 +407,15 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: Transaction<'_>,
     commands: Receiver<SnapshotCommand>,
     executor: &mut E,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) -> bool {
     while let Ok(command) = commands.recv() {
         match command {
             SnapshotCommand::Pin { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let result = transaction
                     .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
                         row.get::<_, i64>(0)
@@ -398,15 +429,29 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::Execute { request, reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let result = executor
                     .execute_read(&transaction, &request)
                     .map_err(ReaderWorkerError::Storage);
                 let _ = reply.send(result);
             }
             SnapshotCommand::MigrationQuery { request, reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(MigrationSqlError::ReaderUnavailable(
+                        error.to_string(),
+                    )));
+                    continue;
+                }
                 let _ = reply.send(execute_query(&transaction, request));
             }
             SnapshotCommand::StoreSize { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let read = || -> Result<StoreSizeTelemetrySample, rusqlite::Error> {
                     let page_size = transaction
                         .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
@@ -436,6 +481,10 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::TableSizes { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
                     let mut statement = transaction.prepare(
                         "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
@@ -478,6 +527,14 @@ fn run_snapshot<E: ReaderQueryExecutor>(
         }
     }
     false
+}
+
+fn probe_family(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), ReaderWorkerError> {
+    family_guard
+        .map_or(Ok(()), SqliteFamilyGuard::probe)
+        .map_err(ReaderWorkerError::SqliteFamily)
 }
 
 fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {
