@@ -42,6 +42,21 @@ fn fake_codex_response_timeout_secs() -> u64 {
     fake_codex_response_timeout().as_secs()
 }
 
+/// Installs the root-owned runtime ports, exactly as `main.rs` does on every
+/// CLI and daemon startup.
+///
+/// The Codex app-server prompt runner is a registered port: the transport
+/// lives in `tracedecay::sessions`, and `tracedecay_agent_hosts` only calls it
+/// through a slot the composition root fills. An unwired process reports the
+/// backend as unavailable instead of spawning anything, which is the correct
+/// production behavior — but it means a test binary, which never passes
+/// through `main`, must install the same wiring before driving the real
+/// backend end-to-end. Registration is `OnceLock`-based and idempotent.
+fn register_runtime_ports() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(tracedecay::register_runtime_ports);
+}
+
 struct EchoBackend;
 
 impl AgentTaskBackend for EchoBackend {
@@ -331,6 +346,7 @@ fn fake_codex_app_server_returns_summary_and_logs_protocol() {
 
 #[test]
 fn codex_app_server_backend_run_task_uses_injected_config() {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
@@ -375,6 +391,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
 
 #[test]
 fn codex_app_server_backend_uses_first_schema_matching_json_object() {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json_after_echo");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
@@ -409,6 +426,7 @@ fn codex_app_server_backend_rejects_nested_schema_matching_json_object() {
 
 #[test]
 fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_model() {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("no_model");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
@@ -433,6 +451,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
 
 #[test]
 fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model() {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     // Env vars are only read while the backend is constructed, so hold the
     // env lock just for that window instead of across the subprocess run.
@@ -467,6 +486,7 @@ fn codex_app_server_backend_from_automation_config_lets_app_server_choose_model(
 
 #[test]
 fn codex_app_server_backend_ignores_env_generation_options() {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     // Env vars are only read while the backend is constructed, so hold the
     // env lock just for that window instead of across the subprocess run.
@@ -664,6 +684,7 @@ struct FakeCodexAppServer {
 }
 
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
+    register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
         codex_bin: fake.bin.display().to_string(),
