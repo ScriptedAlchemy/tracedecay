@@ -507,7 +507,10 @@ fn commit_intent_digest_uses_git_second_precision_without_changing_wire_values()
     // surface while newly created intents reconcile correctly.
     assert_eq!(
         aligned.compute_digest().expect("legacy aligned digest"),
-        digest("sha256:3fcfb47cf5fe4965337c4dfe33b23a84d11394c072e9491e85219bcc950f5b33")
+        ManifestDigest::new(
+            "sha256:3fcfb47cf5fe4965337c4dfe33b23a84d11394c072e9491e85219bcc950f5b33",
+        )
+        .expect("legacy aligned digest is canonical")
     );
     assert_eq!(
         make_intent(i64::MIN, i64::MAX).compute_digest(),
