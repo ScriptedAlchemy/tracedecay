@@ -9,8 +9,9 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use super::{
     BrokerStream, BrokerStreamTransport, DaemonAuthPreface, DaemonHandshake, JsonRpcRequest,
-    JsonRpcResponse, Result, StoreAdministration, TraceDecayError, log_daemon_event,
-    parse_daemon_invocation_request, read_line_handling_wire_oversized, write_json_rpc_response,
+    JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError, classify_mcp_method,
+    log_daemon_event, parse_daemon_invocation_request, read_line_handling_wire_oversized,
+    write_json_rpc_response,
 };
 use crate::mcp::ErrorCode;
 use crate::support::weak_registry::WeakRegistry;
@@ -304,12 +305,32 @@ async fn write_invocation_response(
     Ok(())
 }
 
+/// MCP handshake and catalog-discovery methods.
+///
+/// These are the only requests whose rejection costs a client its entire tool
+/// registry rather than one call, so admission treats them as control traffic.
+pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
+    matches!(
+        classify_mcp_method(method),
+        McpMethod::Initialize | McpMethod::InitializedAck | McpMethod::ToolsList
+    )
+}
+
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;
     };
     if request.method == super::DAEMON_SHUTDOWN_METHOD {
         return request.id.is_some_and(|id| !id.is_null());
+    }
+    // MCP discovery and handshake are reserved, never bulk. They render the
+    // immutable tool catalog and touch no store, so they cost O(catalog) and
+    // cannot be what saturated the daemon. Rejecting them is uniquely
+    // unrecoverable: a host caches `tools/list` for the whole session, so one
+    // saturation rejection leaves that client with *zero* tracedecay tools
+    // until it restarts, while a rejected `tools/call` is merely retried.
+    if is_mcp_discovery_method(&request.method) {
+        return true;
     }
     if request.method != "tools/call" {
         return false;
@@ -369,12 +390,20 @@ pub(crate) async fn reject_admitted_request(
     if let Some(response) = invocation_saturation_response(request_line, &saturation) {
         write_invocation_response(transport, &response).await?;
     } else {
-        let request_id = serde_json::from_str::<JsonRpcRequest>(request_line)
-            .ok()
-            .and_then(|request| request.id)
-            .unwrap_or(serde_json::Value::Null);
-        let response = saturation.into_json_rpc_with_id(request_id);
-        write_json_rpc_response(transport, &response).await?;
+        let parsed = serde_json::from_str::<JsonRpcRequest>(request_line).ok();
+        // A notification (a well-formed request carrying no id) must never be
+        // answered: JSON-RPC 2.0 forbids it, and a stray null-id error frame
+        // desynchronizes strict MCP clients mid-handshake. Only an
+        // unparseable line falls back to a null-id error, which is the
+        // correct reply for a malformed request.
+        let notification = parsed.as_ref().is_some_and(|request| request.id.is_none());
+        if !notification {
+            let request_id = parsed
+                .and_then(|request| request.id)
+                .unwrap_or(serde_json::Value::Null);
+            let response = saturation.into_json_rpc_with_id(request_id);
+            write_json_rpc_response(transport, &response).await?;
+        }
     }
     log_daemon_event("daemon_client", &[("outcome", outcome.to_string())]);
     Ok(())
