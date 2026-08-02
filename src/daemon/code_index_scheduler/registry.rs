@@ -27,9 +27,20 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
 /// mounts. A single global permit serialized EVERY project/worktree cold build
-/// across the whole daemon, turning independent opens into an N-way queue. The
-/// bound stays small enough to respect store write-lock / maintenance-lease
-/// pressure, so it is capped at 4 and scaled to half the available cores.
+/// across the whole daemon, turning independent opens into an N-way queue.
+///
+/// The bound is 2, not 4. Per-file extraction now fans out across the shared
+/// reserved-width indexing pool (`tracedecay_code_index::parallelism`), so a
+/// SINGLE worktree already saturates every non-reserved core. Admitting more
+/// worktrees cannot add throughput — the pool is the same pool — it only
+/// interleaves them, so every worktree's index lands N times later and every
+/// worktree's snapshot bytes sit in RSS N times longer. Race-to-idle: run a
+/// worktree at full width, finish it, take the next one.
+///
+/// Two rather than one because a reconcile is not pure CPU: gix
+/// classification, store writes and publication are I/O and lock phases that
+/// do not touch the indexing pool, so a second admitted worktree overlaps
+/// those with the first one's extraction at negligible CPU cost.
 ///
 /// Same-store (same-worktree) exclusion does NOT depend on this bound: each
 /// mounted worktree owns exactly one reconcile worker task that dequeues wakes
@@ -37,8 +48,11 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 /// per-scheduler `Mutex`. Raising the global bound therefore only lets DISTINCT
 /// worktrees (which write to path-scoped stores) reconcile in parallel; it can
 /// never overlap two reconciles for the same worktree/store.
+const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
+
 fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).clamp(1, 4))
+    std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
