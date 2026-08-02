@@ -229,16 +229,29 @@ impl DaemonEngine {
     /// capability are eligible. `initialize` and `tools/list` mark the client
     /// current without emitting because those requests already fetch the new
     /// generation's catalog.
+    ///
+    /// `catalog_is_provisional` marks a discovery answer served from the
+    /// warming bootstrap route, before the project graph is open. That catalog
+    /// is not the published one — its `tracedecay_context` budget is the
+    /// conservative warming budget rather than the node-count budget — so it
+    /// must not mark the client current. Leaving such a client unmarked is
+    /// exactly what arms its notification for the first request after warm-up
+    /// completes; marking it would strand the provisional catalog for the rest
+    /// of the daemon's life, because this set is never otherwise cleared.
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
         request_line: &str,
+        catalog_is_provisional: bool,
     ) -> Option<CatalogRefreshClientKey> {
         if !valid_client_instance_id(&handshake.client_instance_id) {
             return None;
         }
         let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
         if request.method == HOOK_EVENT_METHOD {
+            return None;
+        }
+        if catalog_is_provisional {
             return None;
         }
         let catalog_is_current = matches!(request.method.as_str(), "initialize" | "tools/list");
