@@ -933,14 +933,14 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 /// Both are rebuilt only when a new generation is loaded.
 type GenerationServingCachesV1 = (
     CodeGenerationId,
-    Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
 );
 
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
-    query_owners: Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
 }
 
@@ -1055,7 +1055,7 @@ impl LatestCompleteCodeIndexV1 {
     pub fn exact(
         &self,
     ) -> Result<
-        Vec<ExtractionAdmittedCodeSearchChunkV1>,
+        Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
         crate::code_index::chunks::ChunkingFailureV1,
     > {
         self.generation.admitted_chunks()
@@ -1077,9 +1077,9 @@ impl LatestCompleteCodeIndexV1 {
     /// complete published generation.
     pub fn production_query_owners(
         &self,
-    ) -> Result<ProductionCodeIndexQueryOwnersV1, RetrievalPortError> {
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         if let Some(owners) = self.query_owners.get() {
-            return Ok(owners.clone());
+            return Ok(Arc::clone(owners));
         }
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = production_code_index_freshness(
@@ -1115,7 +1115,10 @@ impl LatestCompleteCodeIndexV1 {
             .generation
             .admitted_chunks()
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
+        // One materializing copy per generation build; every query thereafter
+        // shares the Arc'd owners without touching the chunk set again.
+        let lexical_projection =
+            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted.as_ref().clone())?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
@@ -1134,13 +1137,17 @@ impl LatestCompleteCodeIndexV1 {
             self.generation.edges(),
             self.generation.chunks().chunks(),
         )?);
-        let owners = ProductionCodeIndexQueryOwnersV1 {
+        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
             exact,
             lexical,
             graph,
-        };
-        let _ = self.query_owners.set(owners.clone());
-        Ok(self.query_owners.get().cloned().unwrap_or(owners))
+        });
+        let _ = self.query_owners.set(Arc::clone(&owners));
+        Ok(self
+            .query_owners
+            .get()
+            .map(Arc::clone)
+            .unwrap_or(owners))
     }
 }
 

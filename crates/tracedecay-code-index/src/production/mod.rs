@@ -457,7 +457,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// Amortized parser-backed exact admission. `admit_all` re-canonicalizes and
     /// re-hashes every chunk, which is pure waste on the serving path once the
     /// immutable chunk set has been admitted. Only success is cached.
-    admitted: OnceLock<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
+    admitted: OnceLock<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>>,
     /// Amortized test-attribution join. Query admission rebuilds this authority
     /// per call even when the generation is unchanged; the traversal and its
     /// evidence digest are a pure function of the immutable generation. Only
@@ -766,11 +766,16 @@ impl CodeIndexPublishedGenerationV1 {
     /// Return chunks re-admitted through their parser-backed exact authority.
     /// Downstream exact/phrase/BM25 projections must consume this value rather
     /// than raw chunks, preserving the non-demotable exact tier.
+    ///
+    /// The admitted sweep is memoized per sealed generation and handed out as
+    /// a shared reference. Returning an owned `Vec` here deep-copied ~150K
+    /// chunks (content included) on every memo hit, which put an O(store)
+    /// memcpy on every search's request path.
     pub fn admitted_chunks(
         &self,
-    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
+    ) -> Result<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>, ChunkingFailureV1> {
         if let Some(admitted) = self.admitted.get() {
-            return Ok(admitted.clone());
+            return Ok(Arc::clone(admitted));
         }
         let mut chunks = Vec::new();
         for file in &self.files {
@@ -780,7 +785,8 @@ impl CodeIndexPublishedGenerationV1 {
             );
         }
         chunks.sort_by(|left, right| left.chunk().id.cmp(&right.chunk().id));
-        let _ = self.admitted.set(chunks.clone());
+        let chunks = Arc::new(chunks);
+        let _ = self.admitted.set(Arc::clone(&chunks));
         Ok(chunks)
     }
 
