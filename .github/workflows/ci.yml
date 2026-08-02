@@ -286,6 +286,21 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
+      # That directory is NOT one of the paths rust-cache stores, but the
+      # build-script output that points at it IS (it lives under `target/`). So
+      # a restored cache replays a link search path that does not exist on this
+      # fresh runner, cargo still considers the build script fresh and never
+      # re-downloads, and codegen fails with `could not find native static
+      # library 'onnxruntime'`. Evicting just this one package forces the build
+      # script to rerun and re-download into this runner, keeping the link path
+      # and the binaries consistent. Keep this before the first cargo
+      # invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
+
       - name: Check default-feature workspace
         run: cargo check --workspace --locked
 
@@ -744,6 +759,21 @@ jobs:
           shared-key: ci-perf-gate-release-${{ runner.os }}
           cache-on-failure: true
 
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
+      # That directory is NOT one of the paths rust-cache stores, but the
+      # build-script output that points at it IS (it lives under `target/`). So
+      # a restored cache replays a link search path that does not exist on this
+      # fresh runner, cargo still considers the build script fresh and never
+      # re-downloads, and codegen fails with `could not find native static
+      # library 'onnxruntime'`. Evicting just this one package forces the build
+      # script to rerun and re-download into this runner, keeping the link path
+      # and the binaries consistent. Keep this before the first cargo
+      # invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
+
       - name: Run serving-path perf gate
         run: scripts/perf-gate.sh
 
@@ -849,6 +879,21 @@ jobs:
           shared-key: ci-clippy-full-${{ runner.os }}
           cache-on-failure: true
 
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
+      # That directory is NOT one of the paths rust-cache stores, but the
+      # build-script output that points at it IS (it lives under `target/`). So
+      # a restored cache replays a link search path that does not exist on this
+      # fresh runner, cargo still considers the build script fresh and never
+      # re-downloads, and codegen fails with `could not find native static
+      # library 'onnxruntime'`. Evicting just this one package forces the build
+      # script to rerun and re-download into this runner, keeping the link path
+      # and the binaries consistent. Keep this before the first cargo
+      # invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
+
       - name: Run blocking Clippy policy with default features
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -925,6 +970,21 @@ jobs:
         working-directory: dashboard
         run: npm test
 
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
+      # That directory is NOT one of the paths rust-cache stores, but the
+      # build-script output that points at it IS (it lives under `target/`). So
+      # a restored cache replays a link search path that does not exist on this
+      # fresh runner, cargo still considers the build script fresh and never
+      # re-downloads, and codegen fails with `could not find native static
+      # library 'onnxruntime'`. Evicting just this one package forces the build
+      # script to rerun and re-download into this runner, keeping the link path
+      # and the binaries consistent. Keep this before the first cargo
+      # invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
+
       - name: Run dashboard integration tests
         run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked --no-tests=fail
 
@@ -966,6 +1026,21 @@ jobs:
         with:
           shared-key: ci-hermes-integration-full-${{ runner.os }}
           cache-on-failure: true
+
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory.
+      # That directory is NOT one of the paths rust-cache stores, but the
+      # build-script output that points at it IS (it lives under `target/`). So
+      # a restored cache replays a link search path that does not exist on this
+      # fresh runner, cargo still considers the build script fresh and never
+      # re-downloads, and codegen fails with `could not find native static
+      # library 'onnxruntime'`. Evicting just this one package forces the build
+      # script to rerun and re-download into this runner, keeping the link path
+      # and the binaries consistent. Keep this before the first cargo
+      # invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
 
       - name: Build tracedecay binary
         run: cargo build --all-features --bin tracedecay --locked
