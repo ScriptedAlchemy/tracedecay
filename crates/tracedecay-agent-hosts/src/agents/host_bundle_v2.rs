@@ -18,6 +18,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_json_bytes;
+use tracedecay_host_integration::host_bundle_storage_failure;
 pub use tracedecay_host_integration::{
     ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
     EmbeddedHostIntegrationEvidenceV1, EmbeddedNativeHostFixtureV1,
@@ -1534,7 +1535,7 @@ pub fn inspect_installed_host_bundle_components_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(HostBundleDoctorReportV1::default());
         }
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
     let control_root = lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR);
     match fs::symlink_metadata(&control_root) {
@@ -1543,14 +1544,14 @@ pub fn inspect_installed_host_bundle_components_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(HostBundleDoctorReportV1::default());
         }
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
     let entries = match fs::read_dir(&control_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(HostBundleDoctorReportV1::default());
         }
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     };
     let mut receipt_paths = entries
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1851,7 +1852,7 @@ pub fn inspect_installed_host_bundle_components_at(
         }
     }
     for entry in fs::read_dir(&control_root)
-        .map_err(|_| HostBundleError::StorageFailure)?
+        .map_err(|_| host_bundle_storage_failure!())?
         .filter_map(Result::ok)
     {
         let path = entry.path();
@@ -1925,11 +1926,11 @@ pub fn latest_host_component_set_receipt_at(
     let entries = match fs::read_dir(&control_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     };
     let mut latest: Option<(std::time::SystemTime, HostComponentSetReceiptV1)> = None;
     for entry in entries {
-        let entry = entry.map_err(|_| HostBundleError::StorageFailure)?;
+        let entry = entry.map_err(|_| host_bundle_storage_failure!())?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -1939,11 +1940,11 @@ pub fn latest_host_component_set_receipt_at(
         }
         let metadata = entry
             .metadata()
-            .map_err(|_| HostBundleError::StorageFailure)?;
+            .map_err(|_| host_bundle_storage_failure!())?;
         if !metadata.is_file() || metadata.len() > MAX_CONTROL_FILE_BYTES as u64 {
             continue;
         }
-        let bytes = fs::read(entry.path()).map_err(|_| HostBundleError::StorageFailure)?;
+        let bytes = fs::read(entry.path()).map_err(|_| host_bundle_storage_failure!())?;
         let Ok(receipt) = serde_json::from_slice::<HostComponentSetReceiptV1>(&bytes) else {
             continue;
         };
@@ -2146,7 +2147,7 @@ fn read_receipt_at(
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
     let relative = Path::new(HOST_BUNDLE_CONTROL_DIR).join(receipt_file(host, component));
     let path = inspect_install_target(root, &relative)?;
@@ -2154,7 +2155,7 @@ fn read_receipt_at(
         Ok(bytes) if bytes.len() <= MAX_CONTROL_FILE_BYTES => bytes,
         Ok(_) => return Err(HostBundleError::ReceiptCorrupted),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     };
     let receipt = serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)?;
     validate_receipt(&receipt)?;
@@ -2177,7 +2178,7 @@ fn observe_artifact_at(
             if metadata.len() > MAX_ARTIFACT_CONTENT_BYTES as u64 {
                 return Err(HostBundleError::ArtifactContentMismatch);
             }
-            let bytes = fs::read(&path).map_err(|_| HostBundleError::StorageFailure)?;
+            let bytes = fs::read(&path).map_err(|_| host_bundle_storage_failure!())?;
             (
                 ObservedArtifactKindV1::RegularFile,
                 Some(Sha256::digest(&bytes).into()),
@@ -2188,7 +2189,7 @@ fn observe_artifact_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             (ObservedArtifactKindV1::Missing, None)
         }
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     };
     Ok(ObservedHostArtifactV1 {
         relative_path: relative_path.to_string(),
@@ -2470,7 +2471,7 @@ impl HostBundleWriterV1 {
                 }
                 backups
                     .rename(backup_name, &parent, &name)
-                    .map_err(|_| HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
                 sync_cap_dir(backups)?;
                 sync_cap_dir(&parent)?;
             } else if entry.wrote_new {
@@ -3283,11 +3284,11 @@ impl HostBundleWriterV1 {
                 }
                 parent
                     .remove_file(&name)
-                    .map_err(|_| HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
             }
             backups
                 .rename(backup_name, &parent, &name)
-                .map_err(|_| HostBundleError::StorageFailure)?;
+                .map_err(|_| host_bundle_storage_failure!())?;
             sync_cap_dir(backups)?;
             sync_cap_dir(&parent)
         } else if entry.wrote_new {
@@ -3677,7 +3678,7 @@ impl HostBundleWriterV1 {
             }
             self.control
                 .rename(&file, &quarantine, &target)
-                .map_err(|_| HostBundleError::StorageFailure)?;
+                .map_err(|_| host_bundle_storage_failure!())?;
             sync_cap_dir(&quarantine)?;
             sync_cap_dir(&self.control)?;
             moved = Some(
@@ -3707,7 +3708,7 @@ impl HostBundleWriterV1 {
     ) -> Result<(), HostBundleError> {
         let control_path = self.lifecycle_root_path.join(HOST_BUNDLE_CONTROL_DIR);
         let mut referenced = false;
-        for entry in fs::read_dir(&control_path).map_err(|_| HostBundleError::StorageFailure)? {
+        for entry in fs::read_dir(&control_path).map_err(|_| host_bundle_storage_failure!())? {
             let Ok(entry) = entry else {
                 return Ok(());
             };
@@ -3735,11 +3736,11 @@ impl HostBundleWriterV1 {
         let backup_path = control_path.join("backups").join(hex::encode(operation_id));
         match fs::symlink_metadata(&backup_path) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(&backup_path).map_err(|_| HostBundleError::StorageFailure)?;
+                fs::remove_dir_all(&backup_path).map_err(|_| host_bundle_storage_failure!())?;
             }
             Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(HostBundleError::StorageFailure),
+            Err(_) => return Err(host_bundle_storage_failure!()),
         }
         if let Some(backups) = backup_path.parent() {
             let _ = fs::remove_dir(backups);
@@ -3766,11 +3767,11 @@ impl HostBundleWriterV1 {
             .join(hex::encode(operation_id));
         match fs::symlink_metadata(&stage_path) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(&stage_path).map_err(|_| HostBundleError::StorageFailure)?;
+                fs::remove_dir_all(&stage_path).map_err(|_| host_bundle_storage_failure!())?;
             }
             Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => return Err(HostBundleError::StorageFailure),
+            Err(_) => return Err(host_bundle_storage_failure!()),
         }
         if let Some(stages) = stage_path.parent() {
             let _ = fs::remove_dir(stages);
@@ -4134,9 +4135,9 @@ fn ensure_bundle_root(root: &Path) -> Result<(), HostBundleError> {
         }
         Ok(_) => return Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
-    fs::create_dir_all(root).map_err(|_| HostBundleError::StorageFailure)?;
+    fs::create_dir_all(root).map_err(|_| host_bundle_storage_failure!())?;
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
         _ => Err(HostBundleError::UnsafeInstallPath),
@@ -4152,7 +4153,7 @@ fn open_or_create_nofollow_dir(parent: &Dir, name: &str) -> Result<Dir, HostBund
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             parent
                 .create_dir(name)
-                .map_err(|_| HostBundleError::StorageFailure)?;
+                .map_err(|_| host_bundle_storage_failure!())?;
             parent
                 .open_dir_nofollow(name)
                 .map_err(|_| HostBundleError::UnsafeInstallPath)
@@ -4194,7 +4195,7 @@ fn read_regular_nofollow(parent: &Dir, name: &str) -> Result<Option<Vec<u8>>, Ho
         }
         Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -4205,7 +4206,7 @@ fn read_regular_nofollow(parent: &Dir, name: &str) -> Result<Option<Vec<u8>>, Ho
     Read::by_ref(&mut file)
         .take(MAX_ARTIFACT_CONTENT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| HostBundleError::StorageFailure)?;
+        .map_err(|_| host_bundle_storage_failure!())?;
     if bytes.len() > MAX_ARTIFACT_CONTENT_BYTES {
         return Err(HostBundleError::ArtifactContentMismatch);
     }
@@ -4217,7 +4218,7 @@ fn regular_file_exists(parent: &Dir, name: &str) -> Result<bool, HostBundleError
         Ok(metadata) if metadata.file_type().is_file() => Ok(true),
         Ok(_) => Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(HostBundleError::StorageFailure),
+        Err(_) => Err(host_bundle_storage_failure!()),
     }
 }
 
@@ -4225,7 +4226,7 @@ fn remove_regular_if_exists(parent: &Dir, name: &str) -> Result<(), HostBundleEr
     if regular_file_exists(parent, name)? {
         parent
             .remove_file(name)
-            .map_err(|_| HostBundleError::StorageFailure)?;
+            .map_err(|_| host_bundle_storage_failure!())?;
     }
     Ok(())
 }
@@ -4244,7 +4245,7 @@ fn remove_if_digest_matches(
     }
     parent
         .remove_file(name)
-        .map_err(|_| HostBundleError::StorageFailure)
+        .map_err(|_| host_bundle_storage_failure!())
 }
 
 fn move_regular_to_backup(
@@ -4261,7 +4262,7 @@ fn move_regular_to_backup(
     }
     parent
         .rename(name, backup_dir, backup_name)
-        .map_err(|_| HostBundleError::StorageFailure)?;
+        .map_err(|_| host_bundle_storage_failure!())?;
     sync_cap_dir(parent)?;
     sync_cap_dir(backup_dir)
 }
@@ -4282,7 +4283,7 @@ fn atomic_write_nofollow(
         }
         Ok(_) => return Err(HostBundleError::UnsafeInstallPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(HostBundleError::StorageFailure),
+        Err(_) => return Err(host_bundle_storage_failure!()),
     }
     for _ in 0..32 {
         let temporary = format!(
@@ -4298,13 +4299,13 @@ fn atomic_write_nofollow(
         let mut file = match parent.open_with(&temporary, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(HostBundleError::StorageFailure),
+            Err(_) => return Err(host_bundle_storage_failure!()),
         };
         let result = (|| {
             file.write_all(bytes)
-                .map_err(|_| HostBundleError::StorageFailure)?;
+                .map_err(|_| host_bundle_storage_failure!())?;
             file.sync_all()
-                .map_err(|_| HostBundleError::StorageFailure)?;
+                .map_err(|_| host_bundle_storage_failure!())?;
             drop(file);
             // A rename changes the final directory entry rather than following
             // a final symlink; the preflight and capability parent prevent
@@ -4312,7 +4313,7 @@ fn atomic_write_nofollow(
             if replace_existing {
                 parent
                     .rename(&temporary, parent, name)
-                    .map_err(|_| HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
             } else {
                 parent
                     .hard_link(&temporary, parent, name)
@@ -4320,12 +4321,12 @@ fn atomic_write_nofollow(
                         if error.kind() == io::ErrorKind::AlreadyExists {
                             HostBundleError::OwnershipConflict
                         } else {
-                            HostBundleError::StorageFailure
+                            host_bundle_storage_failure!()
                         }
                     })?;
                 parent
                     .remove_file(&temporary)
-                    .map_err(|_| HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
             }
             sync_cap_dir(parent)
         })();
@@ -4334,7 +4335,7 @@ fn atomic_write_nofollow(
         }
         return result;
     }
-    Err(HostBundleError::StorageFailure)
+    Err(host_bundle_storage_failure!())
 }
 
 fn sync_cap_dir(dir: &Dir) -> Result<(), HostBundleError> {
@@ -4342,7 +4343,7 @@ fn sync_cap_dir(dir: &Dir) -> Result<(), HostBundleError> {
     options.read(true).maybe_dir(true);
     dir.open_with(".", &options)
         .and_then(|file| file.sync_all())
-        .map_err(|_| HostBundleError::StorageFailure)
+        .map_err(|_| host_bundle_storage_failure!())
 }
 
 fn read_control_json(parent: &Dir, name: &str) -> Result<Option<Vec<u8>>, HostBundleError> {
@@ -5166,6 +5167,13 @@ mod tests {
         }
     }
 
+    /// The exact failure [`FailingSetRegistration::verify`] injects. Named so
+    /// assertions can compare the whole error value: `StorageFailure` carries
+    /// the source site that raised it, so a second `host_bundle_storage_failure!()`
+    /// written at the assertion would never equal the one raised in the fake.
+    const FAILING_SET_REGISTRATION_VERIFY: HostBundleError =
+        HostBundleError::StorageFailure("test:FailingSetRegistration::verify");
+
     #[derive(Default)]
     struct FailingSetRegistration {
         applied: bool,
@@ -5205,7 +5213,7 @@ mod tests {
             _component_set: &HostComponentSetV1,
             _request: &HostComponentSetExecutionRequestV1,
         ) -> Result<(), HostBundleError> {
-            Err(HostBundleError::StorageFailure)
+            Err(FAILING_SET_REGISTRATION_VERIFY)
         }
 
         fn rollback(
@@ -5349,7 +5357,7 @@ mod tests {
                 &updated_verifier,
                 &mut failing_registration,
             ),
-            Err(HostBundleError::StorageFailure)
+            Err(FAILING_SET_REGISTRATION_VERIFY)
         );
         assert!(failing_registration.applied);
         assert!(failing_registration.rolled_back);
@@ -5464,7 +5472,7 @@ mod tests {
                 &updated_verifier,
                 &mut failing,
             ),
-            Err(HostBundleError::StorageFailure)
+            Err(FAILING_SET_REGISTRATION_VERIFY)
         );
         assert_eq!(
             writer
@@ -5669,7 +5677,7 @@ mod tests {
             _request: &HostComponentSetExecutionRequestV1,
         ) -> Result<(), HostBundleError> {
             fs::write(self.artifact_root.join(self.relative_path), &self.bytes)
-                .map_err(|_| HostBundleError::StorageFailure)
+                .map_err(|_| host_bundle_storage_failure!())
         }
 
         fn rollback(

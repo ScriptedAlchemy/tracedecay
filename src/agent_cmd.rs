@@ -1064,7 +1064,7 @@ impl tracedecay::agents::host_bundle_v2::HostBundleLifecycleStorageV1 for Feedba
         tracedecay::agents::host_bundle_v2::HostBundleInstallReceiptV1,
         tracedecay::agents::host_bundle_v2::HostBundleError,
     > {
-        Err(tracedecay::agents::host_bundle_v2::HostBundleError::StorageFailure)
+        Err(tracedecay_host_integration::host_bundle_storage_failure!())
     }
 }
 
@@ -3903,7 +3903,7 @@ mod tests {
         ) -> Result<(), HostBundleError> {
             self.inner.verify(component_set, request)?;
             self.injected_after_apply = !self.expected_removed_path.exists();
-            Err(HostBundleError::StorageFailure)
+            Err(tracedecay_host_integration::host_bundle_storage_failure!())
         }
 
         fn commit(
@@ -4001,7 +4001,7 @@ mod tests {
             _component_set: &HostComponentSetV1,
             _request: &HostComponentSetExecutionRequestV1,
         ) -> Result<(), HostBundleError> {
-            Err(HostBundleError::StorageFailure)
+            Err(tracedecay_host_integration::host_bundle_storage_failure!())
         }
 
         fn commit(
