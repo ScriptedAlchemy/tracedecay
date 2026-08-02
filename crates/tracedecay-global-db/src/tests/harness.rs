@@ -4,20 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::RegisteredGlobalDb;
-use crate::host_ports::profile_sessions::{self, ProfileSessionsRuntime};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
-
-/// Message shown when the composition root never installed the opener.
-pub(crate) const UNWIRED_PROFILE_SESSIONS: &str = "tracedecay_global_db::host_ports::profile_sessions::register must be called by the \
-     composition root before a registered harness can open";
 
 pub struct RegisteredGlobalDbHarness {
     pub registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
     _scope: Option<DaemonDatabaseScope>,
-    registry: Box<dyn ProfileSessionsRuntime>,
 }
 
 /// Standalone registered-database fixture for downstream use-case tests.
@@ -55,12 +49,12 @@ impl RegisteredGlobalDbTestRuntime {
                 },
             )?;
         }
-        Self::open(profile_root.as_ref(), Some(project_root)).await
+        Self::open(profile_root.as_ref(), Some((project_root, project_id))).await
     }
 
     async fn open(
         profile_root: &std::path::Path,
-        project_root: Option<&std::path::Path>,
+        project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
         std::fs::create_dir_all(profile_root)?;
@@ -70,15 +64,32 @@ impl RegisteredGlobalDbTestRuntime {
             nonce,
             "registered-global-db-test-runtime",
         )?;
-        let profile_registered =
-            open_registered_test_database(&profile_root.join("profile-sessions.db")).await?;
-        let project_registered = match project_root {
-            Some(project_root) => Some(
-                open_registered_test_database(
-                    &project_root.join(".tracedecay").join("project-sessions.db"),
+        let profile_registered = open_registered_test_database(
+            &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await?;
+        let project_registered = match project {
+            Some((project_root, project_id)) => {
+                let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
+                    project_id: project_id.to_string(),
+                    storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
+                };
+                let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
+                    project_root,
+                    profile_root,
+                    &marker,
+                )?;
+                Some(
+                    open_registered_test_database(
+                        &layout.sessions_db_path,
+                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                            project_id,
+                        },
+                    )
+                    .await?,
                 )
-                .await?,
-            ),
+            }
             None => None,
         };
         Ok(Self {
@@ -99,7 +110,11 @@ impl RegisteredGlobalDbTestRuntime {
     pub async fn remount_profile_database_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
-        open_registered_test_database(self.profile_registered.db_path()).await
+        open_registered_test_database(
+            self.profile_registered.db_path(),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
     }
 
     pub fn project_database(&self) -> tracedecay_runtime_core::errors::Result<&RegisteredGlobalDb> {
@@ -129,24 +144,19 @@ impl RegisteredGlobalDbHarness {
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
-        // The scope guard is entered before the runtime opens; the root opener
-        // creates the profile identity on its way to the session registry.
         let scope =
             tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
                 .expect("daemon database scope");
-        let registry = profile_sessions::open(profile_root)
-            .expect(UNWIRED_PROFILE_SESSIONS)
-            .await
-            .expect("open registered profile-sessions runtime");
-        let registered = registry
-            .mount()
-            .await
-            .expect("mount registered profile-sessions runtime");
+        let registered = open_registered_test_database(
+            &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("open registered profile-sessions runtime");
         Self {
             registered,
             _directory: directory,
             _scope: Some(scope),
-            registry,
         }
     }
 
@@ -159,10 +169,12 @@ impl RegisteredGlobalDbHarness {
     }
 
     pub async fn mount(&self) -> Arc<RegisteredGlobalDb> {
-        self.registry
-            .mount()
-            .await
-            .expect("remount registered profile-sessions runtime")
+        open_registered_test_database(
+            self.registered.db_path(),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("remount registered profile-sessions runtime")
     }
 
     #[cfg(test)]
@@ -267,10 +279,14 @@ impl HostAdmissionTestRuntimeV1 {
             nonce,
             "global-db-test-runtime",
         )?;
-        let profile_registry =
-            open_registered_test_database(&profile_root.join("global.db")).await?;
+        let profile_registry = open_registered_test_database(
+            &profile_root.join("global.db"),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::Profile,
+        )
+        .await?;
         let profile_registered = open_registered_test_database(
             &tracedecay_sessions::runtime::user_sessions_db_path(profile_root),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await?;
         let project_registered = match project {
@@ -284,7 +300,15 @@ impl HostAdmissionTestRuntimeV1 {
                     profile_root,
                     &marker,
                 )?;
-                Some(open_registered_test_database(&layout.sessions_db_path).await?)
+                Some(
+                    open_registered_test_database(
+                        &layout.sessions_db_path,
+                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                            project_id,
+                        },
+                    )
+                    .await?,
+                )
             }
             None => None,
         };
@@ -687,6 +711,7 @@ impl HostAdmissionTestRuntimeV1 {
 #[cfg(any(test, feature = "test-helpers"))]
 async fn open_registered_test_database(
     path: &std::path::Path,
+    scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
 ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
     crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
@@ -705,8 +730,10 @@ async fn open_registered_test_database(
     } else {
         tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize
     };
-    let (database, _) =
-        tracedecay_runtime_core::db::Database::publish_test_runtime(path, &authority, mode).await?;
+    let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+        path, &authority, mode, scope,
+    )
+    .await?;
     // `Database::conn()` is the retained *reader*; schema DDL has to run on the
     // serialized writer lane or the migration SQL channel reports
     // `WriterUnavailable`. Converging here (rather than relying solely on the
@@ -738,4 +765,23 @@ async fn open_registered_test_database(
         )
         .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegisteredGlobalDbTestRuntime;
+    use tracedecay_store::StoreShardScopeV1;
+
+    #[tokio::test]
+    async fn profile_runtime_publishes_a_profile_sessions_shard() {
+        let temporary = tempfile::tempdir().expect("temporary profile root");
+        let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
+            .await
+            .expect("registered profile runtime");
+
+        assert!(matches!(
+            runtime.profile_database().binding().shard_id.scope,
+            StoreShardScopeV1::ProfileSessions
+        ));
+    }
 }

@@ -44,12 +44,12 @@ pub use access::{
 };
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use connection::TestDatabaseRuntimeMode;
 pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
     DatabaseWriteTransaction,
 };
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;

@@ -279,7 +279,6 @@ mod tests {
 
     #[tokio::test]
     async fn cli_diagnostics_exposes_canonical_observatory_and_costs_coverage() {
-        crate::daemon::store_runtime::session_registry::register_profile_sessions_port();
         let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "analytics-cli-observability-parity",
         )

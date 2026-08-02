@@ -49,42 +49,6 @@ pub(crate) fn release_process_allocator_memory() {
     }
 }
 
-/// Root wiring for `tracedecay_global_db::host_ports::profile_sessions`.
-///
-/// The moved global-db crate cannot reach the daemon's profile identity or
-/// session-runtime registry (they sit above it), so it exposes a
-/// composition-root port instead. This installs the daemon-backed opener —
-/// profile identity creation followed by registry open, with `mount` serving
-/// the registered profile-sessions database. Idempotent (first call wins);
-/// called at daemon startup and by root test harnesses before they open a
-/// `RegisteredGlobalDbHarness`.
-pub(crate) fn register_profile_sessions_port() {
-    use tracedecay_global_db::host_ports::profile_sessions;
-
-    struct DaemonProfileSessions {
-        registry: DaemonSessionRuntimeRegistryV1,
-    }
-
-    impl profile_sessions::ProfileSessionsRuntime for DaemonProfileSessions {
-        fn mount(&self) -> profile_sessions::MountFuture<'_> {
-            Box::pin(async { self.registry.profile_sessions().await })
-        }
-    }
-
-    fn open_runtime(profile_root: PathBuf) -> profile_sessions::OpenFuture {
-        Box::pin(async move {
-            // The caller has already entered the daemon database scope; the
-            // identity is therefore created inside it, not ahead of it.
-            let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-            let registry = DaemonSessionRuntimeRegistryV1::open(identity).await?;
-            Ok(Box::new(DaemonProfileSessions { registry })
-                as Box<dyn profile_sessions::ProfileSessionsRuntime>)
-        })
-    }
-
-    profile_sessions::register(open_runtime);
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredSchemaConvergenceStatus {
     Pending,
