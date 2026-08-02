@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use url::Url;
 
-use super::activity::adapter_workspace_root;
+use super::activity::{
+    adapter_workspace_root, adapter_workspace_root_from_canonical_root, canonicalize_project_root,
+};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
 use super::client::{
     LspDocument, LspRefreshTimeouts, LspSemanticRequestError, StdioLspClient,
@@ -21,6 +23,14 @@ use super::settings::CodeDiagnosticsSettings;
 use crate::{
     AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
     LspSemanticOperationOutcome, LspSemanticRequestAuthority,
+};
+
+mod refresh;
+
+use refresh::RefreshBatch;
+pub use refresh::{
+    CompletedRefresh, MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS, MAX_ANALYZER_QUEUED_ROOT_BATCHES,
+    PreparedRefresh,
 };
 
 /// Normalized code diagnostic shared by the LSP broker and dashboard API.
@@ -177,12 +187,6 @@ struct LspSessionKey {
     language: String,
     command: String,
     workspace_root: PathBuf,
-}
-
-struct RefreshBatch {
-    workspace_root: PathBuf,
-    documents: Vec<LspDocument>,
-    client: Arc<Mutex<Option<StdioLspClient>>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -535,106 +539,6 @@ fn semantic_operation_outcome(
     }
 }
 
-pub struct PreparedRefresh {
-    language: String,
-    project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
-    epoch: u64,
-    batches: Vec<RefreshBatch>,
-}
-
-pub struct CompletedRefresh {
-    language: String,
-    command: String,
-    epoch: u64,
-    result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
-}
-
-impl CompletedRefresh {
-    pub fn is_ok(&self) -> bool {
-        self.result.is_ok()
-    }
-}
-
-impl PreparedRefresh {
-    pub async fn collect_diagnostics(
-        self,
-        diagnostics_quiet_timeout: Duration,
-    ) -> CompletedRefresh {
-        self.collect_diagnostics_with_timeouts(LspRefreshTimeouts::from_diagnostics_quiet_window(
-            diagnostics_quiet_timeout,
-        ))
-        .await
-    }
-
-    pub async fn collect_diagnostics_with_timeouts(
-        self,
-        timeouts: LspRefreshTimeouts,
-    ) -> CompletedRefresh {
-        let language = self.language.clone();
-        let command = self.command.clone();
-        let epoch = self.epoch;
-        let result = self.collect(timeouts).await;
-        CompletedRefresh {
-            language,
-            command,
-            epoch,
-            result,
-        }
-    }
-
-    async fn collect(
-        self,
-        timeouts: LspRefreshTimeouts,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
-        let mut diagnostics = Vec::new();
-        for batch in self.batches {
-            let mut client_slot = batch.client.lock().await;
-            let mut client = match client_slot.take() {
-                Some(client) => client,
-                None => StdioLspClient::start_with_timeouts(
-                    &self.command,
-                    &self.args,
-                    &batch.workspace_root,
-                    timeouts,
-                )
-                .await
-                .map_err(|err| RefreshFailure::crashed(&err))?,
-            };
-            match client
-                .collect_document_diagnostics(&self.project_root, batch.documents, timeouts)
-                .await
-            {
-                Ok(mut batch_diagnostics) => {
-                    *client_slot = Some(client);
-                    diagnostics.append(&mut batch_diagnostics);
-                }
-                Err(err) => {
-                    *client_slot = None;
-                    return Err(RefreshFailure::crashed(&err));
-                }
-            }
-        }
-        Ok(diagnostics)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RefreshFailure {
-    state: EngineState,
-    message: String,
-}
-
-impl RefreshFailure {
-    fn crashed(err: &TraceDecayError) -> Self {
-        Self {
-            state: EngineState::Crashed,
-            message: err.to_string(),
-        }
-    }
-}
-
 /// Dashboard-owned diagnostics broker state.
 pub struct DiagnosticBroker {
     project_root: PathBuf,
@@ -883,15 +787,35 @@ impl DiagnosticBroker {
             .insert(language.to_string(), EngineState::Refreshing);
         let epoch = self.next_refresh_epoch(language);
         let project_root = self.project_root.clone();
+        let canonical_project_root = canonicalize_project_root(&project_root).ok();
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
-            let workspace_root =
-                adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
-                    .unwrap_or_else(|| self.project_root.clone());
+            let workspace_root = match canonical_project_root.as_deref() {
+                Some(root) => adapter_workspace_root_from_canonical_root(
+                    root,
+                    &adapter,
+                    &document.relative_path,
+                ),
+                None => {
+                    adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
+                }
+            }
+            .unwrap_or_else(|| self.project_root.clone());
             documents_by_root
                 .entry(workspace_root)
                 .or_default()
                 .push(document);
+        }
+        if documents_by_root.len() > MAX_ANALYZER_QUEUED_ROOT_BATCHES {
+            let message = format!(
+                "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
+                documents_by_root.len()
+            );
+            self.engine_errors
+                .insert(language.to_string(), message.clone());
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Unavailable);
+            return Err(TraceDecayError::Config { message });
         }
         let batches = documents_by_root
             .into_iter()
@@ -913,14 +837,14 @@ impl DiagnosticBroker {
                 }
             })
             .collect();
-        Ok(Some(PreparedRefresh {
-            language: language.to_string(),
+        Ok(Some(PreparedRefresh::new(
+            language.to_string(),
             project_root,
             command,
-            args: adapter.args,
+            adapter.args,
             epoch,
             batches,
-        }))
+        )))
     }
 
     pub async fn refresh_documents(
@@ -1245,6 +1169,9 @@ fn command_candidates(command: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analyzer::activity::{
+        project_root_canonicalization_count, reset_project_root_canonicalization_count,
+    };
     use crate::analyzer::adapters::DiagnosticMode;
 
     fn assert_safe_partial_detail(
@@ -1454,5 +1381,78 @@ mod tests {
                 .mounted_providers_for_files(&["src/lib.rs".to_owned()])
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn refresh_batch_canonicalizes_the_project_root_once() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir(project.path().join("src")).expect("source directory");
+        std::fs::write(project.path().join("Cargo.toml"), "").expect("root marker");
+        let command = project.path().join("analyzer");
+        std::fs::write(&command, "").expect("analyzer command");
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter(
+                "rust",
+                command.to_string_lossy(),
+                "rs",
+                "Cargo.toml",
+            )],
+        );
+        reset_project_root_canonicalization_count();
+
+        let prepared = broker
+            .prepare_refresh(
+                "rust",
+                vec![
+                    LspDocument {
+                        language: "rust".to_owned(),
+                        language_id: "rust".to_owned(),
+                        relative_path: "src/one.rs".to_owned(),
+                        text: "fn one() {}".to_owned(),
+                    },
+                    LspDocument {
+                        language: "rust".to_owned(),
+                        language_id: "rust".to_owned(),
+                        relative_path: "src/two.rs".to_owned(),
+                        text: "fn two() {}".to_owned(),
+                    },
+                ],
+            )
+            .expect("refresh preparation");
+
+        assert!(prepared.is_some());
+        assert_eq!(project_root_canonicalization_count(), 1);
+    }
+
+    #[test]
+    fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
+        let project = tempfile::tempdir().expect("project");
+        let command = project.path().join("analyzer");
+        std::fs::write(&command, "").expect("analyzer command");
+        let mut documents = Vec::with_capacity(MAX_ANALYZER_QUEUED_ROOT_BATCHES + 1);
+        for index in 0..=MAX_ANALYZER_QUEUED_ROOT_BATCHES {
+            let package = project.path().join(format!("package-{index}"));
+            std::fs::create_dir_all(package.join("src")).expect("package source directory");
+            std::fs::write(package.join("marker"), "").expect("package root marker");
+            documents.push(LspDocument {
+                language: "rust".to_owned(),
+                language_id: "rust".to_owned(),
+                relative_path: format!("package-{index}/src/lib.rs"),
+                text: "fn package() {}".to_owned(),
+            });
+        }
+        let mut broker = DiagnosticBroker::new_for_test(
+            project.path(),
+            vec![adapter("rust", command.to_string_lossy(), "rs", "marker")],
+        );
+
+        let error = match broker.prepare_refresh("rust", documents) {
+            Err(error) => error,
+            Ok(_) => panic!("queue saturation must reject before analyzer startup"),
+        };
+
+        assert!(error.to_string().contains("analyzer root queue saturated"));
+        assert_eq!(broker.snapshot().engines[0].state, EngineState::Unavailable);
     }
 }

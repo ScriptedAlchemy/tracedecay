@@ -16,7 +16,10 @@ pub const MAX_PUBLICATION_BYTES: usize = 256 * 1024;
 /// Maximum number of live bridge sessions in one daemon process.
 pub const MAX_LSP_SESSIONS: usize = 64;
 /// Maximum roots admitted into one exact workspace-folder set.
-pub const MAX_LSP_WORKSPACE_ROOTS: usize = 64;
+/// A client may only admit the bounded root set authorized for this session.
+/// Keeping this small also bounds federated provider fan-out before any graph
+/// or analyzer operation is started.
+pub const MAX_LSP_WORKSPACE_ROOTS: usize = 8;
 /// Detached session state is deterministically discarded after this TTL.
 pub const LSP_SESSION_TTL_MS: u64 = 15 * 60 * 1_000;
 
