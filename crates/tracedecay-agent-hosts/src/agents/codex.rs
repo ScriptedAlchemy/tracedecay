@@ -441,12 +441,21 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        // `~/.codex/agents` is registration surface, not deployed component
+        // assets: `host_component_registration_paths` declares every generated
+        // export plus the ownership manifest for Core. The legacy `install`
+        // path refreshed them through `install_codex_plugin`, so activation
+        // has to do it here too — otherwise a Core install through the
+        // receipt-backed lifecycle never writes the current exports and never
+        // retires the ones a previous bundle owned.
+        install_codex_managed_agents(&ctx.home)?;
         codex_activate_plugin(&ctx.home, &ctx.tracedecay_bin)?;
         sync_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin)?;
         Ok(())
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        crate::automation::agent_targets::remove_managed_agents(&ctx.home.join(".codex/agents"))?;
         uninstall_codex_config(&codex_config_path(&ctx.home))?;
         remove_codex_marketplace_entry(&ctx.home)
     }

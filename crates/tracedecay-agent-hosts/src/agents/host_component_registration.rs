@@ -1061,7 +1061,24 @@ impl HostComponentRegistrationDelegate {
             }
             mutation_plan.paths.clone()
         } else {
-            current_registration_paths
+            // The inventory recorded at backup time is what the backup markers
+            // are indexed by, so it -- not a fresh recomputation -- is the set
+            // to restore. Some inventories are derived from state the operation
+            // itself rewrites: Codex's `.tracedecay-managed-agents.json` is both
+            // a registration path and the record naming the previous bundle's
+            // exports, so a Core apply that retires a stale export shrinks the
+            // recomputed set. Demanding exact equality made every such rollback
+            // refuse as `WrongTarget` and strand the journal. Require instead
+            // that the recorded inventory still cover everything registration
+            // surface is today, which is what actually rules out restoring a
+            // backup taken for a different target.
+            if current_registration_paths
+                .iter()
+                .any(|path| !persisted_paths.contains(path))
+            {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+            }
+            persisted_paths.clone()
         };
         let allowed_registration_directories = self.allowed_registration_directories();
         let registration_directories = mutation_plan.directories.clone();
