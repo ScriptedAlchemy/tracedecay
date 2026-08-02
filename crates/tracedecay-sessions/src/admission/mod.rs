@@ -414,6 +414,7 @@ pub(crate) mod test_support {
         projected_sequences: Vec<u64>,
         parse_offsets: Vec<(ObservationScopeV1, String, ParseOffset)>,
         capture_failures_remaining: usize,
+        session_message_failures_remaining: usize,
     }
 
     #[derive(Clone, Default)]
@@ -574,6 +575,12 @@ pub(crate) mod test_support {
             self.store.state().capture_failures_remaining = 1;
         }
 
+        /// Make the next `count` session-message lookups report the store as
+        /// unavailable, the way reader-pool saturation does.
+        pub(crate) fn fail_next_session_message_lookups(&self, count: usize) {
+            self.store.state().session_message_failures_remaining = count;
+        }
+
         pub(crate) fn pending_projection_count(&self) -> usize {
             let state = self.store.state();
             state
@@ -706,6 +713,13 @@ pub(crate) mod test_support {
             message_id: &'a str,
         ) -> AdmissionFuture<'a, bool> {
             Box::pin(async move {
+                {
+                    let mut state = self.store.state();
+                    if state.session_message_failures_remaining > 0 {
+                        state.session_message_failures_remaining -= 1;
+                        return Err(HostAdmissionOutcome::registered_authority_unavailable());
+                    }
+                }
                 Ok(self.store.state().observations.iter().any(|stored| {
                     stored.observation().scope() == scope
                         && stored.observation().source().provider().as_str() == provider

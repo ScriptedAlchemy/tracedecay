@@ -34,17 +34,59 @@ use outcome::{interruption, validate_probe};
 pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
 
+/// How long a worker that outran [`SNAPSHOT_END_GRACE`] has to confirm its
+/// rollback before the pool writes it off and replaces it.
+///
+/// This must stay comfortably below the attachment drain timeout (5s): a
+/// shutdown that starts while a worker is in limbo has to be able to wait the
+/// limbo out and still converge.
+pub(super) const DEFERRED_SNAPSHOT_END_LIMIT: Duration = Duration::from_secs(2);
+
+/// General-lane workers reachable only by interactive acquisitions.
+///
+/// Foreground and background reads share one lane of workers, so without a
+/// reservation a bulk sweep that opens `max_per_hot_shard` concurrent reads
+/// occupies the lane completely and every interactive read waits out its
+/// deadline and reports `Saturated`. Background acquisitions therefore admit
+/// against `max_per_hot_shard` minus this reservation.
+pub(super) const FOREGROUND_RESERVED_GENERAL_WORKERS: u16 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReaderLane {
     General,
     ReservedHealth,
 }
 
-impl ReaderLane {
+/// Which lane an acquisition enters, and whether it admits against the
+/// reserved-interactive slice of that lane or only the unreserved remainder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct LaneAdmission {
+    lane: ReaderLane,
+    background: bool,
+}
+
+impl LaneAdmission {
     fn for_priority(priority: OperationPriorityV1) -> Self {
         match priority {
-            OperationPriorityV1::Health => Self::ReservedHealth,
-            OperationPriorityV1::Foreground | OperationPriorityV1::Background => Self::General,
+            OperationPriorityV1::Health => Self {
+                lane: ReaderLane::ReservedHealth,
+                background: false,
+            },
+            OperationPriorityV1::Foreground => Self {
+                lane: ReaderLane::General,
+                background: false,
+            },
+            OperationPriorityV1::Background => Self {
+                lane: ReaderLane::General,
+                background: true,
+            },
+        }
+    }
+
+    const fn interactive(lane: ReaderLane) -> Self {
+        Self {
+            lane,
+            background: false,
         }
     }
 }
@@ -73,6 +115,21 @@ pub(super) struct PoolState {
     health: VecDeque<AvailableWorker>,
     pub(super) leased_general: u16,
     pub(super) leased_health: u16,
+    /// Workers whose snapshot end outran [`SNAPSHOT_END_GRACE`].
+    ///
+    /// Their lease has ended but the worker has not confirmed its rollback, so
+    /// it is neither available nor leased. It is still counted here — a limbo
+    /// worker that vanished from the accounting would silently shrink the lane
+    /// and let a shutdown declare quiescence with work still in flight.
+    pub(super) limbo_general: u16,
+    pub(super) limbo_health: u16,
+    /// Acquisitions currently blocked waiting for capacity in each lane.
+    ///
+    /// Occupancy alone cannot distinguish a lane that is merely busy from one
+    /// that is turning callers away: a full lane with no waiters is working,
+    /// a full lane with waiters is the saturation users report.
+    pub(super) waiting_general: u16,
+    pub(super) waiting_health: u16,
 }
 
 impl PoolState {
@@ -81,6 +138,41 @@ impl PoolState {
             .values()
             .filter(|record| record.lane == lane)
             .count() as u16
+    }
+
+    /// Workers this lane can actually hand out: its records minus the ones
+    /// stuck finishing a snapshot. Excluding limbo lets the lane spawn a
+    /// replacement instead of running degraded until the straggler resolves.
+    fn serviceable_workers(&self, lane: ReaderLane) -> u16 {
+        self.workers(lane).saturating_sub(self.limbo(lane))
+    }
+
+    pub(super) const fn limbo(&self, lane: ReaderLane) -> u16 {
+        match lane {
+            ReaderLane::General => self.limbo_general,
+            ReaderLane::ReservedHealth => self.limbo_health,
+        }
+    }
+
+    pub(super) const fn limbo_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.limbo_general,
+            ReaderLane::ReservedHealth => &mut self.limbo_health,
+        }
+    }
+
+    const fn waiting(&self, lane: ReaderLane) -> u16 {
+        match lane {
+            ReaderLane::General => self.waiting_general,
+            ReaderLane::ReservedHealth => self.waiting_health,
+        }
+    }
+
+    const fn waiting_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.waiting_general,
+            ReaderLane::ReservedHealth => &mut self.waiting_health,
+        }
     }
 
     pub(super) fn available(&mut self, lane: ReaderLane) -> &mut VecDeque<AvailableWorker> {
@@ -109,6 +201,49 @@ impl PoolState {
             ReaderLane::General => &mut self.leased_general,
             ReaderLane::ReservedHealth => &mut self.leased_health,
         }
+    }
+}
+
+/// Counts one acquisition as a waiter for as long as it is blocked.
+///
+/// The count is armed the first time the acquisition has to wait and released
+/// on every exit path, including the interrupted and saturated ones. Declaring
+/// it before the state guard inside the loop means the guard is always dropped
+/// first, so re-locking here can never deadlock.
+struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
+    inner: &'pool PoolInner<E>,
+    lane: ReaderLane,
+    counted: bool,
+}
+
+impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
+    const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
+        Self {
+            inner,
+            lane,
+            counted: false,
+        }
+    }
+
+    const fn arm(&mut self, state: &mut PoolState) {
+        if !self.counted {
+            self.counted = true;
+            *state.waiting_mut(self.lane) += 1;
+        }
+    }
+}
+
+impl<E: ReaderQueryExecutor> Drop for WaitingGuard<'_, E> {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state.waiting_mut(self.lane) = state.waiting(self.lane).saturating_sub(1);
     }
 }
 
@@ -212,6 +347,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 health: VecDeque::new(),
                 leased_general: 0,
                 leased_health: 0,
+                limbo_general: 0,
+                limbo_health: 0,
+                waiting_general: 0,
+                waiting_health: 0,
             }),
             capacity_changed: Condvar::new(),
         });
@@ -245,23 +384,30 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
     }
 
+    /// Run one migration-SQL query under the caller's declared priority.
+    ///
+    /// The priority is the caller's, not a pool default: a bulk sweep that
+    /// declares `Background` admits against the unreserved slice of the
+    /// general lane and cannot displace interactive reads.
     pub(crate) fn execute_migration_query(
         &self,
         statement: MigrationSqlStatement,
+        priority: OperationPriorityV1,
         max_wait: Duration,
     ) -> Result<MigrationSqlRows, MigrationSqlError> {
         let mut lease = self
-            .acquire_lane(ReaderLane::General, max_wait, || None)
+            .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
             .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
         lease.execute_migration_query(statement)
     }
 
     pub(crate) fn begin_migration_snapshot(
         &self,
+        priority: OperationPriorityV1,
         max_wait: Duration,
     ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
         let mut lease = self
-            .acquire_lane(ReaderLane::General, max_wait, || None)
+            .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
             .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
         lease.begin_migration_snapshot()?;
         Ok(MigrationSqlReadSnapshot::new(move |statement| {
@@ -274,7 +420,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         max_wait: Duration,
     ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
         let mut lease = self
-            .acquire_lane(ReaderLane::ReservedHealth, max_wait, || None)
+            .acquire_lane(
+                LaneAdmission::interactive(ReaderLane::ReservedHealth),
+                max_wait,
+                || None,
+            )
             .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
         lease.retire_after_snapshot();
         lease.begin_migration_snapshot()?;
@@ -291,7 +441,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
-        let mut lease = self.acquire_lane(ReaderLane::ReservedHealth, max_wait, interrupted)?;
+        let mut lease = self.acquire_lane(
+            LaneAdmission::interactive(ReaderLane::ReservedHealth),
+            max_wait,
+            interrupted,
+        )?;
         lease.read_store_size()
     }
 
@@ -303,7 +457,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
-        let mut lease = self.acquire_lane(ReaderLane::ReservedHealth, max_wait, interrupted)?;
+        let mut lease = self.acquire_lane(
+            LaneAdmission::interactive(ReaderLane::ReservedHealth),
+            max_wait,
+            interrupted,
+        )?;
         lease.read_table_sizes()
     }
 
@@ -321,6 +479,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             available_health: state.health.len() as u16,
             leased_general: state.leased_general,
             leased_health: state.leased_health,
+            limbo_general: state.limbo_general,
+            limbo_health: state.limbo_health,
+            waiting_general: state.waiting_general,
+            waiting_health: state.waiting_health,
         }
     }
 
@@ -368,6 +530,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             && state.opening_health == 0
             && state.leased_general == 0
             && state.leased_health == 0
+            // A worker still finishing a deferred snapshot end is in flight
+            // even though nothing holds its lease. Dropping the pool now would
+            // join a worker mid-rollback with no bound.
+            && state.limbo_general == 0
+            && state.limbo_health == 0
             && Arc::strong_count(&self.inner) == 1
     }
 
@@ -387,8 +554,27 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             return Err(ReaderAcquireError::BindingMismatch);
         }
         validate_probe(request, probe)?;
-        let lane = ReaderLane::for_priority(request.priority());
-        self.acquire_lane(lane, max_wait, || interruption(probe))
+        let admission = LaneAdmission::for_priority(request.priority());
+        self.acquire_lane(admission, max_wait, || interruption(probe))
+    }
+
+    /// How many concurrent leases this acquisition may hold in its lane.
+    ///
+    /// A background acquisition stops short of `max_per_hot_shard` so the
+    /// remainder stays reachable by interactive reads. The reservation never
+    /// shrinks background below one worker: with the smallest legal budget
+    /// (`max_per_hot_shard == 2`) maintenance would otherwise never admit.
+    fn lease_ceiling(&self, admission: LaneAdmission) -> u16 {
+        match admission.lane {
+            ReaderLane::ReservedHealth => 1,
+            ReaderLane::General if admission.background => self
+                .inner
+                .budget
+                .max_per_hot_shard
+                .saturating_sub(FOREGROUND_RESERVED_GENERAL_WORKERS)
+                .max(1),
+            ReaderLane::General => self.inner.budget.max_per_hot_shard,
+        }
     }
 
     /// Give a direct dispatch one bounded poll quantum to absorb a transient
@@ -403,13 +589,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
     fn acquire_lane<F>(
         &self,
-        lane: ReaderLane,
+        admission: LaneAdmission,
         max_wait: Duration,
         mut interrupted: F,
     ) -> Result<ReaderLease<E>, ReaderAcquireError>
     where
         F: FnMut() -> Option<UnavailableReasonV1>,
     {
+        let lane = admission.lane;
+        let lease_ceiling = self.lease_ceiling(admission);
+        let mut waiting = WaitingGuard::new(&self.inner, lane);
         let started = Instant::now();
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
@@ -453,6 +642,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     });
                 }
                 let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+                waiting.arm(&mut state);
                 let (_state, wait_result) = self
                     .inner
                     .capacity_changed
@@ -461,70 +651,86 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 retire_pending = !wait_result.timed_out();
                 continue;
             }
-            if let Some(worker) = state.available(lane).pop_front() {
-                match lane {
-                    ReaderLane::General => state.leased_general += 1,
-                    ReaderLane::ReservedHealth => state.leased_health += 1,
-                }
-                drop(state);
-                return Ok(ReaderLease::checkout(Arc::clone(&self.inner), lane, worker));
-            }
-            // The reserved-health lane must be able to grow too. Its single
-            // worker is otherwise only ever spawned in `start`, and a transient
-            // snapshot-end failure retires it permanently: from then on every
-            // health acquisition spins to `max_wait` and reports Saturated for
-            // the life of the attachment, while `snapshot()` still says Ready.
-            let lane_capacity = match lane {
-                ReaderLane::General => self.inner.budget.max_per_hot_shard,
-                ReaderLane::ReservedHealth => 1,
+            // Foreground reservation. A background acquisition holding fewer
+            // than `lease_ceiling` leases may take or grow a worker; at the
+            // ceiling it waits here instead, leaving the rest of the lane —
+            // both idle workers and unspawned headroom — for interactive
+            // reads. Foreground acquisitions see the whole lane.
+            let leased = match lane {
+                ReaderLane::General => state.leased_general,
+                ReaderLane::ReservedHealth => state.leased_health,
             };
-            if state.workers(lane).saturating_add(state.opening(lane)) < lane_capacity {
-                *state.opening_mut(lane) += 1;
-                drop(state);
-                let spawned =
-                    worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
-                        .and_then(|spawned| self.validate_worker_identity(spawned));
-                let mut state = self
-                    .inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *state.opening_mut(lane) -= 1;
-                let spawned = spawned.map_err(ReaderAcquireError::WorkerStart)?;
-                let id = state.next_id;
-                state.next_id += 1;
-                let client = spawned.client.clone();
-                state.records.insert(
-                    id,
-                    WorkerRecord {
-                        client: spawned.client,
-                        join: Some(spawned.join),
-                        lane,
-                    },
-                );
-                if state.lifecycle == ReaderPoolState::Draining {
-                    state.available(lane).push_back(AvailableWorker {
-                        id,
-                        client,
-                        idle_since: Instant::now(),
-                    });
+            if leased < lease_ceiling {
+                if let Some(worker) = state.available(lane).pop_front() {
+                    match lane {
+                        ReaderLane::General => state.leased_general += 1,
+                        ReaderLane::ReservedHealth => state.leased_health += 1,
+                    }
                     drop(state);
-                    self.inner.capacity_changed.notify_all();
-                    return Err(ReaderAcquireError::Interrupted {
-                        reason: UnavailableReasonV1::Draining,
-                    });
+                    return Ok(ReaderLease::checkout(Arc::clone(&self.inner), lane, worker));
                 }
-                *state.leased_mut(lane) += 1;
-                drop(state);
-                return Ok(ReaderLease::checkout(
-                    Arc::clone(&self.inner),
-                    lane,
-                    AvailableWorker {
+                // The reserved-health lane must be able to grow too. Its single
+                // worker is otherwise only ever spawned in `start`, and a
+                // transient snapshot-end failure retires it permanently: from
+                // then on every health acquisition spins to `max_wait` and
+                // reports Saturated for the life of the attachment, while
+                // `snapshot()` still says Ready.
+                let lane_capacity = match lane {
+                    ReaderLane::General => self.inner.budget.max_per_hot_shard,
+                    ReaderLane::ReservedHealth => 1,
+                };
+                if state
+                    .serviceable_workers(lane)
+                    .saturating_add(state.opening(lane))
+                    < lane_capacity
+                {
+                    *state.opening_mut(lane) += 1;
+                    drop(state);
+                    let spawned =
+                        worker::spawn(self.inner.locator.clone(), self.inner.executor.clone())
+                            .and_then(|spawned| self.validate_worker_identity(spawned));
+                    let mut state = self
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *state.opening_mut(lane) -= 1;
+                    let spawned = spawned.map_err(ReaderAcquireError::WorkerStart)?;
+                    let id = state.next_id;
+                    state.next_id += 1;
+                    let client = spawned.client.clone();
+                    state.records.insert(
                         id,
-                        client,
-                        idle_since: Instant::now(),
-                    },
-                ));
+                        WorkerRecord {
+                            client: spawned.client,
+                            join: Some(spawned.join),
+                            lane,
+                        },
+                    );
+                    if state.lifecycle == ReaderPoolState::Draining {
+                        state.available(lane).push_back(AvailableWorker {
+                            id,
+                            client,
+                            idle_since: Instant::now(),
+                        });
+                        drop(state);
+                        self.inner.capacity_changed.notify_all();
+                        return Err(ReaderAcquireError::Interrupted {
+                            reason: UnavailableReasonV1::Draining,
+                        });
+                    }
+                    *state.leased_mut(lane) += 1;
+                    drop(state);
+                    return Ok(ReaderLease::checkout(
+                        Arc::clone(&self.inner),
+                        lane,
+                        AvailableWorker {
+                            id,
+                            client,
+                            idle_since: Instant::now(),
+                        },
+                    ));
+                }
             }
             let elapsed = started.elapsed();
             if elapsed >= max_wait {
@@ -533,6 +739,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 });
             }
             let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+            waiting.arm(&mut state);
             let (_state, wait_result) = self
                 .inner
                 .capacity_changed
