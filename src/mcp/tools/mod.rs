@@ -383,9 +383,16 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             })
             .unwrap_or_default();
         if !required.is_empty() {
-            return Some(format!("object with required keys: {}", required.join(", ")));
+            return Some(format!(
+                "object with required keys: {}",
+                required.join(", ")
+            ));
         }
-        if schema.get("properties").and_then(Value::as_object).is_some() {
+        if schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some()
+        {
             return Some("object — pass JSON via --args".to_string());
         }
         return None;
@@ -438,14 +445,14 @@ fn example_object_value(
 }
 
 /// Expand an object schema into a skeleton containing its required keys.
-fn example_from_object_schema(key: &str, schema: &Value, depth: usize) -> Value {
+fn example_from_object_schema(schema: &Value, depth: usize) -> Value {
     if depth >= EXAMPLE_MAX_DEPTH {
         return Value::Object(serde_json::Map::new());
     }
     // A closed variant union: show the first variant, which the accompanying
     // shape note lists alongside its alternatives.
     if let Some(variant) = one_of_variants(schema).and_then(|variants| variants.first()) {
-        return example_from_object_schema(key, variant, depth + 1);
+        return example_from_object_schema(variant, depth + 1);
     }
     let Some(props) = schema.get("properties").and_then(Value::as_object) else {
         return Value::Object(serde_json::Map::new());
@@ -464,7 +471,7 @@ fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value
         "integer" | "number" => Value::from(10),
         "array" => {
             let items = schema.get("items");
-            let items_type = items.map(schema_type).unwrap_or("string");
+            let items_type = items.map_or("string", schema_type);
             let element = match items_type {
                 "array" => {
                     let inner = items
@@ -477,14 +484,12 @@ fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value
                         placeholder_value(key, &inner, inner_type, depth + 1),
                     ])
                 }
-                "object" => {
-                    example_from_object_schema(key, items.unwrap_or(&Value::Null), depth + 1)
-                }
+                "object" => example_from_object_schema(items.unwrap_or(&Value::Null), depth + 1),
                 other => placeholder_value(key, items.unwrap_or(&Value::Null), other, depth + 1),
             };
             Value::Array(vec![element])
         }
-        "object" => example_from_object_schema(key, schema, depth),
+        "object" => example_from_object_schema(schema, depth),
         _ => {
             if let Some(literal) = schema.get("const") {
                 return literal.clone();

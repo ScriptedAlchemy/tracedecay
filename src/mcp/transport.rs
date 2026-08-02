@@ -103,6 +103,12 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
     async fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush().await
     }
+
+    fn peer_fully_closed_after_eof(
+        &self,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.inner.peer_fully_closed_after_eof()
+    }
 }
 
 /// Real stdio transport — reads from stdin, writes to stdout.

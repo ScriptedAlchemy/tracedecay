@@ -104,16 +104,13 @@ impl OpenedDatabaseFile {
         &self,
         canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
-        #[cfg(unix)]
+        #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
         {
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            {
-                return self.worker_open_path(canonical_path);
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            {
-                return Ok(canonical_path.to_path_buf());
-            }
+            self.worker_open_path(canonical_path)
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+        {
+            Ok(canonical_path.to_path_buf())
         }
         #[cfg(windows)]
         {

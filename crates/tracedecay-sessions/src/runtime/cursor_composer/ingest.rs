@@ -545,7 +545,7 @@ impl CursorComposerSource {
                     let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
                         continue;
                     };
-                    if context
+                    match context
                         .facade
                         .has_session_message(
                             &context.scope,
@@ -553,9 +553,20 @@ impl CursorComposerSource {
                             &format!("{composer_id}:{bubble_id}"),
                         )
                         .await
-                        .unwrap_or(true)
                     {
-                        continue;
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        // A store error is unavailability, not an answer.
+                        // Reading it as "already ingested" would drop the
+                        // bubble permanently: every later header in this
+                        // composer advances the source cursor past this
+                        // position, so no catch-up pass would revisit it.
+                        // Defer instead — stop before the cursor can move,
+                        // and let the next pass retry from here.
+                        Err(_) => {
+                            byte_budget.defer();
+                            break;
+                        }
                     }
                     let header_position = position as u64;
                     let Ok(source) = cursor_composer_source(&composer_id) else {

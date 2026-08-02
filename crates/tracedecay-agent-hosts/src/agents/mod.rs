@@ -2773,7 +2773,7 @@ pub fn read_only_tool_names() -> Vec<String> {
 pub fn expected_tool_perms() -> Vec<String> {
     advertised_tools()
         .iter()
-        .map(|tool| format!("mcp__tracedecay__{}", tool.name))
+        .map(|tool| format!("{}{}", crate::tool_name::LEGACY_TOOL_PREFIX, tool.name))
         .collect()
 }
 

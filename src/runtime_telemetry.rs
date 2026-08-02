@@ -82,6 +82,61 @@ pub struct DatabaseSnapshot {
     /// graph size — a 25× ratio with a tiny graph is suspicious.
     pub node_count: u64,
     pub edge_count: u64,
+    /// Live reader-pool occupancy for this store, when the pool is attached.
+    ///
+    /// Reader saturation is the failure users actually hit — a query reports
+    /// `reader acquisition saturated` and there is otherwise nothing to look
+    /// at. This is the after-the-fact evidence: where the workers went, and
+    /// whether anyone is queued behind them.
+    pub reader_pool: Option<ReaderPoolOccupancy>,
+}
+
+/// Per-lane reader-pool occupancy at one instant.
+///
+/// `available + leased + limbo` accounts for every worker in a lane. `limbo`
+/// is a worker whose lease ended but whose snapshot rollback has not been
+/// confirmed; `waiting` is acquisitions blocked for capacity, which is what
+/// separates a lane that is busy from one that is turning callers away.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReaderPoolOccupancy {
+    /// `ready` or `draining`.
+    pub state: String,
+    pub general: ReaderLaneOccupancy,
+    pub health: ReaderLaneOccupancy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReaderLaneOccupancy {
+    pub workers: u16,
+    pub available: u16,
+    pub leased: u16,
+    pub limbo: u16,
+    pub waiting: u16,
+}
+
+impl ReaderPoolOccupancy {
+    fn from_pool(snapshot: &crate::db::engine::ReaderPoolSnapshot) -> Self {
+        Self {
+            state: match snapshot.state {
+                crate::db::engine::ReaderPoolState::Ready => "ready".to_string(),
+                crate::db::engine::ReaderPoolState::Draining => "draining".to_string(),
+            },
+            general: ReaderLaneOccupancy {
+                workers: snapshot.general_workers,
+                available: snapshot.available_general,
+                leased: snapshot.leased_general,
+                limbo: snapshot.limbo_general,
+                waiting: snapshot.waiting_general,
+            },
+            health: ReaderLaneOccupancy {
+                workers: snapshot.health_workers,
+                available: snapshot.available_health,
+                leased: snapshot.leased_health,
+                limbo: snapshot.limbo_health,
+                waiting: snapshot.waiting_health,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +239,8 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            source indexed   {src}\n\
            db / source      {ratio:.1}×\n\
            nodes / edges    {nodes} / {edges}\n\
+           readers general  {readers_general}\n\
+           readers health   {readers_health}\n\
         ",
         ver = snap.tracedecay_version,
         os = snap.host_os,
@@ -222,6 +279,23 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         ratio = bloat_ratio,
         nodes = d.node_count,
         edges = d.edge_count,
+        readers_general = d.reader_pool.as_ref().map_or_else(
+            || "(unattached)".to_string(),
+            |pool| lane_line(&pool.general)
+        ),
+        readers_health = d.reader_pool.as_ref().map_or_else(
+            || "(unattached)".to_string(),
+            |pool| lane_line(&pool.health)
+        ),
+    )
+}
+
+/// One reader lane as a single terminal line. Waiters are the saturation
+/// signal, so they are always shown rather than elided when zero.
+fn lane_line(lane: &ReaderLaneOccupancy) -> String {
+    format!(
+        "{} workers ({} available, {} leased, {} limbo), {} waiting",
+        lane.workers, lane.available, lane.leased, lane.limbo, lane.waiting
     )
 }
 
@@ -322,6 +396,12 @@ pub(crate) async fn collect_database(
     };
     let source_total_bytes = read_source_total_bytes(cg).await?;
     let (node_count, edge_count) = read_graph_counts(cg).await?;
+    let reader_pool = cg
+        .db()
+        .conn()
+        .reader_pool_occupancy()
+        .as_ref()
+        .map(ReaderPoolOccupancy::from_pool);
     Ok(DatabaseSnapshot {
         project_root,
         db_path,
@@ -339,6 +419,7 @@ pub(crate) async fn collect_database(
         source_total_bytes,
         node_count,
         edge_count,
+        reader_pool,
     })
 }
 
@@ -580,6 +661,54 @@ mod tests {
         assert!(marker.exists);
         assert!(!marker.parsed);
         assert_eq!(marker.state, None);
+    }
+
+    /// A saturated pool is the case the survey exists for, so the rendered
+    /// report has to show where the workers went and who is queued behind
+    /// them — not just a total.
+    #[test]
+    fn reader_lane_line_reports_occupancy_and_waiters() {
+        let line = lane_line(&ReaderLaneOccupancy {
+            workers: 8,
+            available: 0,
+            leased: 6,
+            limbo: 2,
+            waiting: 3,
+        });
+
+        assert_eq!(
+            line,
+            "8 workers (0 available, 6 leased, 2 limbo), 3 waiting"
+        );
+    }
+
+    #[test]
+    fn reader_pool_occupancy_projects_both_lanes_onto_the_wire() {
+        let occupancy = ReaderPoolOccupancy::from_pool(&crate::db::engine::ReaderPoolSnapshot {
+            state: crate::db::engine::ReaderPoolState::Draining,
+            general_workers: 8,
+            available_general: 1,
+            health_workers: 1,
+            available_health: 0,
+            leased_general: 5,
+            leased_health: 1,
+            limbo_general: 2,
+            limbo_health: 0,
+            waiting_general: 4,
+            waiting_health: 0,
+        });
+        let wire = serde_json::to_value(&occupancy).unwrap();
+
+        assert_eq!(wire["state"], "draining");
+        assert_eq!(wire["general"]["workers"], 8);
+        assert_eq!(wire["general"]["limbo"], 2);
+        assert_eq!(wire["general"]["waiting"], 4);
+        assert_eq!(wire["health"]["leased"], 1);
+        // Every worker in a lane is accounted for by exactly one bucket.
+        assert_eq!(
+            occupancy.general.available + occupancy.general.leased + occupancy.general.limbo,
+            occupancy.general.workers
+        );
     }
 
     /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against

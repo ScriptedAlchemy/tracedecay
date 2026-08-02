@@ -224,7 +224,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.tool_list_changed_capable = true;
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none()
     );
@@ -233,7 +233,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.tool_list_changed_capable = false;
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none()
     );
@@ -242,7 +242,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.catalog_version.clear();
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none(),
         "catalog refresh requires an explicitly negotiated catalog version"
@@ -251,7 +251,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let initialize = json!({"jsonrpc": "2.0", "id": 2, "method": "initialize"}).to_string();
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &initialize)
+            .claim_catalog_refresh(&handshake, &initialize, false)
             .await
             .is_none(),
         "fresh initialize marks the generation current without notifying"
@@ -260,7 +260,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.catalog_version = super::super::binary_version().to_string();
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none(),
         "the initialized client must not get a redundant refresh"
@@ -269,13 +269,13 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     handshake.client_instance_id = test_client_instance_id(3);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_some()
     );
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none()
     );
@@ -283,7 +283,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let next_generation = super::super::DaemonEngine::default();
     assert!(
         next_generation
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_some(),
         "a new daemon generation must notify the same long-lived client once"
@@ -293,10 +293,51 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
     let same_version_generation = super::super::DaemonEngine::default();
     assert!(
         same_version_generation
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_some(),
         "generation identity, not a reused package version, controls refresh"
+    );
+}
+
+/// A discovery answer served while the project graph is still warming is
+/// provisional, so it must not mark the client current. Otherwise the client
+/// keeps the warming catalog for the daemon's whole life: this bookkeeping set
+/// is never cleared, and warm-up completion has no other notification hook.
+#[cfg(unix)]
+#[tokio::test]
+async fn warming_catalog_does_not_mark_a_client_current() {
+    let engine = super::super::DaemonEngine::default();
+    let mut handshake = test_handshake_defaults();
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version = super::super::binary_version().to_string();
+    handshake.client_instance_id = test_client_instance_id(7);
+
+    let tools_list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &tools_list, true)
+            .await
+            .is_none(),
+        "a warming tools/list neither notifies nor marks the client current"
+    );
+
+    // Warm-up completed. The client's next non-discovery request must learn the
+    // published catalog is now available.
+    let ping = json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}).to_string();
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping, false)
+            .await
+            .is_some(),
+        "warm-up completion must arm exactly one catalog refresh"
+    );
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping, false)
+            .await
+            .is_none(),
+        "the refresh stays once-per-generation after warm-up"
     );
 }
 
@@ -322,7 +363,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         handshake.client_instance_id = invalid_id;
         assert!(
             engine
-                .claim_catalog_refresh(&handshake, &ping)
+                .claim_catalog_refresh(&handshake, &ping, false)
                 .await
                 .is_none()
         );
@@ -339,7 +380,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         handshake.client_instance_id = test_client_instance_id(value as u128);
         assert!(
             engine
-                .claim_catalog_refresh(&handshake, &ping)
+                .claim_catalog_refresh(&handshake, &ping, false)
                 .await
                 .is_some()
         );
@@ -348,7 +389,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         test_client_instance_id(super::super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION as u128);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none(),
         "capacity saturation must skip rather than evicting an existing client"
@@ -360,7 +401,7 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
     handshake.client_instance_id = test_client_instance_id(0);
     assert!(
         engine
-            .claim_catalog_refresh(&handshake, &ping)
+            .claim_catalog_refresh(&handshake, &ping, false)
             .await
             .is_none(),
         "saturation must preserve existing dedupe entries"
