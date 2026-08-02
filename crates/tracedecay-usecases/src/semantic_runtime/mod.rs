@@ -14,6 +14,7 @@ mod fair_scheduler;
 mod owner;
 mod ports;
 mod production;
+mod publish_failure_memo;
 mod redundancy;
 
 pub(crate) use accepted_profile_authority::SemanticAcceptedProfileAuthorityPortV1;
@@ -70,6 +71,12 @@ pub use production::{
     production_saved_generation_schedule_hook, project_semantic_application_status,
     project_semantic_production_runtime, project_semantic_source_generation,
     register_project_semantic_runtime, unregister_project_semantic_runtime,
+};
+pub use publish_failure_memo::{
+    DEFAULT_PUBLISH_FAILURE_BACKOFF_BASE, DEFAULT_PUBLISH_FAILURE_BACKOFF_CEILING,
+    SemanticPublishAdmissionV1, SemanticPublishFailureKeyV1, SemanticPublishFailureMemoV1,
+    SuppressedSemanticPublishV1, corpus_size_class, publish_failure_witness,
+    semantic_publish_failure_memo,
 };
 pub use redundancy::{
     SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
