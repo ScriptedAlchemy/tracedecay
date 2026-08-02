@@ -228,6 +228,12 @@ fn add_tracked_branch(
 
 #[tokio::test]
 async fn writer_owned_sqlite_snapshot_includes_committed_wal_data_and_readers_stay_read_only() {
+    // `publish_test_runtime` materialises a sidecar *profile* shard next to the
+    // fixture database, and the kernel initialises profile-scoped shards through
+    // a fail-closed port whose installer lives in `tracedecay-global-db`. Only
+    // the root crate can supply it; production reaches this through
+    // `DaemonSessionRuntimeRegistryV1::open`. Idempotent.
+    crate::daemon::store_runtime::register_registered_schema_installer();
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
