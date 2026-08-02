@@ -319,13 +319,32 @@ impl DaemonEngine {
             return Ok(server);
         }
 
-        let cached = self
+        // Request-side open: take only this store's owner lane, and bound the
+        // wait so a stuck writer surfaces as a typed retryable busy error rather
+        // than an unbounded park.
+        let (resolved_project_path, _) = Self::project_route(handshake)?;
+        let scope = crate::daemon::branch_admin::project_open_writer_scope(
+            &resolved_project_path,
+            &handshake.client_identity.profile_root,
+        );
+        let admission = self
             .store_administration
-            .with_writer_until_cancelled(cancellation, || {
-                self.open_project_server_until_cancelled(handshake, cancellation)
-            })
-            .await
-            .ok_or_else(project_open_cancellation_error)??;
+            .with_writer_admission(
+                scope,
+                cancellation,
+                Some(crate::daemon::branch_admin::REQUEST_WRITER_ADMISSION_DEADLINE),
+                || self.open_project_server_until_cancelled(handshake, cancellation),
+            )
+            .await;
+        let cached = match admission {
+            crate::daemon::branch_admin::WriterAdmission::Completed(result) => result?,
+            crate::daemon::branch_admin::WriterAdmission::Cancelled => {
+                return Err(project_open_cancellation_error());
+            }
+            crate::daemon::branch_admin::WriterAdmission::Busy => {
+                return Err(project_open_writer_busy_error(&resolved_project_path));
+            }
+        };
         let (_key, project_path, server, _inserted) = cached;
         project_open_cancellation_checkpoint(cancellation)?;
         Ok(self.activate_project_server(project_path, server).await)
@@ -602,8 +621,9 @@ impl DaemonEngine {
     ) {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
+        let scope = crate::daemon::branch_admin::owner_writer_scope(&key);
         self.store_administration
-            .with_writer(|| async move {
+            .with_writer_in(scope, || async move {
                 if self
                     .store_administration
                     .project_servers()
@@ -697,9 +717,13 @@ impl DaemonEngine {
             let route_registered = Arc::clone(&route_registered);
             let handshake = handshake.clone();
             Box::pin(async move {
+                let scope = crate::daemon::branch_admin::graph_writer_scope(
+                    &fresh,
+                    crate::daemon::branch_admin::StoreWriterClass::Owner,
+                );
                 let transition = engine
                     .store_administration
-                    .with_writer(|| async {
+                    .with_writer_in(scope, || async {
                         if !route_registered.load(Ordering::Acquire) {
                             return None;
                         }

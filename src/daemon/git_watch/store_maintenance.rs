@@ -15,7 +15,7 @@ use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
 #[cfg(unix)]
-use super::branch_admin::StoreAdministration;
+use super::branch_admin::{StoreAdministration, StoreWriterClass};
 #[cfg(unix)]
 use super::git_watch::GitWatcherInner;
 use super::log_daemon_event;
@@ -34,23 +34,34 @@ pub(super) async fn sync_project(
     escalation: usize,
     administration: &StoreAdministration,
 ) -> bool {
-    // Hold the administration gate from before opening the store until the
-    // `TraceDecay` handle drops. This prevents branch-store GC from selecting
-    // or unlinking the SQLite family while a watcher sync owns it.
+    // The sync must still exclude branch-store GC — GC selects and unlinks the
+    // SQLite family this sync is writing into — but nothing else. It therefore
+    // takes the store's *content* lane rather than daemon-wide exclusion.
+    //
+    // What that changes: `cg.sync()` is O(store) and runs for minutes on a large
+    // index. Under the old single daemon-wide gate it blocked every writer in
+    // the process, including the first project-open of an unrelated project. Now
+    // it blocks only this store's destructive lane and other content writers on
+    // this same store, which is exactly the protection the original comment
+    // asked for. Owner bookkeeping for this store — project open, owner rekey,
+    // scheduler transitions — proceeds beside it.
     administration
-        .with_writer(|| async {
-            let base = cg.last_synced_commit().await;
-            let result = match base {
-                Some(base) => match cg.stale_files_since_commit(&base, escalation) {
-                    Some(files) if files.is_empty() => Ok(()),
-                    Some(files) => cg.sync_if_stale_silent(&files).await,
-                    // Base missing/unreachable or over the escalation limit → full.
+        .with_writer_in(
+            crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Content),
+            || async {
+                let base = cg.last_synced_commit().await;
+                let result = match base {
+                    Some(base) => match cg.stale_files_since_commit(&base, escalation) {
+                        Some(files) if files.is_empty() => Ok(()),
+                        Some(files) => cg.sync_if_stale_silent(&files).await,
+                        // Base missing/unreachable or over the escalation limit → full.
+                        None => cg.sync().await.map(|_| ()),
+                    },
                     None => cg.sync().await.map(|_| ()),
-                },
-                None => cg.sync().await.map(|_| ()),
-            };
-            result.is_ok()
-        })
+                };
+                result.is_ok()
+            },
+        )
         .await
 }
 
@@ -64,12 +75,15 @@ pub(super) async fn track_worktree_branch(
     branch: String,
 ) -> Option<String> {
     administration
-        .with_writer(|| async {
-            cg.track_worktree_branch(&wt_root, &branch)
-                .await
-                .ok()
-                .map(|outcome| format!("{outcome:?}"))
-        })
+        .with_writer_in(
+            crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Owner),
+            || async {
+                cg.track_worktree_branch(&wt_root, &branch)
+                    .await
+                    .ok()
+                    .map(|outcome| format!("{outcome:?}"))
+            },
+        )
         .await
 }
 
