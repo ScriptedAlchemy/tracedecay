@@ -373,6 +373,12 @@ struct ServeProxy {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
+    /// Accumulates the child's stderr in the background so a failure can
+    /// report *why* the process died instead of just that its stdout closed.
+    /// `tracedecay serve` is otherwise silent on success, so nulling stderr
+    /// (the prior behavior) discarded the one diagnostic channel available
+    /// when it exits early.
+    stderr: tokio::task::JoinHandle<String>,
 }
 
 impl ServeProxy {
@@ -382,9 +388,23 @@ impl ServeProxy {
             .arg("--path")
             .arg(project)
             .current_dir(project)
+            // `.cargo/config.toml` pins every cargo-launched process (this
+            // test binary included) at a workspace-local profile via
+            // `TRACEDECAY_DATA_DIR=target/test-profile/.tracedecay`, so that
+            // ordinary `cargo test`/`cargo run` never touches the operator's
+            // real `~/.tracedecay` or contends with a live daemon. This
+            // suite is the deliberate exception: it targets the operator's
+            // real, already-running managed daemon, so the spawned `serve`
+            // proxy must resolve the real default profile rather than
+            // inheriting the sandbox pin — otherwise it looks for a daemon
+            // socket under `target/test-profile/...` that nothing is
+            // listening on, fails its "is the daemon available" check
+            // immediately, and exits before answering the first request
+            // (surfacing upstream as a bare stdout EOF).
+            .env_remove(tracedecay::config::USER_DATA_DIR_ENV)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap_or_else(|error| {
@@ -395,10 +415,17 @@ impl ServeProxy {
             });
         let stdin = child.stdin.take().expect("serve stdin pipe");
         let stdout = BufReader::new(child.stdout.take().expect("serve stdout pipe"));
+        let mut child_stderr = child.stderr.take().expect("serve stderr pipe");
+        let stderr = tokio::spawn(async move {
+            let mut buffer = String::new();
+            let _ = tokio::io::AsyncReadExt::read_to_string(&mut child_stderr, &mut buffer).await;
+            buffer
+        });
         Self {
             child,
             stdin,
             stdout,
+            stderr,
         }
     }
 
@@ -412,6 +439,18 @@ impl ServeProxy {
             .flush()
             .await
             .expect("flushing the serve proxy must succeed");
+    }
+
+    /// Snapshots whatever the child has written to stderr so far, bounded by
+    /// a short grace period. Used only for failure diagnostics: a still-alive
+    /// child normally has nothing on stderr, and a dead one has already
+    /// closed the pipe, so this returns promptly either way.
+    async fn stderr_snapshot(&mut self) -> String {
+        match tokio::time::timeout(Duration::from_millis(500), &mut self.stderr).await {
+            Ok(Ok(captured)) => captured,
+            Ok(Err(join_error)) => format!("<stderr capture task failed: {join_error}>"),
+            Err(_) => "<stderr still streaming; child has not exited>".to_string(),
+        }
     }
 
     /// Reads response lines until one carries the requested id.
@@ -432,18 +471,23 @@ impl ServeProxy {
                     )
                 })
                 .expect("reading from the serve proxy must succeed");
-            assert!(
-                read != 0,
-                "serve proxy closed its stdout before answering request {id}"
-            );
+            if read == 0 {
+                let stderr = self.stderr_snapshot().await;
+                panic!(
+                    "serve proxy closed its stdout before answering request {id}; \
+                     child stderr:\n{stderr}"
+                );
+            }
             let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
                 continue;
             };
             if value.get("id").and_then(Value::as_i64) == Some(id) {
-                assert!(
-                    value.get("error").is_none(),
-                    "serve proxy request {id} failed: {value}"
-                );
+                if value.get("error").is_some() {
+                    let stderr = self.stderr_snapshot().await;
+                    panic!(
+                        "serve proxy request {id} failed: {value}; child stderr:\n{stderr}"
+                    );
+                }
                 return value;
             }
         }
@@ -493,6 +537,7 @@ impl ServeProxy {
 
     /// Kills the proxy this suite spawned. Only ever this child's PID.
     async fn shutdown(mut self) {
+        self.stderr.abort();
         drop(self.stdin);
         let _ = self.child.kill().await;
     }
