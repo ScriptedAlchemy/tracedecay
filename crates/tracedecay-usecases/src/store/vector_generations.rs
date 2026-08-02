@@ -77,6 +77,47 @@ CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_payload_v1 (
 const VECTOR_PAYLOAD_STATEMENT_ROWS: usize = 256;
 const VECTOR_PAYLOAD_TABLE_V1: &str = "semantic_vector_payload_v1";
 const VECTOR_EVALUATION_PAYLOAD_TABLE_V1: &str = "semantic_vector_evaluation_payload_v1";
+/// Slice storage for the state document's corpus-sized metadata.
+///
+/// Every collection that scales with the corpus — per-vector row metadata,
+/// per-chunk projection receipts, the plan's expected chunk set, the staged
+/// committed-effect set, the prepared batches, and the physical-byte bindings
+/// — is encoded once, addressed by the SHA-256 of those bytes, and written as
+/// bounded slices. The state document keeps only the address, so it stays
+/// generation-level regardless of corpus size. Content addressing also means
+/// a staged collection and the published collection it becomes share one
+/// stored copy, so publication writes no new slices.
+const VECTOR_STATE_SLICE_SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS semantic_vector_state_slice_v1 (
+    collection_digest TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS semantic_vector_state_slice_v1_address
+    ON semantic_vector_state_slice_v1 (collection_digest, ordinal);
+";
+/// The evaluation lane keeps a separate slice table for the same reason it
+/// keeps a separate payload table: reclaiming unreferenced production slices
+/// can never delete evaluation rows.
+const VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_slice_v1 (
+    collection_digest TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS semantic_vector_evaluation_state_slice_v1_address
+    ON semantic_vector_evaluation_state_slice_v1 (collection_digest, ordinal);
+";
+const VECTOR_STATE_SLICE_TABLE_V1: &str = "semantic_vector_state_slice_v1";
+const VECTOR_EVALUATION_STATE_SLICE_TABLE_V1: &str = "semantic_vector_evaluation_state_slice_v1";
+/// Bytes per stored slice. One statement carries
+/// `VECTOR_STATE_SLICE_STATEMENT_ROWS` of these, so the widest statement this
+/// store issues stays near a megabyte no matter how large the collection is.
+const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
+/// Slices bound per statement.
+const VECTOR_STATE_SLICE_STATEMENT_ROWS: usize = 32;
+/// Addresses resolved per read statement.
+const VECTOR_STATE_ADDRESS_STATEMENT_ROWS: usize = 64;
 const VECTOR_EVALUATION_STATE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_v1 (
     evaluation_id TEXT PRIMARY KEY,
@@ -108,7 +149,10 @@ pub struct VectorGenerationPlanV1 {
     pub target_projection_key: ProjectionKeyV1,
     pub source_generation: CodeGenerationId,
     pub source_manifest_digest: ManifestDigest,
-    pub expected_chunk_ids: Vec<CodeSearchChunkId>,
+    /// The corpus-sized membership set. Externalized in the state document but
+    /// serialized inline here, so the build-identity digest over this plan is
+    /// unchanged by where the list is stored.
+    pub expected_chunk_ids: ExternalV1<Vec<CodeSearchChunkId>>,
     pub base_generation: Option<VectorGenerationIdV1>,
 }
 
@@ -278,6 +322,478 @@ impl PhysicalVectorBytePoolV1 {
 /// `values` is still *accepted* on read. That is the whole forward migration:
 /// a pre-migration blob loads unchanged, and the first write after loading it
 /// persists the rows and drops the inline floats.
+/// A state-document collection whose bytes live in the slice table.
+///
+/// The plain `Serialize`/`Deserialize` impls are **transparent**: a digest
+/// computed over a value containing one of these is byte-identical to the
+/// digest over the bare inner collection. That is what lets the store move a
+/// corpus-sized field out of the document without moving any identity — the
+/// build-identity digest over [`VectorGenerationPlanV1`] still hashes the full
+/// expected chunk list. The state document persists these through the
+/// [`external_state`] adapters instead, which write only the content address
+/// and leave the bytes to the load/seal walk.
+///
+/// `DerefMut` clears the address, so mutating a collection always forces the
+/// next seal to re-encode and re-address it. A stale address is therefore not
+/// representable.
+#[derive(Clone, Debug, Default)]
+pub struct ExternalV1<T> {
+    /// Content address of the sealed bytes; `None` while unsealed.
+    address: Option<ContentDigest>,
+    value: T,
+}
+
+impl<T> ExternalV1<T> {
+    fn new(value: T) -> Self {
+        Self {
+            address: None,
+            value,
+        }
+    }
+
+    fn into_inner(self) -> T {
+        self.value
+    }
+
+    /// Mutable access that keeps the address intact.
+    ///
+    /// Only for edits the externalized encoding cannot observe: filling the
+    /// elided float payload back into a hydrated vector row leaves the stored
+    /// bytes byte-identical, so re-addressing it would be pure waste. Any edit
+    /// that changes the encoded form must go through `DerefMut` instead.
+    fn elided_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+
+impl<T> From<T> for ExternalV1<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<Element, T: FromIterator<Element>> FromIterator<Element> for ExternalV1<T> {
+    fn from_iter<I: IntoIterator<Item = Element>>(iterator: I) -> Self {
+        Self::new(T::from_iter(iterator))
+    }
+}
+
+impl<T> std::ops::Deref for ExternalV1<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for ExternalV1<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.address = None;
+        &mut self.value
+    }
+}
+
+impl<T: PartialEq> PartialEq for ExternalV1<T> {
+    /// Identity is the collection, never where its bytes happen to live.
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Eq> Eq for ExternalV1<T> {}
+
+impl<T: Serialize> Serialize for ExternalV1<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.value.serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExternalV1<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::new)
+    }
+}
+
+/// One externalized collection, seen by the load/seal walk without knowing
+/// which collection it is.
+///
+/// One sealed collection: its content address and the bounded slices its bytes
+/// were cut into.
+type SealedCollectionV1 = (ContentDigest, Vec<Vec<u8>>);
+
+trait ExternalSlotV1 {
+    /// The address this slot's bytes are stored under, if it is sealed.
+    fn address(&self) -> Option<&ContentDigest>;
+
+    /// Seal the slot and hand back the bytes to write.
+    ///
+    /// Returns `None` when the slot is already sealed and `needed` reports its
+    /// address as durable. Re-encoding is otherwise unconditional, so a slot
+    /// whose bytes are not known to be durable is always written rather than
+    /// assumed present.
+    fn seal(
+        &mut self,
+        needed: &mut dyn FnMut(&ContentDigest) -> bool,
+    ) -> Result<Option<SealedCollectionV1>, VectorGenerationStoreErrorV1>;
+
+    /// Fill the slot from the ordered slices stored at its address.
+    fn fill(&mut self, slices: &[Vec<u8>]) -> Result<(), VectorGenerationStoreErrorV1>;
+}
+
+impl<T> ExternalSlotV1 for ExternalV1<T>
+where
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    fn address(&self) -> Option<&ContentDigest> {
+        self.address.as_ref()
+    }
+
+    fn seal(
+        &mut self,
+        needed: &mut dyn FnMut(&ContentDigest) -> bool,
+    ) -> Result<Option<SealedCollectionV1>, VectorGenerationStoreErrorV1> {
+        if let Some(address) = &self.address
+            && !needed(address)
+        {
+            return Ok(None);
+        }
+        let bytes = serde_json::to_vec(&self.value).map_err(storage_error)?;
+        let address = ContentDigest::of_bytes(&bytes);
+        self.address = Some(address.clone());
+        if !needed(&address) {
+            return Ok(None);
+        }
+        let slices = bytes
+            .chunks(VECTOR_STATE_SLICE_BYTES)
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        Ok(Some((address, slices)))
+    }
+
+    fn fill(&mut self, slices: &[Vec<u8>]) -> Result<(), VectorGenerationStoreErrorV1> {
+        let address = self.address.as_ref().ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Storage(
+                "externalized state slot was filled without an address".to_owned(),
+            )
+        })?;
+        let bytes = slices.concat();
+        // Content addressing is the integrity gate: bytes that do not hash to
+        // the address the document named are refused rather than parsed.
+        if &ContentDigest::of_bytes(&bytes) != address {
+            return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                "externalized state collection {address} does not match its stored bytes"
+            )));
+        }
+        self.value = serde_json::from_slice(&bytes).map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+/// Per-vector row metadata for one generation, with the float payload elided.
+///
+/// The floats live in the payload table (addressed by `output_digest`); this
+/// carries only the row identity, and it is itself externalized so the state
+/// document never renders one row per chunk.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct VectorRowMapV1(BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>);
+
+impl std::ops::Deref for VectorRowMapV1 {
+    type Target = BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for VectorRowMapV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>> for VectorRowMapV1 {
+    fn from(value: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>> for ExternalV1<VectorRowMapV1> {
+    fn from(value: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>) -> Self {
+        Self::new(VectorRowMapV1(value))
+    }
+}
+
+impl Serialize for VectorRowMapV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        externalized_vectors::vector_map::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for VectorRowMapV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        externalized_vectors::vector_map::deserialize(deserializer).map(Self)
+    }
+}
+
+/// The committed prepared batches of one staged build, floats elided.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PreparedBatchesV1(Vec<PreparedVectorGenerationV1>);
+
+impl std::ops::Deref for PreparedBatchesV1 {
+    type Target = Vec<PreparedVectorGenerationV1>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PreparedBatchesV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Serialize for PreparedBatchesV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        externalized_vectors::prepared_batches::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PreparedBatchesV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        externalized_vectors::prepared_batches::deserialize(deserializer).map(Self)
+    }
+}
+
+/// State-document adapters that persist an [`ExternalV1`] as its content
+/// address instead of its contents.
+///
+/// Deserialization accepts either form: an address string for a document this
+/// store wrote, or the pre-migration inline collection. An inline value loads
+/// with no address, which is exactly the signal the forward migration uses to
+/// decide the document must be re-sealed.
+mod external_state {
+    use super::{ContentDigest, ExternalV1};
+    use serde::de::{self, MapAccess, SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::marker::PhantomData;
+
+    /// Serializes an [`ExternalV1`] address, refusing an unsealed slot.
+    pub(super) struct AddressRefV1<'slot>(pub(super) &'slot Option<ContentDigest>);
+
+    impl Serialize for AddressRefV1<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            match self.0 {
+                Some(address) => address.serialize(serializer),
+                None => Err(serde::ser::Error::custom(
+                    "externalized state collection was serialized before it was sealed",
+                )),
+            }
+        }
+    }
+
+    struct AddressOrInlineV1<T>(PhantomData<T>);
+
+    impl<'de, T> Visitor<'de> for AddressOrInlineV1<T>
+    where
+        T: Deserialize<'de> + Default,
+    {
+        type Value = ExternalV1<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an externalized collection address or its inline value")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            let address = ContentDigest::try_from(value.to_owned()).map_err(de::Error::custom)?;
+            Ok(ExternalV1 {
+                address: Some(address),
+                value: T::default(),
+            })
+        }
+
+        fn visit_seq<A>(self, sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            T::deserialize(de::value::SeqAccessDeserializer::new(sequence)).map(ExternalV1::new)
+        }
+
+        fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            T::deserialize(de::value::MapAccessDeserializer::new(map)).map(ExternalV1::new)
+        }
+    }
+
+    pub(super) fn serialize<T, S>(slot: &ExternalV1<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        AddressRefV1(&slot.address).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, T, D>(deserializer: D) -> Result<ExternalV1<T>, D::Error>
+    where
+        T: Deserialize<'de> + Default,
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(AddressOrInlineV1(PhantomData))
+    }
+
+    /// The same adapter for a map of externalized collections, used by the
+    /// per-generation physical-byte bindings.
+    pub(super) mod address_map {
+        use super::{AddressRefV1, Deserialize, Deserializer, ExternalV1, PhantomData, Serializer};
+        use crate::store::vector_generations::VectorGenerationIdV1;
+        use serde::Serialize;
+        use std::collections::BTreeMap;
+
+        struct SlotRefV1<'slot, T>(&'slot ExternalV1<T>, PhantomData<T>);
+
+        impl<T> Serialize for SlotRefV1<'_, T> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                AddressRefV1(&self.0.address).serialize(serializer)
+            }
+        }
+
+        pub(in super::super) fn serialize<T, S>(
+            slots: &BTreeMap<VectorGenerationIdV1, ExternalV1<T>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.collect_map(
+                slots
+                    .iter()
+                    .map(|(key, slot)| (key, SlotRefV1(slot, PhantomData))),
+            )
+        }
+
+        struct SlotV1<T>(ExternalV1<T>);
+
+        impl<'de, T> Deserialize<'de> for SlotV1<T>
+        where
+            T: Deserialize<'de> + Default,
+        {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                super::deserialize(deserializer).map(Self)
+            }
+        }
+
+        pub(in super::super) fn deserialize<'de, T, D>(
+            deserializer: D,
+        ) -> Result<BTreeMap<VectorGenerationIdV1, ExternalV1<T>>, D::Error>
+        where
+            T: Deserialize<'de> + Default,
+            D: Deserializer<'de>,
+        {
+            Ok(
+                BTreeMap::<VectorGenerationIdV1, SlotV1<T>>::deserialize(deserializer)?
+                    .into_iter()
+                    .map(|(key, slot)| (key, slot.0))
+                    .collect(),
+            )
+        }
+    }
+
+    /// The plan is persisted with its expected chunk list externalized. The
+    /// plan's own serde stays transparent so the build-identity digest is
+    /// unchanged; only this state-document encoding elides the list.
+    pub(super) mod plan {
+        use super::{AddressRefV1, Deserialize, Deserializer, ExternalV1, Serialize, Serializer};
+        use crate::store::vector_generations::{
+            CodeGenerationId, CodeSearchChunkId, ManifestDigest, ProjectionKeyV1,
+            VectorGenerationIdV1, VectorGenerationPlanV1,
+        };
+
+        #[derive(Serialize)]
+        struct PlanRefV1<'plan> {
+            target_projection_key: &'plan ProjectionKeyV1,
+            source_generation: &'plan CodeGenerationId,
+            source_manifest_digest: &'plan ManifestDigest,
+            expected_chunk_ids: AddressRefV1<'plan>,
+            base_generation: &'plan Option<VectorGenerationIdV1>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PlanRowV1 {
+            target_projection_key: ProjectionKeyV1,
+            source_generation: CodeGenerationId,
+            source_manifest_digest: ManifestDigest,
+            #[serde(deserialize_with = "super::deserialize")]
+            expected_chunk_ids: ExternalV1<Vec<CodeSearchChunkId>>,
+            base_generation: Option<VectorGenerationIdV1>,
+        }
+
+        pub(in super::super) fn serialize<S>(
+            plan: &VectorGenerationPlanV1,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            PlanRefV1 {
+                target_projection_key: &plan.target_projection_key,
+                source_generation: &plan.source_generation,
+                source_manifest_digest: &plan.source_manifest_digest,
+                expected_chunk_ids: AddressRefV1(&plan.expected_chunk_ids.address),
+                base_generation: &plan.base_generation,
+            }
+            .serialize(serializer)
+        }
+
+        pub(in super::super) fn deserialize<'de, D>(
+            deserializer: D,
+        ) -> Result<VectorGenerationPlanV1, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            let row = PlanRowV1::deserialize(deserializer)?;
+            Ok(VectorGenerationPlanV1 {
+                target_projection_key: row.target_projection_key,
+                source_generation: row.source_generation,
+                source_manifest_digest: row.source_manifest_digest,
+                expected_chunk_ids: row.expected_chunk_ids,
+                base_generation: row.base_generation,
+            })
+        }
+    }
+}
+
 mod externalized_vectors {
     use super::{
         BTreeMap, CodeGenerationId, CodeSearchChunkId, ContentDigest, ManifestDigest,
@@ -458,11 +974,14 @@ pub struct PublishedVectorGenerationV1 {
     source_manifest_digest: ManifestDigest,
     base_generation: Option<VectorGenerationIdV1>,
     embedding_key: AdmittedEmbeddingProjectionKeyV1,
-    #[serde(with = "externalized_vectors::vector_map")]
-    vectors: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
-    tombstones: Vec<CodeSearchChunkId>,
-    tombstone_digests: BTreeMap<CodeSearchChunkId, ContentDigest>,
-    receipts: Vec<ProjectionBatchReceiptV1>,
+    #[serde(with = "external_state")]
+    vectors: ExternalV1<VectorRowMapV1>,
+    #[serde(with = "external_state")]
+    tombstones: ExternalV1<Vec<CodeSearchChunkId>>,
+    #[serde(with = "external_state")]
+    tombstone_digests: ExternalV1<BTreeMap<CodeSearchChunkId, ContentDigest>>,
+    #[serde(with = "external_state")]
+    receipts: ExternalV1<Vec<ProjectionBatchReceiptV1>>,
     checkpoint: VectorProjectionCheckpointV1,
     manifest_digest: ManifestDigest,
 }
@@ -557,7 +1076,7 @@ impl PublishedVectorGenerationV1 {
             ));
         }
         let canonical_tombstones = self.tombstone_digests.keys().cloned().collect::<Vec<_>>();
-        if self.tombstones != canonical_tombstones {
+        if *self.tombstones != canonical_tombstones {
             return Err(VectorGenerationStoreErrorV1::Storage(
                 "published tombstone list is not the canonical digest-map order".to_string(),
             ));
@@ -628,14 +1147,17 @@ pub enum VectorGenerationStoreErrorV1 {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StagedVectorGenerationV1 {
+    #[serde(with = "external_state::plan")]
     plan: VectorGenerationPlanV1,
     embedding_key: Option<AdmittedEmbeddingProjectionKeyV1>,
-    #[serde(with = "externalized_vectors::vector_map")]
-    vectors: BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
-    tombstones: BTreeMap<CodeSearchChunkId, ContentDigest>,
-    #[serde(with = "externalized_vectors::prepared_batches")]
-    batches: Vec<PreparedVectorGenerationV1>,
-    committed_chunk_effects: BTreeSet<CodeSearchChunkId>,
+    #[serde(with = "external_state")]
+    vectors: ExternalV1<VectorRowMapV1>,
+    #[serde(with = "external_state")]
+    tombstones: ExternalV1<BTreeMap<CodeSearchChunkId, ContentDigest>>,
+    #[serde(with = "external_state")]
+    batches: ExternalV1<PreparedBatchesV1>,
+    #[serde(with = "external_state")]
+    committed_chunk_effects: ExternalV1<BTreeSet<CodeSearchChunkId>>,
     checkpoint: VectorProjectionCheckpointV1,
 }
 
@@ -648,9 +1170,9 @@ struct PublishedStateV1 {
     legacy_migration_receipts: BTreeMap<ManifestDigest, LegacyVectorMigrationReceiptV1>,
     #[serde(skip, default)]
     physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
-    #[serde(default)]
+    #[serde(default, with = "external_state::address_map")]
     physical_vector_bindings:
-        BTreeMap<VectorGenerationIdV1, BTreeMap<CodeSearchChunkId, ManifestDigest>>,
+        BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
 }
 
 /// Deterministic state machine used directly by focused tests and persisted by
@@ -706,10 +1228,10 @@ impl FakeVectorGenerationStoreV1 {
             StagedVectorGenerationV1 {
                 plan,
                 embedding_key: None,
-                vectors: BTreeMap::new(),
-                tombstones: BTreeMap::new(),
-                batches: Vec::new(),
-                committed_chunk_effects: BTreeSet::new(),
+                vectors: ExternalV1::default(),
+                tombstones: ExternalV1::default(),
+                batches: ExternalV1::default(),
+                committed_chunk_effects: ExternalV1::default(),
                 checkpoint,
             },
         );
@@ -737,10 +1259,10 @@ impl FakeVectorGenerationStoreV1 {
             StagedVectorGenerationV1 {
                 plan,
                 embedding_key: None,
-                vectors: BTreeMap::new(),
-                tombstones: BTreeMap::new(),
-                batches: Vec::new(),
-                committed_chunk_effects: BTreeSet::new(),
+                vectors: ExternalV1::default(),
+                tombstones: ExternalV1::default(),
+                batches: ExternalV1::default(),
+                committed_chunk_effects: ExternalV1::default(),
                 checkpoint,
             },
         );
@@ -961,10 +1483,12 @@ impl FakeVectorGenerationStoreV1 {
             base_generation: staged.plan.base_generation,
             embedding_key,
             vectors: staged.vectors,
-            tombstones: Vec::new(),
+            tombstones: ExternalV1::default(),
             tombstone_digests,
             receipts: staged
                 .batches
+                .into_inner()
+                .0
                 .into_iter()
                 .map(|batch| batch.receipt)
                 .collect(),
@@ -1425,20 +1949,23 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         Ok(store)
     }
 
-    /// Move a pre-migration state document — one JSON blob carrying every
-    /// float inline — onto row-per-vector payload storage.
+    /// Move a pre-migration state document onto externalized storage.
     ///
-    /// Forward-only and crash-safe: the payload rows and the rewritten state
-    /// commit in one transaction guarded by the same revision the document was
-    /// read at, so a crash leaves the original blob intact and the next open
-    /// retries. Once migrated the check is a load with no inline floats to
-    /// find, and this is a no-op.
+    /// Covers both externalizations: a document that still carries floats
+    /// inline moves onto row-per-vector payloads, and one that still carries
+    /// corpus-sized metadata inline moves onto addressed state slices. Both
+    /// are forward-only and crash-safe: the new rows and the rewritten
+    /// document commit in one transaction guarded by the same revision the
+    /// document was read at, so a crash leaves the original blob intact and
+    /// the next open retries. Once migrated the check is a load with nothing
+    /// inline to find, and this is a no-op.
     async fn migrate_inline_vector_payloads(&self) -> Result<(), VectorGenerationStoreErrorV1> {
         for _ in 0..MAX_STATE_CAS_RETRIES {
-            let (revision, state, load) = self.load_state().await?;
-            if !load.migrated_inline_payloads {
+            let (revision, mut state, load) = self.load_state().await?;
+            if !load.needs_forward_migration() {
                 return Ok(());
             }
+            let pending_slices = seal_external_state(&mut state, &load.durable_slices)?;
             let state_json = serde_json::to_string(&state).map_err(storage_error)?;
             let transaction = self
                 .database
@@ -1447,6 +1974,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                 .map_err(storage_error)?;
             write_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state, &load.durable)
                 .await?;
+            write_state_slices(&transaction, VECTOR_STATE_SLICE_TABLE_V1, &pending_slices).await?;
             let changed = transaction
                 .execute_engine(
                     "UPDATE semantic_vector_generation_state_v1
@@ -1481,6 +2009,13 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             .map_err(storage_error)?;
         database
             .execute_write_batch(VECTOR_GENERATION_STATE_OPERATION, VECTOR_PAYLOAD_SCHEMA_V1)
+            .await
+            .map_err(storage_error)?;
+        database
+            .execute_write_batch(
+                VECTOR_GENERATION_STATE_OPERATION,
+                VECTOR_STATE_SLICE_SCHEMA_V1,
+            )
             .await
             .map_err(storage_error)?;
         let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
@@ -1557,6 +2092,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let mut generation: PublishedVectorGenerationV1 =
             serde_json::from_str(&generation_json).map_err(storage_error)?;
         drop(generation_json);
+        hydrate_generation_slices(database, VECTOR_STATE_SLICE_TABLE_V1, &mut generation).await?;
         hydrate_generation_payloads(database, VECTOR_PAYLOAD_TABLE_V1, &mut generation).await?;
         generation.validate_persisted()?;
         Ok(Some(ActiveVectorGenerationSnapshotV1 {
@@ -1636,6 +2172,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let mut generation: PublishedVectorGenerationV1 =
             serde_json::from_str(&generation_json).map_err(storage_error)?;
         drop(generation_json);
+        hydrate_generation_slices(database, VECTOR_STATE_SLICE_TABLE_V1, &mut generation).await?;
         hydrate_generation_payloads(database, VECTOR_PAYLOAD_TABLE_V1, &mut generation).await?;
         generation.validate_persisted()?;
         (generation.generation_id() == generation_id)
@@ -1901,6 +2438,10 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         }
         let receipt = replacement.finish_legacy_replacement(transaction)?;
         validate_loaded_state(&replacement)?;
+        // The scratch replacement was built entirely in memory, so nothing it
+        // references is durable yet: every collection seals and writes here.
+        let pending_slices = seal_external_state(&mut replacement, &BTreeSet::new())?;
+        let referenced_slices = referenced_state_addresses(&mut replacement)?;
         let state_json = serde_json::to_string(&replacement).map_err(storage_error)?;
         let receipt_json = serde_json::to_string(&receipt).map_err(storage_error)?;
         let quarantined_items = receipt
@@ -2016,6 +2557,9 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         )
         .await?;
         prune_unreferenced_vector_payloads(&writer, VECTOR_PAYLOAD_TABLE_V1, &replacement).await?;
+        write_state_slices(&writer, VECTOR_STATE_SLICE_TABLE_V1, &pending_slices).await?;
+        prune_unreferenced_state_slices(&writer, VECTOR_STATE_SLICE_TABLE_V1, &referenced_slices)
+            .await?;
         let changed = writer
             .execute_engine(
                 "UPDATE semantic_vector_generation_state_v1
@@ -2114,6 +2658,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         for _ in 0..MAX_STATE_CAS_RETRIES {
             let (revision, mut state, load) = self.load_state().await?;
             let result = mutation(&mut state)?;
+            let pending_slices = seal_external_state(&mut state, &load.durable_slices)?;
             let state_json = serde_json::to_string(&state).map_err(storage_error)?;
             let transaction = self
                 .database
@@ -2122,9 +2667,17 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                 .map_err(storage_error)?;
             write_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state, &load.durable)
                 .await?;
+            write_state_slices(&transaction, VECTOR_STATE_SLICE_TABLE_V1, &pending_slices).await?;
             if reclaim_unreferenced {
                 prune_unreferenced_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state)
                     .await?;
+                let referenced = referenced_state_addresses(&mut state)?;
+                prune_unreferenced_state_slices(
+                    &transaction,
+                    VECTOR_STATE_SLICE_TABLE_V1,
+                    &referenced,
+                )
+                .await?;
             }
             let changed = transaction
                 .execute_engine(
@@ -2170,8 +2723,12 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let mut state: FakeVectorGenerationStoreV1 =
             serde_json::from_str(&state_json).map_err(storage_error)?;
         drop(state_json);
-        let load =
+        let (durable_slices, inline_collections) =
+            hydrate_external_state(self.database, VECTOR_STATE_SLICE_TABLE_V1, &mut state).await?;
+        let mut load =
             hydrate_vector_payloads(self.database, VECTOR_PAYLOAD_TABLE_V1, &mut state).await?;
+        load.durable_slices = durable_slices;
+        load.migrated_inline_collections = inline_collections;
         state.ensure_physical_reuse_index()?;
         validate_loaded_state(&state)?;
         Ok((revision, state, load))
@@ -2204,6 +2761,13 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
             .execute_write_batch(
                 VECTOR_GENERATION_STATE_OPERATION,
                 VECTOR_EVALUATION_PAYLOAD_SCHEMA_V1,
+            )
+            .await
+            .map_err(storage_error)?;
+        database
+            .execute_write_batch(
+                VECTOR_GENERATION_STATE_OPERATION,
+                VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1,
             )
             .await
             .map_err(storage_error)?;
@@ -2315,6 +2879,14 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
             )
             .await
             .map_err(storage_error)?;
+        transaction
+            .execute_engine(
+                "DELETE FROM semantic_vector_evaluation_state_slice_v1
+                 WHERE NOT EXISTS (SELECT 1 FROM semantic_vector_evaluation_state_v1)",
+                (),
+            )
+            .await
+            .map_err(storage_error)?;
         transaction.commit().await.map_err(storage_error)?;
         Ok(())
     }
@@ -2328,6 +2900,7 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
         for _ in 0..MAX_STATE_CAS_RETRIES {
             let (revision, mut state, load) = self.load_state().await?;
             let result = mutation(&mut state)?;
+            let pending_slices = seal_external_state(&mut state, &load.durable_slices)?;
             let state_json = serde_json::to_string(&state).map_err(storage_error)?;
             let transaction = self
                 .database
@@ -2339,6 +2912,12 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
                 VECTOR_EVALUATION_PAYLOAD_TABLE_V1,
                 &state,
                 &load.durable,
+            )
+            .await?;
+            write_state_slices(
+                &transaction,
+                VECTOR_EVALUATION_STATE_SLICE_TABLE_V1,
+                &pending_slices,
             )
             .await?;
             let changed = transaction
@@ -2385,12 +2964,20 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
         let mut state: FakeVectorGenerationStoreV1 =
             serde_json::from_str(&state_json).map_err(storage_error)?;
         drop(state_json);
-        let load = hydrate_vector_payloads(
+        let (durable_slices, inline_collections) = hydrate_external_state(
+            self.database,
+            VECTOR_EVALUATION_STATE_SLICE_TABLE_V1,
+            &mut state,
+        )
+        .await?;
+        let mut load = hydrate_vector_payloads(
             self.database,
             VECTOR_EVALUATION_PAYLOAD_TABLE_V1,
             &mut state,
         )
         .await?;
+        load.durable_slices = durable_slices;
+        load.migrated_inline_collections = inline_collections;
         state.ensure_physical_reuse_index()?;
         validate_loaded_state(&state)?;
         Ok((revision, state, load))
@@ -2464,7 +3051,7 @@ fn intern_generation_vectors(
     generation: &PublishedVectorGenerationV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let mut bindings = BTreeMap::new();
-    for (chunk_id, vector) in &generation.vectors {
+    for (chunk_id, vector) in generation.vectors.iter() {
         let (physical_id, reuse_key) =
             physical_vector_reuse_key(&generation.embedding_key, vector)?;
         match published.physical_vectors.get(&physical_id) {
@@ -2491,14 +3078,14 @@ fn intern_generation_vectors(
         .physical_vector_bindings
         .get(generation.generation_id())
     {
-        Some(existing) if existing != &bindings => {
+        Some(existing) if **existing != bindings => {
             Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict)
         }
         Some(_) => Ok(()),
         None => {
             published
                 .physical_vector_bindings
-                .insert(generation.generation_id().clone(), bindings);
+                .insert(generation.generation_id().clone(), bindings.into());
             Ok(())
         }
     }
@@ -2542,7 +3129,7 @@ fn validate_loaded_state(
                 "published generation physical vector membership is incomplete".to_string(),
             ));
         }
-        for (chunk_id, vector) in &generation.vectors {
+        for (chunk_id, vector) in generation.vectors.iter() {
             let physical_id = bindings.get(chunk_id).ok_or_else(|| {
                 VectorGenerationStoreErrorV1::Storage(format!(
                     "published vector {chunk_id} has no physical byte binding"
@@ -2721,8 +3308,22 @@ struct VectorPayloadLoadV1 {
     /// Addresses already durable in the payload table. A later write skips
     /// them, so a commit persists only the rows its own batch introduced.
     durable: BTreeSet<ContentDigest>,
+    /// Collection addresses already durable in the slice table, for the same
+    /// reason.
+    durable_slices: BTreeSet<ContentDigest>,
     /// True when the loaded document still carried inline floats.
     migrated_inline_payloads: bool,
+    /// True when the loaded document still carried an inline O(store)
+    /// collection that belongs in the slice table.
+    migrated_inline_collections: bool,
+}
+
+impl VectorPayloadLoadV1 {
+    /// Whether the loaded document predates an externalization and must be
+    /// rewritten forward before it is served.
+    fn needs_forward_migration(&self) -> bool {
+        self.migrated_inline_payloads || self.migrated_inline_collections
+    }
 }
 
 fn encode_vector_payload(values: &[f32]) -> Vec<u8> {
@@ -2764,7 +3365,7 @@ impl FakeVectorGenerationStoreV1 {
             for vector in staged.vectors.values() {
                 visit(vector);
             }
-            for batch in &staged.batches {
+            for batch in staged.batches.iter() {
                 for vector in &batch.vectors {
                     visit(vector);
                 }
@@ -2772,17 +3373,22 @@ impl FakeVectorGenerationStoreV1 {
         }
     }
 
+    /// Refill the elided float payload of every vector row.
+    ///
+    /// Every write here goes through [`ExternalV1::elided_mut`]: the
+    /// externalized encoding does not carry floats, so restoring them leaves
+    /// the stored bytes — and therefore the collection address — unchanged.
     fn visit_vectors_mut(&mut self, visit: &mut impl FnMut(&mut ProjectedChunkVectorV1)) {
         for generation in self.published.generations.values_mut() {
-            for vector in generation.vectors.values_mut() {
+            for vector in generation.vectors.elided_mut().values_mut() {
                 visit(vector);
             }
         }
         for staged in self.staged.values_mut() {
-            for vector in staged.vectors.values_mut() {
+            for vector in staged.vectors.elided_mut().values_mut() {
                 visit(vector);
             }
-            for batch in &mut staged.batches {
+            for batch in staged.batches.elided_mut().iter_mut() {
                 for vector in &mut batch.vectors {
                     visit(vector);
                 }
@@ -2833,6 +3439,105 @@ async fn hydrate_vector_payloads(
     }
     load.durable = wanted;
     Ok(load)
+}
+
+/// Seal a hand-built fixture so its document can be serialized.
+///
+/// The store's own writers seal inside their mutation path; fixtures that
+/// build state directly go through here instead.
+#[cfg(test)]
+fn seal_test_state(
+    state: &mut FakeVectorGenerationStoreV1,
+) -> BTreeMap<ContentDigest, Vec<Vec<u8>>> {
+    seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
+}
+
+/// Install collection slices for a hand-built fixture state.
+#[cfg(test)]
+async fn install_test_state_slices(
+    database: &Database,
+    slice_table: &str,
+    state: &mut FakeVectorGenerationStoreV1,
+) {
+    let pending = seal_test_state(state);
+    let transaction = database
+        .begin_write_transaction("install test state slices")
+        .await
+        .expect("slice writer");
+    write_state_slices(&transaction, slice_table, &pending)
+        .await
+        .expect("install test state slices");
+    transaction.commit().await.expect("commit test slices");
+}
+
+/// Round-trip the state document the way a restart does, standing in for the
+/// slice and payload tables with the reference state still in memory.
+#[cfg(test)]
+fn restart_round_trip(state: &mut FakeVectorGenerationStoreV1) -> FakeVectorGenerationStoreV1 {
+    let sealed = seal_test_state(state);
+    let encoded = serde_json::to_string(&*state).expect("serialize vector state");
+    let mut restarted: FakeVectorGenerationStoreV1 =
+        serde_json::from_str(&encoded).expect("deserialize vector state");
+    fill_from_sealed(&mut restarted, &sealed);
+    restarted.hydrate_from(state);
+    restarted
+}
+
+#[cfg(test)]
+fn fill_from_sealed(
+    state: &mut FakeVectorGenerationStoreV1,
+    sealed: &BTreeMap<ContentDigest, Vec<Vec<u8>>>,
+) {
+    state
+        .visit_external_slots(&mut |slot| {
+            let Some(address) = slot.address().cloned() else {
+                return Ok(());
+            };
+            slot.fill(sealed.get(&address).expect("sealed collection"))
+        })
+        .expect("fill externalized collections");
+}
+
+/// Render a state document in its pre-migration encoding, with every
+/// externalized collection written back inline.
+#[cfg(test)]
+fn legacy_inline_document(state: &mut FakeVectorGenerationStoreV1) -> serde_json::Value {
+    let sealed = seal_test_state(state);
+    let inline = sealed
+        .iter()
+        .map(|(address, slices)| {
+            (
+                address.as_str().to_owned(),
+                serde_json::from_slice::<serde_json::Value>(&slices.concat())
+                    .expect("inline collection"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut document = serde_json::to_value(&*state).expect("state document");
+    inline_addresses(&mut document, &inline);
+    document
+}
+
+#[cfg(test)]
+fn inline_addresses(value: &mut serde_json::Value, inline: &BTreeMap<String, serde_json::Value>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some(replacement) = inline.get(text.as_str()) {
+                *value = replacement.clone();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                inline_addresses(item, inline);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for field in fields.values_mut() {
+                inline_addresses(field, inline);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Install payload rows for a hand-built fixture state that is written to the
@@ -3037,6 +3742,286 @@ async fn prune_unreferenced_vector_payloads(
             &format!(
                 "DELETE FROM {payload_table}
                  WHERE output_digest NOT IN (SELECT output_digest FROM {scratch_table})"
+            ),
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+    transaction
+        .execute_batch_engine(&format!("DELETE FROM {scratch_table};"))
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+type ExternalSlotVisitV1<'visit> =
+    dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
+
+impl PublishedVectorGenerationV1 {
+    fn visit_external_slots(
+        &mut self,
+        visit: &mut ExternalSlotVisitV1<'_>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        visit(&mut self.vectors)?;
+        visit(&mut self.tombstones)?;
+        visit(&mut self.tombstone_digests)?;
+        visit(&mut self.receipts)
+    }
+}
+
+impl FakeVectorGenerationStoreV1 {
+    /// Every externalized collection in the state document, in a stable order.
+    fn visit_external_slots(
+        &mut self,
+        visit: &mut ExternalSlotVisitV1<'_>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        for staged in self.staged.values_mut() {
+            visit(&mut staged.plan.expected_chunk_ids)?;
+            visit(&mut staged.vectors)?;
+            visit(&mut staged.tombstones)?;
+            visit(&mut staged.batches)?;
+            visit(&mut staged.committed_chunk_effects)?;
+        }
+        for generation in self.published.generations.values_mut() {
+            generation.visit_external_slots(visit)?;
+        }
+        for bindings in self.published.physical_vector_bindings.values_mut() {
+            visit(bindings)?;
+        }
+        Ok(())
+    }
+}
+
+/// Seal every externalized collection and collect the slices to write.
+///
+/// A slot whose address is already durable is left alone, so a mutation
+/// re-encodes only what it actually changed: committing one batch writes that
+/// batch's slices, not the corpus. Content addressing then makes publication
+/// free — the staged collections and the published ones they become hash to
+/// the same addresses, which are durable by then.
+fn seal_external_state(
+    state: &mut FakeVectorGenerationStoreV1,
+    durable: &BTreeSet<ContentDigest>,
+) -> Result<BTreeMap<ContentDigest, Vec<Vec<u8>>>, VectorGenerationStoreErrorV1> {
+    let mut pending: BTreeMap<ContentDigest, Vec<Vec<u8>>> = BTreeMap::new();
+    state.visit_external_slots(&mut |slot| {
+        let sealed =
+            slot.seal(&mut |address| !durable.contains(address) && !pending.contains_key(address))?;
+        if let Some((address, slices)) = sealed {
+            pending.insert(address, slices);
+        }
+        Ok(())
+    })?;
+    Ok(pending)
+}
+
+/// Address every externalized collection the committed state still references.
+fn referenced_state_addresses(
+    state: &mut FakeVectorGenerationStoreV1,
+) -> Result<BTreeSet<ContentDigest>, VectorGenerationStoreErrorV1> {
+    let mut referenced = BTreeSet::new();
+    state.visit_external_slots(&mut |slot| {
+        if let Some(address) = slot.address() {
+            referenced.insert(address.clone());
+        }
+        Ok(())
+    })?;
+    Ok(referenced)
+}
+
+/// Fill every externalized collection in `state` from `slice_table`.
+///
+/// Collections are resolved one address at a time so a whole-corpus load never
+/// holds every encoded collection at once, and each is verified against its
+/// content address before it is parsed. A missing address fails closed.
+async fn hydrate_external_state(
+    database: &Database,
+    slice_table: &str,
+    state: &mut FakeVectorGenerationStoreV1,
+) -> Result<(BTreeSet<ContentDigest>, bool), VectorGenerationStoreErrorV1> {
+    let mut wanted = BTreeSet::new();
+    let mut inline = false;
+    state.visit_external_slots(&mut |slot| {
+        match slot.address() {
+            Some(address) => {
+                wanted.insert(address.clone());
+            }
+            None => inline = true,
+        }
+        Ok(())
+    })?;
+    for address in &wanted {
+        let slices = read_state_slices(database, slice_table, address).await?;
+        state.visit_external_slots(&mut |slot| {
+            if slot.address() == Some(address) {
+                slot.fill(&slices)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok((wanted, inline))
+}
+
+/// Fill one standalone published generation read outside the writer lane.
+async fn hydrate_generation_slices(
+    database: &Database,
+    slice_table: &str,
+    generation: &mut PublishedVectorGenerationV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let mut wanted = BTreeSet::new();
+    generation.visit_external_slots(&mut |slot| {
+        if let Some(address) = slot.address() {
+            wanted.insert(address.clone());
+        }
+        Ok(())
+    })?;
+    for address in &wanted {
+        let slices = read_state_slices(database, slice_table, address).await?;
+        generation.visit_external_slots(&mut |slot| {
+            if slot.address() == Some(address) {
+                slot.fill(&slices)?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+async fn read_state_slices(
+    database: &Database,
+    slice_table: &str,
+    address: &ContentDigest,
+) -> Result<Vec<Vec<u8>>, VectorGenerationStoreErrorV1> {
+    let mut rows = database
+        .engine_conn()
+        .query(
+            &format!(
+                "SELECT ordinal, payload
+                 FROM {slice_table}
+                 WHERE collection_digest = ?1
+                 ORDER BY ordinal"
+            ),
+            params![address.as_str()],
+        )
+        .await
+        .map_err(storage_error)?;
+    let mut slices = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage_error)? {
+        let ordinal = row.get::<i64>(0).map_err(storage_error)?;
+        if usize::try_from(ordinal).ok() != Some(slices.len()) {
+            return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                "externalized state collection {address} has a gap in its slices"
+            )));
+        }
+        slices.push(row.get::<Vec<u8>>(1).map_err(storage_error)?);
+    }
+    drop(rows);
+    if slices.is_empty() {
+        return Err(VectorGenerationStoreErrorV1::Storage(format!(
+            "externalized state collection {address} is missing from the store"
+        )));
+    }
+    Ok(slices)
+}
+
+/// Persist sealed collection slices inside the caller's transaction.
+///
+/// Rows are content-addressed and inserted with `OR IGNORE`, so a retried
+/// commit is a no-op rather than a conflict, and every statement carries a
+/// bounded number of bounded slices.
+async fn write_state_slices(
+    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
+    slice_table: &str,
+    pending: &BTreeMap<ContentDigest, Vec<Vec<u8>>>,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let rows = pending
+        .iter()
+        .flat_map(|(address, slices)| {
+            slices
+                .iter()
+                .enumerate()
+                .map(move |(ordinal, payload)| (address, ordinal, payload))
+        })
+        .collect::<Vec<_>>();
+    for group in rows.chunks(VECTOR_STATE_SLICE_STATEMENT_ROWS) {
+        let tuples = (0..group.len())
+            .map(|index| {
+                let base = index * 3;
+                format!("(?{}, ?{}, ?{})", base + 1, base + 2, base + 3)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT OR IGNORE INTO {slice_table} (collection_digest, ordinal, payload)
+             VALUES {tuples}"
+        );
+        let mut values = Vec::with_capacity(group.len() * 3);
+        for (address, ordinal, payload) in group {
+            values.push(tracedecay_runtime_core::db::engine::Value::Text(
+                address.as_str().to_owned(),
+            ));
+            values.push(tracedecay_runtime_core::db::engine::Value::Integer(
+                i64::try_from(*ordinal).map_err(storage_error)?,
+            ));
+            values.push(tracedecay_runtime_core::db::engine::Value::Blob(
+                (*payload).clone(),
+            ));
+        }
+        transaction
+            .execute_engine(
+                &sql,
+                tracedecay_runtime_core::db::engine::params_from_iter(values),
+            )
+            .await
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+/// Delete collection slices the committed state no longer references.
+async fn prune_unreferenced_state_slices(
+    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
+    slice_table: &str,
+    referenced: &BTreeSet<ContentDigest>,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let scratch_table = format!("temp.{slice_table}_referenced");
+    transaction
+        .execute_batch_engine(&format!(
+            "CREATE TEMP TABLE IF NOT EXISTS {slice_table}_referenced (
+                 collection_digest TEXT PRIMARY KEY
+             ) STRICT;
+             DELETE FROM {scratch_table};"
+        ))
+        .await
+        .map_err(storage_error)?;
+    let addresses = referenced.iter().collect::<Vec<_>>();
+    for group in addresses.chunks(VECTOR_STATE_ADDRESS_STATEMENT_ROWS) {
+        let tuples = (1..=group.len())
+            .map(|index| format!("(?{index})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = group
+            .iter()
+            .map(|address| {
+                tracedecay_runtime_core::db::engine::Value::Text(address.as_str().to_owned())
+            })
+            .collect::<Vec<_>>();
+        transaction
+            .execute_engine(
+                &format!(
+                    "INSERT OR IGNORE INTO {scratch_table} (collection_digest) VALUES {tuples}"
+                ),
+                tracedecay_runtime_core::db::engine::params_from_iter(values),
+            )
+            .await
+            .map_err(storage_error)?;
+    }
+    transaction
+        .execute_engine(
+            &format!(
+                "DELETE FROM {slice_table}
+                 WHERE collection_digest NOT IN
+                     (SELECT collection_digest FROM {scratch_table})"
             ),
             (),
         )
@@ -3369,7 +4354,7 @@ mod tests {
             target_projection_key: projection_key.clone(),
             source_generation: source_generation.clone(),
             source_manifest_digest: source_manifest_digest.clone(),
-            expected_chunk_ids: vec![chunk_id.clone()],
+            expected_chunk_ids: vec![chunk_id.clone()].into(),
             base_generation: None,
         };
         let manifest_digest =
@@ -3406,10 +4391,10 @@ mod tests {
             source_manifest_digest: source_manifest_digest.clone(),
             base_generation: None,
             embedding_key,
-            vectors,
-            tombstones: Vec::new(),
-            tombstone_digests: BTreeMap::new(),
-            receipts: vec![batch],
+            vectors: vectors.into(),
+            tombstones: Vec::new().into(),
+            tombstone_digests: BTreeMap::new().into(),
+            receipts: vec![batch].into(),
             checkpoint: VectorProjectionCheckpointV1 {
                 target_projection_key: projection_key,
                 source_generation,
@@ -3641,7 +4626,7 @@ mod tests {
                 target_projection_key: embedding.projection_key().clone(),
                 source_generation: target_source.clone(),
                 source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                expected_chunk_ids: vec![chunk_id.clone()],
+                expected_chunk_ids: vec![chunk_id.clone()].into(),
                 base_generation: Some(base_id.clone()),
             })
             .expect("staged build");
@@ -3656,7 +4641,7 @@ mod tests {
                 target_projection_key: embedding.projection_key().clone(),
                 source_generation: target_source,
                 source_manifest_digest: mismatched_manifest,
-                expected_chunk_ids: vec![chunk_id],
+                expected_chunk_ids: vec![chunk_id].into(),
                 base_generation: Some(base_id),
             })
             .expect("mismatched-watermark build");
@@ -3703,7 +4688,7 @@ mod tests {
                 target_projection_key: embedding.projection_key().clone(),
                 source_generation: target_source,
                 source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                expected_chunk_ids: vec![chunk_id],
+                expected_chunk_ids: vec![chunk_id].into(),
                 base_generation: Some(base_id.clone()),
             })
             .expect("staged build");
@@ -4040,6 +5025,7 @@ mod tests {
         insert_generation(&mut state, active);
         state.published.active_generation = Some(active_id.clone());
         install_test_vector_payloads(&database, VECTOR_PAYLOAD_TABLE_V1, &state).await;
+        install_test_state_slices(&database, VECTOR_STATE_SLICE_TABLE_V1, &mut state).await;
         let mut state_json = serde_json::to_value(&state).expect("vector state JSON");
         state_json["published"]["generations"][manifest_digest('e').as_str()] =
             serde_json::json!("corrupt-inactive-vector-bytes");
@@ -4194,12 +5180,10 @@ mod tests {
             Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
         );
         assert_eq!(store.active_generation_id(), Some(&second_id));
-        let encoded = serde_json::to_string(&store).expect("serialize vector state");
-        let mut restarted: FakeVectorGenerationStoreV1 =
-            serde_json::from_str(&encoded).expect("deserialize vector state");
-        // The state document carries no float payloads; a restart resolves
-        // them from row-per-vector storage, which this stands in for.
-        restarted.hydrate_from(&store);
+        // The state document carries neither float payloads nor corpus-sized
+        // collections; a restart resolves both from their own tables, which
+        // this round trip stands in for.
+        let mut restarted = restart_round_trip(&mut store);
         restarted
             .ensure_physical_reuse_index()
             .expect("rebuild physical reuse index");
@@ -4414,7 +5398,7 @@ mod tests {
             target_projection_key: projection_key.clone(),
             source_generation: source_generation.clone(),
             source_manifest_digest: source_manifest_digest.clone(),
-            expected_chunk_ids: vec![chunk_id.clone()],
+            expected_chunk_ids: vec![chunk_id.clone()].into(),
             base_generation: None,
         };
         let vectors = BTreeMap::from([(
@@ -4454,10 +5438,10 @@ mod tests {
             source_manifest_digest: plan.source_manifest_digest.clone(),
             base_generation: None,
             embedding_key,
-            vectors: vectors.clone(),
-            tombstones: vec![],
-            tombstone_digests: BTreeMap::new(),
-            receipts: vec![],
+            vectors: vectors.clone().into(),
+            tombstones: vec![].into(),
+            tombstone_digests: BTreeMap::new().into(),
+            receipts: vec![].into(),
             checkpoint,
             manifest_digest: first,
         };
@@ -4479,21 +5463,43 @@ mod tests {
             "execution lineage does not redefine identical immutable vector content"
         );
 
+        let mut sealed_source = FakeVectorGenerationStoreV1::new();
+        sealed_source
+            .published
+            .generations
+            .insert(published.generation_id().clone(), published.clone());
+        let sealed = seal_test_state(&mut sealed_source);
+        let published = sealed_source
+            .published
+            .generations
+            .values()
+            .next()
+            .expect("sealed generation")
+            .clone();
         let encoded = serde_json::to_string(&published).expect("serialize published generation");
         assert!(
             !encoded.contains("\"values\""),
             "the state document must not carry inline float payloads"
         );
+        assert!(
+            !encoded.contains("\"chunk_digest\""),
+            "the state document must not carry per-vector row metadata"
+        );
         let mut decoded: PublishedVectorGenerationV1 =
             serde_json::from_str(&encoded).expect("deserialize published generation");
         assert!(
-            decoded
-                .vectors()
-                .values()
-                .all(|vector| vector.values.is_empty()),
-            "decoded vectors resolve their floats from row-per-vector storage"
+            decoded.vectors().is_empty(),
+            "decoded rows resolve from externalized collection storage"
         );
-        for (chunk_id, vector) in &mut decoded.vectors {
+        decoded
+            .visit_external_slots(&mut |slot| {
+                let Some(address) = slot.address().cloned() else {
+                    return Ok(());
+                };
+                slot.fill(sealed.get(&address).expect("sealed collection"))
+            })
+            .expect("fill externalized collections");
+        for (chunk_id, vector) in decoded.vectors.elided_mut().iter_mut() {
             vector
                 .values
                 .clone_from(&published.vectors[chunk_id].values);
@@ -4529,10 +5535,11 @@ mod tests {
                     values: vec![1.0],
                     output_digest: content_digest('d'),
                 },
-            )]),
-            tombstones: vec![chunk_id.clone()],
-            tombstone_digests: BTreeMap::from([(chunk_id, content_digest('c'))]),
-            receipts: vec![],
+            )])
+            .into(),
+            tombstones: vec![chunk_id.clone()].into(),
+            tombstone_digests: BTreeMap::from([(chunk_id, content_digest('c'))]).into(),
+            receipts: vec![].into(),
             checkpoint: VectorProjectionCheckpointV1 {
                 target_projection_key: embedding_key.projection_key().clone(),
                 source_generation: id("code-generation.1"),
@@ -4577,13 +5584,13 @@ mod tests {
         generation.checkpoint.last_request_digest = Some(request_digest);
         generation.checkpoint.last_publication_digest =
             Some(deletion_batch.publication_digest.clone());
-        generation.receipts = vec![deletion_batch];
+        *generation.receipts = vec![deletion_batch];
         generation.manifest_digest = generation_identity_digest(
             &VectorGenerationPlanV1 {
                 target_projection_key: generation.projection_key.clone(),
                 source_generation: generation.source_generation.clone(),
                 source_manifest_digest: generation.source_manifest_digest.clone(),
-                expected_chunk_ids: vec![],
+                expected_chunk_ids: vec![].into(),
                 base_generation: None,
             },
             &generation.vectors,
@@ -4661,7 +5668,7 @@ mod tests {
             target_projection_key: embedding.projection_key().clone(),
             source_generation: source.clone(),
             source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-            expected_chunk_ids: vec![chunk_id.clone()],
+            expected_chunk_ids: vec![chunk_id.clone()].into(),
             base_generation: None,
         };
 
@@ -4780,8 +5787,10 @@ mod tests {
         insert_generation(&mut state, generation);
         state.published.active_generation = Some(generation_id.clone());
 
-        // Re-inline the payloads to reproduce the pre-migration encoding.
-        let mut document = serde_json::to_value(&state).expect("state document");
+        // Re-inline both externalizations to reproduce the pre-migration
+        // encoding: corpus-sized collections rendered in place, and every
+        // float carried inside its vector row.
+        let mut document = legacy_inline_document(&mut state);
         let vectors =
             document["published"]["generations"][generation_id.as_digest().as_str()]["vectors"]
                 .as_object_mut()
@@ -4791,6 +5800,7 @@ mod tests {
         }
         let legacy_document = document.to_string();
         assert!(legacy_document.contains("\"values\""));
+        assert!(legacy_document.contains("\"chunk_digest\""));
         DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
             .await
             .expect("schema");
@@ -5006,7 +6016,7 @@ mod tests {
             target_projection_key: projection_key,
             source_generation: source.clone(),
             source_manifest_digest,
-            expected_chunk_ids: chunk_ids,
+            expected_chunk_ids: chunk_ids.into(),
             base_generation: None,
         };
 

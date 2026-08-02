@@ -1143,7 +1143,7 @@ impl ProductionSemanticRuntimeV1 {
                     target_projection_key: published_projection_key.clone(),
                     source_generation: published_source_generation.clone(),
                     source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                    expected_chunk_ids,
+                    expected_chunk_ids: expected_chunk_ids.into(),
                     base_generation: base_generation.clone(),
                 };
                 let build = store

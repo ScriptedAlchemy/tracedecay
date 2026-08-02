@@ -254,7 +254,7 @@ fn publish_initial_generation() -> (
             target_projection_key: projection_key.clone(),
             source_generation: id("code-generation.1"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id, gone.id, stable.id],
+            expected_chunk_ids: vec![alpha.id, gone.id, stable.id].into(),
             base_generation: None,
         })
         .expect("initial build");
@@ -322,7 +322,7 @@ async fn indexing_and_cancellation_leave_only_the_compatible_prior_generation_qu
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: next_source_manifest.clone(),
-            expected_chunk_ids: vec![alpha.id.clone()],
+            expected_chunk_ids: vec![alpha.id.clone()].into(),
             base_generation: Some(base_generation.clone()),
         })
         .expect("staged replacement");
@@ -507,7 +507,7 @@ fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id.clone(), added.id.clone(), stable.id.clone()],
+            expected_chunk_ids: vec![alpha.id.clone(), added.id.clone(), stable.id.clone()].into(),
             base_generation: Some(base_generation.clone()),
         })
         .expect("changed build");
@@ -563,7 +563,7 @@ fn checkpoint_and_active_pointer_publish_atomically() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id],
+            expected_chunk_ids: vec![alpha.id].into(),
             base_generation: None,
         })
         .unwrap();
@@ -640,7 +640,7 @@ fn unchanged_generation_reuses_vectors_without_fake_inference() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.2"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id, gone.id, stable.id],
+            expected_chunk_ids: vec![alpha.id, gone.id, stable.id].into(),
             base_generation: Some(base_generation.clone()),
         })
         .unwrap();
@@ -801,7 +801,7 @@ fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
             target_projection_key: projection_key,
             source_generation: id("code-generation.1"),
             source_manifest_digest: prepared.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha.id],
+            expected_chunk_ids: vec![alpha.id].into(),
             base_generation: None,
         })
         .unwrap();
@@ -830,7 +830,7 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
         target_projection_key: projection_key.clone(),
         source_generation: id("code-generation.1"),
         source_manifest_digest,
-        expected_chunk_ids: vec![alpha.id.clone(), beta.id.clone()],
+        expected_chunk_ids: vec![alpha.id.clone(), beta.id.clone()].into(),
         base_generation: None,
     };
 
@@ -990,7 +990,7 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
             target_projection_key: projection_key.clone(),
             source_generation: id("code-generation.1"),
             source_manifest_digest: initial.receipt.source_manifest_digest.clone(),
-            expected_chunk_ids: vec![alpha_v1.id.clone(), stable_v1.id.clone()],
+            expected_chunk_ids: vec![alpha_v1.id.clone(), stable_v1.id.clone()].into(),
             base_generation: None,
         })
         .await
@@ -1064,7 +1064,7 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
         target_projection_key: projection_key,
         source_generation: id("code-generation.2"),
         source_manifest_digest: next.receipt.source_manifest_digest.clone(),
-        expected_chunk_ids: vec![stable_v2.id.clone()],
+        expected_chunk_ids: vec![stable_v2.id.clone()].into(),
         base_generation: Some(initial_publication.generation_id.clone()),
     };
     let next_build = restarted
