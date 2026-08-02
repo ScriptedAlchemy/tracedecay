@@ -6,7 +6,6 @@
 //! few contracts both sides need (resource ceilings, the fallback reason, the
 //! rerank compatibility pins, and the default catalog model id) are defined
 //! here and re-exported by the root's configuration modules.
-#![allow(dead_code)] // in-flight semantic runtime root; Plan 31 native fastembed semantic code search
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -171,10 +170,6 @@ type FastEmbedArtifactLoaderV1 = Box<
 pub struct LoadedSemanticArtifactV1(Arc<AdmittedProjectionArtifactV1>);
 
 impl LoadedSemanticArtifactV1 {
-    fn from_admitted(authority: Arc<AdmittedProjectionArtifactV1>) -> Self {
-        Self(authority)
-    }
-
     pub fn from_lifecycle(
         lifecycle: &SemanticModelLifecycleOwnerV1,
         manifest: &tracedecay_domain::CodeGenerationManifestV1,

@@ -224,10 +224,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     entries.sort_by_key(|(k, _)| (*k).clone());
     let mut has_non_scalar = false;
     for (key, schema) in &entries {
-        let ty = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string");
+        let ty = schema_type(schema);
         if matches!(ty, "array" | "object") {
             has_non_scalar = true;
         }
@@ -281,14 +278,117 @@ Reserved flags: --args <json|-|@file|file> (whole MCP arguments object; `-` read
   --project <path>, -h/--help.\n\
 Per-key values starting with @ are read from that file; @- reads stdin.";
 
-/// Enum values or array item shapes worth stating inline so the help is
-/// sufficient for one-shot construction.
+/// The effective JSON type of a property schema.
+///
+/// A schema may state its type directly, offer a nullable union
+/// (`"type": ["string", "null"]`), or describe a closed set of object variants
+/// with `oneOf` and no `type` at all. The last form used to fall through to the
+/// `"string"` default, so an object-shaped parameter was advertised as a string
+/// and every caller that believed the help constructed an invalid request.
+fn schema_type(schema: &Value) -> &'static str {
+    if let Some(ty) = schema.get("type").and_then(Value::as_str) {
+        return match ty {
+            "array" => "array",
+            "object" => "object",
+            "boolean" => "boolean",
+            "integer" => "integer",
+            "number" => "number",
+            _ => "string",
+        };
+    }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        // Nullable unions: report the non-null member.
+        for candidate in types {
+            match candidate.as_str() {
+                Some("null") | None => {}
+                Some(_) => return schema_type(&json_type_only(candidate)),
+            }
+        }
+    }
+    if let Some(variants) = schema.get("oneOf").and_then(Value::as_array) {
+        if variants
+            .iter()
+            .any(|variant| variant.get("properties").is_some())
+        {
+            return "object";
+        }
+        return "string";
+    }
+    "string"
+}
+
+fn json_type_only(ty: &Value) -> Value {
+    let mut schema = serde_json::Map::new();
+    schema.insert("type".to_owned(), ty.clone());
+    Value::Object(schema)
+}
+
+/// The `oneOf` variants of a schema, if it is a closed variant union.
+fn one_of_variants(schema: &Value) -> Option<&Vec<Value>> {
+    schema.get("oneOf").and_then(Value::as_array)
+}
+
+/// A short label for one `oneOf` variant: its discriminating `const`, or its
+/// required keys.
+fn variant_label(variant: &Value) -> Option<String> {
+    if let Some(literal) = variant.get("const").and_then(Value::as_str) {
+        return Some(format!("\"{literal}\""));
+    }
+    let props = variant.get("properties").and_then(Value::as_object)?;
+    for (key, sub) in props {
+        if let Some(literal) = sub.get("const").and_then(Value::as_str) {
+            return Some(format!("{key}={literal}"));
+        }
+    }
+    let required: Vec<&str> = variant
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    (!required.is_empty()).then(|| format!("{{{}}}", required.join(", ")))
+}
+
+/// Enum values, object sub-fields, variant unions, or array item shapes worth
+/// stating inline so the help is sufficient for one-shot construction.
+///
+/// Object-typed parameters used to render as a bare `object required` with no
+/// description, which told a caller nothing about the fields the daemon
+/// actually requires; naming the required sub-keys here is what makes those
+/// tools callable from their own help.
 fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
         let values: Vec<&str> = allowed.iter().filter_map(Value::as_str).collect();
         if !values.is_empty() {
             return Some(format!("one of: {}", values.join(" | ")));
         }
+    }
+    if let Some(literal) = schema.get("const").and_then(Value::as_str) {
+        return Some(format!("must be: {literal}"));
+    }
+    if let Some(variants) = one_of_variants(schema) {
+        let labels: Vec<String> = variants.iter().filter_map(variant_label).collect();
+        if !labels.is_empty() {
+            return Some(format!("one of: {}", labels.join(" | ")));
+        }
+    }
+    if ty == "object" {
+        let required: Vec<String> = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !required.is_empty() {
+            return Some(format!("object with required keys: {}", required.join(", ")));
+        }
+        if schema.get("properties").and_then(Value::as_object).is_some() {
+            return Some("object — pass JSON via --args".to_string());
+        }
+        return None;
     }
     if ty == "array" {
         let items_type = schema
@@ -304,66 +404,102 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
     None
 }
 
+/// Bound on schema recursion while building an example. The tool schemas are
+/// finite trees far shallower than this; the cap only guarantees termination.
+const EXAMPLE_MAX_DEPTH: usize = 6;
+
 /// A mechanical `--args` example object: every required property plus the
 /// non-scalar optional ones, with placeholder values derived from the schema.
+///
+/// Object-valued properties are expanded recursively. Emitting `{}` for them —
+/// as this did before — produced an example the daemon rejects outright
+/// whenever the nested schema has required keys of its own.
 fn example_args_object(props: &serde_json::Map<String, Value>, required: &[&str]) -> String {
+    serde_json::to_string(&example_object_value(props, required, 0))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn example_object_value(
+    props: &serde_json::Map<String, Value>,
+    required: &[&str],
+    depth: usize,
+) -> Value {
     let mut example = serde_json::Map::new();
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
     entries.sort_by_key(|(key, _)| (!required.contains(&key.as_str()), (*key).clone()));
     for (key, schema) in entries {
-        let ty = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("string");
+        let ty = schema_type(schema);
         if !required.contains(&key.as_str()) && !matches!(ty, "array" | "object") {
             continue;
         }
-        example.insert(key.clone(), placeholder_value(key, schema, ty));
+        example.insert(key.clone(), placeholder_value(key, schema, ty, depth));
     }
-    serde_json::to_string(&Value::Object(example)).unwrap_or_else(|_| "{}".to_string())
+    Value::Object(example)
 }
 
-fn placeholder_value(key: &str, schema: &Value, ty: &str) -> Value {
+/// Expand an object schema into a skeleton containing its required keys.
+fn example_from_object_schema(key: &str, schema: &Value, depth: usize) -> Value {
+    if depth >= EXAMPLE_MAX_DEPTH {
+        return Value::Object(serde_json::Map::new());
+    }
+    // A closed variant union: show the first variant, which the accompanying
+    // shape note lists alongside its alternatives.
+    if let Some(variant) = one_of_variants(schema).and_then(|variants| variants.first()) {
+        return example_from_object_schema(key, variant, depth + 1);
+    }
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return Value::Object(serde_json::Map::new());
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    example_object_value(props, &required, depth + 1)
+}
+
+fn placeholder_value(key: &str, schema: &Value, ty: &str, depth: usize) -> Value {
     match ty {
         "boolean" => Value::Bool(true),
         "integer" | "number" => Value::from(10),
         "array" => {
             let items = schema.get("items");
-            let items_type = items
-                .and_then(|items| items.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("string");
+            let items_type = items.map(schema_type).unwrap_or("string");
             let element = match items_type {
                 "array" => {
                     let inner = items
                         .and_then(|items| items.get("items"))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    let inner_type = inner
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("string");
+                    let inner_type = schema_type(&inner);
                     Value::Array(vec![
-                        placeholder_value(key, &inner, inner_type),
-                        placeholder_value(key, &inner, inner_type),
+                        placeholder_value(key, &inner, inner_type, depth + 1),
+                        placeholder_value(key, &inner, inner_type, depth + 1),
                     ])
                 }
-                "object" => Value::Object(serde_json::Map::new()),
-                other => placeholder_value(key, items.unwrap_or(&Value::Null), other),
+                "object" => {
+                    example_from_object_schema(key, items.unwrap_or(&Value::Null), depth + 1)
+                }
+                other => placeholder_value(key, items.unwrap_or(&Value::Null), other, depth + 1),
             };
             Value::Array(vec![element])
         }
-        "object" => Value::Object(serde_json::Map::new()),
+        "object" => example_from_object_schema(key, schema, depth),
         _ => {
+            if let Some(literal) = schema.get("const") {
+                return literal.clone();
+            }
             if let Some(first) = schema
                 .get("enum")
                 .and_then(Value::as_array)
                 .and_then(|values| values.first())
             {
-                first.clone()
-            } else {
-                Value::String(format!("<{key}>"))
+                return first.clone();
             }
+            if let Some(default) = schema.get("default") {
+                return default.clone();
+            }
+            Value::String(format!("<{key}>"))
         }
     }
 }
@@ -376,6 +512,152 @@ pub fn short_tool_name(full: &str) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn help_for(schema: Value) -> String {
+        render_tool_cli_help(&ToolDefinition {
+            name: "tracedecay_probe".to_string(),
+            description: "Probe tool.".to_string(),
+            input_schema: schema,
+            annotations: None,
+            meta: None,
+        })
+    }
+
+    fn nested_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope", "meta"],
+            "properties": {
+                "scope": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["generation"],
+                    "properties": {
+                        "generation": {"type": "string", "default": "gen:latest"},
+                        "path_prefix": {"type": ["string", "null"]}
+                    }
+                },
+                "meta": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["projection", "temporal"],
+                    "properties": {
+                        "projection": {"type": "string", "enum": ["summary", "evidence"]},
+                        "temporal": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "required": ["kind"],
+                                    "properties": {"kind": {"const": "current"}}
+                                },
+                                {
+                                    "type": "object",
+                                    "required": ["kind", "cutoff"],
+                                    "properties": {
+                                        "kind": {"const": "as_of"},
+                                        "cutoff": {"type": "integer"}
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// The generated example is the only thing most callers copy, so it has to
+    /// be a request the daemon will actually accept. Emitting `{}` for a nested
+    /// object with required keys produced a guaranteed-invalid call.
+    #[test]
+    fn help_example_expands_nested_required_object_keys() {
+        let help = help_for(nested_schema());
+        let example = help
+            .lines()
+            .find(|line| line.trim_start().starts_with('{'))
+            .expect("example object")
+            .trim();
+        let parsed: Value = serde_json::from_str(example).expect("example parses as JSON");
+
+        assert_eq!(parsed["scope"]["generation"], json!("gen:latest"));
+        assert_eq!(parsed["meta"]["projection"], json!("summary"));
+        assert_eq!(parsed["meta"]["temporal"]["kind"], json!("current"));
+        // Optional scalar sub-keys stay out, exactly as at the top level.
+        assert!(parsed["scope"].get("path_prefix").is_none());
+    }
+
+    /// A bare `object required` with no description told the caller nothing
+    /// about the keys the daemon requires.
+    #[test]
+    fn help_names_required_sub_keys_of_object_parameters() {
+        let help = help_for(nested_schema());
+        assert!(
+            help.contains("object with required keys: generation"),
+            "missing scope sub-key note in:\n{help}"
+        );
+        assert!(
+            help.contains("object with required keys: projection, temporal"),
+            "missing meta sub-key note in:\n{help}"
+        );
+    }
+
+    /// A `oneOf` of object variants carries no `type`, so it used to fall
+    /// through to the `string` default and every caller sent a bare string.
+    #[test]
+    fn help_reports_one_of_object_parameters_as_objects() {
+        let help = help_for(json!({
+            "type": "object",
+            "required": ["selector"],
+            "properties": {
+                "selector": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "required": ["selector", "name"],
+                            "properties": {
+                                "selector": {"const": "trait"},
+                                "name": {"type": "string"}
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "required": ["selector", "name"],
+                            "properties": {
+                                "selector": {"const": "method"},
+                                "name": {"type": "string"}
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+        assert!(
+            help.contains("--selector") && help.contains("object"),
+            "selector not advertised as an object in:\n{help}"
+        );
+        assert!(
+            help.contains("selector=trait") && help.contains("selector=method"),
+            "variant labels missing in:\n{help}"
+        );
+    }
+
+    /// Scalar parameters keep their existing rendering.
+    #[test]
+    fn help_keeps_scalar_parameter_rendering() {
+        let help = help_for(json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "number", "description": "Max results"},
+                "mode": {"type": "string", "enum": ["fast", "exact"]}
+            }
+        }));
+        assert!(help.contains("--query"));
+        assert!(help.contains("Search query"));
+        assert!(help.contains("one of: fast | exact"));
+    }
 
     #[test]
     fn tool_result_constructors_keep_internal_analytics_explicit() {

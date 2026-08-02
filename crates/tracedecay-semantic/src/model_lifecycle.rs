@@ -4,8 +4,6 @@
 //! Installation stays offline-safe; after startup, the daemon may acquire the
 //! immutable catalog revision in the background. Search never discovers an
 //! ambient hub/cache or downloads model bytes at query time.
-#![allow(dead_code)] // fastembed model lifecycle; Plan 31 — staged
-
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};

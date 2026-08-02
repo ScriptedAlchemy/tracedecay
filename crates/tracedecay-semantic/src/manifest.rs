@@ -6,7 +6,6 @@
 //! constraints, and the complete resource ceiling. These immutable pins are
 //! the complete local artifact-integrity contract; no signature or trust-root
 //! authority is layered on top.
-#![allow(dead_code)] // model artifact manifest; Plan 31
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
