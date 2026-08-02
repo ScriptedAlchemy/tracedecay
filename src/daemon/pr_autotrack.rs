@@ -763,7 +763,13 @@ async fn track_pr(
     // acquired so a coordinator removal cannot observe a half-prepared branch.
     match administration
         .daemon
-        .with_writer(|| async { graph.track_worktree_branch(&worktree, &label).await })
+        .with_writer_in(
+            crate::daemon::branch_admin::graph_writer_scope(
+                graph.as_ref(),
+                crate::daemon::branch_admin::StoreWriterClass::Owner,
+            ),
+            || async { graph.track_worktree_branch(&worktree, &label).await },
+        )
         .await
     {
         Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
@@ -828,17 +834,23 @@ async fn remove_pr_store(
     if branch_store_exists && let Some(graph) = administration.graph {
         administration
             .daemon
-            .with_writer(|| async {
-                let profile_root = graph.retained_profile_root()?;
-                let target = graph.project_memory_db().await?;
-                crate::migrate::memory_cutover::apply_for_retained_project(
-                    graph.project_root(),
-                    &profile_root,
-                    graph.store_layout(),
-                    target.as_db(),
-                )
-                .await
-            })
+            .with_writer_in(
+                crate::daemon::branch_admin::graph_writer_scope(
+                    graph,
+                    crate::daemon::branch_admin::StoreWriterClass::Owner,
+                ),
+                || async {
+                    let profile_root = graph.retained_profile_root()?;
+                    let target = graph.project_memory_db().await?;
+                    crate::migrate::memory_cutover::apply_for_retained_project(
+                        graph.project_root(),
+                        &profile_root,
+                        graph.store_layout(),
+                        target.as_db(),
+                    )
+                    .await
+                },
+            )
             .await
             .map_err(|error| format!("project-memory cutover failed: {error}"))?;
     }
