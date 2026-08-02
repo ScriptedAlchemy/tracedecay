@@ -8,9 +8,6 @@ const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical-autoincrem
 
 pub const OBSERVATION_ANCHOR_SCHEMA_MIGRATION: &str = "observation-retrieval-anchors-v2";
 
-pub(super) const LEGACY_OBSERVATION_PROJECTION_GENERATION: &str =
-    "projection.legacy-observation-import.v1";
-
 pub(super) const OBSERVATION_SCHEMA_OPERATION: &str = "migrate observation authority schema";
 
 async fn observation_table_exists(

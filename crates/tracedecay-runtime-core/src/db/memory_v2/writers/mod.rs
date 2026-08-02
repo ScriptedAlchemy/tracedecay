@@ -4,7 +4,9 @@
 //! `memory_v2`.
 
 mod compatibility_bank;
+#[allow(dead_code)]
 mod lineage;
+#[allow(dead_code)]
 mod purge;
 
 pub(in crate::db) use compatibility_bank::{
@@ -13,17 +15,12 @@ pub(in crate::db) use compatibility_bank::{
     mark_memory_v2_compatibility_bank_dirty_in_transaction,
     upsert_memory_v2_compatibility_bank_in_transaction,
 };
+#[allow(unused_imports)]
 pub(in crate::db::memory_v2) use lineage::{
-    ensure_current, insert_assertion, insert_event, insert_fact_identity, insert_feedback_history,
-    insert_legacy_feedback_event_mapping, insert_mapping, legacy_feedback_mapping_can_be_recorded,
+    ensure_current, insert_assertion, insert_event, insert_fact_identity, insert_mapping,
     update_current,
 };
 pub(crate) use purge::MemoryV2LegacyPurgeReceipt;
 #[cfg(test)]
 pub(in crate::db) use purge::purge_memory_v2_fact;
 pub(in crate::db) use purge::purge_memory_v2_fact_in_transaction;
-#[cfg(test)]
-pub(in crate::db::memory_v2) use purge::purge_payload_rows;
-pub(in crate::db::memory_v2) use purge::{
-    PurgeIntent, insert_quarantine, purge_memory_v2_fact_inner, quarantine_fact,
-};

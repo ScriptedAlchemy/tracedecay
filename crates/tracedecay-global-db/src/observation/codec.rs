@@ -22,28 +22,11 @@ pub(super) fn storage_message(
     storage(operation, std::io::Error::other(message.into()))
 }
 
-pub(super) fn encode<T: serde::Serialize>(
-    value: &T,
-    operation: &'static str,
-) -> ObservationStoreResult<String> {
-    serde_json::to_string(value).map_err(|error| storage(operation, error))
-}
-
 pub(super) fn decode<T: serde::de::DeserializeOwned>(
     value: &str,
     operation: &'static str,
 ) -> ObservationStoreResult<T> {
     serde_json::from_str(value).map_err(|error| storage(operation, error))
-}
-
-pub(super) fn encode_json_string<T: serde::Serialize>(
-    value: &T,
-    operation: &'static str,
-) -> ObservationStoreResult<String> {
-    match serde_json::to_value(value).map_err(|error| storage(operation, error))? {
-        serde_json::Value::String(value) => Ok(value),
-        _ => Err(storage_message(operation, "encoded value is not a string")),
-    }
 }
 
 pub(super) fn decode_repository_provenance_attachment(

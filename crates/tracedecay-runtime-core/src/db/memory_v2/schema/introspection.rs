@@ -7,7 +7,7 @@ use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::{
-    MemoryV2Executor, OPERATION, db_error, db_message, json_text, optional_string, row_exists,
+    MemoryV2Executor, db_error, db_message, json_text, optional_string, row_exists,
 };
 use super::baseline::create_schema;
 
@@ -53,28 +53,6 @@ async fn trigger_exists(conn: &impl MemoryV2Executor, trigger: &str) -> Result<b
 
 /// V20/V21 retain their original feedback-backfill behavior. The V22 map and
 /// history must be installed together before a backfill can write either.
-pub(in crate::db::memory_v2) async fn v22_feedback_history_schema_installed(
-    conn: &impl MemoryV2Executor,
-) -> Result<bool> {
-    let tables = [
-        "memory_v2_legacy_feedback_event_map",
-        "memory_v2_feedback_history",
-        "memory_v2_feedback_history_repair_progress",
-    ];
-    let mut present = 0;
-    for table in tables {
-        present += usize::from(table_exists(conn, table).await?);
-    }
-    match present {
-        0 => Ok(false),
-        count if count == tables.len() => Ok(true),
-        _ => Err(db_message(
-            OPERATION,
-            "V22 feedback history schema is only partially present",
-        )),
-    }
-}
-
 async fn proposal_current_is_v22(conn: &impl MemoryV2Executor) -> Result<bool> {
     let Some(sql) = optional_string(
         conn,
