@@ -483,6 +483,9 @@ mod tests {
                         semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                             reason: "authority_unavailable",
                         },
+                        coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                            "authority_unavailable",
+                        ),
                     },
                 )
             })
