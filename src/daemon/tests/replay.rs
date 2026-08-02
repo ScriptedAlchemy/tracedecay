@@ -1,5 +1,40 @@
 use super::*;
 
+#[tokio::test]
+async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
+    let temp = TempDir::new().unwrap();
+    let profile_root = temp.path().join("profile");
+    let identity = test_client_identity_for(profile_root);
+    let params = serde_json::json!({
+        "name": "tracedecay_lcm_status",
+        "arguments": {
+            "storage_scope": "user",
+            "provider": "cursor",
+            "format": "json"
+        }
+    });
+
+    let response = super::super::projectless_tools_call_response(
+        serde_json::json!(1),
+        Some(&params),
+        &identity,
+        &StoreAdministration::default(),
+    )
+    .await;
+
+    let error = response
+        .error
+        .expect("profile setup failure must be returned as JSON-RPC");
+    assert_eq!(error.code, -32603);
+    assert!(
+        error
+            .message
+            .contains("project route error (registered_authority_unavailable)"),
+        "unexpected setup error: {}",
+        error.message
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_identity_startup_replays_retained_profile_receipts() {
     let temp = TempDir::new().unwrap();

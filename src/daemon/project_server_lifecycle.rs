@@ -171,10 +171,19 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
 pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
-) -> Result<()> {
-    store_administration
+) {
+    if let Err(error) = store_administration
         .ensure_profile_host_admission_bootstrap(&client_identity.profile_root)
         .await
+    {
+        let reason_code = error
+            .project_route_context()
+            .map_or("authority_unavailable", |(reason_code, _, _)| reason_code);
+        log_daemon_event(
+            "profile_host_admission_bootstrap_schedule_failed",
+            &[("reason_code", reason_code.to_owned())],
+        );
+    }
 }
 
 const PROFILE_HOST_ADMISSION_REPLAY_READ_GRACE: Duration = Duration::from_secs(5);

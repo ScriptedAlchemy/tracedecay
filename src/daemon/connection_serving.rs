@@ -249,7 +249,7 @@ async fn serve_broker_socket_client(
         &engine.store_administration,
         &handshake.client_identity,
     )
-    .await?;
+    .await;
     // Resolve initialize roots only after authentication and inside daemon
     // authority. The proxy process never opens the registry database.
     let initialize_route = apply_daemon_initialize_route(
@@ -632,7 +632,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         &store_administration,
         &handshake.client_identity,
     )
-    .await?;
+    .await;
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;
