@@ -91,6 +91,12 @@ Two mutually exclusive modes, gated by `TRACEDECAY_DOGFOOD_BACKUP_PLAIN`
 Both modes require the backup to already exist; `cargo dogfood` never
 creates one implicitly.
 
+A backup is optional insurance, not a gate. With `TRACEDECAY_DOGFOOD_BACKUP`
+unset, dogfood proceeds and warns on stderr that it is running without one;
+the forward-only boundary still recovers forward (rung 1 below), but rungs 2
+and 3 have nothing to restore from. Naming a backup that is incomplete is
+still refused outright — that is a misconfiguration, not an opt-out.
+
 ## 3. The recovery ladder
 
 In order, this is what takes a stuck forward-only boundary back to a clean

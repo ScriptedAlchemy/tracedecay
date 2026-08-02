@@ -747,17 +747,29 @@ assert_crash_recovery() {
   fi
 }
 
-# Dogfood must stop before installation or marker publication when no complete
-# profile backup is available for restored-copy rehearsal.
-setup_case missing-complete-profile-backup
+# A profile backup is optional insurance, not a gate: with none named, dogfood
+# proceeds and says so on stderr so the operator knows the rehearsal was
+# skipped. Naming an incomplete one is still a configuration error (next case).
+setup_case absent-profile-backup
 write_fake_binary "$case_source" new
-if run_case TRACEDECAY_DOGFOOD_BACKUP= >"$case_output" 2>&1; then
-  fail "dogfood succeeded without a complete verified profile backup"
+run_case TRACEDECAY_DOGFOOD_BACKUP= >"$case_output" 2>&1
+grep -Fq 'proceeding without a profile backup' "$case_output" ||
+  fail "absent backup did not announce that it proceeded without one"
+test -e "$case_state" ||
+  fail "absent backup stopped short of the migration marker boundary"
+
+# Dogfood must stop before installation or marker publication when a backup is
+# named but is not a complete verified backup fit for restored-copy rehearsal.
+setup_case incomplete-profile-backup
+write_fake_binary "$case_source" new
+rm -f "$case_backup/backup-manifest.json"
+if run_case >"$case_output" 2>&1; then
+  fail "dogfood succeeded with an incomplete profile backup"
 fi
-grep -Fq 'dogfood requires TRACEDECAY_DOGFOOD_BACKUP' "$case_output" ||
-  fail "missing backup refusal was not actionable"
+grep -Fq 'names an incomplete backup' "$case_output" ||
+  fail "incomplete backup refusal was not actionable"
 test ! -e "$case_state" ||
-  fail "missing backup refusal crossed the migration marker boundary"
+  fail "incomplete backup refusal crossed the migration marker boundary"
 
 # Crossing into post-update is irreversible. Even when it fails after opening
 # a store, the new binary remains selected and is the only binary allowed to
