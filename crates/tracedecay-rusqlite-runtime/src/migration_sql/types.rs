@@ -215,12 +215,28 @@ pub enum MigrationSqlWriteIntent {
     Commit,
 }
 
+/// How long a write transaction is allowed to hold the writer.
+///
+/// `Ordinary` is the default for every mutation: one fixed lease, no renewal.
+/// `AuthorizedLongLease` exists for the three write shapes that legitimately
+/// outrun a single lease while continuously making progress — fresh-schema
+/// installation, real-scale index installation, and full-index bulk
+/// replacement. None of them steps an existing store forward from an older
+/// shape; there is no version ladder behind this policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MigrationSqlTransactionPolicy {
     Ordinary,
-    SchemaMigration,
+    AuthorizedLongLease,
 }
 
+/// Whether one statement inside a transaction carries the ordinary
+/// per-statement deadline.
+///
+/// `AuthorizedLongSchema` is accepted only inside an
+/// [`MigrationSqlTransactionPolicy::AuthorizedLongLease`] transaction, and only
+/// for durable schema DDL: a single `CREATE INDEX` over a real-scale table can
+/// exceed the ordinary statement deadline while still being one bounded,
+/// cancellable unit of work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MigrationSqlStepPolicy {
     Bounded,

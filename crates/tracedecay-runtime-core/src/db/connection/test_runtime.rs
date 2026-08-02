@@ -312,17 +312,16 @@ impl Database {
             DatabaseAccessMode::ReadWrite
         };
         let database = Self::publish_runtime(runtime, access).await?;
-        let migrated = match mode {
-            TestDatabaseRuntimeMode::Initialize => {
-                crate::db::migrations::migrate(&database).await?;
-                false
+        // Writable test runtimes assert the store already carries the schema
+        // this binary creates; there is no ladder to step, so nothing is ever
+        // reported as migrated.
+        match mode {
+            TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing => {
+                crate::db::migrations::ensure_schema_current(&database).await?;
             }
-            TestDatabaseRuntimeMode::Existing => {
-                crate::db::migrations::migrate(&database).await?.is_some()
-            }
-            TestDatabaseRuntimeMode::ReadOnly => false,
-        };
-        Ok((database, migrated))
+            TestDatabaseRuntimeMode::ReadOnly => {}
+        }
+        Ok((database, false))
     }
 }
 
