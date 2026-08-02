@@ -31,6 +31,17 @@ const BOOTSTRAP_TERMINAL: u8 = 2;
 const BOOTSTRAP_CANCELLED: u8 = 3;
 const BOOTSTRAP_READY_CACHE_FOR: Duration = Duration::from_secs(30);
 const BOOTSTRAP_TERMINAL_CACHE_FOR: Duration = Duration::from_secs(2);
+/// Total wall-clock a bootstrap worker may spend retrying one profile before
+/// giving up.
+///
+/// Retry backoff caps at two seconds, so a permanently retryable failure — a
+/// broker that never opens, a profile root that never becomes readable — spins
+/// a task forever at 0.5 Hz for the daemon's whole life, and every retry logs
+/// nothing after the first. Bounding the total turns that into one warned
+/// give-up. It is not a permanent refusal: a terminal worker is evicted after
+/// `bootstrap_terminal_cache_for`, so the next admission that needs this
+/// profile starts a fresh worker, and a daemon restart always retries.
+const BOOTSTRAP_RETRY_BUDGET: Duration = Duration::from_mins(1);
 
 pub(super) type ProfileHostAdmissionBootstrapOperation =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = crate::errors::Result<()>> + Send>> + Send + Sync>;
@@ -55,6 +66,7 @@ pub(super) struct ProfileHostAdmissionReplayRegistry {
     idle_eviction_after: Duration,
     bootstrap_ready_cache_for: Duration,
     bootstrap_terminal_cache_for: Duration,
+    bootstrap_retry_budget: Duration,
 }
 
 struct ReplayWorkerEntry {
@@ -74,6 +86,7 @@ struct ProfileHostAdmissionBootstrapWorker {
     completed_at: std::sync::Mutex<Option<Instant>>,
     completed: Notify,
     cancellation: Arc<ProfileHostAdmissionCancellation>,
+    retry_budget: Duration,
 }
 
 struct ProfileHostAdmissionCancellation {
@@ -107,6 +120,7 @@ impl Default for ProfileHostAdmissionReplayRegistry {
             idle_eviction_after: IDLE_EVICTION_AFTER,
             bootstrap_ready_cache_for: BOOTSTRAP_READY_CACHE_FOR,
             bootstrap_terminal_cache_for: BOOTSTRAP_TERMINAL_CACHE_FOR,
+            bootstrap_retry_budget: BOOTSTRAP_RETRY_BUDGET,
         }
     }
 }
@@ -149,9 +163,10 @@ impl ProfileHostAdmissionReplayRegistry {
             return;
         }
 
-        let worker = Arc::new(ProfileHostAdmissionBootstrapWorker::new(Arc::clone(
-            &self.cancellation,
-        )));
+        let worker = Arc::new(ProfileHostAdmissionBootstrapWorker::new(
+            Arc::clone(&self.cancellation),
+            self.bootstrap_retry_budget,
+        ));
         let task_worker = Arc::clone(&worker);
         let task = tokio::spawn(async move {
             task_worker.run(operation).await;
@@ -397,10 +412,25 @@ impl ProfileHostAdmissionReplayRegistry {
         registry.bootstrap_terminal_cache_for = terminal;
         registry
     }
+
+    #[cfg(test)]
+    fn with_bootstrap_retry_budget(budget: Duration) -> Self {
+        let mut registry = Self::default();
+        registry.bootstrap_retry_budget = budget;
+        registry
+    }
+
+    #[cfg(test)]
+    async fn bootstrap_state(&self, profile_root: &Path) -> Option<u8> {
+        let workers = self.bootstrap_workers.lock().await;
+        workers
+            .get(profile_root)
+            .map(|entry| entry.worker.state.load(Ordering::Acquire))
+    }
 }
 
 impl ProfileHostAdmissionBootstrapWorker {
-    fn new(cancellation: Arc<ProfileHostAdmissionCancellation>) -> Self {
+    fn new(cancellation: Arc<ProfileHostAdmissionCancellation>, retry_budget: Duration) -> Self {
         Self {
             state: AtomicU8::new(BOOTSTRAP_RUNNING),
             attempt_count: AtomicUsize::new(0),
@@ -408,6 +438,7 @@ impl ProfileHostAdmissionBootstrapWorker {
             completed_at: std::sync::Mutex::new(None),
             completed: Notify::new(),
             cancellation,
+            retry_budget,
         }
     }
 
@@ -433,6 +464,7 @@ impl ProfileHostAdmissionBootstrapWorker {
 
     async fn run(&self, operation: ProfileHostAdmissionBootstrapOperation) {
         let mut consecutive_retryable = 0u32;
+        let started = Instant::now();
         loop {
             self.attempt_count.fetch_add(1, Ordering::AcqRel);
             let result = tokio::select! {
@@ -473,6 +505,31 @@ impl ProfileHostAdmissionBootstrapWorker {
                             "profile_host_admission_bootstrap_retry",
                             &[("reason_code", reason_code.to_owned())],
                         );
+                    }
+                    // Retryable does not mean retry forever. Once the budget is
+                    // spent, stop and say so; the entry is evicted shortly after
+                    // and the next admission (or a restart) resumes the attempt.
+                    let elapsed = started.elapsed();
+                    if elapsed >= self.retry_budget {
+                        tracing::warn!(
+                            event = "profile_host_admission_bootstrap_exhausted",
+                            reason_code,
+                            attempts = consecutive_retryable,
+                            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                            budget_ms =
+                                u64::try_from(self.retry_budget.as_millis()).unwrap_or(u64::MAX),
+                            "profile host admission bootstrap gave up after its retry budget; \
+                             it resumes on the next admission or daemon restart"
+                        );
+                        log_daemon_event(
+                            "profile_host_admission_bootstrap_exhausted",
+                            &[
+                                ("reason_code", reason_code.to_owned()),
+                                ("attempts", consecutive_retryable.to_string()),
+                            ],
+                        );
+                        self.finish(BOOTSTRAP_TERMINAL);
+                        return;
                     }
                     tokio::select! {
                         () = self.wait_for_cancellation() => {
@@ -869,6 +926,52 @@ mod tests {
         assert_eq!(attempts.load(Ordering::Acquire), 3);
         assert_eq!(registry.bootstrap_attempt_count(&profile_root).await, 3);
         assert_eq!(registry.bootstrap_backoff_count(&profile_root).await, 2);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bootstrap_gives_up_terminally_once_its_retry_budget_is_spent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::with_bootstrap_retry_budget(
+            Duration::from_millis(60),
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let operation_attempts = Arc::clone(&attempts);
+        // Always retryable: without a budget this loops for the daemon's life.
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let attempts = Arc::clone(&operation_attempts);
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::AcqRel);
+                Err(crate::errors::TraceDecayError::project_route(
+                    "test_bootstrap_unavailable",
+                    true,
+                    "permanently retryable test failure",
+                ))
+            })
+        });
+
+        registry.ensure_bootstrap(&profile_root, operation).await;
+        assert!(
+            registry
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(5))
+                .await,
+            "a permanently retryable bootstrap must still terminate"
+        );
+        assert_eq!(
+            registry.bootstrap_state(&profile_root).await,
+            Some(BOOTSTRAP_TERMINAL),
+            "spending the retry budget is a terminal give-up, not a success"
+        );
+        let observed = attempts.load(Ordering::Acquire);
+        assert!(observed >= 2, "the budget must allow real retries first");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            observed,
+            "a terminal worker must stop retrying entirely"
+        );
         registry.shutdown().await;
     }
 

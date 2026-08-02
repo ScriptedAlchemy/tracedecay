@@ -34,7 +34,8 @@ pub use workflow::GlobalDbWorkflowStore;
 pub mod vector_generation_test_support {
     pub use crate::semantic_code::projector::{
         CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, ProjectedChunkVectorV1,
-        SemanticProjectionErrorV1, prepare_vector_generation, prepare_vector_generation_async,
+        ProjectionRequestBatchV1, SemanticProjectionErrorV1, prepare_vector_generation,
+        prepare_vector_generation_async, split_projection_request,
     };
 
     pub use super::vector_generations::{
