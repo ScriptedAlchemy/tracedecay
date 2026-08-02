@@ -20,8 +20,8 @@ use super::{
     CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
     CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
-    newly_eligible_percentile, now_micros,
+    DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
+    PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
@@ -1206,7 +1206,26 @@ impl CodeIndexSchedulerRegistryV1 {
                 // is held and reconcile work starts on the next line.
                 let started_micros = now_micros().0;
                 let outcome = scheduler.ensure_fresh_for_query().ok()?;
-                let latest = scheduler.latest_complete()?;
+                // Await-new must never preempt serve-old. A reconcile installs
+                // the generation it publishes directly, so this normally hits;
+                // when it abstains the active generation is mid-decode
+                // elsewhere, and queuing on that O(store) sweep would block a
+                // lane that already has a complete generation to answer from.
+                let latest = match scheduler.latest_complete_already_decoded() {
+                    Some(latest) => latest,
+                    None => {
+                        let retained = serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        match retained {
+                            Some(retained) => retained,
+                            // Nothing is servable: only now may this await the
+                            // in-flight decode rather than abstain.
+                            None => scheduler.latest_complete()?,
+                        }
+                    }
+                };
                 *serving_generation
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
@@ -1283,6 +1302,16 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
+        self.latest_complete_ready_with(project_root, GenerationDecodeAdmissionV1::AwaitDecode)
+            .await
+    }
+
+    /// [`Self::latest_complete_ready`] under an explicit decode admission.
+    async fn latest_complete_ready_with(
+        &self,
+        project_root: &Path,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.try_lock().ok()?;
@@ -1298,7 +1327,10 @@ impl CodeIndexSchedulerRegistryV1 {
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => return None,
             };
-            let latest = scheduler.latest_complete_ready_for_query().ok().flatten()?;
+            let latest = scheduler
+                .latest_complete_ready_for_query_with(admission)
+                .ok()
+                .flatten()?;
             *serving_generation
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
@@ -1358,6 +1390,33 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
+        self.latest_complete_ready_for_scope_with(scope, GenerationDecodeAdmissionV1::AwaitDecode)
+            .await
+    }
+
+    /// [`Self::latest_complete_ready_for_scope`] restricted to an
+    /// already-decoded generation.
+    ///
+    /// This is the freshness probe for a caller that *already* has a complete
+    /// generation it can serve. It runs the same ready gate, but abstains
+    /// instead of parking when the active generation is mid-decode, so awaiting
+    /// a new generation can never preempt serving the old one.
+    pub(in crate::daemon) async fn latest_complete_ready_decoded_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        self.latest_complete_ready_for_scope_with(
+            scope,
+            GenerationDecodeAdmissionV1::AlreadyDecoded,
+        )
+        .await
+    }
+
+    async fn latest_complete_ready_for_scope_with(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Option<LatestCompleteCodeIndexV1> {
         // MCP search resolves its generation before it asks for query authority,
         // so this is the first authenticated demand boundary on that path.
         self.activate_for_scope(scope);
@@ -1376,7 +1435,7 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             matched?
         };
-        let latest = self.latest_complete_ready(&root).await?;
+        let latest = self.latest_complete_ready_with(&root, admission).await?;
         Self::latest_matches_scope(&latest, scope).then_some(latest)
     }
 

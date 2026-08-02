@@ -272,21 +272,34 @@ impl CodeIndexSchedulerRegistryV1 {
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
-        // Stale-while-revalidate. The ready gate admits only an *already
-        // current* generation, so it abstains for the whole window of any
-        // rebuild — freshness unknown, git metadata moved, staleness threshold
-        // elapsed. Every other callable code query keeps serving the last
-        // complete generation through that window, and search must not be the
-        // one lane that collapses. Fall back to the generation already held for
-        // this worktree and mark the lanes stale. Only when no complete
-        // generation exists at all does this stay a typed fail-fast.
-        let (latest, served_stale) = match self.latest_complete_ready_for_scope(scope).await {
-            Some(latest) => (latest, false),
+        // Stale-while-revalidate, resolved serve-old first. The ready gate
+        // admits only an *already current* generation, so it abstains for the
+        // whole window of any rebuild — freshness unknown, git metadata moved,
+        // staleness threshold elapsed. Every other callable code query keeps
+        // serving the last complete generation through that window, and search
+        // must not be the one lane that collapses.
+        //
+        // Resolution order is load-bearing, not cosmetic. Asking the ready gate
+        // first made every query queue on the single-flight decode of whatever
+        // generation was being activated, so a query with a perfectly servable
+        // generation in hand still paid an O(store) sweep before it could reach
+        // this fallback. Await-new must never preempt serve-old: check the O(1)
+        // `serving_generation` first, and when it holds a complete generation,
+        // resolve freshness through the decode-free ready probe. Only when
+        // nothing is servable may the query await the in-flight decode, and
+        // when no complete generation exists at all this stays a typed
+        // fail-fast rather than degrading into an empty answer.
+        let (latest, served_stale) = match self.latest_complete_serving_for_scope(scope).await {
+            Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
+                // Warm path: the ready gate admits, byte-identical to before.
+                Some(ready) => (ready, false),
+                None => (serving, true),
+            },
             None => (
-                self.latest_complete_serving_for_scope(scope)
+                self.latest_complete_ready_for_scope(scope)
                     .await
                     .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?,
-                true,
+                false,
             ),
         };
         let authority = self
