@@ -101,7 +101,9 @@ pub fn embedding_session_width(intra_threads: u32, configured_max_sessions: u32)
     let configured = (configured_max_sessions as usize).max(1);
     match env_width(EMBED_SESSIONS_ENV) {
         Some(forced) => forced.min(MAX_EMBEDDING_SESSIONS).min(configured),
-        None => embedding_session_width_for(detected_cores(), intra_threads, configured_max_sessions),
+        None => {
+            embedding_session_width_for(detected_cores(), intra_threads, configured_max_sessions)
+        }
     }
 }
 

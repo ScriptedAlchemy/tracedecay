@@ -1282,13 +1282,15 @@ fn projection_vectors_are_byte_identical_at_every_encoder_width() {
     };
 
     let mut narrow_encoder = WidthEncoder::new(1);
-    let narrow = prepare_vector_generation(&admitted, build_request(), &corpus, &mut narrow_encoder)
-        .expect("width-1 projection");
+    let narrow =
+        prepare_vector_generation(&admitted, build_request(), &corpus, &mut narrow_encoder)
+            .expect("width-1 projection");
 
     for width in [2usize, 8, 64] {
         let mut wide_encoder = WidthEncoder::new(width);
-        let wide = prepare_vector_generation(&admitted, build_request(), &corpus, &mut wide_encoder)
-            .expect("wide projection");
+        let wide =
+            prepare_vector_generation(&admitted, build_request(), &corpus, &mut wide_encoder)
+                .expect("wide projection");
         assert_eq!(
             narrow.vectors, wide.vectors,
             "width {width} changed the projected vectors"
