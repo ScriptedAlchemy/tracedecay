@@ -14,6 +14,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
+#[cfg(test)]
+use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
@@ -139,6 +142,7 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
+    pub(super) resident_memory: Arc<ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     mount_admission: Arc<tokio::sync::Semaphore>,
@@ -160,11 +164,25 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
+    #[cfg(test)]
     pub fn new(max_worktrees: usize) -> Self {
+        Self::with_resident_memory(
+            max_worktrees,
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+        )
+    }
+
+    pub fn with_resident_memory(
+        max_worktrees: usize,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+    ) -> Self {
         let (generation_publications, _) =
             tokio::sync::broadcast::channel(GENERATION_PUBLICATION_CHANNEL_CAPACITY);
         Self {
             max_worktrees,
+            resident_memory,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             mount_admission: Arc::new(tokio::sync::Semaphore::new(
@@ -178,6 +196,11 @@ impl CodeIndexSchedulerRegistryV1 {
             activations: Arc::new(Mutex::new(BTreeMap::new())),
             test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::daemon) fn resident_memory(&self) -> &Arc<ProcessResidentMemoryV1> {
+        &self.resident_memory
     }
 
     pub(in crate::daemon) fn register_activation(
