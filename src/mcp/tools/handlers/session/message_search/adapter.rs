@@ -1,7 +1,6 @@
-use std::fmt::Write as _;
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
 
 use super::super::lcm_args::{
@@ -10,10 +9,10 @@ use super::super::lcm_args::{
 };
 use super::super::sessions_for::render_message_search_md;
 use super::contract::{
-    SessionRetrievalCommand, SessionRetrievalFilters, SessionRetrievalPageView,
-    SessionRetrievalProjectSelector, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalWorkerBlocker,
-    SessionRetrievalWorkerRetryClass, SessionTemporalMetadataView,
+    SessionRetrievalCommand, SessionRetrievalFilters, SessionRetrievalNextActionView,
+    SessionRetrievalPageView, SessionRetrievalProjectSelector, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionTemporalMetadataView,
 };
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
@@ -126,7 +125,24 @@ pub(crate) fn parse_message_search_request(args: &Value) -> Result<MessageSearch
     })
 }
 
-fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Value {
+fn payload_object_mut(payload: &mut Value) -> Result<&mut Map<String, Value>> {
+    payload
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "message search payload must be an object".to_string(),
+        })
+}
+
+fn error_object_mut(payload: &mut Value) -> Result<&mut Map<String, Value>> {
+    payload_object_mut(payload)?
+        .get_mut("error")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "message search error payload must be an object".to_string(),
+        })
+}
+
+fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
     let mut payload = json!({
         "status": "ok",
         "outcome": "complete_zero",
@@ -150,18 +166,15 @@ fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Value {
         "refresh_required": false,
         "next_action": Value::Null,
     });
-    if !request.git_filter.is_empty()
-        && let Some(map) = payload.as_object_mut()
-    {
+    let map = payload_object_mut(&mut payload)?;
+    if !request.git_filter.is_empty() {
         map.insert(
             "git_filter".to_string(),
-            git_filter_value(&request.git_filter),
+            serde_json::to_value(&request.git_filter)?,
         );
         map.insert("git_filter_applied".to_string(), Value::Bool(true));
     }
-    if request.workflow_scope.is_some()
-        && let Some(map) = payload.as_object_mut()
-    {
+    if request.workflow_scope.is_some() {
         map.insert(
             "workflow_run".to_string(),
             request
@@ -177,27 +190,13 @@ fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Value {
         map.insert("workflow_filter_applied".to_string(), Value::Bool(true));
         map.insert("workflow_run_parent_session".to_string(), Value::Null);
     }
-    payload
-}
-
-fn git_filter_value(git_filter: &GitScopeFilter) -> Value {
-    let mut value = serde_json::Map::new();
-    if let Some(branch) = &git_filter.branch {
-        value.insert("branch".to_string(), Value::String(branch.clone()));
-    }
-    if let Some(worktree) = &git_filter.worktree {
-        value.insert("worktree".to_string(), Value::String(worktree.clone()));
-    }
-    if let Some(commit) = &git_filter.commit {
-        value.insert("commit".to_string(), Value::String(commit.clone()));
-    }
-    Value::Object(value)
+    Ok(payload)
 }
 
 fn temporal_value(
     temporal: &SessionTemporalMetadataView,
     freshness: SessionDataFreshness,
-) -> Value {
+) -> Result<Value> {
     let freshness = match freshness {
         SessionDataFreshness::Fresh => json!({ "state": "fresh" }),
         SessionDataFreshness::Stored { generation_lag } => {
@@ -207,37 +206,20 @@ fn temporal_value(
             json!({ "state": "partial", "generation_lag": generation_lag })
         }
     };
-    let mut value = json!({
-        "anchors": temporal.anchors,
-        "watermarks": temporal.watermarks,
-        "coverage": temporal.coverage,
-        "cursor": temporal.cursor,
-        "explanations": temporal.explanations,
-        "freshness": freshness,
-    });
-    if !temporal.source_coverage.is_empty() {
-        value["source_coverage"] = json!(temporal.source_coverage);
-    }
-    if !temporal.omissions.is_empty() {
-        value["omissions"] = json!(temporal.omissions);
-    }
-    value
+    let mut value = serde_json::to_value(temporal)?;
+    let map = payload_object_mut(&mut value)?;
+    map.remove("authorized_root");
+    map.insert("freshness".to_string(), freshness);
+    Ok(value)
 }
 
 fn message_search_results_value(results: Vec<SessionMessageSearchResult>) -> Result<Value> {
-    let mut values = Vec::with_capacity(results.len());
-    for result in results {
-        let score =
-            serde_json::Number::from_f64(result.score).ok_or_else(|| TraceDecayError::Config {
-                message: "session retrieval result score must be finite".to_string(),
-            })?;
-        let mut value = serde_json::Map::new();
-        value.insert("session".to_string(), serde_json::to_value(result.session)?);
-        value.insert("message".to_string(), serde_json::to_value(result.message)?);
-        value.insert("score".to_string(), Value::Number(score));
-        values.push(Value::Object(value));
+    if results.iter().any(|result| !result.score.is_finite()) {
+        return Err(TraceDecayError::Config {
+            message: "session retrieval result score must be finite".to_string(),
+        });
     }
-    Ok(Value::Array(values))
+    serde_json::to_value(results).map_err(Into::into)
 }
 
 fn apply_page(
@@ -246,11 +228,7 @@ fn apply_page(
     freshness: SessionDataFreshness,
 ) -> Result<()> {
     let SessionRetrievalPageView { results, temporal } = page;
-    let map = payload
-        .as_object_mut()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "message search payload must be an object".to_string(),
-        })?;
+    let map = payload_object_mut(payload)?;
     if let Some(root) = &temporal.authorized_root {
         map.insert(
             "selected_project_root".to_string(),
@@ -262,7 +240,10 @@ fn apply_page(
         "results".to_string(),
         message_search_results_value(results)?,
     );
-    map.insert("temporal".to_string(), temporal_value(&temporal, freshness));
+    map.insert(
+        "temporal".to_string(),
+        temporal_value(&temporal, freshness)?,
+    );
     Ok(())
 }
 
@@ -270,43 +251,43 @@ fn apply_temporal(
     payload: &mut Value,
     temporal: &SessionTemporalMetadataView,
     freshness: SessionDataFreshness,
-) {
-    let Some(map) = payload.as_object_mut() else {
-        return;
-    };
+) -> Result<()> {
+    let map = payload_object_mut(payload)?;
     if let Some(root) = &temporal.authorized_root {
         map.insert(
             "selected_project_root".to_string(),
             Value::String(root.clone()),
         );
     }
-    map.insert("temporal".to_string(), temporal_value(temporal, freshness));
+    map.insert("temporal".to_string(), temporal_value(temporal, freshness)?);
+    Ok(())
 }
 
-fn apply_refresh_guidance(payload: &mut Value, required: bool) {
-    let Some(map) = payload.as_object_mut() else {
-        return;
-    };
+const fn refresh_next_action() -> SessionRetrievalNextActionView {
+    SessionRetrievalNextActionView {
+        kind: "session_refresh",
+        tool: "tracedecay_session_refresh",
+        action: "begin",
+        reason: "the authorized session-temporal store does not satisfy the requested freshness precondition",
+    }
+}
+
+fn apply_refresh_guidance(payload: &mut Value, required: bool) -> Result<()> {
+    let map = payload_object_mut(payload)?;
     map.insert("refresh_required".to_string(), Value::Bool(required));
     map.insert(
         "next_action".to_string(),
         if required {
-            json!({
-                "kind": "session_refresh",
-                "tool": "tracedecay_session_refresh",
-                "action": "begin",
-                "reason": "the authorized session-temporal store does not satisfy the requested freshness precondition",
-            })
+            serde_json::to_value(refresh_next_action())?
         } else {
             Value::Null
         },
     );
+    Ok(())
 }
 
-fn apply_typed_error(payload: &mut Value, status: &str, code: &str, message: &str) {
-    let Some(map) = payload.as_object_mut() else {
-        return;
-    };
+fn apply_typed_error(payload: &mut Value, status: &str, code: &str, message: &str) -> Result<()> {
+    let map = payload_object_mut(payload)?;
     map.insert("status".to_string(), Value::String(status.to_string()));
     map.insert("outcome".to_string(), Value::String(status.to_string()));
     map.insert("message".to_string(), Value::String(message.to_string()));
@@ -318,100 +299,104 @@ fn apply_typed_error(payload: &mut Value, status: &str, code: &str, message: &st
             "retryable": false
         }),
     );
+    Ok(())
 }
 
-fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailable) {
+fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailable) -> Result<()> {
     apply_typed_error(
         payload,
         "unavailable",
         "session_retrieval_service_unavailable",
         "the authorized session retrieval service is unavailable",
+    )?;
+    let error = error_object_mut(payload)?;
+    error.insert("reason".to_string(), json!(unavailable.reason.as_str()));
+    error.insert(
+        "retryable".to_string(),
+        json!(unavailable.reason.is_retryable()),
     );
-    payload["error"]["reason"] = json!(unavailable.reason.as_str());
-    payload["error"]["retryable"] = json!(unavailable.reason.is_retryable());
     if let Some(worker) = unavailable.worker {
-        payload["service_status"] = json!({
-            "last_progress_at_unix_micros": worker.last_progress_at_unix_micros,
-            "backlog": worker.backlog,
-            "blocker": worker.blocker.map(SessionRetrievalWorkerBlocker::as_str),
-            "retry_class": worker.retry_class.map(SessionRetrievalWorkerRetryClass::as_str),
-        });
+        payload_object_mut(payload)?
+            .insert("service_status".to_string(), serde_json::to_value(worker)?);
     }
+    Ok(())
 }
 
 fn render_service_outcome(
     request: &MessageSearchRequest<'_>,
     outcome: SessionRetrievalServiceOutcome,
 ) -> Result<Value> {
-    let mut payload = base_message_search_payload(request);
+    let mut payload = base_message_search_payload(request)?;
     match outcome {
         SessionRetrievalServiceOutcome::Complete { page, freshness } => {
-            payload["outcome"] = json!("complete");
+            payload_object_mut(&mut payload)?.insert("outcome".to_string(), json!("complete"));
             apply_page(&mut payload, page, freshness)?;
         }
         SessionRetrievalServiceOutcome::CompleteZero {
             temporal,
             freshness,
         } => {
-            apply_temporal(&mut payload, &temporal, freshness);
+            apply_temporal(&mut payload, &temporal, freshness)?;
         }
         SessionRetrievalServiceOutcome::Stale {
             temporal,
             freshness,
         } => {
-            payload["status"] = json!("stale");
-            payload["outcome"] = json!("stale");
-            apply_temporal(&mut payload, &temporal, freshness);
-            apply_refresh_guidance(&mut payload, request.catch_up);
+            let map = payload_object_mut(&mut payload)?;
+            map.insert("status".to_string(), json!("stale"));
+            map.insert("outcome".to_string(), json!("stale"));
+            apply_temporal(&mut payload, &temporal, freshness)?;
+            apply_refresh_guidance(&mut payload, request.catch_up)?;
         }
         SessionRetrievalServiceOutcome::Partial {
             page,
             freshness,
             omitted,
         } => {
-            payload["status"] = json!("partial");
-            payload["outcome"] = json!("partial");
-            payload["omitted"] = json!(omitted);
+            let map = payload_object_mut(&mut payload)?;
+            map.insert("status".to_string(), json!("partial"));
+            map.insert("outcome".to_string(), json!("partial"));
+            map.insert("omitted".to_string(), json!(omitted));
             let refresh_required = request.catch_up
                 && matches!(
                     freshness,
                     SessionDataFreshness::Stored { .. } | SessionDataFreshness::Partial { .. }
                 );
             apply_page(&mut payload, page, freshness)?;
-            apply_refresh_guidance(&mut payload, refresh_required);
+            apply_refresh_guidance(&mut payload, refresh_required)?;
         }
         SessionRetrievalServiceOutcome::WrongScope => apply_typed_error(
             &mut payload,
             "wrong_scope",
             "session_retrieval_wrong_scope",
             "the canonical session retrieval service does not own the requested root",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Locked => apply_typed_error(
             &mut payload,
             "locked",
             "session_retrieval_locked",
             "the authorized session-temporal store is locked",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Redacted => apply_typed_error(
             &mut payload,
             "redacted",
             "session_retrieval_redacted",
             "the requested session evidence is redacted",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Deleted => apply_typed_error(
             &mut payload,
             "deleted",
             "session_retrieval_deleted",
             "the requested session evidence was deleted",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Denied => apply_typed_error(
             &mut payload,
             "denied",
             "session_retrieval_denied",
             "session retrieval was denied",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
-            apply_unavailable(&mut payload, unavailable);
+            apply_unavailable(&mut payload, unavailable)?;
         }
         SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
             kind,
@@ -423,23 +408,24 @@ fn render_service_outcome(
                 "cursor_manifest_limit_exceeded",
                 "session_cursor_manifest_limit_exceeded",
                 "session retrieval cursor manifest exceeded its canonical bound",
-            );
-            payload["error"]["kind"] = json!(kind);
-            payload["error"]["observed"] = json!(observed);
-            payload["error"]["maximum"] = json!(maximum);
+            )?;
+            let error = error_object_mut(&mut payload)?;
+            error.insert("kind".to_string(), json!(kind));
+            error.insert("observed".to_string(), json!(observed));
+            error.insert("maximum".to_string(), json!(maximum));
         }
         SessionRetrievalServiceOutcome::BudgetExhausted => apply_typed_error(
             &mut payload,
             "budget_exhausted",
             "session_retrieval_budget_exhausted",
             "session retrieval exhausted its bounded work budget",
-        ),
+        )?,
         SessionRetrievalServiceOutcome::Cancelled => apply_typed_error(
             &mut payload,
             "cancelled",
             "session_retrieval_cancelled",
             "session retrieval was cancelled",
-        ),
+        )?,
     }
     Ok(payload)
 }
@@ -543,69 +529,122 @@ fn retrieval_command(
     )
 }
 
-fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Value {
-    let mut payload = base_message_search_payload(request);
+fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
+    let mut payload = base_message_search_payload(request)?;
     apply_typed_error(
         &mut payload,
         "deferred",
         "session_retrieval_multi_root_deferred",
         "multi-root session retrieval is not implemented",
-    );
-    payload["project_scope"] = json!("all_registered");
-    payload
+    )?;
+    payload_object_mut(&mut payload)?.insert("project_scope".to_string(), json!("all_registered"));
+    Ok(payload)
 }
 
-pub(crate) fn render_temporal_message_search_md(payload: &Value) -> String {
-    let mut markdown = render_message_search_md(payload);
-    if let Some(coverage) = payload
-        .get("temporal")
-        .and_then(|temporal| temporal.get("coverage"))
-    {
-        let _ = write!(
-            markdown,
-            "\n- Coverage: visible {}, hidden {}, unknown {}, redacted {}\n",
-            coverage["visible"].as_u64().unwrap_or_default(),
-            coverage["hidden"].as_u64().unwrap_or_default(),
-            coverage["unknown"].as_u64().unwrap_or_default(),
-            coverage["redacted"].as_u64().unwrap_or_default(),
-        );
+fn markdown_object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>> {
+    value.as_object().ok_or_else(|| TraceDecayError::Config {
+        message: format!("message search markdown requires {name} to be an object"),
+    })
+}
+
+fn markdown_u64(value: &Map<String, Value>, field: &str, name: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("message search markdown requires {name} to be an unsigned integer"),
+        })
+}
+
+fn markdown_string<'a>(value: &'a Map<String, Value>, field: &str, name: &str) -> Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("message search markdown requires {name} to be a string"),
+        })
+}
+
+fn markdown_optional_string<'a>(
+    value: &'a Map<String, Value>,
+    field: &str,
+    name: &str,
+) -> Result<&'a str> {
+    match value.get(field) {
+        Some(Value::String(value)) => Ok(value),
+        Some(Value::Null) => Ok("none"),
+        _ => Err(TraceDecayError::Config {
+            message: format!("message search markdown requires {name} to be a string or null"),
+        }),
     }
-    if payload
+}
+
+pub(crate) fn render_temporal_message_search_md(payload: &Value) -> Result<String> {
+    let mut markdown = render_message_search_md(payload);
+    if let Some(temporal) = payload.get("temporal") {
+        let temporal = markdown_object(temporal, "temporal")?;
+        let coverage = temporal
+            .get("coverage")
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "message search markdown requires temporal.coverage".to_string(),
+            })?;
+        let coverage = markdown_object(coverage, "temporal.coverage")?;
+        let visible = markdown_u64(coverage, "visible", "temporal.coverage.visible")?;
+        let hidden = markdown_u64(coverage, "hidden", "temporal.coverage.hidden")?;
+        let unknown = markdown_u64(coverage, "unknown", "temporal.coverage.unknown")?;
+        let redacted = markdown_u64(coverage, "redacted", "temporal.coverage.redacted")?;
+        markdown.push_str(&format!(
+            "\n- Coverage: visible {visible}, hidden {hidden}, unknown {unknown}, redacted {redacted}\n"
+        ));
+    }
+    let refresh_required = payload
         .get("refresh_required")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "message search markdown requires refresh_required to be a boolean"
+                .to_string(),
+        })?;
+    if refresh_required {
         markdown.push_str(
             "- Refresh required: run `tracedecay_session_refresh` with action `begin`.\n",
         );
     }
     if let Some(error) = payload.get("error") {
-        let _ = writeln!(
-            markdown,
-            "- Problem: `{}` — {}",
-            error["code"].as_str().unwrap_or("session_retrieval_error"),
-            error["message"]
-                .as_str()
-                .unwrap_or("session retrieval failed"),
-        );
-        if let Some(reason) = error.get("reason").and_then(Value::as_str) {
-            let _ = writeln!(markdown, "- Unavailable reason: `{reason}`");
+        let error = markdown_object(error, "error")?;
+        let code = markdown_string(error, "code", "error.code")?;
+        let message = markdown_string(error, "message", "error.message")?;
+        markdown.push_str(&format!("- Problem: `{code}` — {message}\n"));
+        if let Some(reason) = error.get("reason") {
+            let reason = reason.as_str().ok_or_else(|| TraceDecayError::Config {
+                message: "message search markdown requires error.reason to be a string".to_string(),
+            })?;
+            markdown.push_str(&format!("- Unavailable reason: `{reason}`\n"));
         }
     }
     if let Some(status) = payload.get("service_status") {
-        let last_progress = status
-            .get("last_progress_at_unix_micros")
-            .and_then(Value::as_i64)
-            .map_or_else(|| "none".to_string(), |value| value.to_string());
-        let _ = writeln!(
-            markdown,
-            "- Refresh worker: last progress {last_progress}, backlog {}, blocker `{}`, retry class `{}`",
-            status["backlog"].as_u64().unwrap_or_default(),
-            status["blocker"].as_str().unwrap_or("none"),
-            status["retry_class"].as_str().unwrap_or("none"),
-        );
+        let status = markdown_object(status, "service_status")?;
+        let last_progress = match status.get("last_progress_at_unix_micros") {
+            Some(Value::Null) => "none".to_string(),
+            Some(value) => value.as_i64().map(|value| value.to_string()).ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "message search markdown requires service_status.last_progress_at_unix_micros to be an integer or null".to_string(),
+                }
+            })?,
+            None => {
+                return Err(TraceDecayError::Config {
+                    message: "message search markdown requires service_status.last_progress_at_unix_micros".to_string(),
+                });
+            }
+        };
+        let backlog = markdown_u64(status, "backlog", "service_status.backlog")?;
+        let blocker = markdown_optional_string(status, "blocker", "service_status.blocker")?;
+        let retry_class =
+            markdown_optional_string(status, "retry_class", "service_status.retry_class")?;
+        markdown.push_str(&format!(
+            "- Refresh worker: last progress {last_progress}, backlog {backlog}, blocker `{blocker}`, retry class `{retry_class}`\n"
+        ));
     }
-    markdown
+    Ok(markdown)
 }
 
 pub(crate) async fn handle_message_search_with_service(
@@ -629,10 +668,14 @@ pub(crate) async fn handle_message_search_with_service(
                 "project_scope cannot be combined with project_id, project_path, or project_selector",
             ));
         }
-        let payload = deferred_all_registered_payload(&request);
-        return Ok(tool_json_with_md(project_root, &args, &payload, || {
-            render_temporal_message_search_md(&payload)
-        }));
+        let payload = deferred_all_registered_payload(&request)?;
+        let markdown = render_temporal_message_search_md(&payload)?;
+        return Ok(tool_json_with_md(
+            project_root,
+            &args,
+            &payload,
+            move || markdown,
+        ));
     }
     if matches!(store_scope, SessionRetrievalStoreScope::Profile) && project_selector.is_some() {
         return Err(argument_error(
@@ -647,14 +690,21 @@ pub(crate) async fn handle_message_search_with_service(
         ),
     };
     let mut payload = render_service_outcome(&request, outcome)?;
-    payload["store_scope"] = json!(store_scope.as_str());
-    if matches!(store_scope, SessionRetrievalStoreScope::Project)
-        && project_root.is_some()
-        && !has_project_selector
     {
-        payload["selected_project_root"] = json!(project_root);
+        let map = payload_object_mut(&mut payload)?;
+        map.insert("store_scope".to_string(), json!(store_scope.as_str()));
+        if matches!(store_scope, SessionRetrievalStoreScope::Project)
+            && project_root.is_some()
+            && !has_project_selector
+        {
+            map.insert("selected_project_root".to_string(), json!(project_root));
+        }
     }
-    Ok(tool_json_with_md(project_root, &args, &payload, || {
-        render_temporal_message_search_md(&payload)
-    }))
+    let markdown = render_temporal_message_search_md(&payload)?;
+    Ok(tool_json_with_md(
+        project_root,
+        &args,
+        &payload,
+        move || markdown,
+    ))
 }

@@ -779,7 +779,7 @@ async fn unavailable_outcome_exposes_typed_worker_status() {
     assert_eq!(payload["service_status"]["backlog"], 7);
     assert_eq!(payload["service_status"]["blocker"], "worker_panicked");
     assert_eq!(payload["service_status"]["retry_class"], "projector");
-    let markdown = render_temporal_message_search_md(&payload);
+    let markdown = render_temporal_message_search_md(&payload).unwrap();
     assert!(markdown.contains("Unavailable reason: `refresh_worker_recovering`"));
     assert!(markdown.contains(
             "Refresh worker: last progress 42, backlog 7, blocker `worker_panicked`, retry class `projector`"
@@ -819,4 +819,33 @@ async fn unavailable_outcome_reports_no_progress_backlog_as_stalled() {
     assert_eq!(payload["service_status"]["backlog"], 14);
     assert_eq!(payload["service_status"]["blocker"], "storage");
     assert_eq!(payload["service_status"]["retry_class"], "storage");
+}
+
+#[test]
+fn markdown_rejects_malformed_temporal_coverage() {
+    let payload = json!({
+        "query": "database backup",
+        "provider": "all",
+        "scope": "all",
+        "count": 0,
+        "results": [],
+        "goals": false,
+        "refresh_required": false,
+        "temporal": {
+            "coverage": {
+                "visible": "one",
+                "hidden": 2,
+                "unknown": 3,
+                "redacted": 4
+            }
+        }
+    });
+
+    let error = render_temporal_message_search_md(&payload).unwrap_err();
+
+    assert!(matches!(error, TraceDecayError::Config { .. }), "{error}");
+    assert!(
+        error.to_string().contains("temporal.coverage.visible"),
+        "{error}"
+    );
 }

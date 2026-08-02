@@ -358,6 +358,14 @@ pub(crate) struct SessionRetrievalOmissionView {
     pub(crate) reason: HydrationStateV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SessionRetrievalNextActionView {
+    pub(crate) kind: &'static str,
+    pub(crate) tool: &'static str,
+    pub(crate) action: &'static str,
+    pub(crate) reason: &'static str,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct SessionTemporalWatermarksView {
     pub(crate) generation: u64,
@@ -418,7 +426,8 @@ impl SessionRetrievalUnavailableReason {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SessionRetrievalWorkerBlocker {
     WorkerMissing,
     WorkerPanicked,
@@ -441,7 +450,8 @@ impl SessionRetrievalWorkerBlocker {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SessionRetrievalWorkerRetryClass {
     Storage,
     Projector,
@@ -458,7 +468,7 @@ impl SessionRetrievalWorkerRetryClass {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct SessionRetrievalWorkerStatusView {
     pub(crate) last_progress_at_unix_micros: Option<i64>,
     pub(crate) backlog: usize,
