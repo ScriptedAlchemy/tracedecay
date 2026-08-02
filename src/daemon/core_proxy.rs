@@ -224,7 +224,7 @@ async fn proxy_host_input_to_daemon(
             );
             tokio::pin!(daemon_request);
             loop {
-                if *eof.borrow() && !pending.is_empty() {
+                if *eof.borrow() {
                     break daemon_request.await;
                 }
                 tokio::select! {
@@ -237,14 +237,11 @@ async fn proxy_host_input_to_daemon(
                             while let Ok(line) = input.try_recv() {
                                 pending.push_back(line);
                             }
-                            if pending.is_empty() {
-                                return Ok(());
-                            }
                         }
                     }
                     next = input.recv() => {
                         let Some(next) = next else {
-                            return Ok(());
+                            break daemon_request.await;
                         };
                         pending.push_back(next);
                     }

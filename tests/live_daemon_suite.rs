@@ -484,9 +484,7 @@ impl ServeProxy {
             if value.get("id").and_then(Value::as_i64) == Some(id) {
                 if value.get("error").is_some() {
                     let stderr = self.stderr_snapshot().await;
-                    panic!(
-                        "serve proxy request {id} failed: {value}; child stderr:\n{stderr}"
-                    );
+                    panic!("serve proxy request {id} failed: {value}; child stderr:\n{stderr}");
                 }
                 return value;
             }

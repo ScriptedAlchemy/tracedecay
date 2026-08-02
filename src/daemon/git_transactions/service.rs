@@ -837,9 +837,7 @@ fn map_store_error(error: GitIndexTransactionStoreError) -> GitIndexTransactionP
 fn map_journal_error(error: GitIndexJournalError) -> GitIndexTransactionPortError {
     match error {
         GitIndexJournalError::Store(error) => map_store_error(error),
-        GitIndexJournalError::Domain(_) | GitIndexJournalError::InvalidTerminalOutcome => {
-            GitIndexTransactionPortError::NeedsInspection
-        }
+        GitIndexJournalError::Domain(_) => GitIndexTransactionPortError::NeedsInspection,
     }
 }
 
