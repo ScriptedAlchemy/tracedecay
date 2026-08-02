@@ -171,8 +171,8 @@ confused:
   padded tensor shape, which is semantics, not sizing.
 
 Before this split the embedder ran one session at four intra-op threads on
-every host — roughly 400% CPU on a 96-core box — which is what made post-
-dogfood rebuild windows run tens of minutes.
+every host — roughly 400% CPU on a 96-core box — which made local rebuild
+windows run tens of minutes.
 
 GPU is not enabled. `fastembed`'s `InitOptionsUserDefined` does accept
 `with_execution_providers`, so wiring CUDA/DirectML is mechanical, but three
