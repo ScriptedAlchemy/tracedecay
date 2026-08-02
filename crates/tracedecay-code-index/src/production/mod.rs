@@ -181,6 +181,22 @@ impl CodeIndexGenerationScopeV1 {
         }
     }
 
+    /// Whether two scopes name the same physical checkout.
+    ///
+    /// Repository and worktree are identity: a generation sealed under either
+    /// of them differing belongs to another checkout and may never be adopted.
+    /// `reference` is not identity — it is the label HEAD happens to carry, and
+    /// it moves under a fixed worktree on every ordinary commit, branch switch,
+    /// or rebase. Treating it as identity made the active generation of the
+    /// branch you just left "incompatible", so the first reconcile after any
+    /// branch switch failed outright and the worktree stopped indexing until
+    /// the store was rebuilt. The reference the generation was sealed under is
+    /// still carried on its own snapshot, so attribution stays generation-bound.
+    #[must_use]
+    pub fn identifies_same_checkout(&self, other: &Self) -> bool {
+        self.repository == other.repository && self.worktree == other.worktree
+    }
+
     fn validate(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         self.repository
             .validate()
@@ -336,7 +352,14 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     }
 }
 
-const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
+/// The sealed-generation envelope revision this build writes.
+///
+/// Every reader that gates on the sealed format — the publication store, the
+/// worker probe, and code-generation retention — must gate on this one value.
+/// A second copy of the number in another crate is a silent store-wide outage
+/// the moment the writer is versioned: retention refuses every file it is
+/// supposed to sweep, and the store grows without bound.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1168,7 +1191,8 @@ where
         if let Some(active) = &active {
             active.validate()?;
             if active.manifest.project_id != self.config.project_id
-                || CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot) != *scope
+                || !CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot)
+                    .identifies_same_checkout(scope)
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
