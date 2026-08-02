@@ -20,31 +20,48 @@ fn legacy_sealed_generation_is_rejected_before_manifest_decode() {
 }
 
 #[test]
-fn code_index_extraction_parallelism_is_bounded_by_files_and_capacity() {
-    let available = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .clamp(1, MAX_CODE_INDEX_EXTRACTION_WORKERS);
+fn parallel_collection_preserves_input_order() {
+    let items = (0..1_024_usize).collect::<Vec<_>>();
 
-    assert_eq!(bounded_code_index_extraction_workers(0), 1);
-    assert_eq!(bounded_code_index_extraction_workers(1), 1);
-    assert_eq!(bounded_code_index_extraction_workers(usize::MAX), available);
-    assert!(bounded_code_index_extraction_workers(4) <= 4);
+    let values = collect_bounded_ordered(&items, |item| Ok::<_, ()>(*item * 2))
+        .expect("infallible mapping");
+
+    assert_eq!(values.len(), items.len());
+    assert!(
+        values.iter().enumerate().all(|(index, value)| *value == index * 2),
+        "completion order must not reorder results"
+    );
 }
 
 #[test]
-fn bounded_parallel_collection_stops_after_the_failing_batch() {
+fn parallel_collection_returns_the_lowest_index_failure() {
     let visited = AtomicUsize::new(0);
-    let items = (0..32).collect::<Vec<_>>();
+    let items = (0..256_usize).collect::<Vec<_>>();
 
     let error = collect_bounded_ordered(&items, |item| {
         visited.fetch_add(1, Ordering::Relaxed);
-        if *item == 2 { Err(*item) } else { Ok(*item) }
+        if *item == 2 || *item == 200 {
+            Err(*item)
+        } else {
+            Ok(*item)
+        }
     })
-    .expect_err("the first batch contains a fatal error");
+    .expect_err("the mapping fails");
 
-    assert_eq!(error, 2);
-    assert!(
-        visited.load(Ordering::Relaxed) <= MAX_CODE_INDEX_EXTRACTION_WORKERS,
-        "work after the failing batch must not start"
+    assert_eq!(
+        error, 2,
+        "the reported failure must be the sequential one, not the first to finish"
     );
+    assert!(visited.load(Ordering::Relaxed) > 0);
+}
+
+#[test]
+fn parallel_and_sequential_collection_agree() {
+    let items = (0..2_048_usize).collect::<Vec<_>>();
+    let operation = |item: &usize| Ok::<_, ()>(item.wrapping_mul(2_654_435_761));
+
+    let sequential = items.iter().map(operation).collect::<Result<Vec<_>, ()>>();
+    let parallel = collect_bounded_ordered(&items, operation);
+
+    assert_eq!(sequential, parallel);
 }

@@ -215,6 +215,10 @@ mod tests {
                     available_health: 1,
                     leased_general: 1,
                     leased_health: 0,
+                    limbo_general: 0,
+                    limbo_health: 0,
+                    waiting_general: 0,
+                    waiting_health: 0,
                 },
                 true,
             )

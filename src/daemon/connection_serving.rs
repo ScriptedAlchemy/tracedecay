@@ -376,9 +376,16 @@ async fn serve_broker_socket_client(
                     .map(|id| project_open_error_response(id, &error));
             }
             // Keep catalog-refresh bookkeeping consistent with the regular MCP
-            // server path: initialize and tools/list mark this catalog current.
+            // server path: initialize and tools/list mark this catalog current,
+            // unless the project graph is still warming, in which case the
+            // catalog answered here is provisional and must not be recorded as
+            // the client's current one.
             if let Some(key) = engine
-                .claim_catalog_refresh(&handshake, &first_request_line)
+                .claim_catalog_refresh(
+                    &handshake,
+                    &first_request_line,
+                    project_node_count.is_none(),
+                )
                 .await
                 && let Err(error) = write_tool_list_changed_notification(&mut transport).await
             {
@@ -429,7 +436,7 @@ async fn serve_broker_socket_client(
     // The stdio proxy creates one daemon connection per request. The request
     // was peeked above so initialize-root routing happens before project open.
     if let Some(key) = engine
-        .claim_catalog_refresh(&handshake, &first_request_line)
+        .claim_catalog_refresh(&handshake, &first_request_line, false)
         .await
         && let Err(error) = write_tool_list_changed_notification(&mut transport).await
     {
