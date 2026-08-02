@@ -912,6 +912,7 @@ mod tests {
     async fn preview_is_read_only_while_apply_runs_authoritative_repair() {
         let temp = tempfile::tempdir().unwrap();
         let memory_path = temp.path().join("user-memory.db");
+        crate::register_test_schema_installer();
         let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
             &memory_path,
             "memory curation test",

@@ -3168,6 +3168,7 @@ mod tests {
     async fn cancellation_after_rebuild_cannot_publish_legacy_replacement() {
         let temporary = tempfile::tempdir().expect("temporary project database");
         let path = temporary.path().join("project.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(&path, "cancelled legacy replacement")
             .expect("database authority");
         let (database, _) =

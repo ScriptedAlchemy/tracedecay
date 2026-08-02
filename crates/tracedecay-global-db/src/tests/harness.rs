@@ -62,6 +62,7 @@ impl RegisteredGlobalDbTestRuntime {
         profile_root: &std::path::Path,
         project_root: Option<&std::path::Path>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
+        crate::register_test_schema_installer();
         std::fs::create_dir_all(profile_root)?;
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
@@ -124,6 +125,7 @@ impl RegisteredGlobalDbTestRuntime {
 
 impl RegisteredGlobalDbHarness {
     pub async fn open(label: &str) -> Self {
+        crate::register_test_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -254,6 +256,7 @@ impl HostAdmissionTestRuntimeV1 {
         profile_root: &std::path::Path,
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
+        crate::register_test_schema_installer();
         std::fs::create_dir_all(profile_root)?;
         if let Some((project_root, _)) = project.as_ref() {
             std::fs::create_dir_all(project_root)?;
@@ -685,6 +688,7 @@ impl HostAdmissionTestRuntimeV1 {
 async fn open_registered_test_database(
     path: &std::path::Path,
 ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+    crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -692,13 +696,28 @@ async fn open_registered_test_database(
         path,
         "open registered global-db test runtime",
     )?;
-    let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
-        path,
-        &authority,
-        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
-    )
-    .await?;
-    crate::ensure_registered_schema(database.conn()).await?;
+    // The exact test-runtime resolver refuses `Initialize` for a store that is
+    // already on disk (and `Existing` for one that is not). Fixtures reach this
+    // helper both ways — a fresh profile root, and a shard some earlier stage of
+    // the same test already materialised — so pick the mode from the file.
+    let mode = if path.try_exists()? {
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing
+    } else {
+        tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize
+    };
+    let (database, _) =
+        tracedecay_runtime_core::db::Database::publish_test_runtime(path, &authority, mode).await?;
+    // `Database::conn()` is the retained *reader*; schema DDL has to run on the
+    // serialized writer lane or the migration SQL channel reports
+    // `WriterUnavailable`. Converging here (rather than relying solely on the
+    // kernel's initialise-time port call) keeps the fixture correct for an
+    // already-materialised store too.
+    {
+        let writer = database
+            .writer_connection("initialize registered global-db test schema")
+            .await?;
+        crate::ensure_registered_schema(writer.engine_connection()).await?;
+    }
     let runtime = database.retained_runtime().clone();
     let expected_binding = runtime.binding().clone();
     let expected_locator = runtime.locator().verified().clone();
