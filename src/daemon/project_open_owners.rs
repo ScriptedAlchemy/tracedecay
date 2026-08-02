@@ -3075,6 +3075,7 @@ mod tests {
         temporary: &tempfile::TempDir,
         name: &str,
     ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
+        crate::daemon::store_runtime::register_registered_schema_installer();
         let database_path = temporary.path().join(format!("{name}.db"));
         crate::daemon::store_runtime::register_registered_schema_installer();
         let database_authority = crate::db::DatabaseAuthority::acquire_test(&database_path, name)
@@ -3410,6 +3411,7 @@ mod tests {
             },
         )
         .expect("configured-model pin");
+        crate::daemon::store_runtime::register_registered_schema_installer();
         let database_path = temporary.path().join("scout.db");
         crate::daemon::store_runtime::register_registered_schema_installer();
         let database_authority =
