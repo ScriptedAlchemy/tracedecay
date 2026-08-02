@@ -1570,6 +1570,10 @@ async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
 
 #[cfg(test)]
 async fn open_migration_database(path: &Path, operation: &'static str) -> Result<Database> {
+    // The kernel initialises the profile sidecar shard through a fail-closed
+    // port whose real installer lives in `tracedecay-global-db`. Idempotent —
+    // the port keeps the first registration.
+    tracedecay_global_db::register_test_schema_installer();
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(path, operation)?;
     match Database::open(path, &authority).await {
         Ok((database, _)) => Ok(database),

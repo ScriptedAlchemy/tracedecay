@@ -1919,6 +1919,7 @@ mod tests {
         .expect("complete GitHub response creates a refresh state");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-review.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(&path, "github-source-restart").unwrap();
         let (database, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)

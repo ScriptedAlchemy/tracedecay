@@ -1070,6 +1070,10 @@ mod tests {
     }
 
     async fn initialize_test_database(path: &Path) -> Database {
+        // The kernel initialises the profile sidecar shard through a
+        // fail-closed port whose real installer lives in `tracedecay-global-db`.
+        // Idempotent — the port keeps the first registration.
+        tracedecay_global_db::register_test_schema_installer();
         let authority =
             DatabaseAuthority::acquire_test(path, "memory cutover removal test").unwrap();
         Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)

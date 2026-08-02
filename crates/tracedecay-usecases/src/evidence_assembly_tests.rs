@@ -166,6 +166,7 @@ async fn runtime_anchor_resolution_uses_one_snapshot_across_terminal_write() {
     .unwrap();
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("project.db");
+    crate::register_test_schema_installer();
     let authority =
         DatabaseAuthority::acquire_test(&path, "anchor resolution snapshot test").unwrap();
     let (database, _) =
@@ -263,6 +264,7 @@ async fn runtime_anchor_resolution_serves_persisted_v2_anchor_records() {
 
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("project.db");
+    crate::register_test_schema_installer();
     let authority =
         DatabaseAuthority::acquire_test(&path, "legacy anchor resolution test").unwrap();
     let (database, _) =
