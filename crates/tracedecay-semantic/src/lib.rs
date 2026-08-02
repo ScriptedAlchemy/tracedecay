@@ -40,6 +40,7 @@ use self::runtime_service::{
 use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicClock};
 
 mod artifact_store;
+pub mod embedding_parallelism;
 mod fastembed_adapter;
 pub mod legacy_migration;
 mod manifest;
@@ -107,8 +108,14 @@ impl Default for SemanticResourceCeilings {
             max_model_bytes: 700 * 1024 * 1024,
             max_tokenizer_bytes: 64 * 1024 * 1024,
             max_resident_bytes: 2 * 1024 * 1024 * 1024,
-            max_threads: 4,
-            max_concurrent_sessions: 1,
+            // Intra-op width is a numerics knob (it can change how a GEMM is
+            // partitioned), so it stays pinned and host-independent.
+            max_threads: embedding_parallelism::DEFAULT_INTRA_THREADS,
+            // Concurrent sessions are pure sizing: each one is an independent
+            // invocation of the same graph over the same tensor shape. Default
+            // to what the serving reservation leaves room for instead of
+            // embedding single-file on every host.
+            max_concurrent_sessions: embedding_parallelism::default_max_concurrent_sessions(),
             max_batch_size: 32,
             max_sequence_length: 512,
             load_deadline_ms: 30_000,
@@ -795,7 +802,11 @@ impl DaemonSemanticRuntimeHandleV1 {
 struct RuntimeChunkVectorEncoderV1<R: EmbeddingRuntime> {
     runtime: Arc<SemanticRuntimeService<R>>,
     progress: Arc<SemanticRuntimeScheduleCancellationV1>,
-    session: Option<PooledSession<R, SystemMonotonicClock>>,
+    /// Checked-out sessions, grown lazily up to [`Self::width`]. Index 0 is
+    /// the session the single-group path uses, so a narrow host behaves
+    /// exactly as it did before.
+    sessions: Vec<PooledSession<R, SystemMonotonicClock>>,
+    width: usize,
     completed_units: u64,
 }
 
@@ -810,10 +821,100 @@ where
         Self {
             runtime,
             progress,
-            session: None,
+            sessions: Vec::new(),
+            width: embedding_parallelism::embedding_session_width(
+                embedding_parallelism::DEFAULT_INTRA_THREADS,
+                u32::MAX,
+            ),
             completed_units: 0,
         }
     }
+
+    /// Check out up to `wanted` sessions, stopping early on any pool refusal.
+    ///
+    /// The pool's own ceilings (session count, resident bytes) therefore stay
+    /// the binding constraint: exhaustion narrows the width instead of failing
+    /// the projection. At least one session must be obtainable.
+    fn ensure_sessions(&mut self, wanted: usize) -> Result<usize, String> {
+        let wanted = wanted.min(self.width).max(1);
+        while self.sessions.len() < wanted {
+            match self.runtime.acquire() {
+                Ok(session) => self.sessions.push(session),
+                Err(error) if self.sessions.is_empty() => return Err(error.to_string()),
+                Err(_) => break,
+            }
+        }
+        Ok(self.sessions.len())
+    }
+}
+
+/// Encode one already-composed group against one checked-out session.
+///
+/// Free-standing so the sequential and concurrent paths run byte-identical
+/// code; the only difference between them is which session is used.
+fn encode_group_with_session<R>(
+    session: &mut PooledSession<R, SystemMonotonicClock>,
+    key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+    chunks: &[&CodeSearchChunkV1],
+    progress: &SemanticRuntimeScheduleCancellationV1,
+) -> Result<(Vec<Vec<f32>>, u64), String>
+where
+    R: EmbeddingRuntime + Send + Sync + 'static,
+{
+    if chunks.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    if progress.cancelled() {
+        return Err("semantic projection cancelled".to_owned());
+    }
+    if session.authority().projection().embedding_key() != key {
+        return Err("semantic projection authority changed".to_owned());
+    }
+    let max_texts = session.authority().max_batch_texts() as usize;
+    let max_bytes = session.authority().max_batch_bytes() as usize;
+    let mut encoded = Vec::with_capacity(chunks.len());
+    let mut units = 0u64;
+    let mut cursor = 0;
+    while cursor < chunks.len() {
+        let mut end = cursor;
+        let mut batch_bytes = 0usize;
+        while end < chunks.len() && end - cursor < max_texts {
+            let text_bytes = chunks[end].sanitized_text.as_str().len();
+            if text_bytes > max_bytes {
+                return Err("semantic projection text exceeds the batch byte ceiling".to_owned());
+            }
+            if end > cursor && batch_bytes.saturating_add(text_bytes) > max_bytes {
+                break;
+            }
+            batch_bytes = batch_bytes.saturating_add(text_bytes);
+            end += 1;
+        }
+        if end == cursor {
+            return Err("semantic projection batch limits admit no input".to_owned());
+        }
+        let batch = BoundedSanitizedTextBatchV1::try_new(
+            chunks[cursor..end]
+                .iter()
+                .map(|chunk| chunk.sanitized_text.as_str().to_owned())
+                .collect(),
+            max_texts,
+            max_bytes,
+        )
+        .map_err(|error| error.to_string())?;
+        let vectors = session
+            .embed_batch(&batch, progress)
+            .map_err(|error| error.to_string())?;
+        if vectors.len() != end - cursor {
+            return Err("semantic projector returned an unexpected vector batch size".to_owned());
+        }
+        for vector in vectors {
+            vector.validate().map_err(|error| error.to_string())?;
+            encoded.push(vector.values);
+        }
+        units = units.saturating_add((end - cursor) as u64);
+        cursor = end;
+    }
+    Ok((encoded, units))
 }
 
 impl<R> CanonicalChunkVectorEncoderV1 for RuntimeChunkVectorEncoderV1<R>
@@ -843,66 +944,108 @@ where
         if self.progress.cancelled() {
             return Err("semantic projection cancelled".to_owned());
         }
-        let session = if let Some(session) = self.session.as_mut() {
-            session
-        } else {
-            self.session = Some(self.runtime.acquire().map_err(|error| error.to_string())?);
-            self.session
-                .as_mut()
-                .unwrap_or_else(|| panic!("session was just installed"))
-        };
-        if session.authority().projection().embedding_key() != key {
-            return Err("semantic projection authority changed".to_owned());
-        }
-        let max_texts = session.authority().max_batch_texts() as usize;
-        let max_bytes = session.authority().max_batch_bytes() as usize;
-        let mut encoded = Vec::with_capacity(chunks.len());
-        let mut cursor = 0;
-        while cursor < chunks.len() {
-            let mut end = cursor;
-            let mut batch_bytes = 0usize;
-            while end < chunks.len() && end - cursor < max_texts {
-                let text_bytes = chunks[end].sanitized_text.as_str().len();
-                if text_bytes > max_bytes {
-                    return Err(
-                        "semantic projection text exceeds the batch byte ceiling".to_owned()
-                    );
-                }
-                if end > cursor && batch_bytes.saturating_add(text_bytes) > max_bytes {
-                    break;
-                }
-                batch_bytes = batch_bytes.saturating_add(text_bytes);
-                end += 1;
-            }
-            if end == cursor {
-                return Err("semantic projection batch limits admit no input".to_owned());
-            }
-            let batch = BoundedSanitizedTextBatchV1::try_new(
-                chunks[cursor..end]
-                    .iter()
-                    .map(|chunk| chunk.sanitized_text.as_str().to_owned())
-                    .collect(),
-                max_texts,
-                max_bytes,
-            )
-            .map_err(|error| error.to_string())?;
-            let vectors = session
-                .embed_batch(&batch, self.progress.as_ref())
-                .map_err(|error| error.to_string())?;
-            if vectors.len() != end - cursor {
-                return Err(
-                    "semantic projector returned an unexpected vector batch size".to_owned(),
-                );
-            }
-            for vector in vectors {
-                vector.validate().map_err(|error| error.to_string())?;
-                encoded.push(vector.values);
-            }
-            self.completed_units = self.completed_units.saturating_add((end - cursor) as u64);
-            self.progress.set_completed_units(self.completed_units);
-            cursor = end;
-        }
+        self.ensure_sessions(1)?;
+        let progress = Arc::clone(&self.progress);
+        let (encoded, units) =
+            encode_group_with_session(&mut self.sessions[0], key, chunks, progress.as_ref())?;
+        self.completed_units = self.completed_units.saturating_add(units);
+        self.progress.set_completed_units(self.completed_units);
         Ok(encoded)
+    }
+
+    fn encode_concurrency(&self) -> usize {
+        self.width
+    }
+
+    /// Dispatch the caller's groups across every checked-out session.
+    ///
+    /// Groups are split into contiguous stripes, one per session, so flattening
+    /// the stripe results back in stripe order reproduces the caller's input
+    /// order exactly. Each group is still one invocation over the same tensor
+    /// shape it would have had sequentially, so the vectors are byte-identical
+    /// at any width — the width only decides how many run at once.
+    ///
+    /// Failures are reported by lowest input index, matching the sequential
+    /// path's first-error semantics regardless of which stripe failed first in
+    /// wall-clock terms.
+    fn encode_batches(
+        &mut self,
+        key: &tracedecay_domain::EmbeddingProjectionKeyV1,
+        groups: &[&[&CodeSearchChunkV1]],
+    ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.progress.cancelled() {
+            return Err("semantic projection cancelled".to_owned());
+        }
+        let sessions = self.ensure_sessions(groups.len())?;
+        if sessions <= 1 || groups.len() == 1 {
+            let progress = Arc::clone(&self.progress);
+            let mut encoded = Vec::with_capacity(groups.len());
+            let mut units = 0u64;
+            for group in groups {
+                let (vectors, group_units) =
+                    encode_group_with_session(&mut self.sessions[0], key, group, progress.as_ref())
+                        .inspect_err(|_| {
+                            self.completed_units = self.completed_units.saturating_add(units);
+                            self.progress.set_completed_units(self.completed_units);
+                        })?;
+                units = units.saturating_add(group_units);
+                encoded.push(vectors);
+            }
+            self.completed_units = self.completed_units.saturating_add(units);
+            self.progress.set_completed_units(self.completed_units);
+            return Ok(encoded);
+        }
+
+        let stripe_len = groups.len().div_ceil(sessions);
+        let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
+        let progress = Arc::clone(&self.progress);
+        let mut stripe_results: Vec<Result<(Vec<Vec<Vec<f32>>>, u64), String>> =
+            embedding_parallelism::install(|| {
+                use rayon::prelude::*;
+                stripes
+                    .par_iter()
+                    .zip(self.sessions.par_iter_mut())
+                    .map(|(stripe, session)| {
+                        let mut encoded = Vec::with_capacity(stripe.len());
+                        let mut units = 0u64;
+                        for group in stripe.iter() {
+                            let (vectors, group_units) =
+                                encode_group_with_session(session, key, group, progress.as_ref())?;
+                            units = units.saturating_add(group_units);
+                            encoded.push(vectors);
+                        }
+                        Ok((encoded, units))
+                    })
+                    .collect()
+            });
+
+        let mut encoded = Vec::with_capacity(groups.len());
+        let mut units = 0u64;
+        let mut failure = None;
+        for result in stripe_results.drain(..) {
+            match result {
+                Ok((stripe, stripe_units)) => {
+                    units = units.saturating_add(stripe_units);
+                    if failure.is_none() {
+                        encoded.extend(stripe);
+                    }
+                }
+                Err(reason) => {
+                    if failure.is_none() {
+                        failure = Some(reason);
+                    }
+                }
+            }
+        }
+        self.completed_units = self.completed_units.saturating_add(units);
+        self.progress.set_completed_units(self.completed_units);
+        match failure {
+            Some(reason) => Err(reason),
+            None => Ok(encoded),
+        }
     }
 }
 
