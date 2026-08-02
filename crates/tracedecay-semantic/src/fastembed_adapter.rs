@@ -193,18 +193,22 @@ struct LifecycleInstallArtifactV1 {
 }
 
 impl VerifiedEmbeddingArtifactV1 {
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn embedding_key(&self) -> &tracedecay_domain::EmbeddingProjectionKeyV1 {
         self.projection.embedding_key()
     }
 
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn dimensions(&self) -> u32 {
         self.embedding_key().dimensions
     }
 
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn metric(&self) -> EmbeddingMetricV1 {
         self.embedding_key().metric
     }
 
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn normalization(&self) -> EmbeddingNormalizationV1 {
         self.embedding_key().normalization
     }
@@ -232,6 +236,7 @@ impl VerifiedEmbeddingArtifactV1 {
         self.max_batch_bytes
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
         self.artifact
             .as_ref()
@@ -251,8 +256,9 @@ impl VerifiedEmbeddingArtifactV1 {
         self.resident_byte_ceiling
     }
 
-    // Feature-independent: reads member bytes through the store/lifecycle
-    // pins only; the adapter's tests exercise it in every feature profile.
+    // Feature-independent implementation, but only the compiled FastEmbed
+    // runtime and descriptor tests need direct member bytes.
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn required_member_bytes(&self, role: ArtifactMemberRoleV1) -> Result<Vec<u8>, EmbedError> {
         if let Some(artifact) = self.artifact.as_ref() {
             return artifact.read_member_bytes(role).map_err(|_| {
@@ -540,6 +546,7 @@ impl AdmittedProjectionArtifactV1 {
         &self.runtime_artifact.projection
     }
 
+    #[cfg(any(test, feature = "semantic-fastembed"))]
     fn runtime_artifact(&self) -> &VerifiedEmbeddingArtifactV1 {
         &self.runtime_artifact
     }
@@ -564,6 +571,7 @@ impl AdmittedProjectionArtifactV1 {
 }
 
 impl LifecycleInstallArtifactV1 {
+    #[cfg(feature = "semantic-fastembed")]
     fn declares_member(&self, role: ArtifactMemberRoleV1) -> bool {
         let key = match role {
             ArtifactMemberRoleV1::Model => "model",
