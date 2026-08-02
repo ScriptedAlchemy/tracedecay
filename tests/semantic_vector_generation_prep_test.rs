@@ -10,9 +10,9 @@ use tracedecay::code_index::projection::{expected_request_digest, verify_batch_r
 use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::store::vector_generation_test_support::{
     CanonicalChunkVectorEncoderV1, DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1,
-    SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1,
-    VectorGenerationStoreErrorV1, fail_before_publication_swap_once, prepare_vector_generation,
-    prepare_vector_generation_async,
+    ProjectionRequestBatchV1, SemanticProjectionErrorV1, VectorGenerationIdV1,
+    VectorGenerationPlanV1, VectorGenerationStoreErrorV1, fail_before_publication_swap_once,
+    prepare_vector_generation, prepare_vector_generation_async, split_projection_request,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
@@ -939,6 +939,240 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
             .len(),
         2
     );
+}
+
+/// A corpus large enough to span several encoder groups and several commits.
+fn split_identity_corpus() -> Vec<CodeSearchChunkV1> {
+    (0..40)
+        .map(|index| {
+            chunk(
+                "code-generation.1",
+                &format!("split-{index:03}"),
+                &format!("fn split_{index:03}() {{}}"),
+                index,
+            )
+        })
+        .collect()
+}
+
+fn whole_corpus_request(
+    corpus: &[CodeSearchChunkV1],
+    projection_key: &ProjectionKeyV1,
+) -> ProjectionBatchRequestV1 {
+    let mut added = corpus
+        .iter()
+        .map(|chunk| change(chunk, None, Some(chunk.content_digest.clone())))
+        .collect::<Vec<_>>();
+    added.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+    request(
+        changes(None, "code-generation.1", added, vec![], vec![]),
+        None,
+        projection_key.clone(),
+        ProjectionReplayReasonV1::InitialProjection,
+    )
+}
+
+fn publish_in_batches(
+    admitted: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+    plan: VectorGenerationPlanV1,
+    batches: Vec<ProjectionRequestBatchV1>,
+) -> (
+    FakeVectorGenerationStoreV1,
+    tracedecay::store::vector_generation_test_support::VectorGenerationPublicationV1,
+) {
+    let mut store = FakeVectorGenerationStoreV1::new();
+    let build = store.begin_generation(plan).expect("staged build");
+    let mut checkpoint = None;
+    for batch in batches {
+        let prepared = prepare_vector_generation(
+            admitted,
+            batch.request,
+            &batch.canonical_chunks,
+            &mut FakeEncoder::default(),
+        )
+        .expect("projection batch");
+        checkpoint = Some(
+            store
+                .commit_batch(&build, checkpoint.as_ref(), prepared)
+                .expect("batch commit"),
+        );
+    }
+    let publication = store.publish_generation(&build, None).expect("publication");
+    (store, publication)
+}
+
+/// The A/B digest-equality probe for incremental commits.
+///
+/// Production no longer commits a whole corpus in one shot: it splits the
+/// request with `split_projection_request` and commits each batch as it
+/// completes. That is only admissible if splitting moves no identity, so this
+/// runs the *same* corpus both ways and compares what identity is built from —
+/// the vector floats, every `output_digest`, and the generation manifest
+/// digest — rather than comparing the encodings that carry them.
+#[test]
+fn splitting_a_run_into_commits_preserves_every_generation_digest() {
+    let key = embedding_key();
+    let admitted = admitted_key(&key);
+    let projection_key = key.projection_key().expect("projection key");
+    let corpus = split_identity_corpus();
+    let whole = whole_corpus_request(&corpus, &projection_key);
+    let mut expected_chunk_ids = corpus
+        .iter()
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
+    expected_chunk_ids.sort();
+    let plan = VectorGenerationPlanV1 {
+        target_projection_key: projection_key,
+        source_generation: id("code-generation.1"),
+        source_manifest_digest: whole.changes.manifest_digest.clone(),
+        expected_chunk_ids: expected_chunk_ids.into(),
+        base_generation: None,
+    };
+
+    let unsplit = split_projection_request(&whole, &corpus, 4_096).expect("unsplit request");
+    assert_eq!(
+        unsplit.len(),
+        1,
+        "a corpus inside one batch window is not split at all"
+    );
+    let (single_store, single) = publish_in_batches(&admitted, plan.clone(), unsplit);
+
+    // 16 embeds per batch is two encoder groups, so boundaries stay aligned.
+    let split = split_projection_request(&whole, &corpus, 16).expect("split request");
+    assert_eq!(split.len(), 3, "40 changes split into windows of 16");
+    assert!(
+        split
+            .iter()
+            .all(|batch| !batch.request.changes.added_or_changed.is_empty()),
+        "every batch carries embeds of its own"
+    );
+    let (split_store, multi) = publish_in_batches(&admitted, plan, split);
+
+    assert_eq!(
+        single.generation_id, multi.generation_id,
+        "splitting a run must not move the generation identity"
+    );
+    assert_eq!(single.manifest_digest, multi.manifest_digest);
+
+    let single_generation = single_store
+        .generation(&single.generation_id)
+        .expect("single generation");
+    let split_generation = split_store
+        .generation(&multi.generation_id)
+        .expect("split generation");
+    assert_eq!(
+        single_generation.vectors().len(),
+        corpus.len(),
+        "the split run publishes the whole corpus"
+    );
+    for (chunk_id, expected) in single_generation.vectors() {
+        let actual = split_generation
+            .vectors()
+            .get(chunk_id)
+            .expect("split vector");
+        assert_eq!(
+            expected.values, actual.values,
+            "vector bytes for {chunk_id} must be identical across batch sizes"
+        );
+        assert_eq!(
+            expected.output_digest, actual.output_digest,
+            "output digest for {chunk_id} must be identical across batch sizes"
+        );
+        assert_eq!(
+            expected.source_manifest_digest,
+            actual.source_manifest_digest
+        );
+    }
+
+    // Execution lineage is the only thing that legitimately differs.
+    assert_eq!(single_generation.receipts().len(), 1);
+    assert_eq!(split_generation.receipts().len(), 3);
+    assert_ne!(single.checkpoint, multi.checkpoint);
+}
+
+/// A run that stops partway resumes from its durable checkpoint.
+#[test]
+fn a_partial_incremental_run_resumes_from_its_checkpoint() {
+    let key = embedding_key();
+    let admitted = admitted_key(&key);
+    let projection_key = key.projection_key().expect("projection key");
+    let corpus = split_identity_corpus();
+    let whole = whole_corpus_request(&corpus, &projection_key);
+    let mut expected_chunk_ids = corpus
+        .iter()
+        .map(|chunk| chunk.id.clone())
+        .collect::<Vec<_>>();
+    expected_chunk_ids.sort();
+    let plan = VectorGenerationPlanV1 {
+        target_projection_key: projection_key,
+        source_generation: id("code-generation.1"),
+        source_manifest_digest: whole.changes.manifest_digest.clone(),
+        expected_chunk_ids: expected_chunk_ids.into(),
+        base_generation: None,
+    };
+    let batches = split_projection_request(&whole, &corpus, 16).expect("split request");
+    let reference = publish_in_batches(&admitted, plan.clone(), batches.clone()).1;
+
+    let mut store = FakeVectorGenerationStoreV1::new();
+    let build = store.begin_generation(plan.clone()).expect("staged build");
+    let mut checkpoint = None;
+    for batch in batches.iter().take(1) {
+        let prepared = prepare_vector_generation(
+            &admitted,
+            batch.request.clone(),
+            &batch.canonical_chunks,
+            &mut FakeEncoder::default(),
+        )
+        .expect("projection batch");
+        checkpoint = Some(
+            store
+                .commit_batch(&build, checkpoint.as_ref(), prepared)
+                .expect("batch commit"),
+        );
+    }
+    assert_eq!(
+        store.publish_generation(&build, None),
+        Err(VectorGenerationStoreErrorV1::IncompleteGeneration),
+        "a partial run must never become the active generation"
+    );
+
+    // Restart: the build identity is a digest of the plan, so reopening the
+    // same plan re-adopts the same staged build, and its checkpoint says how
+    // many batches are already durable.
+    let resumed_build = store.begin_generation(plan).expect("resumed build");
+    assert_eq!(resumed_build, build, "the staged build is re-adopted");
+    let resumed = store
+        .staged_checkpoint(&resumed_build)
+        .expect("staged checkpoint")
+        .clone();
+    assert_eq!(
+        resumed.completed_batches, 1,
+        "the checkpoint names exactly the batches that committed"
+    );
+
+    let mut checkpoint = Some(resumed);
+    for batch in batches.into_iter().skip(1) {
+        let prepared = prepare_vector_generation(
+            &admitted,
+            batch.request,
+            &batch.canonical_chunks,
+            &mut FakeEncoder::default(),
+        )
+        .expect("projection batch");
+        checkpoint = Some(
+            store
+                .commit_batch(&resumed_build, checkpoint.as_ref(), prepared)
+                .expect("resumed batch commit"),
+        );
+    }
+    let publication = store
+        .publish_generation(&resumed_build, None)
+        .expect("resumed publication");
+    assert_eq!(
+        publication.generation_id, reference.generation_id,
+        "resuming publishes the same generation an uninterrupted run would"
+    );
+    assert_eq!(publication.manifest_digest, reference.manifest_digest);
 }
 
 #[tokio::test]

@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
-    CodeSearchChunkV1, ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
+    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
 };
@@ -380,6 +380,125 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         vectors,
         tombstones,
     })
+}
+
+/// One bounded slice of a whole-corpus projection request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectionRequestBatchV1 {
+    pub request: ProjectionBatchRequestV1,
+    pub canonical_chunks: Vec<CodeSearchChunkV1>,
+}
+
+/// Split one whole-corpus projection request into batches that commit
+/// independently.
+///
+/// Committing per batch is what bounds the live float set: a batch's vectors
+/// are persisted and released before the next batch is embedded, instead of
+/// the whole corpus accumulating in memory until a single terminal commit.
+///
+/// Splitting is identity-preserving, which is the load-bearing property:
+///
+/// - Boundaries land on multiples of [`VECTOR_ENCODING_BATCH_SIZE`], so every
+///   encoder group holds exactly the changes it would have held in one
+///   whole-corpus pass. The tensor shape the model sees never changes, so
+///   vector bytes — and therefore every `output_digest`, and the generation
+///   manifest digest built from those digests — are byte-identical.
+/// - `added_or_changed` is split as contiguous windows of an already-canonical
+///   list, so each batch's partition is canonical too.
+/// - Deletions and ordinary reuse are receipt-only decisions with no encoder
+///   work, so they ride on the final batch rather than being spread out.
+/// - Re-embedded reuse is encoded by its own windowed pass, so it also rides
+///   on the final batch without disturbing any `added_or_changed` group.
+///
+/// What legitimately does change is execution evidence: the run produces one
+/// receipt per batch instead of one for the corpus, each with its own request
+/// and publication digest. The immutable generation identity deliberately does
+/// not depend on that lineage.
+///
+/// A request the projector would reject outright is returned unsplit, so the
+/// rejection stays exactly where it was.
+pub fn split_projection_request(
+    request: &ProjectionBatchRequestV1,
+    canonical_chunks: &[CodeSearchChunkV1],
+    max_embeds_per_batch: usize,
+) -> Result<Vec<ProjectionRequestBatchV1>, SemanticProjectionErrorV1> {
+    let unsplit = || {
+        Ok(vec![ProjectionRequestBatchV1 {
+            request: request.clone(),
+            canonical_chunks: canonical_chunks.to_vec(),
+        }])
+    };
+    let projection_changed =
+        request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
+    let reembed_reused = projection_changed
+        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange;
+    if projection_changed && !request.changes.reused.is_empty() && !reembed_reused {
+        return unsplit();
+    }
+    // Round down to whole encoder groups; never below one group.
+    let window = max_embeds_per_batch
+        .saturating_sub(max_embeds_per_batch % VECTOR_ENCODING_BATCH_SIZE)
+        .max(VECTOR_ENCODING_BATCH_SIZE);
+    if request.changes.added_or_changed.len() <= window {
+        return unsplit();
+    }
+
+    let chunks_by_id = canonical_chunks
+        .iter()
+        .map(|chunk| (chunk.id.clone(), chunk))
+        .collect::<BTreeMap<_, _>>();
+    let windows = request.changes.added_or_changed.chunks(window);
+    let last_index = windows.len().saturating_sub(1);
+    let mut batches = Vec::with_capacity(windows.len());
+    for (index, embeds) in request.changes.added_or_changed.chunks(window).enumerate() {
+        let is_last = index == last_index;
+        let mut changes = ChangedCodeChunkSetV1 {
+            from_generation: request.changes.from_generation.clone(),
+            to_generation: request.changes.to_generation.clone(),
+            manifest_digest: request.changes.manifest_digest.clone(),
+            added_or_changed: embeds.to_vec(),
+            deleted: if is_last {
+                request.changes.deleted.clone()
+            } else {
+                Vec::new()
+            },
+            reused: if is_last {
+                request.changes.reused.clone()
+            } else {
+                Vec::new()
+            },
+        };
+        changes.manifest_digest = changes
+            .compute_digest()
+            .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
+        let mut batch_request = ProjectionBatchRequestV1 {
+            request_digest: request.request_digest.clone(),
+            changes,
+            previous_projection_key: request.previous_projection_key.clone(),
+            target_projection_key: request.target_projection_key.clone(),
+            replay_reason: request.replay_reason,
+        };
+        batch_request.request_digest = expected_request_digest(&batch_request)
+            .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
+        // The projector rejects a canonical chunk it did not ask for, so each
+        // batch carries exactly the chunks its own embeds name.
+        let mut wanted = embeds
+            .iter()
+            .map(|change| &change.chunk_id)
+            .collect::<BTreeSet<_>>();
+        if is_last && reembed_reused {
+            wanted.extend(request.changes.reused.iter().map(|change| &change.chunk_id));
+        }
+        let batch_chunks = wanted
+            .into_iter()
+            .filter_map(|chunk_id| chunks_by_id.get(chunk_id).map(|chunk| (*chunk).clone()))
+            .collect::<Vec<_>>();
+        batches.push(ProjectionRequestBatchV1 {
+            request: batch_request,
+            canonical_chunks: batch_chunks,
+        });
+    }
+    Ok(batches)
 }
 
 /// Encode `changes` group by group, dispatching a bounded window of groups to
