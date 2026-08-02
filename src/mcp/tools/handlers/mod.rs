@@ -122,14 +122,14 @@ use super::binding::{
     tool_dispatches_registered_project_reader,
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
+#[cfg(test)]
+use dispatch_groups::dispatch_memory_operation;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
     dispatch_edit_tools, dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools,
     dispatch_info_tools, dispatch_memory_tools, dispatch_retained_application_tools,
     dispatch_session_workflow_tools,
 };
-#[cfg(test)]
-use dispatch_groups::dispatch_memory_operation;
 use retained_catalog::dispatch_profile_retained_application_tool;
 use tool_call_support::{
     INTERNAL_DAEMON_TOOL_NAMES, boxed_send, rejected_tool_project_selector_present,

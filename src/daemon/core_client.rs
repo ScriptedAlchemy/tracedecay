@@ -524,8 +524,7 @@ pub async fn call_default_tool_awaiting_project_open(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline)
-        .await
+    call_tool_with_project_open_retry(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
 /// Extracts the single JSON payload from an MCP tool result while ignoring

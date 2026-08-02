@@ -63,9 +63,7 @@ impl<'a> DiagnosticsStore<'a> {
         }
     }
 
-    pub const fn new_runtime(
-        conn: &'a tracedecay_runtime_core::db::engine::Connection,
-    ) -> Self {
+    pub const fn new_runtime(conn: &'a tracedecay_runtime_core::db::engine::Connection) -> Self {
         Self::new(conn)
     }
 

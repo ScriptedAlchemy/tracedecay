@@ -156,7 +156,9 @@ fn select_store_window(
         None => 0,
     };
     let take = budget.min(count);
-    let indices = (0..take).map(|offset| (start + offset) % count).collect::<Vec<_>>();
+    let indices = (0..take)
+        .map(|offset| (start + offset) % count)
+        .collect::<Vec<_>>();
     let next = indices.last().map(|&index| keys[index].clone());
     (indices, next)
 }
@@ -305,8 +307,10 @@ impl MaintenanceCoordinator {
                             // whole scope directories whose project root no
                             // longer exists.
                             succeeded &=
-                                super::store_maintenance::run_code_index_scope_reconciliation(graph)
-                                    .await;
+                                super::store_maintenance::run_code_index_scope_reconciliation(
+                                    graph,
+                                )
+                                .await;
                             if let Some(compaction) = &retention.compaction {
                                 succeeded &= super::store_maintenance::run_project_compaction(
                                     graph.db(),

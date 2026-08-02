@@ -1649,8 +1649,7 @@ fn available_id_index_clears_and_validates_identically() {
     .expect("assembles");
     assert!(
         context.bundle.omissions.iter().any(|omission| {
-            omission.anchor_id.is_none()
-                && omission.reason == ContextOmissionReasonV1::Unavailable
+            omission.anchor_id.is_none() && omission.reason == ContextOmissionReasonV1::Unavailable
         }),
         "available anchor omission is cleared to None"
     );
