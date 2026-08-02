@@ -1,16 +1,6 @@
-/**
- * Query-term utilities shared by the search surfaces (Explorer, Sessions).
- *
- * Truthfulness note: the daemon's search endpoints return hits but no
- * relevance score. Everything here is derived from two things we genuinely
- * have — the query the user typed and the fields the daemon actually returned
- * — so the UI can say *why* a row is on screen ("the term appears in `name`
- * and `file_path`") and *how the daemon ordered it* (its position in the
- * response) without inventing a number the backend never produced.
- */
+/** Query-term utilities shared by the search surfaces. */
 
-/** Terms a highlighter should mark: quoted phrases stay whole, bare words
- * split on whitespace, single characters are dropped (they mark everything). */
+/** Return quoted phrases and bare query terms worth highlighting. */
 export function queryTerms(query: string): string[] {
   const out: string[] = [];
   const pattern = /"([^"]+)"|'([^']+)'|(\S+)/g;
@@ -60,12 +50,7 @@ export function fieldMatches(value: unknown, terms: readonly string[]): boolean 
   return terms.some((term) => text.includes(term));
 }
 
-/**
- * Which of the named fields actually contain a query term. This is the honest
- * answer to "why did this match?" — it reports what is observably true of the
- * payload, and returns an empty list when the daemon matched on something we
- * cannot see (a stemmed FTS token, an embedding), rather than guessing.
- */
+/** Return the visible fields that contain at least one query term. */
 export function matchedFieldNames(
   row: Record<string, unknown>,
   fields: readonly string[],
@@ -74,11 +59,7 @@ export function matchedFieldNames(
   return fields.filter((field) => fieldMatches(row[field], terms));
 }
 
-/**
- * Trim a long body down to the neighbourhood of the first matched term so the
- * one visible line is the line that explains the hit. Returns the original
- * text (clipped) when nothing matches.
- */
+/** Trim text to the neighbourhood of the first matched term. */
 export function matchWindow(text: string, terms: readonly string[], radius = 90): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (terms.length === 0) return flat;
