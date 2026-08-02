@@ -81,9 +81,16 @@ impl WorkflowSqliteAuthority {
 
     fn install_schema(&self) -> Result<(), WorkflowSqliteAuthorityBuildError> {
         self.handle
-            .execute_batch(WORKFLOW_SCHEMA_V1.to_owned())
+            .execute_batch(format!(
+                "{WORKFLOW_SCHEMA_V1}\n{}",
+                crate::workflow_state::WORKFLOW_STATE_SCHEMA_V1
+            ))
             .map(|_| ())
             .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)
+    }
+
+    pub(crate) fn state_handle(&self) -> &MigrationSqlHandle {
+        &self.handle
     }
 }
 
@@ -132,7 +139,7 @@ fn statement(
     MigrationSqlStatement::new(sql.to_owned(), params)
 }
 
-fn migration_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
+pub(crate) fn migration_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
         MigrationSqlValue::Text(value) => Some(value),
         _ => None,
@@ -180,7 +187,7 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
     serde_json::from_str(payload).map_err(|_| ())
 }
 
-fn query_handle(
+pub(crate) fn query_handle(
     handle: &MigrationSqlHandle,
     sql: &str,
     params: Vec<MigrationSqlValue>,
@@ -188,7 +195,7 @@ fn query_handle(
     handle.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
-fn query_tx(
+pub(crate) fn query_tx(
     transaction: &MigrationSqlTransaction,
     sql: &str,
     params: Vec<MigrationSqlValue>,
@@ -196,7 +203,7 @@ fn query_tx(
     transaction.query(statement(sql, params)?)
 }
 
-fn execute_tx(
+pub(crate) fn execute_tx(
     transaction: &MigrationSqlTransaction,
     sql: &str,
     params: Vec<MigrationSqlValue>,

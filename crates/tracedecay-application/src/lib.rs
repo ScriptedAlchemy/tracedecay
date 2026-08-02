@@ -46,6 +46,7 @@ pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
 pub mod workflow_runtime;
+pub mod workflow_state;
 
 mod error;
 mod surface_binding;
@@ -242,3 +243,4 @@ pub use work_read::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;
 pub use workflow_runtime::*;
+pub use workflow_state::*;
