@@ -1,30 +1,37 @@
 //! Fixed native Git mechanics for PR11 index transactions.
 //!
-//! The public surface names only stage, unstage, write-tree, and commit-index
-//! operations. It never accepts a generic Git subcommand, flags, ref, or
+//! The native surface only stages, unstages, and commits preview-bound index
+//! changes. It never accepts a generic Git subcommand, flags, ref, or
 //! working-tree path from a caller. Daemon code supplies already validated,
 //! preview-bound patch material and performs the journaled recovery protocol.
-#![allow(dead_code)] // PR11/Plan 36 git index transactions — staged ops
 
-use std::env;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use serde::Serialize;
 use thiserror::Error;
-use tracedecay_application::DirectorySyncPolicy;
 use tracedecay_domain::{
     DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexEntryExpectationV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
-    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitOidV1, GitOperationStateV1,
-    HunkDirectionV1, HunkRefV1, ManifestDigest, canonical_sha256, full_hunk_selection_bitmap,
+    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitOidV1, HunkDirectionV1, HunkRefV1,
+    ManifestDigest, canonical_sha256,
 };
 
-const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const GIT_INDEX_ADAPTER_REVISION: &str = "tracedecay.git-index-adapter.v1";
+
+mod patch;
+mod process;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use patch::ValidatedIndexPatch;
+use process::{
+    absolute_git_path, current_operation_state, git_command, git_timestamp, is_executable_hook,
+    joined_patch_bytes, parse_git_oid, read_optional_file, run_command_with_stdin, run_git_at,
+    sync_parent_directory, worktree_mode,
+};
 
 #[derive(Debug, Error)]
 pub enum NativeGitIndexError {
@@ -81,93 +88,6 @@ impl NativeGitIndexError {
 
     pub(crate) const fn is_commit_boundary_unknown(&self) -> bool {
         matches!(self, Self::CommitBoundaryUnknown { .. })
-    }
-}
-
-/// A patch fragment produced by the fixed preview builder. Its fields are
-/// private so callers cannot pass opaque patch text to the native executor.
-#[derive(Clone, Debug)]
-pub(crate) struct ValidatedIndexPatch {
-    hunk: HunkRefV1,
-    bytes: Vec<u8>,
-}
-
-#[derive(Serialize)]
-struct NativePatchDigestMaterial<'a> {
-    header: &'a str,
-    body: &'a [String],
-}
-
-impl ValidatedIndexPatch {
-    pub(crate) fn new(hunk: HunkRefV1, bytes: Vec<u8>) -> Result<Self, NativeGitIndexError> {
-        hunk.validate()?;
-        if bytes.is_empty() || bytes.len() > MAX_PATCH_BYTES {
-            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-        }
-        let text =
-            std::str::from_utf8(&bytes).map_err(|_| NativeGitIndexError::PatchDoesNotMatchHunk)?;
-        let lines: Vec<&str> = text.lines().collect();
-        let hunk_positions: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(index, line)| (*line == hunk.hunk_header.as_str()).then_some(index))
-            .collect();
-        let Some(&hunk_index) = hunk_positions.first() else {
-            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-        };
-        if hunk_positions.len() != 1
-            || hunk_index < 2
-            || !lines[hunk_index - 2].starts_with("--- ")
-            || !lines[hunk_index - 1].starts_with("+++ ")
-            || lines[..hunk_index - 2].iter().any(|line| !line.is_empty())
-        {
-            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-        }
-
-        let body: Vec<String> = lines[hunk_index + 1..]
-            .iter()
-            .map(|line| (*line).to_owned())
-            .collect();
-        if body.is_empty()
-            || body.iter().any(|line| {
-                !line.starts_with(' ')
-                    && !line.starts_with('+')
-                    && !line.starts_with('-')
-                    && !line.starts_with('\\')
-            })
-            || body.iter().any(|line| line.starts_with("\\ No newline"))
-            || !body
-                .iter()
-                .any(|line| line.starts_with('+') || line.starts_with('-'))
-        {
-            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-        }
-        let patch_digest = canonical_sha256(&NativePatchDigestMaterial {
-            header: &hunk.hunk_header,
-            body: &body,
-        })?;
-        let context: Vec<&str> = body
-            .iter()
-            .filter(|line| line.starts_with(' '))
-            .map(String::as_str)
-            .collect();
-        let context_digest = canonical_sha256(&context)?;
-        if patch_digest != hunk.patch_digest || context_digest != hunk.context_digest {
-            return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-        }
-        let (old_lines, new_lines) = parse_hunk_line_counts(&hunk.hunk_header)?;
-        if hunk.selected_line_bitmap != full_hunk_selection_bitmap(old_lines.max(new_lines)) {
-            return Err(NativeGitIndexError::PartialHunkSelectionUnsupported);
-        }
-        Ok(Self { hunk, bytes })
-    }
-
-    pub(crate) fn hunk(&self) -> &HunkRefV1 {
-        &self.hunk
-    }
-
-    fn bytes(&self) -> &[u8] {
-        &self.bytes
     }
 }
 
@@ -413,14 +333,13 @@ impl FixedGitIndexRunner {
                 &["rev-parse", "--git-path", "info/sparse-checkout"],
             )?,
         )?;
-        let sparse_bytes = std::fs::read(sparse_path).unwrap_or_default();
+        let sparse_bytes = read_optional_file(&sparse_path)?;
         canonical_sha256(&sparse_bytes).map_err(Into::into)
     }
 
     pub(crate) fn submodule_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let output = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
-        let gitmodules =
-            std::fs::read(self.repository_root.join(".gitmodules")).unwrap_or_default();
+        let gitmodules = read_optional_file(&self.repository_root.join(".gitmodules"))?;
         canonical_sha256(&(output.stdout, gitmodules)).map_err(Into::into)
     }
 
@@ -471,6 +390,7 @@ impl FixedGitIndexRunner {
         self.apply_hunks(lock, preview, patches, HunkDirectionV1::IndexToHead, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn write_tree(&self) -> Result<GitOidV1, NativeGitIndexError> {
         self.ensure_index_unlocked()?;
         let output = self.run_git("write-tree", &["write-tree"])?;
@@ -479,6 +399,7 @@ impl FixedGitIndexRunner {
 
     /// Compute the candidate tree against an isolated index and object
     /// quarantine. Preview never writes the repository index or object store.
+    #[cfg(test)]
     pub(crate) fn preview_candidate_tree(
         &self,
         patches: &[ValidatedIndexPatch],
@@ -1026,235 +947,5 @@ impl FixedGitIndexRunner {
             .stderr(Stdio::null())
             .output()
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-    }
-}
-
-fn joined_patch_bytes(patches: &[ValidatedIndexPatch]) -> Vec<u8> {
-    let mut patch_bytes = Vec::new();
-    for patch in patches {
-        patch_bytes.extend_from_slice(patch.bytes());
-        if !patch_bytes.ends_with(b"\n") {
-            patch_bytes.push(b'\n');
-        }
-    }
-    patch_bytes
-}
-
-fn git_command(repository_root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(repository_root);
-    for (key, _) in env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
-        }
-    }
-    command
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    command
-}
-
-fn run_git_at(
-    repository_root: &Path,
-    operation: &'static str,
-    args: &[&str],
-) -> Result<String, NativeGitIndexError> {
-    let output = git_command(repository_root)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Err(NativeGitIndexError::GitFailed {
-            operation,
-            status: output.status.to_string(),
-        });
-    }
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_owned())
-        .map_err(|_| NativeGitIndexError::MalformedOutput { operation })
-}
-
-fn run_command_with_stdin(
-    mut command: Command,
-    operation: &'static str,
-    input: &[u8],
-) -> Result<Output, NativeGitIndexError> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    let Some(mut stdin) = child.stdin.take() else {
-        return Err(NativeGitIndexError::Io(
-            "native Git stdin was not available".to_owned(),
-        ));
-    };
-    stdin
-        .write_all(input)
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    drop(stdin);
-    let output = child
-        .wait_with_output()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(NativeGitIndexError::GitFailed {
-            operation,
-            status: output.status.to_string(),
-        })
-    }
-}
-
-fn absolute_git_path(repository_root: &Path, value: &str) -> Result<PathBuf, NativeGitIndexError> {
-    if value.is_empty() {
-        return Err(NativeGitIndexError::MalformedOutput {
-            operation: "rev-parse",
-        });
-    }
-    let path = PathBuf::from(value);
-    Ok(if path.is_absolute() {
-        path
-    } else {
-        repository_root.join(path)
-    })
-}
-
-fn parse_git_oid(operation: &'static str, output: &[u8]) -> Result<GitOidV1, NativeGitIndexError> {
-    let text = std::str::from_utf8(output)
-        .map_err(|_| NativeGitIndexError::MalformedOutput { operation })?;
-    GitOidV1::new(text.trim()).map_err(|_| NativeGitIndexError::MalformedOutput { operation })
-}
-
-fn parse_hunk_line_counts(header: &str) -> Result<(u32, u32), NativeGitIndexError> {
-    let mut fields = header.split_whitespace();
-    if fields.next() != Some("@@") {
-        return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-    }
-    let old = fields
-        .next()
-        .and_then(|value| value.strip_prefix('-'))
-        .and_then(parse_hunk_range_count)
-        .ok_or(NativeGitIndexError::PatchDoesNotMatchHunk)?;
-    let new = fields
-        .next()
-        .and_then(|value| value.strip_prefix('+'))
-        .and_then(parse_hunk_range_count)
-        .ok_or(NativeGitIndexError::PatchDoesNotMatchHunk)?;
-    if fields.next() != Some("@@") || fields.next().is_some() {
-        return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
-    }
-    Ok((old, new))
-}
-
-fn parse_hunk_range_count(value: &str) -> Option<u32> {
-    match value.split_once(',') {
-        Some((start, count)) if !start.is_empty() => count.parse().ok(),
-        None if !value.is_empty() => Some(1),
-        _ => None,
-    }
-}
-
-fn git_timestamp(micros: i64) -> String {
-    format!("@{} +0000", micros.div_euclid(1_000_000))
-}
-
-fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
-    if git_dir.join("MERGE_HEAD").is_file() {
-        GitOperationStateV1::Merge
-    } else if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
-        GitOperationStateV1::Rebase
-    } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
-        GitOperationStateV1::CherryPick
-    } else if git_dir.join("REVERT_HEAD").is_file() {
-        GitOperationStateV1::Revert
-    } else if git_dir.join("BISECT_LOG").is_file() {
-        GitOperationStateV1::Bisect
-    } else if git_dir.join("sequencer").is_dir() {
-        GitOperationStateV1::Sequencer
-    } else {
-        GitOperationStateV1::None
-    }
-}
-
-fn sync_parent_directory(path: &Path) -> Result<(), NativeGitIndexError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| NativeGitIndexError::Io("Git index has no parent directory".to_owned()))?;
-    tracedecay_application::sync_directory(parent, DirectorySyncPolicy::Strict)
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))
-}
-
-fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    let mode = if metadata.file_type().is_symlink() {
-        GitFileModeV1::SYMLINK
-    } else if metadata.is_file() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 != 0 {
-                GitFileModeV1::EXECUTABLE
-            } else {
-                GitFileModeV1::REGULAR
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            GitFileModeV1::REGULAR
-        }
-    } else {
-        return None;
-    };
-    GitFileModeV1::new(mode).ok()
-}
-
-#[cfg(unix)]
-fn is_executable_hook(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    path.is_file()
-        && std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable_hook(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::process::Command;
-
-    use tempfile::tempdir;
-
-    use super::{FixedGitIndexRunner, NativeGitIndexError};
-
-    #[test]
-    fn existing_native_index_lock_blocks_mutation_before_git_runs() {
-        let directory = tempdir().expect("temporary repository");
-        let initialized = Command::new("git")
-            .current_dir(directory.path())
-            .args(["init", "--quiet"])
-            .status()
-            .expect("git init starts");
-        assert!(initialized.success());
-
-        let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
-        fs::write(runner.index_lock_path(), b"external Git transaction").expect("index lock");
-
-        assert!(matches!(
-            runner.ensure_index_unlocked(),
-            Err(NativeGitIndexError::IndexLocked)
-        ));
-    }
-
-    #[test]
-    fn commit_boundary_errors_remain_distinct_from_safe_native_failures() {
-        let safe = NativeGitIndexError::StaleRepositoryState;
-        let unknown = safe.into_commit_boundary_unknown("index publish");
-        assert!(unknown.is_commit_boundary_unknown());
-        assert!(!NativeGitIndexError::PatchDoesNotMatchHunk.is_commit_boundary_unknown());
     }
 }
