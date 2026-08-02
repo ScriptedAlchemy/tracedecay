@@ -1036,13 +1036,6 @@ impl StoreAdministration {
         ensure_no_external_branch_store_holders(database_paths)
     }
 
-    /// Reports whether writer administration is already held. Work that would
-    /// queue behind an unrelated writer can be delayed for that writer's whole
-    /// operation, which callers may want to answer with a retry hint instead.
-    pub(super) fn writer_is_busy(&self) -> bool {
-        self.gate.try_lock().is_err()
-    }
-
     /// Acquires writer administration before constructing the supplied future
     /// and holds it until that future completes.
     pub(super) async fn with_writer<Operation, OperationFuture, Output>(
