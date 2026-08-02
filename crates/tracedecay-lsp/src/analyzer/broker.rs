@@ -1,27 +1,31 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as SyncMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use url::Url;
 
-use super::activity::adapter_workspace_root;
+use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
-use super::client::{
-    LspDocument, LspRefreshTimeouts, LspSemanticRequestError, StdioLspClient,
-    decode_semantic_request,
-};
-use super::error::{
-    AnalyzerCancellation as CancellationToken, AnalyzerResult as Result,
-    AnalyzerRuntimeError as TraceDecayError,
-};
+use super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
 use super::settings::CodeDiagnosticsSettings;
-use crate::{
-    AdmittedRoot, AnalyzerEvent, AnalyzerState, AnalyzerSupervisor, LspRequestId, LspRuntimeFuture,
-    LspSemanticOperationOutcome, LspSemanticRequestAuthority,
+mod refresh;
+mod semantic_authority;
+#[cfg(test)]
+#[path = "broker/tests.rs"]
+mod tests;
+
+use refresh::{BrokerRefreshCapacity, RefreshBatch};
+pub use refresh::{
+    CompletedRefresh, MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS, MAX_ANALYZER_QUEUED_ROOT_BATCHES,
+    PreparedRefresh,
 };
+pub use semantic_authority::StdioLspSemanticAuthority;
+#[cfg(test)]
+pub(crate) use semantic_authority::{analyzer_start_failure, semantic_operation_outcome};
 
 /// Normalized code diagnostic shared by the LSP broker and dashboard API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,462 +183,6 @@ struct LspSessionKey {
     workspace_root: PathBuf,
 }
 
-struct RefreshBatch {
-    workspace_root: PathBuf,
-    documents: Vec<LspDocument>,
-    client: Arc<Mutex<Option<StdioLspClient>>>,
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct SemanticOperationKey {
-    root_uri: String,
-    request_id: LspRequestId,
-}
-
-struct StdioLspSemanticAuthorityInner {
-    command: String,
-    args: Vec<String>,
-    project_root: PathBuf,
-    root_uri: String,
-    timeouts: LspRefreshTimeouts,
-    client: Arc<Mutex<Option<StdioLspClient>>>,
-    operations: Mutex<BTreeMap<SemanticOperationKey, CancellationToken>>,
-    supervisor: SyncMutex<AnalyzerSupervisor>,
-}
-
-/// Retained analyzer authority sharing the broker's stdio client slot.
-///
-/// Queued operations race lock acquisition against their cancellation token;
-/// in-flight operations delegate cancellation to `StdioLspClient`, which
-/// writes the standard `$/cancelRequest` notification.
-#[derive(Clone)]
-pub struct StdioLspSemanticAuthority {
-    inner: Arc<StdioLspSemanticAuthorityInner>,
-}
-
-impl StdioLspSemanticAuthority {
-    pub fn new(
-        command: impl Into<String>,
-        args: Vec<String>,
-        project_root: PathBuf,
-        root_uri: impl Into<String>,
-        timeouts: LspRefreshTimeouts,
-    ) -> Arc<Self> {
-        Self::from_shared_client(
-            command,
-            args,
-            project_root,
-            root_uri,
-            timeouts,
-            Arc::new(Mutex::new(None)),
-        )
-    }
-
-    fn from_shared_client(
-        command: impl Into<String>,
-        args: Vec<String>,
-        project_root: PathBuf,
-        root_uri: impl Into<String>,
-        timeouts: LspRefreshTimeouts,
-        client: Arc<Mutex<Option<StdioLspClient>>>,
-    ) -> Arc<Self> {
-        let root_uri = root_uri.into();
-        Arc::new(Self {
-            inner: Arc::new(StdioLspSemanticAuthorityInner {
-                command: command.into(),
-                args,
-                project_root,
-                root_uri: root_uri.clone(),
-                timeouts,
-                client,
-                operations: Mutex::new(BTreeMap::new()),
-                supervisor: SyncMutex::new(AnalyzerSupervisor::new(AdmittedRoot::new(root_uri))),
-            }),
-        })
-    }
-
-    /// Atomic project-scoped lifecycle evidence for doctor, dashboard, and
-    /// other non-LSP callers. The snapshot contains no process or stderr data.
-    pub fn analyzer_readiness(&self) -> AnalyzerSupervisor {
-        self.inner
-            .supervisor
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    fn terminal_outcome(&self) -> Option<LspSemanticOperationOutcome> {
-        analyzer_terminal_outcome(&self.inner)
-    }
-}
-
-impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
-    fn start(
-        &self,
-        root: AdmittedRoot,
-        request_id: LspRequestId,
-        request: crate::LspSemanticRequest,
-    ) -> LspRuntimeFuture<LspSemanticOperationOutcome> {
-        let request = match decode_semantic_request(request) {
-            Ok(request) => request,
-            Err(error) => {
-                return Box::pin(async move { analyzer_event_outcome(error.analyzer_event()) });
-            }
-        };
-        if root.uri() != self.inner.root_uri {
-            return Box::pin(async { LspSemanticOperationOutcome::Unavailable });
-        }
-        if let Some(outcome) = self.terminal_outcome() {
-            return Box::pin(async move { outcome });
-        }
-        let key = SemanticOperationKey {
-            root_uri: root.uri().to_owned(),
-            request_id,
-        };
-        let cancellation = CancellationToken::new();
-        let inserted = match self.inner.operations.try_lock() {
-            Ok(mut operations) => {
-                if operations.contains_key(&key) {
-                    false
-                } else {
-                    operations.insert(key.clone(), cancellation.clone());
-                    true
-                }
-            }
-            Err(_) => {
-                return Box::pin(async {
-                    LspSemanticOperationOutcome::Partial {
-                        value: serde_json::Value::Null,
-                        coverage: "semantic-runtime-busy".to_owned(),
-                        detail: None,
-                    }
-                });
-            }
-        };
-        if !inserted {
-            return Box::pin(async {
-                LspSemanticOperationOutcome::Partial {
-                    value: serde_json::Value::Null,
-                    coverage: "semantic-duplicate-operation".to_owned(),
-                    detail: None,
-                }
-            });
-        }
-
-        let inner = Arc::clone(&self.inner);
-        let analyzer_root = root;
-        Box::pin(async move {
-            let outcome = tokio::select! {
-                () = cancellation.cancelled() => {
-                    LspSemanticOperationOutcome::Partial {
-                        value: serde_json::Value::Null,
-                        coverage: "semantic-cancelled".to_owned(),
-                        detail: None,
-                    }
-                }
-                slot = inner.client.lock() => {
-                    let mut slot = slot;
-                    if slot.is_none()
-                        && let Some(outcome) = analyzer_terminal_outcome(&inner)
-                    {
-                        inner.operations.lock().await.remove(&key);
-                        return outcome;
-                    }
-                    let client = if let Some(client) = slot.take() {
-                        mark_analyzer_ready(&inner, &analyzer_root);
-                        Ok(Some(client))
-                    } else {
-                        begin_analyzer_start(&inner, &analyzer_root);
-                        tokio::select! {
-                            () = cancellation.cancelled() => Ok(None),
-                            client = StdioLspClient::start_with_timeouts(
-                                &inner.command,
-                                &inner.args,
-                                &inner.project_root,
-                                inner.timeouts,
-                            ) => client.map(Some),
-                        }
-                    };
-                    match client {
-                        Ok(Some(mut client)) => {
-                            mark_analyzer_ready(&inner, &analyzer_root);
-                            let result = client
-                                .semantic_request(request, &cancellation, inner.timeouts)
-                                .await;
-                            // Cancellation drops `read_message_until` wherever
-                            // it was suspended, so any bytes it had already
-                            // consumed into its local header/body buffers are
-                            // gone and the stream may be parked mid-frame.
-                            // Reusing the client would make every later request
-                            // parse from the middle of a message, so retire it
-                            // alongside the transport failures.
-                            if !matches!(
-                                &result,
-                                Err(LspSemanticRequestError::Transport { .. }
-                                    | LspSemanticRequestError::InvalidResponse { .. }
-                                    | LspSemanticRequestError::Cancelled)
-                            ) {
-                                *slot = Some(client);
-                            }
-                            match &result {
-                                Ok(_)
-                                | Err(LspSemanticRequestError::Remote {
-                                    code: Some(-32601),
-                                    ..
-                                }) => record_analyzer_event(
-                                    &inner,
-                                    &analyzer_root,
-                                    AnalyzerEvent::Ready,
-                                ),
-                                Err(error) => record_analyzer_event(
-                                    &inner,
-                                    &analyzer_root,
-                                    error.analyzer_event(),
-                                ),
-                            }
-                            semantic_operation_outcome(result)
-                        }
-                        Ok(None) => {
-                            record_analyzer_event(
-                                &inner,
-                                &analyzer_root,
-                                AnalyzerEvent::Cancelled,
-                            );
-                            analyzer_event_outcome(AnalyzerEvent::Cancelled)
-                        }
-                        Err(error) => {
-                            // Coverage is a stable token vocabulary that callers
-                            // match on, so the analyzer's own message cannot live
-                            // in it: slugifying stripped the punctuation and cut it
-                            // mid-word, and a message happening to contain "stale"
-                            // steered rename candidates down the wrong branch.
-                            // Callers receive only a static typed template; the
-                            // daemon-local event keeps the full operational error.
-                            record_analyzer_event(
-                                &inner,
-                                &analyzer_root,
-                                AnalyzerEvent::StartupFailed,
-                            );
-                            analyzer_start_failure(&error)
-                        }
-                    }
-                }
-            };
-            inner.operations.lock().await.remove(&key);
-            outcome
-        })
-    }
-
-    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
-        let key = SemanticOperationKey {
-            root_uri: root.uri().to_owned(),
-            request_id: request_id.clone(),
-        };
-        self.inner
-            .operations
-            .try_lock()
-            .ok()
-            .and_then(|operations| operations.get(&key).cloned())
-            .is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
-    }
-}
-
-fn begin_analyzer_start(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedRoot) {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if supervisor.state() == AnalyzerState::Ready {
-        let _ = supervisor.apply(root, AnalyzerEvent::Crashed);
-    }
-    if matches!(
-        supervisor.state(),
-        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff
-    ) {
-        let _ = supervisor.apply(root, AnalyzerEvent::StartRequested);
-    }
-}
-
-fn analyzer_terminal_outcome(
-    inner: &StdioLspSemanticAuthorityInner,
-) -> Option<LspSemanticOperationOutcome> {
-    let supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match supervisor.state() {
-        AnalyzerState::Exhausted | AnalyzerState::Unavailable => {
-            Some(LspSemanticOperationOutcome::Unavailable)
-        }
-        AnalyzerState::AwaitingStart
-        | AnalyzerState::Starting
-        | AnalyzerState::Ready
-        | AnalyzerState::RestartBackoff => None,
-    }
-}
-
-fn mark_analyzer_ready(inner: &StdioLspSemanticAuthorityInner, root: &AdmittedRoot) {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if matches!(
-        supervisor.state(),
-        AnalyzerState::AwaitingStart | AnalyzerState::RestartBackoff
-    ) {
-        let _ = supervisor.apply(root, AnalyzerEvent::StartRequested);
-    }
-    if supervisor.state() == AnalyzerState::Starting {
-        let _ = supervisor.apply(root, AnalyzerEvent::Ready);
-    }
-}
-
-fn record_analyzer_event(
-    inner: &StdioLspSemanticAuthorityInner,
-    root: &AdmittedRoot,
-    event: AnalyzerEvent,
-) {
-    let mut supervisor = inner
-        .supervisor
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _ = supervisor.apply(root, event);
-}
-
-fn analyzer_event_outcome(event: AnalyzerEvent) -> LspSemanticOperationOutcome {
-    let Some(coverage) = event.coverage_token() else {
-        return LspSemanticOperationOutcome::Unavailable;
-    };
-    LspSemanticOperationOutcome::Partial {
-        value: serde_json::Value::Null,
-        coverage: coverage.to_owned(),
-        detail: event.failure_detail(),
-    }
-}
-
-fn analyzer_start_failure(error: &TraceDecayError) -> LspSemanticOperationOutcome {
-    eprintln!("[tracedecay] event=analyzer_start_failed error={error}");
-    analyzer_event_outcome(AnalyzerEvent::StartupFailed)
-}
-
-fn semantic_operation_outcome(
-    result: std::result::Result<serde_json::Value, LspSemanticRequestError>,
-) -> LspSemanticOperationOutcome {
-    match result {
-        Ok(value) => LspSemanticOperationOutcome::Complete(value),
-        Err(LspSemanticRequestError::Remote {
-            code: Some(-32601), ..
-        }) => LspSemanticOperationOutcome::Unavailable,
-        Err(error) => {
-            eprintln!("[tracedecay] event=analyzer_semantic_request_failed error={error}");
-            analyzer_event_outcome(error.analyzer_event())
-        }
-    }
-}
-
-pub struct PreparedRefresh {
-    language: String,
-    project_root: PathBuf,
-    command: String,
-    args: Vec<String>,
-    epoch: u64,
-    batches: Vec<RefreshBatch>,
-}
-
-pub struct CompletedRefresh {
-    language: String,
-    command: String,
-    epoch: u64,
-    result: std::result::Result<Vec<CodeDiagnostic>, RefreshFailure>,
-}
-
-impl CompletedRefresh {
-    pub fn is_ok(&self) -> bool {
-        self.result.is_ok()
-    }
-}
-
-impl PreparedRefresh {
-    pub async fn collect_diagnostics(
-        self,
-        diagnostics_quiet_timeout: Duration,
-    ) -> CompletedRefresh {
-        self.collect_diagnostics_with_timeouts(LspRefreshTimeouts::from_diagnostics_quiet_window(
-            diagnostics_quiet_timeout,
-        ))
-        .await
-    }
-
-    pub async fn collect_diagnostics_with_timeouts(
-        self,
-        timeouts: LspRefreshTimeouts,
-    ) -> CompletedRefresh {
-        let language = self.language.clone();
-        let command = self.command.clone();
-        let epoch = self.epoch;
-        let result = self.collect(timeouts).await;
-        CompletedRefresh {
-            language,
-            command,
-            epoch,
-            result,
-        }
-    }
-
-    async fn collect(
-        self,
-        timeouts: LspRefreshTimeouts,
-    ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
-        let mut diagnostics = Vec::new();
-        for batch in self.batches {
-            let mut client_slot = batch.client.lock().await;
-            let mut client = match client_slot.take() {
-                Some(client) => client,
-                None => StdioLspClient::start_with_timeouts(
-                    &self.command,
-                    &self.args,
-                    &batch.workspace_root,
-                    timeouts,
-                )
-                .await
-                .map_err(|err| RefreshFailure::crashed(&err))?,
-            };
-            match client
-                .collect_document_diagnostics(&self.project_root, batch.documents, timeouts)
-                .await
-            {
-                Ok(mut batch_diagnostics) => {
-                    *client_slot = Some(client);
-                    diagnostics.append(&mut batch_diagnostics);
-                }
-                Err(err) => {
-                    *client_slot = None;
-                    return Err(RefreshFailure::crashed(&err));
-                }
-            }
-        }
-        Ok(diagnostics)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RefreshFailure {
-    state: EngineState,
-    message: String,
-}
-
-impl RefreshFailure {
-    fn crashed(err: &TraceDecayError) -> Self {
-        Self {
-            state: EngineState::Crashed,
-            message: err.to_string(),
-        }
-    }
-}
-
 /// Dashboard-owned diagnostics broker state.
 pub struct DiagnosticBroker {
     project_root: PathBuf,
@@ -648,6 +196,7 @@ pub struct DiagnosticBroker {
     project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
     settings_unavailable: Option<SettingsUnavailable>,
+    refresh_capacity: BrokerRefreshCapacity,
 }
 
 impl DiagnosticBroker {
@@ -668,6 +217,7 @@ impl DiagnosticBroker {
             project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
             settings_unavailable: None,
+            refresh_capacity: BrokerRefreshCapacity::new(),
         }
     }
 
@@ -879,20 +429,56 @@ impl DiagnosticBroker {
             return Err(TraceDecayError::Config { message });
         }
 
+        let project_root = self.project_root.clone();
+        let canonical_project_root = canonicalize_project_root(&project_root).map_err(|error| {
+            let message = format!("failed to resolve admitted project root: {error}");
+            self.engine_errors
+                .insert(language.to_string(), message.clone());
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Unavailable);
+            self.remove_language_clients(language);
+            TraceDecayError::Config { message }
+        })?;
         self.engine_overrides
             .insert(language.to_string(), EngineState::Refreshing);
         let epoch = self.next_refresh_epoch(language);
-        let project_root = self.project_root.clone();
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
-            let workspace_root =
-                adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
-                    .unwrap_or_else(|| self.project_root.clone());
+            let workspace_root = adapter_workspace_root_from_canonical_root(
+                &canonical_project_root,
+                &adapter,
+                &document.relative_path,
+            )
+            .unwrap_or_else(|| canonical_project_root.clone());
             documents_by_root
                 .entry(workspace_root)
                 .or_default()
                 .push(document);
         }
+        if documents_by_root.len() > MAX_ANALYZER_QUEUED_ROOT_BATCHES {
+            let message = format!(
+                "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
+                documents_by_root.len()
+            );
+            self.engine_errors
+                .insert(language.to_string(), message.clone());
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Unavailable);
+            return Err(TraceDecayError::Config { message });
+        }
+        let reservation = self
+            .refresh_capacity
+            .reserve(documents_by_root.len())
+            .ok_or_else(|| {
+                let message = format!(
+                    "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
+                    documents_by_root.len()
+                );
+                self.engine_errors.insert(language.to_string(), message.clone());
+                self.engine_overrides
+                    .insert(language.to_string(), EngineState::Unavailable);
+                TraceDecayError::Config { message }
+            })?;
         let batches = documents_by_root
             .into_iter()
             .map(|(workspace_root, documents)| {
@@ -913,14 +499,15 @@ impl DiagnosticBroker {
                 }
             })
             .collect();
-        Ok(Some(PreparedRefresh {
-            language: language.to_string(),
-            project_root,
+        Ok(Some(PreparedRefresh::new(
+            language.to_string(),
+            canonical_project_root,
             command,
-            args: adapter.args,
+            adapter.args,
             epoch,
             batches,
-        }))
+            reservation,
+        )))
     }
 
     pub async fn refresh_documents(
@@ -1240,219 +827,4 @@ fn command_candidates(command: &str) -> Vec<String> {
 #[cfg(not(windows))]
 fn command_candidates(command: &str) -> Vec<String> {
     vec![command.to_string()]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::analyzer::adapters::DiagnosticMode;
-
-    fn assert_safe_partial_detail(
-        outcome: LspSemanticOperationOutcome,
-        expected_coverage: &str,
-        expected_detail: &str,
-    ) {
-        let LspSemanticOperationOutcome::Partial {
-            coverage, detail, ..
-        } = outcome
-        else {
-            panic!("expected partial semantic outcome");
-        };
-        assert_eq!(coverage, expected_coverage);
-        assert_eq!(detail, Some(expected_detail));
-        for forbidden in [
-            "bearer-secret",
-            "YWxpY2U6c2VjcmV0",
-            "alice:hunter2",
-            "bob:password",
-            "/home/alice",
-            r"C:\Users\alice",
-            "密碼",
-            "🔐",
-        ] {
-            assert!(
-                !detail
-                    .expect("typed analyzer failure detail")
-                    .contains(forbidden),
-                "caller detail leaked {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn analyzer_failure_details_never_copy_raw_errors() {
-        let sensitive = concat!(
-            "stderr first line\n",
-            "Authorization: Bearer bearer-secret\n",
-            "Authorization: Basic YWxpY2U6c2VjcmV0\n",
-            "https://alice:hunter2@example.test/private\n",
-            "file://bob:password@localhost/home/bob/private.rs\n",
-            "/home/alice/.ssh/id_rsa\n",
-            r"C:\Users\alice\AppData\secret.txt",
-            "\nUTF-8: 密碼 🔐"
-        );
-
-        assert_safe_partial_detail(
-            analyzer_start_failure(&TraceDecayError::Config {
-                message: sensitive.to_owned(),
-            }),
-            "analyzer-start-failed",
-            LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL,
-        );
-        assert_safe_partial_detail(
-            semantic_operation_outcome(Err(LspSemanticRequestError::Remote {
-                code: Some(-32603),
-                message: sensitive.to_owned(),
-            })),
-            "analyzer-remote-error",
-            LspSemanticOperationOutcome::ANALYZER_REMOTE_ERROR_DETAIL,
-        );
-        assert_safe_partial_detail(
-            semantic_operation_outcome(Err(LspSemanticRequestError::Transport {
-                class: sensitive.to_owned(),
-            })),
-            "analyzer-transport-failed",
-            LspSemanticOperationOutcome::ANALYZER_TRANSPORT_FAILED_DETAIL,
-        );
-        assert_safe_partial_detail(
-            semantic_operation_outcome(Err(LspSemanticRequestError::InvalidResponse {
-                class: sensitive.to_owned(),
-            })),
-            "analyzer-invalid-response",
-            LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
-        );
-        assert_safe_partial_detail(
-            semantic_operation_outcome(Err(LspSemanticRequestError::TimedOut)),
-            "analyzer-timeout",
-            LspSemanticOperationOutcome::ANALYZER_TIMEOUT_DETAIL,
-        );
-        assert_safe_partial_detail(
-            semantic_operation_outcome(Err(LspSemanticRequestError::Cancelled)),
-            "analyzer-cancelled",
-            LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
-        );
-    }
-
-    #[test]
-    fn semantic_remote_method_missing_remains_unavailable() {
-        assert_eq!(
-            semantic_operation_outcome(Err(LspSemanticRequestError::Remote {
-                code: Some(-32601),
-                message: "method not found: stale Bearer secret /private/path?!".to_owned(),
-            })),
-            LspSemanticOperationOutcome::Unavailable
-        );
-    }
-
-    fn adapter(
-        language: &str,
-        command: impl Into<String>,
-        extension: &str,
-        root_marker: &str,
-    ) -> LspAdapterDefinition {
-        LspAdapterDefinition {
-            language: language.to_owned(),
-            language_id: language.to_owned(),
-            command: command.into(),
-            args: Vec::new(),
-            extensions: vec![extension.to_owned()],
-            root_markers: vec![root_marker.to_owned()],
-            install_options: Vec::new(),
-            diagnostics: DiagnosticMode::Push,
-        }
-    }
-
-    #[test]
-    fn admitted_providers_derive_python_and_typescript_from_project_files() {
-        let project = tempfile::tempdir().expect("project");
-        std::fs::write(project.path().join("pyproject.toml"), "").expect("python root marker");
-        std::fs::write(project.path().join("tsconfig.json"), "").expect("typescript root marker");
-        let python = project.path().join("pyright-langserver");
-        std::fs::write(&python, "").expect("mounted python provider");
-        let mut broker = DiagnosticBroker::new(
-            project.path(),
-            vec![
-                adapter(
-                    "typescript",
-                    project
-                        .path()
-                        .join("missing-typescript-language-server")
-                        .to_string_lossy(),
-                    "ts",
-                    "tsconfig.json",
-                ),
-                adapter("python", python.to_string_lossy(), "py", "pyproject.toml"),
-            ],
-            CodeDiagnosticsSettings::default(),
-        );
-
-        let admitted = broker
-            .admitted_providers_for_files(&["src/main.ts".to_owned(), "src/main.py".to_owned()]);
-
-        assert_eq!(
-            admitted,
-            vec![
-                AdmittedLspProvider {
-                    language: "typescript".to_owned(),
-                    command: project
-                        .path()
-                        .join("missing-typescript-language-server")
-                        .to_string_lossy()
-                        .into_owned(),
-                    analyzer_available: false,
-                },
-                AdmittedLspProvider {
-                    language: "python".to_owned(),
-                    command: python.to_string_lossy().into_owned(),
-                    analyzer_available: true,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
-        let project = tempfile::tempdir().expect("project");
-        std::fs::write(project.path().join("Cargo.toml"), "").expect("rust root marker");
-        let missing = project.path().join("missing-rust-analyzer");
-        let mut broker = DiagnosticBroker::new(
-            project.path(),
-            vec![adapter(
-                "rust",
-                missing.to_string_lossy(),
-                "rs",
-                "Cargo.toml",
-            )],
-            CodeDiagnosticsSettings::default(),
-        );
-
-        assert_eq!(
-            broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]),
-            vec![AdmittedLspProvider {
-                language: "rust".to_owned(),
-                command: missing.to_string_lossy().into_owned(),
-                analyzer_available: false,
-            }]
-        );
-        assert!(
-            broker
-                .semantic_authority_if_available(
-                    "rust",
-                    project.path().to_path_buf(),
-                    url::Url::from_directory_path(project.path())
-                        .expect("project root URI")
-                        .to_string(),
-                    LspRefreshTimeouts::from_diagnostics_quiet_window(
-                        std::time::Duration::from_millis(10),
-                    ),
-                )
-                .expect("configured adapter")
-                .is_none()
-        );
-        assert!(
-            broker
-                .mounted_providers_for_files(&["src/lib.rs".to_owned()])
-                .is_empty()
-        );
-    }
 }
