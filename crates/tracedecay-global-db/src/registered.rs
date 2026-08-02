@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
@@ -303,32 +302,6 @@ impl RegisteredGlobalDb {
             self.runtime.locator().verified(),
         )?;
         Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
-    }
-
-    pub fn remote_storage(
-        &self,
-        keyring: Arc<dyn tracedecay_rusqlite_runtime::remote::RemoteSpoolKeyringV1>,
-    ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageV1,
-    > {
-        let handle = self
-            .runtime
-            .authorized_migration_sql_handle(self.authority.clone())
-            .map_err(|error| {
-                registered_error("attach registered remote storage", format!("{error:?}"))
-            })?;
-        validate_registered_identity(
-            handle.binding(),
-            handle.verified_locator(),
-            self.runtime.binding(),
-            self.runtime.locator().verified(),
-        )?;
-        tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageV1::attach(
-            handle,
-            self.runtime.binding().clone(),
-            keyring,
-        )
-        .map_err(|error| registered_error("attach registered remote storage", error.to_string()))
     }
 
     pub fn remote_replay_transaction(&self) -> crate::RegisteredRemoteReplayTransactionV1 {

@@ -53,7 +53,9 @@ use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
 };
-pub use schema::{REMOTE_SCHEMA, validate_remote_schema};
+pub use schema::{
+    REMOTE_NODE_LOCAL_SCHEMA, REMOTE_OBSERVATION_EVENTS_SCHEMA, validate_remote_schema,
+};
 pub use status::RemoteStorageStatusSnapshotV1;
 
 #[derive(Debug, Error)]

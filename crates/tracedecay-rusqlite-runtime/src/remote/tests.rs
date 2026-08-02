@@ -173,7 +173,7 @@ impl RemoteReplayTransportPortV1 for UnreachableTransport {
 fn install_remote_schema_fixture(fixture: &Fixture) {
     let transaction = fixture.handle.begin_schema_migration_immediate().unwrap();
     transaction
-        .execute_schema_batch_step(REMOTE_SCHEMA.to_owned())
+        .execute_schema_batch_step(REMOTE_NODE_LOCAL_SCHEMA.to_owned())
         .unwrap();
     transaction.commit().unwrap();
 }
@@ -323,6 +323,21 @@ fn runtime_attachment_requires_explicit_remote_migration() {
     transaction.commit().unwrap();
     assert!(matches!(
         validate_remote_schema(&incompatible.handle),
+        Err(RemoteSqliteStorageErrorV1::ResetRequired)
+    ));
+
+    let mixed_store = fixture();
+    install_remote_schema_fixture(&mixed_store);
+    let transaction = mixed_store
+        .handle
+        .begin_schema_migration_immediate()
+        .unwrap();
+    transaction
+        .execute_schema_batch_step(REMOTE_OBSERVATION_EVENTS_SCHEMA.to_owned())
+        .unwrap();
+    transaction.commit().unwrap();
+    assert!(matches!(
+        validate_remote_schema(&mixed_store.handle),
         Err(RemoteSqliteStorageErrorV1::ResetRequired)
     ));
 }

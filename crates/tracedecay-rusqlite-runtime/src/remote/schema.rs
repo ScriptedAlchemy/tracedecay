@@ -6,12 +6,11 @@ const REQUIRED_REMOTE_TABLES: &[&str] = &[
     "remote_authorities",
     "remote_enrollment_grants",
     "remote_enrollments",
-    "remote_observation_events",
     "remote_recovery_journal",
     "remote_spool_frames",
 ];
 
-pub const REMOTE_SCHEMA: &str = "
+pub const REMOTE_NODE_LOCAL_SCHEMA: &str = "
 CREATE TABLE remote_authorities (
     brain_id TEXT PRIMARY KEY,
     runtime_binding_json TEXT NOT NULL,
@@ -62,6 +61,21 @@ CREATE TABLE remote_spool_frames (
     UNIQUE (enrollment_id, sequence)
 ) STRICT;
 
+CREATE TABLE remote_recovery_journal (
+    operation_id TEXT PRIMARY KEY,
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('backup', 'restore', 'failover')),
+    state TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    receipt_json TEXT,
+    updated_at INTEGER NOT NULL
+) STRICT;
+";
+
+/// Canonical repository-store fragment for replay identity and sequencing.
+///
+/// The registered final-schema authority consumes this exact fragment. It is
+/// deliberately absent from [`REMOTE_NODE_LOCAL_SCHEMA`].
+pub const REMOTE_OBSERVATION_EVENTS_SCHEMA: &str = "
 CREATE TABLE remote_observation_events (
     event_id TEXT PRIMARY KEY,
     frame_digest TEXT NOT NULL,
@@ -77,15 +91,6 @@ CREATE TABLE remote_observation_events (
     idempotency_key TEXT NOT NULL UNIQUE,
     command_digest TEXT NOT NULL,
     UNIQUE (enrollment_id, node_id, capture_sequence)
-) STRICT;
-
-CREATE TABLE remote_recovery_journal (
-    operation_id TEXT PRIMARY KEY,
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('backup', 'restore', 'failover')),
-    state TEXT NOT NULL,
-    request_json TEXT NOT NULL,
-    receipt_json TEXT,
-    updated_at INTEGER NOT NULL
 ) STRICT;
 ";
 
@@ -116,10 +121,6 @@ pub fn validate_remote_schema(
                 key_revision, nonce, ciphertext, state, last_attempt, attempt_started_at,
                 receipt_json, finding, captured_at
          FROM remote_spool_frames LIMIT 0",
-        "SELECT event_id, frame_digest, enrollment_id, enrollment_revision, node_id,
-                policy_revision, capture_sequence, previous_event_id, observation_id,
-                writer_fence_json, captured_at, idempotency_key, command_digest
-         FROM remote_observation_events LIMIT 0",
         "SELECT operation_id, operation_kind, state, request_json, receipt_json, updated_at
          FROM remote_recovery_journal LIMIT 0",
     ] {
@@ -140,6 +141,7 @@ fn remote_tables(
         .iter()
         .copied()
         .chain([
+            "remote_observation_events",
             "remote_schema_versions_v1",
             "remote_observations_v1",
             "remote_authorities_v1",

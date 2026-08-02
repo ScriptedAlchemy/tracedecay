@@ -175,24 +175,11 @@ fn connection() -> Connection {
                     projected_rows INTEGER NOT NULL,
                     skipped_observations INTEGER NOT NULL,
                     state TEXT NOT NULL
-                 );
-                 CREATE TABLE remote_observation_events (
-                    event_id TEXT PRIMARY KEY,
-                    frame_digest TEXT NOT NULL,
-                    enrollment_id TEXT NOT NULL,
-                    enrollment_revision INTEGER NOT NULL,
-                    node_id TEXT NOT NULL,
-                    policy_revision INTEGER NOT NULL,
-                    capture_sequence INTEGER NOT NULL,
-                    previous_event_id TEXT,
-                    observation_id TEXT NOT NULL UNIQUE,
-                    writer_fence_json TEXT NOT NULL,
-                    captured_at INTEGER NOT NULL,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    command_digest TEXT NOT NULL,
-                    UNIQUE (enrollment_id, node_id, capture_sequence)
                  );",
         )
+        .unwrap();
+    connection
+        .execute_batch(crate::remote::REMOTE_OBSERVATION_EVENTS_SCHEMA)
         .unwrap();
     connection
 }
