@@ -386,17 +386,20 @@ setsid bash -c '
 ' _ "$DAEMON_PID" >"$RSS_SAMPLES" 2>/dev/null &
 SAMPLER_PID=$!
 
-# Reindex driver: keeps the daemon building fresh code-index generations for
-# the whole load window. Each `status` call against an unmounted project root
-# mounts that worktree and triggers its cold reconcile, so cycling over N
-# private clones holds the indexing pipeline busy while the workers read.
+# Reindex driver: keeps a full cold index running for the whole load window,
+# so the read battery is measured against a daemon on a box that indexing is
+# saturating. Each cycle is a real `tracedecay init` over a private clone —
+# the same pipeline (read, sanitize, extract, chunk, digest) at the same width
+# a worktree reconcile uses.
 REINDEX_PID=""
 if ((PERF_REINDEX_WORKTREES > 0)); then
   log "==> PHASE LOAD: preparing $PERF_REINDEX_WORKTREES reindex clone(s)"
   REINDEX_ROOTS=()
   for ((r = 0; r < PERF_REINDEX_WORKTREES; r++)); do
     clone="$RUN_DIR/reindex-$r"
-    if git clone --local --quiet "$PERF_TARGET_REPO" "$clone" >/dev/null 2>&1; then
+    # --no-hardlinks: the run directory is usually on a different filesystem
+    # than the repo, where a hardlinked clone fails outright.
+    if git clone --local --no-hardlinks --quiet "$PERF_TARGET_REPO" "$clone" >/dev/null 2>&1; then
       REINDEX_ROOTS+=("$clone")
     else
       log "    WARNING could not clone $PERF_TARGET_REPO into $clone"
@@ -404,17 +407,18 @@ if ((PERF_REINDEX_WORKTREES > 0)); then
   done
   ((${#REINDEX_ROOTS[@]} > 0)) || die "no reindex clone could be created"
   reindex_driver() {
-    local deadline="$1" root
+    local deadline="$1" root cycles=0
     while (($(date +%s) < deadline)); do
       for root in "${REINDEX_ROOTS[@]}"; do
         (($(date +%s) < deadline)) || break
-        # Drop the mount so the next touch is a cold full build again.
         rm -rf "$root/.tracedecay" 2>/dev/null || true
-        "$BIN" tool status "{\"format\":\"json\"}" --project "$root" --json >/dev/null 2>&1 || true
-        "$BIN" tool search '{"query":"TraceDecay","limit":10,"format":"json"}' \
-          --project "$root" --json >/dev/null 2>&1 || true
+        (cd "$root" && "$BIN" init) >/dev/null 2>&1 || true
+        cycles=$((cycles + 1))
       done
     done
+    # Full indexes completed inside the load window: the direct read on
+    # whether indexing raced to idle or stayed in the way.
+    printf '%s\n' "$cycles" >"$PERF_OUTPUT_DIR/reindex-cycles"
   }
 fi
 
