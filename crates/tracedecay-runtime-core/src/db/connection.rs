@@ -1974,6 +1974,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2002,6 +2003,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2053,6 +2055,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2077,6 +2080,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2128,6 +2132,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2179,6 +2184,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2230,6 +2236,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2291,6 +2298,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2313,6 +2321,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2331,6 +2340,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2356,6 +2366,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
@@ -2387,6 +2398,7 @@ mod tests {
             &path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
+            test_code_shard().unwrap(),
         )
         .await
         .unwrap();
