@@ -160,9 +160,14 @@ pub use retrieval_anchor::{
 pub use runtime::*;
 pub use schema::{GENERATION_DIAGNOSTICS_SCHEMA_DDL, RETRIEVAL_ANCHORS_SCHEMA_DDL};
 pub use session::{
+    MAX_SESSION_CONTENT_FTS_CHARS, MAX_SESSION_CONTENT_GC_PAGE_SIZE,
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
-    MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,
-    SessionGenerationActivateOperation, SessionGenerationActivatePermit,
+    MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionContentErrorV1, SessionContentFileLocatorV1,
+    SessionContentGcRequestV1, SessionContentKeyV1, SessionContentKindV1, SessionContentObjectV1,
+    SessionContentOccurrenceOwnerV1, SessionContentOwnerV1, SessionContentReadRequestV1,
+    SessionContentReferenceV1, SessionContentResult, SessionContentSearchTextV1,
+    SessionContentStorageV1, SessionContentSummaryOwnerV1, SessionContentValueV1,
+    SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,
     SessionGenerationActivationReceiptV1, SessionGenerationActivationRequestV1,
     SessionGenerationRebuildBeginOperation, SessionGenerationRebuildBeginPermit,
     SessionGenerationRebuildDispositionV1, SessionGenerationRebuildReceiptV1,

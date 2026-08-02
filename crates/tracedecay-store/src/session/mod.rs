@@ -5,6 +5,7 @@
 //! with downstream adapters.
 
 mod common;
+mod content;
 mod projection;
 mod refresh;
 mod retrieval;
@@ -26,6 +27,14 @@ pub use common::{
     SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1, SessionTemporalOperationPermit,
     SessionTemporalPageRetrieveOperation, SessionTemporalPageRetrievePermit,
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
+};
+pub use content::{
+    MAX_SESSION_CONTENT_FTS_CHARS, MAX_SESSION_CONTENT_GC_PAGE_SIZE, SessionContentErrorV1,
+    SessionContentFileLocatorV1, SessionContentGcRequestV1, SessionContentKeyV1,
+    SessionContentKindV1, SessionContentObjectV1, SessionContentOccurrenceOwnerV1,
+    SessionContentOwnerV1, SessionContentReadRequestV1, SessionContentReferenceV1,
+    SessionContentResult, SessionContentSearchTextV1, SessionContentStorageV1,
+    SessionContentSummaryOwnerV1, SessionContentValueV1,
 };
 pub use projection::{
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionGenerationActivationReceiptV1,
