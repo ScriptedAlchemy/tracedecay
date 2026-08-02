@@ -507,7 +507,13 @@ impl std::fmt::Display for StoreIdentityInventory {
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let scratch_root = layout.data_root.join("scratch").join("sqlite-read");
     let open_result = match storage::PrivateStoreIo::create_dir_all(&scratch_root) {
-        Ok(()) => crate::sqlite_read_snapshot::open_in(&layout.graph_db_path, &scratch_root).await,
+        Ok(()) => {
+            tracedecay_runtime_core::sqlite_read_snapshot::open_in(
+                &layout.graph_db_path,
+                &scratch_root,
+            )
+            .await
+        }
         Err(error) => Err(error),
     };
     let (graph_health, nodes, files, facts) = match open_result {
@@ -532,8 +538,11 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
     let (sessions, messages, lcm_rows) =
         match storage::PrivateStoreIo::create_dir_all(&scratch_root) {
             Ok(()) => {
-                match crate::sqlite_read_snapshot::open_in(&layout.sessions_db_path, &scratch_root)
-                    .await
+                match tracedecay_runtime_core::sqlite_read_snapshot::open_in(
+                    &layout.sessions_db_path,
+                    &scratch_root,
+                )
+                .await
                 {
                     Ok(snapshot) => {
                         let connection = snapshot.connection();

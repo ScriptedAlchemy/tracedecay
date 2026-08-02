@@ -100,10 +100,6 @@ pub mod mcp;
 pub mod memory;
 pub mod migrate;
 pub mod monitor;
-mod open_store_holders;
-#[cfg(test)]
-mod os_str_bytes;
-mod path_scope;
 mod path_tree;
 pub mod privacy;
 pub mod project_registry;
@@ -121,7 +117,6 @@ mod semantic_code;
 pub mod serve;
 pub mod sessions;
 mod shell;
-mod sqlite_read_snapshot;
 pub mod storage;
 pub mod store;
 pub(crate) mod support;

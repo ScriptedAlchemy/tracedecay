@@ -193,7 +193,9 @@ where
 {
     items
         .into_iter()
-        .filter(|item| crate::path_scope::path_matches_scope(get_path(item), scope_prefix))
+        .filter(|item| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(get_path(item), scope_prefix)
+        })
         .collect()
 }
 

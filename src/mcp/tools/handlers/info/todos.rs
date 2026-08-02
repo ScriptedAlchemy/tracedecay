@@ -72,7 +72,7 @@ pub(crate) async fn handle_todos(
 
     'outer: for file in &files {
         if let Some(prefix) = path
-            && !crate::path_scope::path_matches_scope(&file.path, Some(prefix))
+            && !tracedecay_runtime_core::path_scope::path_matches_scope(&file.path, Some(prefix))
         {
             continue;
         }

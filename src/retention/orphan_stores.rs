@@ -648,7 +648,7 @@ fn durable_check_scratch_root(profile_root: &Path) -> PathBuf {
 /// instead of maintaining a fixed list: both legacy memory and Memory V2 add
 /// durable tables, and a newly added table must be protected automatically.
 /// Side-effect-free with respect to the store: opens the database through
-/// [`crate::sqlite_read_snapshot`], so the live store is never mutated or
+/// [`tracedecay_runtime_core::sqlite_read_snapshot`], so the live store is never mutated or
 /// locked against a concurrent writer.
 async fn check_durable_memory_rows(
     data_root: &Path,
@@ -668,10 +668,13 @@ async fn check_durable_memory_rows(
     if std::fs::create_dir_all(scratch_root).is_err() {
         return DurableMemoryCheck::Unverifiable;
     }
-    let snapshot = match crate::sqlite_read_snapshot::open_in(&graph_db_path, scratch_root).await {
-        Ok(snapshot) => snapshot,
-        Err(_) => return DurableMemoryCheck::Unverifiable,
-    };
+    let snapshot =
+        match tracedecay_runtime_core::sqlite_read_snapshot::open_in(&graph_db_path, scratch_root)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(_) => return DurableMemoryCheck::Unverifiable,
+        };
     let connection = snapshot.connection();
     let mut rows = match connection
         .query(

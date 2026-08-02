@@ -8,7 +8,7 @@
 //!
 //! The registry read does, because it is one small file and needs a
 //! consistent view of `code_projects`. The *per-store size sampling*
-//! deliberately does not. [`crate::sqlite_read_snapshot`] freezes a database
+//! deliberately does not. [`tracedecay_runtime_core::sqlite_read_snapshot`] freezes a database
 //! family by reflinking it, falling back to a **full byte copy** when the
 //! filesystem cannot reflink, and any graph database a live daemon has open
 //! is WAL-backed and therefore takes that path. Running this report over the
@@ -285,9 +285,12 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
         copy_sqlite_family(&global_db_path, &snapshot_source)
             .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        let snapshot = crate::sqlite_read_snapshot::open_in(&snapshot_source, scratch.path())
-            .await
-            .map_err(|error| report_error("open global.db read snapshot", error))?;
+        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open_in(
+            &snapshot_source,
+            scratch.path(),
+        )
+        .await
+        .map_err(|error| report_error("open global.db read snapshot", error))?;
         let connection = snapshot.connection();
         let mut rows = connection
             .query(

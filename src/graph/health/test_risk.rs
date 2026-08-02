@@ -156,7 +156,9 @@ pub async fn analyze_test_risk(
                 && !skip_coverage.contains(&n.id)
                 && !n.qualified_name.contains("::tests::")
         })
-        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
+        .filter(|n| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(&n.file_path, path_prefix)
+        })
         .collect();
 
     let excluded_count = eligible_fns

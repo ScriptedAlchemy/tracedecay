@@ -76,7 +76,7 @@ pub(crate) async fn compute_health_snapshot(
     let mut skipped_in_scope = 0usize;
     let mut dead_count = 0usize;
     for agg in &file_aggregates {
-        if crate::path_scope::path_matches_scope(&agg.file_path, path_prefix) {
+        if tracedecay_runtime_core::path_scope::path_matches_scope(&agg.file_path, path_prefix) {
             complexity_values.push(agg.complexity);
             total_fns += agg.function_methods;
             skipped_in_scope += agg.skipped_function_methods;

@@ -70,5 +70,5 @@ fn path_is_rust(path: &str) -> bool {
 }
 
 fn path_matches_optional_scope(path: &str, scope_prefix: Option<&str>) -> bool {
-    crate::path_scope::path_matches_scope(path, scope_prefix)
+    tracedecay_runtime_core::path_scope::path_matches_scope(path, scope_prefix)
 }

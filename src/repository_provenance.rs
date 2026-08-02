@@ -162,16 +162,16 @@ impl NativeRepositoryProvenanceProbe {
         let Some(canonical_root_digest) = privacy_bound_digest(
             request.privacy_domain_salt,
             b"repository-canonical-root-v1",
-            &[crate::os_str_bytes::native_os_str_bytes(
+            &[tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
                 canonical_root.as_os_str(),
             )],
         ) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
         let path_frames = [
-            crate::os_str_bytes::native_os_str_bytes(canonical_root.as_os_str()),
-            crate::os_str_bytes::native_os_str_bytes(git_dir.as_os_str()),
-            crate::os_str_bytes::native_os_str_bytes(common_dir.as_os_str()),
+            tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(canonical_root.as_os_str()),
+            tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(git_dir.as_os_str()),
+            tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(common_dir.as_os_str()),
             remote_identity.path_frame,
         ];
         let Some(path_identity_digest) = privacy_bound_digest(

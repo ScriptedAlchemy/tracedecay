@@ -41,7 +41,10 @@ pub(crate) async fn handle_signature_search(
     let mut touched: Vec<String> = Vec::new();
     for node in function_nodes.iter().chain(method_nodes.iter()) {
         if let Some(prefix) = path_filter
-            && !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix))
+            && !tracedecay_runtime_core::path_scope::path_matches_scope(
+                &node.file_path,
+                Some(prefix),
+            )
         {
             continue;
         }

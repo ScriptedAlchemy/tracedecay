@@ -851,7 +851,7 @@ async fn create_consistent_branch_snapshot(
         if let Some(source) = retained_source {
             source.snapshot_to(&temp).await?;
         } else {
-            crate::sqlite_read_snapshot::backup_live_sqlite_database(src, &temp)
+            tracedecay_runtime_core::sqlite_read_snapshot::backup_live_sqlite_database(src, &temp)
                 .await
                 .map_err(|error| crate::errors::TraceDecayError::Database {
                     message: format!("failed to back up live branch database: {error}"),

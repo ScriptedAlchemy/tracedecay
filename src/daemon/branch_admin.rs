@@ -1579,22 +1579,22 @@ fn ensure_recovery_tombstone_states(
 }
 
 fn ensure_no_external_branch_store_holders(database_paths: &[PathBuf]) -> Result<()> {
-    let options = crate::open_store_holders::OpenStoreHolderScanOptions {
+    let options = tracedecay_runtime_core::open_store_holders::OpenStoreHolderScanOptions {
         include_current_process: true,
         excluded_current_process_fds: BTreeSet::new(),
     };
-    let scan = crate::open_store_holders::scan_with_options(database_paths, &options).map_err(
-        |error| TraceDecayError::Config {
-            message: format!("failed to inspect open branch stores: {error}"),
-        },
-    )?;
+    let scan =
+        tracedecay_runtime_core::open_store_holders::scan_with_options(database_paths, &options)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to inspect open branch stores: {error}"),
+            })?;
     match scan {
-        crate::open_store_holders::OpenStoreHolderScan::Supported(holders)
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Supported(holders)
             if holders.is_empty() =>
         {
             Ok(())
         }
-        crate::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
             let details = holders
                 .into_iter()
                 .map(|holder| format!("pid {} ({})", holder.pid, holder.command))
@@ -1606,13 +1606,13 @@ fn ensure_no_external_branch_store_holders(database_paths: &[PathBuf]) -> Result
                 ),
             })
         }
-        crate::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
-            Err(TraceDecayError::Config {
-                message: format!(
-                    "cannot prove branch stores are closed: {reason}; destructive branch operation refused"
-                ),
-            })
-        }
+        tracedecay_runtime_core::open_store_holders::OpenStoreHolderScan::Unsupported {
+            reason,
+        } => Err(TraceDecayError::Config {
+            message: format!(
+                "cannot prove branch stores are closed: {reason}; destructive branch operation refused"
+            ),
+        }),
     }
 }
 

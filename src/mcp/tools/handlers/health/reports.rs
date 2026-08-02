@@ -28,7 +28,9 @@ pub(crate) async fn handle_gini(
         cg.get_all_nodes()
             .await?
             .into_iter()
-            .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
+            .filter(|n| {
+                tracedecay_runtime_core::path_scope::path_matches_scope(&n.file_path, path_prefix)
+            })
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -73,7 +75,9 @@ pub(crate) async fn handle_gini(
                 .symbol_complexity()
                 .await?
                 .into_iter()
-                .filter(|(file, _, _)| crate::path_scope::path_matches_scope(file, path_prefix))
+                .filter(|(file, _, _)| {
+                    tracedecay_runtime_core::path_scope::path_matches_scope(file, path_prefix)
+                })
                 .map(|(file, name, value)| (format!("{file}:{name}"), value))
                 .collect()
         }
@@ -135,7 +139,9 @@ pub(crate) async fn handle_gini(
 fn scope_filter_pairs(pairs: Vec<(String, f64)>, path_prefix: Option<&str>) -> Vec<(String, f64)> {
     pairs
         .into_iter()
-        .filter(|(file, _)| crate::path_scope::path_matches_scope(file, path_prefix))
+        .filter(|(file, _)| {
+            tracedecay_runtime_core::path_scope::path_matches_scope(file, path_prefix)
+        })
         .collect()
 }
 
@@ -153,14 +159,14 @@ async fn gini_fan_values(
 ) -> Result<Vec<(String, f64)>> {
     let mut per_file: HashMap<String, f64> = HashMap::new();
     for file in cg.db().distinct_node_file_paths().await? {
-        if crate::path_scope::path_matches_scope(&file, path_prefix) {
+        if tracedecay_runtime_core::path_scope::path_matches_scope(&file, path_prefix) {
             per_file.entry(file).or_insert(0.0);
         }
     }
     for (src, tgt, count) in cg.db().cross_file_edge_pair_counts().await? {
         if src != tgt
-            && crate::path_scope::path_matches_scope(&src, path_prefix)
-            && crate::path_scope::path_matches_scope(&tgt, path_prefix)
+            && tracedecay_runtime_core::path_scope::path_matches_scope(&src, path_prefix)
+            && tracedecay_runtime_core::path_scope::path_matches_scope(&tgt, path_prefix)
         {
             let key = if fan_in { tgt } else { src };
             *per_file.entry(key).or_insert(0.0) += count as f64;
