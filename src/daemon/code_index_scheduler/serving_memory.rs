@@ -166,8 +166,6 @@ impl LatestCompleteCodeIndexV1 {
 
     pub(in crate::daemon) fn warm_serving_caches(&self) -> Result<(), RetrievalPortError> {
         self.warm_control.checkpoint()?;
-        let _ = self.generation.admitted_chunks();
-        let _ = self.generation.test_attribution_authority();
         self.ensure_serving_ready()?;
         self.warm_control.checkpoint()
     }

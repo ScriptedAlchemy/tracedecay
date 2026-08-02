@@ -114,7 +114,7 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
         "activation must decode the active generation exactly once"
     );
 
-    // Every per-generation derivation an unpinned query would otherwise build
+    // Every per-generation derivation an unpinned search would otherwise build
     // lazily must already exist before the first request is served.
     let latest = scheduler.latest_complete().expect("restored generation");
     assert!(
@@ -122,8 +122,8 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
         "activation must run the canonical validation sweep"
     );
     assert!(
-        latest.generation().is_exact_admission_warm(),
-        "activation must run the exact-admission sweep, not the first query"
+        !latest.generation().is_exact_admission_warm(),
+        "serving must not retain a duplicate exact-admission chunk allocation"
     );
     assert!(
         latest.record_index_is_warm(),
@@ -134,18 +134,16 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
         "activation must build the exact/lexical/graph lane owners"
     );
 
-    // Everything the serving path touches for an unpinned query.
-    assert!(!latest.exact().expect("exact admission").is_empty());
+    // Everything the search serving path touches for an unpinned query.
     let _ = latest.record_index();
     latest
         .production_query_owners()
         .expect("production lane owners");
-    latest
-        .test_attribution_authority()
-        .expect("test attribution authority");
     // A second request repeats the whole sequence.
     let repeat = scheduler.latest_complete().expect("repeat generation read");
-    assert!(!repeat.exact().expect("repeat exact admission").is_empty());
+    repeat
+        .production_query_owners()
+        .expect("repeat production lane owners");
 
     assert_eq!(
         scheduler.sealed_decode_count(),
