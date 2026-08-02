@@ -14,9 +14,7 @@ impl FakeVectorGenerationStoreV1 {
                 .get(base_id)
                 .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
         }
-        let digest = canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &plan))
-            .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))?;
-        let build_id = VectorGenerationBuildIdV1(digest);
+        let (build_id, staged) = new_staged_generation(plan.clone())?;
         if let Some(existing) = self.staged.get(&build_id) {
             if existing.plan == plan {
                 return Ok(build_id);
@@ -25,26 +23,7 @@ impl FakeVectorGenerationStoreV1 {
                 "build identity collision".to_string(),
             ));
         }
-        let checkpoint = VectorProjectionCheckpointV1 {
-            target_projection_key: plan.target_projection_key.clone(),
-            source_generation: plan.source_generation.clone(),
-            source_manifest_digest: plan.source_manifest_digest.clone(),
-            completed_batches: 0,
-            last_request_digest: None,
-            last_publication_digest: None,
-        };
-        self.staged.insert(
-            build_id.clone(),
-            StagedVectorGenerationV1 {
-                plan,
-                embedding_key: None,
-                vectors: ExternalV1::default(),
-                tombstones: ExternalV1::default(),
-                batches: ExternalV1::default(),
-                committed_chunk_effects: ExternalV1::default(),
-                checkpoint,
-            },
-        );
+        self.staged.insert(build_id.clone(), staged);
         Ok(build_id)
     }
 
@@ -71,7 +50,9 @@ impl FakeVectorGenerationStoreV1 {
                 embedding_key: None,
                 vectors: ExternalV1::default(),
                 tombstones: ExternalV1::default(),
+                tombstone_ids: ExternalV1::default(),
                 batches: ExternalV1::default(),
+                receipts: ExternalV1::default(),
                 committed_chunk_effects: ExternalV1::default(),
                 checkpoint,
             },
@@ -180,6 +161,7 @@ impl FakeVectorGenerationStoreV1 {
                         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
                     }
                     next.tombstones.remove(&receipt.chunk_id);
+                    next.tombstone_ids.retain(|chunk_id| chunk_id != &receipt.chunk_id);
                     let mut rebound = (*vector).clone();
                     rebound.source_manifest_digest = next.plan.source_manifest_digest.clone();
                     next.vectors.insert(receipt.chunk_id.clone(), rebound);
@@ -197,6 +179,7 @@ impl FakeVectorGenerationStoreV1 {
                         receipt.chunk_id.clone(),
                         tombstone.prior_chunk_digest.clone(),
                     );
+                    next.tombstone_ids.push(receipt.chunk_id.clone());
                 }
                 ProjectionOperationV1::Reused => {
                     let base = base_vector(&self.published, &next.plan, &receipt.chunk_id)?;
@@ -241,6 +224,9 @@ impl FakeVectorGenerationStoreV1 {
         next.checkpoint.completed_batches += 1;
         next.checkpoint.last_request_digest = Some(prepared.request.request_digest.clone());
         next.checkpoint.last_publication_digest = Some(prepared.receipt.publication_digest.clone());
+        next.receipts.push(prepared.receipt.clone());
+        next.tombstone_ids.sort();
+        next.tombstone_ids.dedup();
         next.batches.push(prepared.clone());
         let checkpoint = next.checkpoint.clone();
         self.staged.insert(build_id.clone(), next);
@@ -263,50 +249,9 @@ impl FakeVectorGenerationStoreV1 {
             .get(build_id)
             .cloned()
             .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
-        let expected = staged
-            .plan
-            .expected_chunk_ids
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let actual = staged.vectors.keys().cloned().collect::<BTreeSet<_>>();
-        if expected != actual || staged.batches.is_empty() {
-            return Err(VectorGenerationStoreErrorV1::IncompleteGeneration);
-        }
-        let embedding_key = staged
-            .embedding_key
-            .clone()
-            .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
-        for vector in staged.vectors.values() {
-            validate_vector_row(&staged.plan, &embedding_key, vector)?;
-        }
-
-        let manifest_digest =
-            generation_identity_digest(&staged.plan, &staged.vectors, &staged.tombstones)?;
-        let generation_id = VectorGenerationIdV1::new(manifest_digest.clone());
-        let tombstone_digests = staged.tombstones;
-        let mut generation = PublishedVectorGenerationV1 {
-            generation_id: generation_id.clone(),
-            projection_key: staged.plan.target_projection_key,
-            source_generation: staged.plan.source_generation,
-            source_manifest_digest: staged.plan.source_manifest_digest,
-            base_generation: staged.plan.base_generation,
-            embedding_key,
-            vectors: staged.vectors,
-            tombstones: ExternalV1::default(),
-            tombstone_digests,
-            receipts: staged
-                .batches
-                .into_inner()
-                .0
-                .into_iter()
-                .map(|batch| batch.receipt)
-                .collect(),
-            checkpoint: staged.checkpoint.clone(),
-            manifest_digest: manifest_digest.clone(),
-        };
-        generation.canonicalize_tombstones();
-        generation.validate_persisted()?;
+        let generation = publishable_generation(staged)?;
+        let generation_id = generation.generation_id.clone();
+        let manifest_digest = generation.manifest_digest.clone();
         // Decide the whole publication against the current state before
         // touching it, so the swap needs no defensive deep copy of every
         // published generation.
@@ -345,19 +290,6 @@ impl FakeVectorGenerationStoreV1 {
             manifest_digest,
             checkpoint,
         })
-    }
-
-    /// Seal a complete generation inside caller-owned scratch state without
-    /// making it active. This is the legacy-rebuild staging boundary: the
-    /// scratch state is not queryable and can be discarded on any failure.
-    pub(crate) fn seal_generation_inactive(
-        &mut self,
-        build_id: &VectorGenerationBuildIdV1,
-    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
-        let prior_active = self.published.active_generation.clone();
-        let publication = self.publish_generation(build_id, prior_active.as_ref())?;
-        self.published.active_generation = prior_active;
-        Ok(publication)
     }
 
     pub fn active_generation_id(&self) -> Option<&VectorGenerationIdV1> {
@@ -407,75 +339,6 @@ impl FakeVectorGenerationStoreV1 {
         }
         self.published.active_generation = None;
         Ok(())
-    }
-
-    /// Bind scratch-built generations to a validated migration receipt.
-    ///
-    /// The legacy active pointer belongs to the live state, not this scratch
-    /// state, so it is checked by the database replacement transaction.
-    fn finish_legacy_replacement(
-        &mut self,
-        transaction: &LegacyVectorMigrationOwnerTransactionV1,
-    ) -> Result<LegacyVectorMigrationReceiptV1, VectorGenerationStoreErrorV1> {
-        transaction
-            .validate()
-            .map_err(|error| VectorGenerationStoreErrorV1::LegacyMigration(error.to_string()))?;
-        let mut rebuilt = BTreeMap::new();
-        for item in &transaction.receipt.items {
-            let Some(generation) = item.rebuilt_generation.as_ref() else {
-                continue;
-            };
-            let identity = (
-                item.source_generation.as_ref(),
-                item.canonical_chunk_set_digest.as_ref(),
-            );
-            if rebuilt
-                .insert(generation, identity)
-                .is_some_and(|existing| existing != identity)
-            {
-                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-            }
-        }
-        if rebuilt.len() != self.published.generations.len() {
-            return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-        }
-        for (generation_id, (source_generation, expected_chunk_set_digest)) in rebuilt {
-            let generation = self
-                .published
-                .generations
-                .get(generation_id)
-                .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
-            if Some(generation.source_generation()) != source_generation {
-                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-            }
-            let chunk_identities = generation
-                .vectors
-                .iter()
-                .map(|(chunk_id, vector)| (chunk_id.clone(), vector.chunk_digest.clone()))
-                .collect::<Vec<_>>();
-            let actual_chunk_set_digest =
-                canonical_chunk_set_digest(generation.source_generation(), &chunk_identities)
-                    .map_err(|error| {
-                        VectorGenerationStoreErrorV1::LegacyMigration(error.to_string())
-                    })?;
-            if Some(&actual_chunk_set_digest) != expected_chunk_set_digest {
-                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-            }
-        }
-        if let Some(next_active) = &transaction.next_active_generation
-            && !self.published.generations.contains_key(next_active)
-        {
-            return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-        }
-        self.staged.clear();
-        self.published
-            .active_generation
-            .clone_from(&transaction.next_active_generation);
-        self.published.legacy_migration_receipts.insert(
-            transaction.receipt.receipt_digest.clone(),
-            transaction.receipt.clone(),
-        );
-        Ok(transaction.receipt.clone())
     }
 
     pub fn active_checkpoint(&self) -> Option<&VectorProjectionCheckpointV1> {
@@ -529,18 +392,93 @@ impl FakeVectorGenerationStoreV1 {
         generation_id: &VectorGenerationIdV1,
         chunk_id: &CodeSearchChunkId,
     ) -> Option<Arc<[f32]>> {
-        let physical_id = self
+        let generation = self
             .published
-            .physical_vector_bindings
-            .get(generation_id)?
-            .get(chunk_id)?;
+            .generations
+            .get(generation_id)?;
+        let vector = generation.vectors().get(chunk_id)?;
+        let (physical_id, _) =
+            physical_vector_reuse_key(generation.embedding_key(), vector).ok()?;
         self.published
             .physical_vectors
-            .get(physical_id)
+            .get(&physical_id)
             .map(|payload| Arc::clone(&payload.values.0))
     }
 
     pub fn fail_before_publication_swap_once(&mut self) {
         self.fail_before_publication_swap = true;
     }
+}
+
+fn publishable_generation(
+    staged: StagedVectorGenerationV1,
+) -> Result<PublishedVectorGenerationV1, VectorGenerationStoreErrorV1> {
+    let expected = staged
+        .plan
+        .expected_chunk_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual = staged.vectors.keys().cloned().collect::<BTreeSet<_>>();
+    if expected != actual || staged.batches.is_empty() {
+        return Err(VectorGenerationStoreErrorV1::IncompleteGeneration);
+    }
+    let embedding_key = staged
+        .embedding_key
+        .clone()
+        .ok_or(VectorGenerationStoreErrorV1::IncompleteGeneration)?;
+    for vector in staged.vectors.values() {
+        validate_vector_row(&staged.plan, &embedding_key, vector)?;
+    }
+    let manifest_digest =
+        generation_identity_digest(&staged.plan, &staged.vectors, &staged.tombstones)?;
+    let generation = PublishedVectorGenerationV1 {
+        generation_id: VectorGenerationIdV1::new(manifest_digest.clone()),
+        projection_key: staged.plan.target_projection_key,
+        source_generation: staged.plan.source_generation,
+        source_manifest_digest: staged.plan.source_manifest_digest,
+        base_generation: staged.plan.base_generation,
+        embedding_key,
+        vectors: staged.vectors,
+        tombstones: staged.tombstone_ids,
+        tombstone_digests: staged.tombstones,
+        receipts: staged.receipts,
+        checkpoint: staged.checkpoint,
+        manifest_digest,
+    };
+    generation.validate_persisted()?;
+    Ok(generation)
+}
+
+fn new_staged_generation(
+    plan: VectorGenerationPlanV1,
+) -> Result<
+    (VectorGenerationBuildIdV1, StagedVectorGenerationV1),
+    VectorGenerationStoreErrorV1,
+> {
+    validate_plan(&plan)?;
+    let digest = canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &plan))
+        .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))?;
+    let checkpoint = VectorProjectionCheckpointV1 {
+        target_projection_key: plan.target_projection_key.clone(),
+        source_generation: plan.source_generation.clone(),
+        source_manifest_digest: plan.source_manifest_digest.clone(),
+        completed_batches: 0,
+        last_request_digest: None,
+        last_publication_digest: None,
+    };
+    Ok((
+        VectorGenerationBuildIdV1(digest),
+        StagedVectorGenerationV1 {
+            plan,
+            embedding_key: None,
+            vectors: ExternalV1::default(),
+            tombstones: ExternalV1::default(),
+            tombstone_ids: ExternalV1::default(),
+            batches: ExternalV1::default(),
+            receipts: ExternalV1::default(),
+            committed_chunk_effects: ExternalV1::default(),
+            checkpoint,
+        },
+    ))
 }

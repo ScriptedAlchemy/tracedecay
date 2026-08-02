@@ -2,7 +2,7 @@ impl FakeVectorGenerationStoreV1 {
     /// Rebuild the derived physical-byte index for every published generation.
     ///
     /// The generation map is moved aside rather than cloned: interning only
-    /// touches `physical_vectors` and `physical_vector_bindings`, so a deep
+    /// touches only the derived `physical_vectors` pool, so a deep
     /// copy of every published generation — the whole float corpus, once per
     /// load — bought nothing but the borrow.
     /// In-memory stand-in for the payload table, used by restart tests that
@@ -64,8 +64,7 @@ fn intern_generation_vectors(
     published: &mut PublishedStateV1,
     generation: &PublishedVectorGenerationV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
-    let mut bindings = BTreeMap::new();
-    for (chunk_id, vector) in generation.vectors.iter() {
+    for vector in generation.vectors.values() {
         let (physical_id, reuse_key) =
             physical_vector_reuse_key(&generation.embedding_key, vector)?;
         match published.physical_vectors.get(&physical_id) {
@@ -86,23 +85,8 @@ fn intern_generation_vectors(
                 values: SharedVectorBytesV1(shared),
             },
         );
-        bindings.insert(chunk_id.clone(), physical_id);
     }
-    match published
-        .physical_vector_bindings
-        .get(generation.generation_id())
-    {
-        Some(existing) if **existing != bindings => {
-            Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict)
-        }
-        Some(_) => Ok(()),
-        None => {
-            published
-                .physical_vector_bindings
-                .insert(generation.generation_id().clone(), bindings.into());
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 fn validate_loaded_state(
@@ -115,13 +99,6 @@ fn validate_loaded_state(
             "active vector generation pointer is dangling".to_string(),
         ));
     }
-    for (receipt_digest, receipt) in &state.published.legacy_migration_receipts {
-        if &receipt.receipt_digest != receipt_digest || receipt.validate().is_err() {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "legacy vector migration receipt is invalid".to_string(),
-            ));
-        }
-    }
     for (generation_id, generation) in &state.published.generations {
         if generation.generation_id() != generation_id {
             return Err(VectorGenerationStoreErrorV1::Storage(
@@ -129,39 +106,19 @@ fn validate_loaded_state(
             ));
         }
         generation.validate_persisted()?;
-        let bindings = state
-            .published
-            .physical_vector_bindings
-            .get(generation_id)
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(
-                    "published generation has no physical vector bindings".to_string(),
-                )
-            })?;
-        if bindings.len() != generation.vectors.len() {
-            return Err(VectorGenerationStoreErrorV1::Storage(
-                "published generation physical vector membership is incomplete".to_string(),
-            ));
-        }
         for (chunk_id, vector) in generation.vectors.iter() {
-            let physical_id = bindings.get(chunk_id).ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(format!(
-                    "published vector {chunk_id} has no physical byte binding"
-                ))
-            })?;
+            let (physical_id, expected_key) =
+                physical_vector_reuse_key(generation.embedding_key(), vector)?;
             let physical = state
                 .published
                 .physical_vectors
-                .get(physical_id)
+                .get(&physical_id)
                 .ok_or_else(|| {
                     VectorGenerationStoreErrorV1::Storage(format!(
-                        "published vector {chunk_id} has a dangling physical byte binding"
+                        "published vector {chunk_id} has no derived physical byte entry"
                     ))
                 })?;
-            let (expected_id, expected_key) =
-                physical_vector_reuse_key(generation.embedding_key(), vector)?;
-            if physical_id != &expected_id
-                || physical.reuse_key != expected_key
+            if physical.reuse_key != expected_key
                 || physical.values.0.as_ref() != vector.values.as_slice()
             {
                 return Err(VectorGenerationStoreErrorV1::Storage(format!(

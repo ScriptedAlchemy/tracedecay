@@ -545,110 +545,255 @@ async fn row_per_vector_storage_preserves_identity_and_resumes_staged_builds() {
     assert_eq!(payload_row_count(&database).await, 1);
 }
 
-/// A pre-migration state document carries every float inline. Opening the
-/// store must move those floats to row-per-vector storage, drop them from
-/// the document, and leave every identity untouched.
 #[tokio::test]
-async fn opening_a_legacy_inline_state_migrates_payloads_to_rows() {
+async fn publication_fault_rolls_back_and_pointer_cas_preserves_snapshot_identity() {
     let temporary = tempfile::tempdir().expect("temporary project database");
     let (database, _authority) =
-        open_project_database(&temporary, "legacy inline payload migration").await;
-    let embedding = admitted_embedding();
-    let source: CodeGenerationId = id("code-generation.legacy-inline");
-    let generation = logical_generation(
-        'c',
-        embedding.clone(),
-        source.as_str(),
-        '4',
-        "chunk.v1.legacy-inline",
-        'd',
-        vec![0.75_f32],
-    );
-    let generation_id = generation.generation_id().clone();
-    let source_manifest_digest = generation.source_manifest_digest().clone();
-    let expected = generation.clone();
-    let mut state = FakeVectorGenerationStoreV1::new();
-    insert_generation(&mut state, generation);
-    state.published.active_generation = Some(generation_id.clone());
-
-    // Re-inline both externalizations to reproduce the pre-migration
-    // encoding: corpus-sized collections rendered in place, and every
-    // float carried inside its vector row.
-    let mut document = legacy_inline_document(&mut state);
-    let vectors =
-        document["published"]["generations"][generation_id.as_digest().as_str()]["vectors"]
-            .as_object_mut()
-            .expect("vector map");
-    for vector in vectors.values_mut() {
-        vector["values"] = serde_json::json!([0.75_f32]);
-    }
-    let legacy_document = document.to_string();
-    assert!(legacy_document.contains("\"values\""));
-    assert!(legacy_document.contains("\"chunk_digest\""));
-    DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
-        .await
-        .expect("schema");
-    database
-        .execute_write_engine(
-            "install legacy inline vector fixture",
-            "UPDATE semantic_vector_generation_state_v1
-                 SET revision = revision + 1, state_json = ?1
-                 WHERE singleton = 1",
-            params![legacy_document],
-        )
-        .await
-        .expect("install legacy fixture");
-    assert_eq!(payload_row_count(&database).await, 0);
-
+        open_project_database(&temporary, "vector publication rollback").await;
     let store = DatabaseVectorGenerationStoreV1::open(&database)
         .await
-        .expect("open migrates the legacy document");
-    assert_eq!(payload_row_count(&database).await, 1);
-    let document = state_document(&database).await;
-    assert!(
-        !document.contains("\"values\""),
-        "migration drops the inline floats from the state document"
+        .expect("vector store");
+    let embedding = admitted_embedding();
+    let first_source: CodeGenerationId = id("code-generation.atomic-first");
+    let first_chunk: CodeSearchChunkId = id("chunk.v1.atomic-first");
+    let first_prepared = added_prepared(
+        &embedding,
+        &first_source,
+        &first_chunk,
+        &content_digest('a'),
+        vec![0.25],
     );
-    let observed = store
-        .active_generation()
+    let first_build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: first_source,
+            source_manifest_digest: first_prepared.request.changes.manifest_digest.clone(),
+            expected_chunk_ids: vec![first_chunk].into(),
+            base_generation: None,
+        })
         .await
-        .expect("read active generation")
-        .expect("active generation");
-    assert_eq!(observed.generation_id(), &generation_id);
-    assert_eq!(&observed, &expected, "migration preserves the generation");
-
-    // Re-opening a migrated store is a no-op rather than a second rewrite.
-    let revision_before = state_revision(&database).await;
-    DatabaseVectorGenerationStoreV1::open(&database)
+        .expect("first build");
+    store
+        .commit_batch(&first_build, None, first_prepared)
         .await
-        .expect("reopen migrated store");
-    assert_eq!(state_revision(&database).await, revision_before);
-    assert_eq!(
-        DatabaseVectorGenerationStoreV1::read_active_generation_for(
-            &database,
-            &embedding,
-            &source,
-            &source_manifest_digest,
+        .expect("first batch");
+    let mut staged_rows = database
+        .engine_conn()
+        .query(
+            "SELECT record_json
+             FROM semantic_vector_generation_v1
+             WHERE build_id = ?1",
+            params![first_build.0.as_str()],
         )
         .await
-        .expect("bounded active read")
-        .expect("compatible active generation")
-        .vectors()
-        .values()
+        .expect("staged record");
+    let staged_json = staged_rows
         .next()
-        .expect("vector")
-        .values,
-        vec![0.75_f32]
+        .await
+        .expect("staged row")
+        .expect("staged row")
+        .get::<String>(0)
+        .expect("staged JSON");
+    drop(staged_rows);
+    assert!(
+        staged_json.contains("\"receipts\":\"sha256:"),
+        "the batch commit must persist publication-ready receipts"
+    );
+    database
+        .execute_write_batch(
+            "inject vector pointer failure",
+            "CREATE TRIGGER fail_vector_pointer_update
+             BEFORE UPDATE ON semantic_vector_active_generation_v1
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected vector pointer failure');
+             END;",
+        )
+        .await
+        .expect("failure trigger");
+    assert!(matches!(
+        store.publish_generation(&first_build, None).await,
+        Err(VectorGenerationStoreErrorV1::Storage(_))
+    ));
+    assert_eq!(
+        store.active_generation_id().await.expect("active pointer"),
+        None
+    );
+    assert!(
+        store
+            .staged_checkpoint(&first_build)
+            .await
+            .expect("staged checkpoint")
+            .is_some(),
+        "the generation-row update must roll back with the pointer update"
+    );
+    database
+        .execute_write_batch(
+            "remove vector pointer failure",
+            "DROP TRIGGER fail_vector_pointer_update;",
+        )
+        .await
+        .expect("drop failure trigger");
+    let first = store
+        .publish_generation(&first_build, None)
+        .await
+        .expect("first publication");
+    let first_snapshot =
+        DatabaseVectorGenerationStoreV1::read_active_generation_snapshot(&database)
+            .await
+            .expect("first snapshot")
+            .expect("first snapshot");
+
+    let second_source: CodeGenerationId = id("code-generation.atomic-second");
+    let second_chunk: CodeSearchChunkId = id("chunk.v1.atomic-second");
+    let second_prepared = added_prepared(
+        &embedding,
+        &second_source,
+        &second_chunk,
+        &content_digest('b'),
+        vec![0.5],
+    );
+    let second_build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: second_source,
+            source_manifest_digest: second_prepared.request.changes.manifest_digest.clone(),
+            expected_chunk_ids: vec![second_chunk].into(),
+            base_generation: None,
+        })
+        .await
+        .expect("second build");
+    store
+        .commit_batch(&second_build, None, second_prepared)
+        .await
+        .expect("second batch");
+    let second = store
+        .publish_generation(&second_build, Some(&first.generation_id))
+        .await
+        .expect("second publication");
+    assert!(
+        !DatabaseVectorGenerationStoreV1::active_snapshot_is_current(
+            &database,
+            first_snapshot.revision(),
+            first_snapshot.generation().generation_id(),
+        )
+        .await
+        .expect("snapshot currency"),
+        "a concurrent pointer swap must invalidate the prior snapshot receipt"
+    );
+    store
+        .activate_generation(&first.generation_id, Some(&second.generation_id))
+        .await
+        .expect("rollback activation");
+    assert_eq!(
+        store.active_generation_id().await.expect("rollback pointer"),
+        Some(first.generation_id.clone())
+    );
+    assert_eq!(
+        store
+            .activate_generation(&second.generation_id, None)
+            .await,
+        Err(VectorGenerationStoreErrorV1::StaleActiveGeneration)
+    );
+    assert_eq!(
+        store.active_generation_id().await.expect("stable pointer"),
+        Some(first.generation_id)
     );
 }
 
-/// Retiring a generation must release the interner keys it introduced, or
-/// the process-global pool grows for the lifetime of the daemon.
+#[tokio::test]
+async fn cancelled_generation_reclamation_is_owner_indexed_and_bounded() {
+    let temporary = tempfile::tempdir().expect("temporary project database");
+    let (database, _authority) =
+        open_project_database(&temporary, "bounded vector generation reclamation").await;
+    let store = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("vector store");
+    let embedding = admitted_embedding();
+    let source: CodeGenerationId = id("code-generation.gc");
+    let chunk: CodeSearchChunkId = id("chunk.v1.gc");
+    let prepared = added_prepared(
+        &embedding,
+        &source,
+        &chunk,
+        &content_digest('c'),
+        vec![0.75],
+    );
+    let build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: source,
+            source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
+            expected_chunk_ids: vec![chunk].into(),
+            base_generation: None,
+        })
+        .await
+        .expect("build");
+    store
+        .commit_batch(&build, None, prepared)
+        .await
+        .expect("batch");
+    assert_eq!(payload_row_count(&database).await, 1);
+    assert!(store.cancel_generation(&build).await.expect("cancel"));
+    assert_eq!(
+        payload_row_count(&database).await,
+        1,
+        "cancellation only enqueues background reclamation"
+    );
+
+    let mut prior_physical_rows = database
+        .query_scalar_i64(
+            "count vector physical rows",
+            "SELECT
+                 (SELECT COUNT(*) FROM semantic_vector_payload_v1)
+               + (SELECT COUNT(*) FROM semantic_vector_state_slice_v1)",
+        )
+        .await
+        .expect("physical rows");
+    for _ in 0..256 {
+        let has_more = store
+            .reclaim_retired_generation_page(1)
+            .await
+            .expect("bounded reclaim");
+        let physical_rows = database
+            .query_scalar_i64(
+                "count vector physical rows",
+                "SELECT
+                     (SELECT COUNT(*) FROM semantic_vector_payload_v1)
+                   + (SELECT COUNT(*) FROM semantic_vector_state_slice_v1)",
+            )
+            .await
+            .expect("physical rows");
+        assert!(
+            prior_physical_rows - physical_rows <= 1,
+            "one reclaim page may delete at most its row budget"
+        );
+        prior_physical_rows = physical_rows;
+        if !has_more {
+            break;
+        }
+    }
+    assert_eq!(prior_physical_rows, 0);
+    assert_eq!(
+        database
+            .query_scalar_i64(
+                "prove vector GC drained",
+                "SELECT
+                     (SELECT COUNT(*) FROM semantic_vector_generation_retired_v1)
+                   + (SELECT COUNT(*) FROM semantic_vector_orphan_resource_v1)
+                   + (SELECT COUNT(*) FROM semantic_vector_payload_owner_v1)
+                   + (SELECT COUNT(*) FROM semantic_vector_state_slice_owner_v1)",
+            )
+            .await
+            .expect("GC state"),
+        0
+    );
+}
+
 #[test]
 fn physical_byte_pool_releases_keys_for_retired_generations() {
     let pool = PhysicalVectorBytePoolV1::default();
     pool.sweep_retired().expect("sweep");
-    let baseline = pool.retained_entries();
+    let mut keys = Vec::new();
     {
         let mut retained = Vec::new();
         for index in 0..64_u64 {
@@ -661,23 +806,21 @@ fn physical_byte_pool_releases_keys_for_retired_generations() {
                 privacy_key_epoch: embedding.privacy_key_epoch(),
             };
             retained.push(pool.intern(&reuse_key, &[0.5_f32]).expect("intern"));
+            keys.push(reuse_key);
         }
-        assert_eq!(
-            pool.retained_entries(),
-            baseline + 64,
+        assert!(
+            keys.iter().all(|key| pool.contains_key(key)),
             "live generations retain their interned identities"
         );
         pool.sweep_retired().expect("sweep with live handles");
-        assert_eq!(
-            pool.retained_entries(),
-            baseline + 64,
+        assert!(
+            keys.iter().all(|key| pool.contains_key(key)),
             "a sweep never drops a live entry"
         );
     }
     pool.sweep_retired().expect("sweep after retire");
-    assert_eq!(
-        pool.retained_entries(),
-        baseline,
+    assert!(
+        keys.iter().all(|key| !pool.contains_key(key)),
         "retiring the generations releases every key they interned"
     );
 }

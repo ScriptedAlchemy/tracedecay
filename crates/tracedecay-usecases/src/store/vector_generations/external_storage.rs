@@ -15,14 +15,6 @@ struct VectorPayloadLoadV1 {
     migrated_inline_collections: bool,
 }
 
-impl VectorPayloadLoadV1 {
-    /// Whether the loaded document predates an externalization and must be
-    /// rewritten forward before it is served.
-    fn needs_forward_migration(&self) -> bool {
-        self.migrated_inline_payloads || self.migrated_inline_collections
-    }
-}
-
 fn encode_vector_payload(values: &[f32]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(std::mem::size_of_val(values));
     for value in values {
@@ -149,24 +141,6 @@ fn seal_test_state(
     seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
 }
 
-/// Install collection slices for a hand-built fixture state.
-#[cfg(test)]
-async fn install_test_state_slices(
-    database: &Database,
-    slice_table: &str,
-    state: &mut FakeVectorGenerationStoreV1,
-) {
-    let pending = seal_test_state(state);
-    let transaction = database
-        .begin_write_transaction("install test state slices")
-        .await
-        .expect("slice writer");
-    write_state_slices(&transaction, slice_table, &pending)
-        .await
-        .expect("install test state slices");
-    transaction.commit().await.expect("commit test slices");
-}
-
 /// Round-trip the state document the way a restart does, standing in for the
 /// slice and payload tables with the reference state still in memory.
 #[cfg(test)]
@@ -193,66 +167,6 @@ fn fill_from_sealed(
             slot.fill(sealed.get(&address).expect("sealed collection"))
         })
         .expect("fill externalized collections");
-}
-
-/// Render a state document in its pre-migration encoding, with every
-/// externalized collection written back inline.
-#[cfg(test)]
-fn legacy_inline_document(state: &mut FakeVectorGenerationStoreV1) -> serde_json::Value {
-    let sealed = seal_test_state(state);
-    let inline = sealed
-        .iter()
-        .map(|(address, slices)| {
-            (
-                address.as_str().to_owned(),
-                serde_json::from_slice::<serde_json::Value>(&slices.concat())
-                    .expect("inline collection"),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut document = serde_json::to_value(&*state).expect("state document");
-    inline_addresses(&mut document, &inline);
-    document
-}
-
-#[cfg(test)]
-fn inline_addresses(value: &mut serde_json::Value, inline: &BTreeMap<String, serde_json::Value>) {
-    match value {
-        serde_json::Value::String(text) => {
-            if let Some(replacement) = inline.get(text.as_str()) {
-                *value = replacement.clone();
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                inline_addresses(item, inline);
-            }
-        }
-        serde_json::Value::Object(fields) => {
-            for field in fields.values_mut() {
-                inline_addresses(field, inline);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Install payload rows for a hand-built fixture state that is written to the
-/// state table directly instead of through the store's mutation path.
-#[cfg(test)]
-async fn install_test_vector_payloads(
-    database: &Database,
-    payload_table: &str,
-    state: &FakeVectorGenerationStoreV1,
-) {
-    let transaction = database
-        .begin_write_transaction("install test vector payloads")
-        .await
-        .expect("payload writer");
-    write_vector_payloads(&transaction, payload_table, state, &BTreeSet::new())
-        .await
-        .expect("install test vector payloads");
-    transaction.commit().await.expect("commit test payloads");
 }
 
 /// Fill one standalone published generation read outside the writer lane.
@@ -390,80 +304,6 @@ async fn write_vector_payloads(
     Ok(())
 }
 
-fn referenced_payload_addresses(state: &FakeVectorGenerationStoreV1) -> BTreeSet<ContentDigest> {
-    let mut referenced = BTreeSet::new();
-    state.visit_vectors(&mut |vector| {
-        referenced.insert(vector.output_digest.clone());
-    });
-    referenced
-}
-
-/// Delete payload rows the committed state no longer references.
-///
-/// Retiring a generation is what makes its floats unreachable, so reclamation
-/// runs with the state-shrinking mutations (publish, activate, deactivate,
-/// cancel, rebuild) rather than on every commit.
-async fn prune_unreferenced_vector_payloads(
-    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
-    payload_table: &str,
-    state: &FakeVectorGenerationStoreV1,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let scratch_table = format!("temp.{payload_table}_referenced");
-    transaction
-        .execute_batch_engine(&format!(
-            "CREATE TEMP TABLE IF NOT EXISTS {payload_table}_referenced (
-                 output_digest TEXT PRIMARY KEY
-             ) STRICT;
-             DELETE FROM {scratch_table};"
-        ))
-        .await
-        .map_err(storage_error)?;
-    let referenced = referenced_payload_addresses(state)
-        .into_iter()
-        .collect::<Vec<_>>();
-    for group in referenced.chunks(VECTOR_PAYLOAD_STATEMENT_ROWS) {
-        let tuples = (1..=group.len())
-            .map(|index| format!("(?{index})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let values = group
-            .iter()
-            .map(|digest| {
-                tracedecay_runtime_core::db::engine::Value::Text(digest.as_str().to_owned())
-            })
-            .collect::<Vec<_>>();
-        transaction
-            .execute_engine(
-                &format!("INSERT OR IGNORE INTO {scratch_table} (output_digest) VALUES {tuples}"),
-                tracedecay_runtime_core::db::engine::params_from_iter(values),
-            )
-            .await
-            .map_err(storage_error)?;
-    }
-    // `NOT EXISTS` against the scratch table's primary key is one index probe
-    // per payload row. The `NOT IN` form this replaced degraded into a scan of
-    // the reference set for every row, which at whole-corpus sizes ran past the
-    // runtime's per-statement execution limit and failed the publish outright.
-    transaction
-        .execute_engine(
-            &format!(
-                "DELETE FROM {payload_table}
-                 WHERE NOT EXISTS (
-                     SELECT 1 FROM {scratch_table}
-                     WHERE {scratch_table}.output_digest = {payload_table}.output_digest
-                 )"
-            ),
-            (),
-        )
-        .await
-        .map_err(storage_error)?;
-    transaction
-        .execute_batch_engine(&format!("DELETE FROM {scratch_table};"))
-        .await
-        .map_err(storage_error)?;
-    Ok(())
-}
-
 type ExternalSlotVisitV1<'visit> =
     dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
 
@@ -489,14 +329,13 @@ impl FakeVectorGenerationStoreV1 {
             visit(&mut staged.plan.expected_chunk_ids)?;
             visit(&mut staged.vectors)?;
             visit(&mut staged.tombstones)?;
+            visit(&mut staged.tombstone_ids)?;
             visit(&mut staged.batches)?;
+            visit(&mut staged.receipts)?;
             visit(&mut staged.committed_chunk_effects)?;
         }
         for generation in self.published.generations.values_mut() {
             generation.visit_external_slots(visit)?;
-        }
-        for bindings in self.published.physical_vector_bindings.values_mut() {
-            visit(bindings)?;
         }
         Ok(())
     }
@@ -523,20 +362,6 @@ fn seal_external_state(
         Ok(())
     })?;
     Ok(pending)
-}
-
-/// Address every externalized collection the committed state still references.
-fn referenced_state_addresses(
-    state: &mut FakeVectorGenerationStoreV1,
-) -> Result<BTreeSet<ContentDigest>, VectorGenerationStoreErrorV1> {
-    let mut referenced = BTreeSet::new();
-    state.visit_external_slots(&mut |slot| {
-        if let Some(address) = slot.address() {
-            referenced.insert(address.clone());
-        }
-        Ok(())
-    })?;
-    Ok(referenced)
 }
 
 /// Fill every externalized collection in `state` from `slice_table`.
@@ -704,63 +529,5 @@ async fn write_state_slices(
             .await
             .map_err(storage_error)?;
     }
-    Ok(())
-}
-
-/// Delete collection slices the committed state no longer references.
-async fn prune_unreferenced_state_slices(
-    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
-    slice_table: &str,
-    referenced: &BTreeSet<ContentDigest>,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let scratch_table = format!("temp.{slice_table}_referenced");
-    transaction
-        .execute_batch_engine(&format!(
-            "CREATE TEMP TABLE IF NOT EXISTS {slice_table}_referenced (
-                 collection_digest TEXT PRIMARY KEY
-             ) STRICT;
-             DELETE FROM {scratch_table};"
-        ))
-        .await
-        .map_err(storage_error)?;
-    let addresses = referenced.iter().collect::<Vec<_>>();
-    for group in addresses.chunks(VECTOR_STATE_ADDRESS_STATEMENT_ROWS) {
-        let tuples = (1..=group.len())
-            .map(|index| format!("(?{index})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let values = group
-            .iter()
-            .map(|address| {
-                tracedecay_runtime_core::db::engine::Value::Text(address.as_str().to_owned())
-            })
-            .collect::<Vec<_>>();
-        transaction
-            .execute_engine(
-                &format!(
-                    "INSERT OR IGNORE INTO {scratch_table} (collection_digest) VALUES {tuples}"
-                ),
-                tracedecay_runtime_core::db::engine::params_from_iter(values),
-            )
-            .await
-            .map_err(storage_error)?;
-    }
-    transaction
-        .execute_engine(
-            &format!(
-                "DELETE FROM {slice_table}
-                 WHERE NOT EXISTS (
-                     SELECT 1 FROM {scratch_table}
-                     WHERE {scratch_table}.collection_digest = {slice_table}.collection_digest
-                 )"
-            ),
-            (),
-        )
-        .await
-        .map_err(storage_error)?;
-    transaction
-        .execute_batch_engine(&format!("DELETE FROM {scratch_table};"))
-        .await
-        .map_err(storage_error)?;
     Ok(())
 }

@@ -184,16 +184,3 @@ async fn probe_peak_resident_bytes_for_a_whole_corpus_generation() {
         publication.generation_id.as_digest(),
     );
 }
-
-async fn state_revision(database: &Database) -> i64 {
-    let mut rows = database
-        .engine_conn()
-        .query(
-            "SELECT revision FROM semantic_vector_generation_state_v1 WHERE singleton = 1",
-            (),
-        )
-        .await
-        .expect("revision");
-    let row = rows.next().await.expect("revision row").expect("row");
-    row.get::<i64>(0).expect("revision")
-}

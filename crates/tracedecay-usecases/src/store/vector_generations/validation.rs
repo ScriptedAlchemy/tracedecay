@@ -7,7 +7,7 @@ fn parse_vector_generation_id(
 ) -> Result<VectorGenerationIdV1, VectorGenerationStoreErrorV1> {
     ManifestDigest::try_from(raw.to_owned())
         .map(VectorGenerationIdV1::new)
-        .map_err(|error| VectorGenerationStoreErrorV1::LegacyMigration(error.to_string()))
+        .map_err(storage_error)
 }
 
 /// Derive the immutable vector-generation identity from projected content,
@@ -67,6 +67,8 @@ fn validate_batch_identity(
         || prepared.receipt.target_projection_key != plan.target_projection_key
         || prepared.request.changes.to_generation != plan.source_generation
         || prepared.receipt.source_generation != plan.source_generation
+        || prepared.request.changes.manifest_digest != plan.source_manifest_digest
+        || prepared.receipt.source_manifest_digest != plan.source_manifest_digest
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }

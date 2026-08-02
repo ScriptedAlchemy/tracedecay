@@ -197,7 +197,6 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention as run_retention,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 
     let layout = graph.hook_store_layout();
@@ -206,6 +205,14 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
     if !store_root.join("active-code-generation-v1.json").is_file() {
         return true;
     }
+
+    let _store = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
+        Ok(store) => store,
+        Err(_) => {
+            log_code_generation_retention_degraded("vector_generation_store_unavailable");
+            return false;
+        }
+    };
 
     // Hold the canonical graph writer lane from the pin read through durable
     // filesystem publication. A vector-generation writer cannot publish a new
@@ -221,25 +228,16 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
             return false;
         }
     };
-    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
-        Ok(store) => match store.read_legacy_inventory().await {
-            Ok(inventory) => match inventory.read_only_inventory() {
-                Ok(inventory) => inventory.retained_readable_sources(),
-                Err(_) => {
-                    log_code_generation_retention_degraded("vector_inventory_unreadable");
-                    return false;
-                }
-            },
+    let vector_readable_sources =
+        match DatabaseVectorGenerationStoreV1::retained_source_generations_in_transaction(&writer)
+            .await
+        {
+            Ok(sources) => sources,
             Err(_) => {
                 log_code_generation_retention_degraded("vector_inventory_read_failed");
                 return false;
             }
-        },
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_generation_store_unavailable");
-            return false;
-        }
-    };
+        };
 
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let report = tokio::task::spawn_blocking(move || {

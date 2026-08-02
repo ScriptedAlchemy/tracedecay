@@ -48,6 +48,10 @@ impl PublishedVectorGenerationV1 {
         &self.vectors
     }
 
+    pub(crate) fn into_vectors(self) -> BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1> {
+        self.vectors.value.0
+    }
+
     pub fn tombstones(&self) -> &[CodeSearchChunkId] {
         &self.tombstones
     }
@@ -79,6 +83,7 @@ impl PublishedVectorGenerationV1 {
             && self.manifest_digest == other.manifest_digest
     }
 
+    #[cfg(test)]
     fn canonicalize_tombstones(&mut self) {
         self.tombstones = self.tombstone_digests.keys().cloned().collect();
     }
@@ -167,8 +172,10 @@ pub enum VectorGenerationStoreErrorV1 {
     PhysicalVectorConflict,
     #[error("injected failure before atomic publication swap")]
     InjectedPublicationFailure,
-    #[error("legacy vector migration failed: {0}")]
-    LegacyMigration(String),
+    #[error("legacy vector generation singleton is not the exact empty state")]
+    NonemptyLegacySingleton,
+    #[error("vector generation active pointer belongs to another store shard")]
+    ShardIdentityMismatch,
     #[error("project vector generation storage failed: {0}")]
     Storage(String),
     #[error("project vector generation state changed repeatedly during compare-and-swap")]
@@ -188,7 +195,11 @@ struct StagedVectorGenerationV1 {
     #[serde(with = "external_state")]
     tombstones: ExternalV1<BTreeMap<CodeSearchChunkId, ContentDigest>>,
     #[serde(with = "external_state")]
+    tombstone_ids: ExternalV1<Vec<CodeSearchChunkId>>,
+    #[serde(with = "external_state")]
     batches: ExternalV1<PreparedBatchesV1>,
+    #[serde(with = "external_state")]
+    receipts: ExternalV1<Vec<ProjectionBatchReceiptV1>>,
     #[serde(with = "external_state")]
     committed_chunk_effects: ExternalV1<BTreeSet<CodeSearchChunkId>>,
     checkpoint: VectorProjectionCheckpointV1,
@@ -199,13 +210,8 @@ struct StagedVectorGenerationV1 {
 struct PublishedStateV1 {
     generations: BTreeMap<VectorGenerationIdV1, PublishedVectorGenerationV1>,
     active_generation: Option<VectorGenerationIdV1>,
-    #[serde(default)]
-    legacy_migration_receipts: BTreeMap<ManifestDigest, LegacyVectorMigrationReceiptV1>,
     #[serde(skip, default)]
     physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
-    #[serde(default, with = "external_state::address_map")]
-    physical_vector_bindings:
-        BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
 }
 
 /// Deterministic state machine used directly by focused tests and persisted by

@@ -120,333 +120,212 @@ fn successful_publication_consumes_the_staged_build() {
 }
 
 #[tokio::test]
-async fn legacy_inventory_never_deserializes_vectors_and_quarantines_only_unreadable_entries() {
+async fn opening_exact_empty_singleton_binds_the_active_pointer_and_drops_the_singleton() {
     let temporary = tempfile::tempdir().expect("temporary project database");
-    let path = temporary.path().join("project.db");
-    crate::register_test_schema_installer();
-    let authority =
-        DatabaseAuthority::acquire_test(&path, "legacy vector migration").expect("authority");
-    let (database, _) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-            .await
-            .expect("database");
-    let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+    let (database, _authority) =
+        open_project_database(&temporary, "empty vector singleton cutover").await;
+    database
+        .execute_write_batch(
+            "install empty vector singleton fixture",
+            VECTOR_GENERATION_STATE_SCHEMA_V1,
+        )
         .await
-        .expect("migration store");
-    let readable = manifest_digest('a');
-    let unreadable = manifest_digest('b');
-    let source = "code-generation.legacy";
-    let secret = "legacy-vector-secret";
-    let generations = serde_json::Map::from_iter([
-        (
-            readable.as_str().to_owned(),
-            serde_json::json!({
-                "generation_id": readable.as_str(),
-                "source_generation": source,
-                "vectors": [secret]
-            }),
-        ),
-        (unreadable.as_str().to_owned(), serde_json::json!(secret)),
-    ]);
-    let state = serde_json::json!({
-        "staged": {},
-        "published": {
-            "generations": generations,
-            "active_generation": readable.as_str(),
-            "legacy_migration_receipts": {},
-            "physical_vector_bindings": {}
-        }
-    })
-    .to_string();
+        .expect("legacy singleton schema");
     database
         .execute_write_engine(
-            "install unreadable legacy vector fixture",
-            "UPDATE semantic_vector_generation_state_v1
-                 SET revision = revision + 1, state_json = ?1
-                 WHERE singleton = 1",
-            params![state],
+            "install empty vector singleton fixture",
+            "INSERT INTO semantic_vector_generation_state_v1 (
+                singleton, revision, state_json
+             ) VALUES (1, 0, ?1)",
+            params![
+                r#"{"staged":{},"published":{"generations":{},"active_generation":null,"legacy_migration_receipts":{},"physical_vector_bindings":{}}}"#
+            ],
         )
         .await
-        .expect("legacy fixture");
+        .expect("legacy singleton row");
 
-    let inventory = store
-        .read_legacy_inventory()
+    DatabaseVectorGenerationStoreV1::open(&database)
         .await
-        .expect("identity-only inventory");
-    assert_eq!(inventory.inventory.entries.len(), 2);
-    assert!(matches!(
-        &inventory.inventory.entries[0],
-        LegacyVectorInventoryEntryV1::Readable { .. }
-    ));
-    assert!(matches!(
-        &inventory.inventory.entries[1],
-        LegacyVectorInventoryEntryV1::Unreadable { .. }
-    ));
-    let offline_sources = retained_readable_sources_from_read_only_database(&path)
-        .expect("read-only source inventory");
-    assert_eq!(
-        offline_sources,
-        BTreeSet::from([id(source)]),
-        "offline retention planning must use exactly the readable source set"
-    );
-    let mut rebuilder = ProductionLegacyVectorCanonicalRebuilderV1::try_new(
-        Vec::new(),
-        |_| -> Result<
-            StagedCanonicalVectorRebuildV1,
-            tracedecay_semantic::legacy_migration::LegacyVectorMigrationErrorV1,
-        > { unreachable!("no retained generations") },
-    )
-    .expect("empty production rebuilder");
-    let transaction = prepare_legacy_vector_migration(
-        &inventory,
-        &mut rebuilder,
-        &NeverCancelLegacyVectorMigrationV1,
-    )
-    .expect("migration transaction");
-    store
-        .replace_legacy_vectors_atomically(
-            &inventory,
-            FakeVectorGenerationStoreV1::new(),
-            &transaction,
-        )
-        .await
-        .expect("atomic replacement");
+        .expect("exact empty singleton migrates");
 
-    assert_eq!(
-        database
-            .query_scalar_text(
-                "inspect isolated legacy quarantine",
-                "SELECT generation_json
-                     FROM semantic_legacy_vector_quarantine_v1",
-            )
-            .await
-            .expect("quarantine row"),
-        serde_json::to_string(secret).expect("secret JSON")
-    );
     assert_eq!(
         database
             .query_scalar_i64(
-                "prove readable legacy vectors were dropped",
+                "prove singleton removed",
                 "SELECT COUNT(*)
-                     FROM semantic_legacy_vector_quarantine_v1",
+                 FROM sqlite_schema
+                 WHERE type = 'table'
+                   AND name = 'semantic_vector_generation_state_v1'",
             )
             .await
-            .expect("quarantine count"),
+            .expect("singleton schema count"),
+        0
+    );
+    let mut rows = database
+        .engine_conn()
+        .query(
+            "SELECT revision, shard_id_json, generation_id
+             FROM semantic_vector_active_generation_v1
+             WHERE singleton = 1",
+            (),
+        )
+        .await
+        .expect("active pointer");
+    let row = rows
+        .next()
+        .await
+        .expect("active pointer row")
+        .expect("active pointer row");
+    assert_eq!(row.get::<i64>(0).expect("revision"), 0);
+    let bound: tracedecay_store::StoreShardIdV1 =
+        serde_json::from_str(&row.get::<String>(1).expect("shard identity"))
+            .expect("canonical shard identity");
+    assert_eq!(&bound, &database.retained_runtime().binding().shard_id);
+    assert_eq!(
+        row.get::<Option<String>>(2).expect("generation identity"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn opening_nonempty_singleton_fails_typed_without_partial_cutover() {
+    let temporary = tempfile::tempdir().expect("temporary project database");
+    let (database, _authority) =
+        open_project_database(&temporary, "nonempty vector singleton refusal").await;
+    database
+        .execute_write_batch(
+            "install nonempty vector singleton fixture",
+            VECTOR_GENERATION_STATE_SCHEMA_V1,
+        )
+        .await
+        .expect("legacy singleton schema");
+    database
+        .execute_write_engine(
+            "install nonempty vector singleton fixture",
+            "INSERT INTO semantic_vector_generation_state_v1 (
+                singleton, revision, state_json
+             ) VALUES (1, 0, ?1)",
+            params![
+                r#"{"staged":{},"published":{"generations":{},"active_generation":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","legacy_migration_receipts":{},"physical_vector_bindings":{}}}"#
+            ],
+        )
+        .await
+        .expect("legacy singleton row");
+
+    assert!(matches!(
+        DatabaseVectorGenerationStoreV1::open(&database).await,
+        Err(VectorGenerationStoreErrorV1::NonemptyLegacySingleton)
+    ));
+    assert_eq!(
+        database
+            .query_scalar_i64(
+                "prove singleton retained after refusal",
+                "SELECT COUNT(*)
+                 FROM sqlite_schema
+                 WHERE type = 'table'
+                   AND name = 'semantic_vector_generation_state_v1'",
+            )
+            .await
+            .expect("singleton schema count"),
         1
     );
     assert_eq!(
         database
             .query_scalar_i64(
-                "prove legacy bytes left active state",
-                "SELECT instr(state_json, 'legacy-vector-secret')
-                     FROM semantic_vector_generation_state_v1
-                     WHERE singleton = 1",
+                "prove cutover rolled back",
+                "SELECT COUNT(*)
+                 FROM sqlite_schema
+                 WHERE type = 'table'
+                   AND name = 'semantic_vector_active_generation_v1'",
             )
             .await
-            .expect("active state inspection"),
+            .expect("active schema count"),
         0
     );
-    let committed_state = database
-        .query_scalar_text(
-            "capture committed vector state",
-            "SELECT state_json
-                 FROM semantic_vector_generation_state_v1
-                 WHERE singleton = 1",
-        )
-        .await
-        .expect("committed state");
-    assert_eq!(
-        store
-            .replace_legacy_vectors_atomically(
-                &inventory,
-                FakeVectorGenerationStoreV1::new(),
-                &transaction,
-            )
-            .await,
-        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
-    );
-    assert_eq!(
-        database
-            .query_scalar_text(
-                "verify stale migration rollback",
-                "SELECT state_json
-                     FROM semantic_vector_generation_state_v1
-                     WHERE singleton = 1",
-            )
-            .await
-            .expect("state after stale migration"),
-        committed_state
-    );
-    DatabaseVectorGenerationStoreV1::open(&database)
-        .await
-        .expect("replacement state is runtime-readable");
 }
 
 #[tokio::test]
-async fn retained_canonical_rebuild_and_active_pointer_publish_together() {
+async fn reopening_rejects_an_active_pointer_bound_to_another_shard() {
     let temporary = tempfile::tempdir().expect("temporary project database");
-    let path = temporary.path().join("project.db");
-    crate::register_test_schema_installer();
-    let authority =
-        DatabaseAuthority::acquire_test(&path, "canonical vector rebuild").expect("authority");
-    let (database, _) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-            .await
-            .expect("database");
-    let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+    let (database, _authority) =
+        open_project_database(&temporary, "vector active pointer identity").await;
+    DatabaseVectorGenerationStoreV1::open(&database)
         .await
-        .expect("migration store");
-    let legacy = manifest_digest('a');
-    let source: CodeGenerationId = id("code-generation.retained");
-    let legacy_generations = serde_json::Map::from_iter([(
-        legacy.as_str().to_owned(),
-        serde_json::json!({
-            "generation_id": legacy.as_str(),
-            "source_generation": source.as_str(),
-            "vectors": "legacy-bytes-must-not-be-used"
-        }),
-    )]);
-    let legacy_state = serde_json::json!({
-        "staged": {},
-        "published": {
-            "generations": legacy_generations,
-            "active_generation": legacy.as_str(),
-            "legacy_migration_receipts": {},
-            "physical_vector_bindings": {}
-        }
-    })
-    .to_string();
+        .expect("initial vector store");
     database
         .execute_write_engine(
-            "install readable legacy vector fixture",
-            "UPDATE semantic_vector_generation_state_v1
-                 SET revision = revision + 1, state_json = ?1
-                 WHERE singleton = 1",
-            params![legacy_state],
+            "corrupt vector active pointer identity",
+            "UPDATE semantic_vector_active_generation_v1
+             SET shard_id_json = '{}'
+             WHERE singleton = 1",
+            (),
         )
         .await
-        .expect("legacy fixture");
-    let inventory = store
-        .read_legacy_inventory()
-        .await
-        .expect("legacy inventory");
-    let retained = CanonicalEligibleChunkSetV1::try_from_chunks(
-        source.clone(),
-        vec![canonical_chunk("chunk.v1.retained", &source, 'd')],
-    )
-    .expect("retained canonical code");
-    let mut replacement = FakeVectorGenerationStoreV1::new();
-    let rebuilt = logical_generation(
-        'c',
-        admitted_embedding(),
-        source.as_str(),
-        '3',
-        "chunk.v1.retained",
-        'd',
-        vec![0.5],
-    );
-    let rebuilt_id = insert_generation(&mut replacement, rebuilt);
-    let rebuilt_for_callback = rebuilt_id.clone();
-    let mut rebuilder = ProductionLegacyVectorCanonicalRebuilderV1::try_new(
-        vec![retained],
-        move |chunks: &CanonicalEligibleChunkSetV1| {
-            Ok(StagedCanonicalVectorRebuildV1 {
-                source_generation: chunks.source_generation().clone(),
-                rebuilt_generation: rebuilt_for_callback.clone(),
-                canonical_chunk_set_digest: chunks.digest().clone(),
-            })
-        },
-    )
-    .expect("production rebuilder");
-    let transaction = prepare_legacy_vector_migration(
-        &inventory,
-        &mut rebuilder,
-        &NeverCancelLegacyVectorMigrationV1,
-    )
-    .expect("canonical rebuild transaction");
+        .expect("foreign shard fixture");
 
-    let receipt = store
-        .replace_legacy_vectors_atomically(&inventory, replacement, &transaction)
-        .await
-        .expect("atomic canonical rebuild publication");
-    assert_eq!(
-        store
-            .completed_legacy_migration_receipt()
-            .await
-            .expect("completed migration receipt"),
-        Some(receipt)
-    );
-
-    let reopened = DatabaseVectorGenerationStoreV1::open(&database)
-        .await
-        .expect("runtime store");
-    assert_eq!(
-        reopened
-            .active_generation_id()
-            .await
-            .expect("active generation"),
-        Some(rebuilt_id)
-    );
-    assert_eq!(
-        database
-            .query_scalar_i64(
-                "prove rebuild did not quarantine readable legacy bytes",
-                "SELECT COUNT(*)
-                     FROM sqlite_schema
-                     WHERE type = 'table'
-                       AND name = 'semantic_legacy_vector_quarantine_v1'",
-            )
-            .await
-            .expect("quarantine schema count"),
-        0
-    );
+    assert!(matches!(
+        DatabaseVectorGenerationStoreV1::open(&database).await,
+        Err(VectorGenerationStoreErrorV1::ShardIdentityMismatch)
+    ));
 }
+
 
 #[tokio::test]
 async fn request_read_ignores_corrupt_inactive_and_staged_generations() {
     let temporary = tempfile::tempdir().expect("temporary project database");
-    let path = temporary.path().join("project.db");
-    crate::register_test_schema_installer();
-    let authority =
-        DatabaseAuthority::acquire_test(&path, "active vector request read").expect("authority");
-    let (database, _) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-            .await
-            .expect("database");
-    let _store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+    let (database, _authority) =
+        open_project_database(&temporary, "active vector request read").await;
+    let store = DatabaseVectorGenerationStoreV1::open(&database)
         .await
-        .expect("migration store");
+        .expect("vector store");
     let embedding = admitted_embedding();
     let source: CodeGenerationId = id("code-generation.request-read");
-    let source_manifest = manifest_digest('4');
-    let active = logical_generation(
-        'c',
-        embedding.clone(),
-        source.as_str(),
-        '4',
-        "chunk.v1.request-read",
-        'd',
+    let chunk_id: CodeSearchChunkId = id("chunk.v1.request-read");
+    let prepared = added_prepared(
+        &embedding,
+        &source,
+        &chunk_id,
+        &content_digest('d'),
         vec![0.5],
     );
-    let active_id = active.generation_id().clone();
-    let mut state = FakeVectorGenerationStoreV1::new();
-    insert_generation(&mut state, active);
-    state.published.active_generation = Some(active_id.clone());
-    install_test_vector_payloads(&database, VECTOR_PAYLOAD_TABLE_V1, &state).await;
-    install_test_state_slices(&database, VECTOR_STATE_SLICE_TABLE_V1, &mut state).await;
-    let mut state_json = serde_json::to_value(&state).expect("vector state JSON");
-    state_json["published"]["generations"][manifest_digest('e').as_str()] =
-        serde_json::json!("corrupt-inactive-vector-bytes");
-    state_json["staged"] = serde_json::json!({
-        "corrupt-build": "corrupt-staged-vector-bytes"
-    });
+    let source_manifest = prepared.request.changes.manifest_digest.clone();
+    let build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: source.clone(),
+            source_manifest_digest: source_manifest.clone(),
+            expected_chunk_ids: vec![chunk_id].into(),
+            base_generation: None,
+        })
+        .await
+        .expect("staged generation");
+    store
+        .commit_batch(&build, None, prepared)
+        .await
+        .expect("batch");
+    let active_id = store
+        .publish_generation(&build, None)
+        .await
+        .expect("publication")
+        .generation_id;
     database
-        .execute_write_engine(
+        .execute_write_batch(
             "install inactive corruption fixture",
-            "UPDATE semantic_vector_generation_state_v1
-                 SET revision = revision + 1, state_json = ?1
-                 WHERE singleton = 1",
-            params![state_json.to_string()],
+            &format!(
+                "INSERT INTO semantic_vector_generation_v1 (
+                    build_id, revision, lifecycle, generation_id, record_json
+                 ) VALUES (
+                    '{}', 0, 'published', '{}', 'corrupt-inactive-vector-bytes'
+                 );
+                 INSERT INTO semantic_vector_generation_v1 (
+                    build_id, revision, lifecycle, generation_id, record_json
+                 ) VALUES (
+                    '{}', 0, 'staged', NULL, 'corrupt-staged-vector-bytes'
+                 );",
+                manifest_digest('e').as_str(),
+                manifest_digest('e').as_str(),
+                manifest_digest('f').as_str(),
+            ),
         )
         .await
         .expect("corrupt inactive fixture");
@@ -473,12 +352,9 @@ async fn request_read_ignores_corrupt_inactive_and_staged_generations() {
         .is_none(),
         "an active generation with the wrong source manifest must be denied"
     );
-    assert!(
-        DatabaseVectorGenerationStoreV1::open(&database)
-            .await
-            .is_err(),
-        "full-state decoding would observe unrelated corruption"
-    );
+    DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("open does not scan unrelated generation rows");
 }
 
 #[tokio::test]

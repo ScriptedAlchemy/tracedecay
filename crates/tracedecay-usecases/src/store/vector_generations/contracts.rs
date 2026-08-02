@@ -2,11 +2,53 @@ const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generatio
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
 const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
+#[cfg(test)]
 const VECTOR_GENERATION_STATE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_generation_state_v1 (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     revision INTEGER NOT NULL CHECK (revision >= 0),
     state_json TEXT NOT NULL
+) STRICT;
+";
+const VECTOR_GENERATION_RECORD_SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS semantic_vector_generation_v1 (
+    build_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    lifecycle TEXT NOT NULL CHECK (lifecycle IN ('staged', 'published')),
+    generation_id TEXT UNIQUE,
+    record_json TEXT NOT NULL,
+    CHECK (
+        (lifecycle = 'staged' AND generation_id IS NULL)
+        OR (lifecycle = 'published' AND generation_id IS NOT NULL)
+    )
+) STRICT;
+CREATE TABLE IF NOT EXISTS semantic_vector_active_generation_v1 (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    shard_id_json TEXT NOT NULL,
+    generation_id TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS semantic_vector_payload_owner_v1 (
+    build_id TEXT NOT NULL,
+    output_digest TEXT NOT NULL,
+    PRIMARY KEY (build_id, output_digest)
+) STRICT;
+CREATE INDEX IF NOT EXISTS semantic_vector_payload_owner_v1_address
+    ON semantic_vector_payload_owner_v1 (output_digest);
+CREATE TABLE IF NOT EXISTS semantic_vector_state_slice_owner_v1 (
+    build_id TEXT NOT NULL,
+    collection_digest TEXT NOT NULL,
+    PRIMARY KEY (build_id, collection_digest)
+) STRICT;
+CREATE INDEX IF NOT EXISTS semantic_vector_state_slice_owner_v1_address
+    ON semantic_vector_state_slice_owner_v1 (collection_digest);
+CREATE TABLE IF NOT EXISTS semantic_vector_generation_retired_v1 (
+    build_id TEXT PRIMARY KEY
+) STRICT;
+CREATE TABLE IF NOT EXISTS semantic_vector_orphan_resource_v1 (
+    kind TEXT NOT NULL CHECK (kind IN ('payload', 'state_slice')),
+    address TEXT NOT NULL,
+    PRIMARY KEY (kind, address)
 ) STRICT;
 ";
 /// Row-per-vector float storage for the production generation state.
@@ -42,12 +84,12 @@ const VECTOR_EVALUATION_PAYLOAD_TABLE_V1: &str = "semantic_vector_evaluation_pay
 ///
 /// Every collection that scales with the corpus — per-vector row metadata,
 /// per-chunk projection receipts, the plan's expected chunk set, the staged
-/// committed-effect set, the prepared batches, and the physical-byte bindings
-/// — is encoded once, addressed by the SHA-256 of those bytes, and written as
-/// bounded slices. The state document keeps only the address, so it stays
-/// generation-level regardless of corpus size. Content addressing also means
-/// a staged collection and the published collection it becomes share one
-/// stored copy, so publication writes no new slices.
+/// committed-effect set, and the prepared batches — is encoded once, addressed
+/// by the SHA-256 of those bytes, and written as bounded slices. The state
+/// document keeps only the address, so it stays generation-level regardless of
+/// corpus size. Content addressing also means a staged collection and the
+/// published collection it becomes share one stored copy, so publication
+/// writes no new slices.
 const VECTOR_STATE_SLICE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_state_slice_v1 (
     collection_digest TEXT NOT NULL,
@@ -90,18 +132,6 @@ CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_v1 (
     state_json TEXT NOT NULL
 ) STRICT;
 ";
-const LEGACY_VECTOR_QUARANTINE_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS semantic_legacy_vector_quarantine_v1 (
-    receipt_digest TEXT NOT NULL,
-    legacy_generation TEXT NOT NULL,
-    reason_digest TEXT NOT NULL,
-    generation_json TEXT NOT NULL,
-    receipt_json TEXT NOT NULL,
-    PRIMARY KEY (receipt_digest, legacy_generation)
-) STRICT;
-";
-const LEGACY_VECTOR_UNREADABLE_REASON_DOMAIN_V1: &str =
-    "tracedecay.semantic-code.legacy-vector-unreadable-reason.v1";
 const MAX_STATE_CAS_RETRIES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

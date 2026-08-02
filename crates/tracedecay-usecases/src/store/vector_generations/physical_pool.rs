@@ -121,12 +121,11 @@ impl PhysicalVectorBytePoolV1 {
         Ok(())
     }
 
-    /// Number of retained keys, live or not. Used by the eviction test.
     #[cfg(test)]
-    pub(crate) fn retained_entries(&self) -> usize {
+    fn contains_key(&self, key: &PhysicalVectorReuseKeyV1) -> bool {
         self.entries
             .lock()
-            .map(|pool| pool.entries.len())
+            .map(|pool| pool.entries.contains_key(key))
             .unwrap_or_default()
     }
 }

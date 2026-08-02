@@ -955,6 +955,8 @@ impl ProductionSemanticRuntimeV1 {
         let commit_lease = fair_lease.clone();
         let commit_database = Arc::clone(&database);
         let stage_state = Arc::clone(&commit_state);
+        let cleanup_state = Arc::clone(&commit_state);
+        let cleanup_database = Arc::clone(&database);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
         let request = match FastEmbedSemanticGenerationRequestV1::new(
@@ -1080,6 +1082,28 @@ impl ProductionSemanticRuntimeV1 {
                             }
                             let _ = lifecycle
                                 .mark_runtime_failed(format!("semantic runtime {reason:?}"), true);
+                            if let Some(build) = cleanup_state.lock().await.build.clone()
+                                && let Ok(store) =
+                                    DatabaseVectorGenerationStoreV1::open(cleanup_database.as_ref())
+                                        .await
+                                && matches!(store.cancel_generation(&build).await, Ok(true))
+                            {
+                                loop {
+                                    match store.reclaim_retired_generation_page(128).await {
+                                        Ok(true) => tokio::task::yield_now().await,
+                                        Ok(false) => break,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                event = "semantic_vector_reclamation",
+                                                outcome = "deferred",
+                                                error = %error,
+                                                "retired semantic vector generation reclamation deferred"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             break;
                         }
                         SemanticRuntimeScheduleStatusV1::Unavailable => break,
@@ -1748,10 +1772,14 @@ impl PublishedSemanticVectorReadPortV1 {
             .iter()
             .map(|chunk| (&chunk.id, chunk))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = Vec::with_capacity(vectors.vectors().len());
-        for (ordinal, (chunk_id, vector)) in vectors.vectors().iter().enumerate() {
+        let generation = vectors.generation_id().clone();
+        let projection_key = vectors.projection_key().clone();
+        let source_generation = vectors.source_generation().clone();
+        let vector_rows = vectors.into_vectors();
+        let mut rows = Vec::with_capacity(vector_rows.len());
+        for (ordinal, (chunk_id, vector)) in vector_rows.into_iter().enumerate() {
             let chunk = chunks
-                .get(chunk_id)
+                .get(&chunk_id)
                 .ok_or(RetrievalPortError::GenerationMismatch)?;
             let (anchor_id, logical_evidence_id, source_occurrence) =
                 semantic_candidate_identity(chunk)?;
@@ -1782,9 +1810,9 @@ impl PublishedSemanticVectorReadPortV1 {
                 freshness: freshness.clone(),
             };
             rows.push(SemanticVectorRecordV1 {
-                vector_generation: vectors.generation_id().clone(),
-                projection_key: vectors.projection_key().clone(),
-                source_generation: vectors.source_generation().clone(),
+                vector_generation: generation.clone(),
+                projection_key: projection_key.clone(),
+                source_generation: source_generation.clone(),
                 chunk_id: chunk_id.clone(),
                 candidate,
                 binding: CodeCandidateBindingV1 {
@@ -1799,14 +1827,14 @@ impl PublishedSemanticVectorReadPortV1 {
                     matched_term_kinds: Vec::new(),
                     source_occurrence,
                 },
-                values: vector.values.clone(),
+                values: vector.values,
             });
         }
         Ok(Self {
-            generation: vectors.generation_id().clone(),
-            projection_key: vectors.projection_key().clone(),
+            generation,
+            projection_key,
             search_index_key,
-            source_generation: vectors.source_generation().clone(),
+            source_generation,
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
         })

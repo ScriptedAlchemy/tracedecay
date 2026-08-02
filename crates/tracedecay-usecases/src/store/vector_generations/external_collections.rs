@@ -27,10 +27,6 @@ impl<T> ExternalV1<T> {
         }
     }
 
-    fn into_inner(self) -> T {
-        self.value
-    }
-
     /// Mutable access that keeps the address intact.
     ///
     /// Only for edits the externalized encoding cannot observe: filling the
@@ -340,69 +336,6 @@ mod external_state {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_any(AddressOrInlineV1(PhantomData))
-    }
-
-    /// The same adapter for a map of externalized collections, used by the
-    /// per-generation physical-byte bindings.
-    pub(super) mod address_map {
-        use super::{AddressRefV1, Deserialize, Deserializer, ExternalV1, PhantomData, Serializer};
-        use crate::store::vector_generations::VectorGenerationIdV1;
-        use serde::Serialize;
-        use std::collections::BTreeMap;
-
-        struct SlotRefV1<'slot, T>(&'slot ExternalV1<T>, PhantomData<T>);
-
-        impl<T> Serialize for SlotRefV1<'_, T> {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                AddressRefV1(&self.0.address).serialize(serializer)
-            }
-        }
-
-        pub(in super::super) fn serialize<T, S>(
-            slots: &BTreeMap<VectorGenerationIdV1, ExternalV1<T>>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.collect_map(
-                slots
-                    .iter()
-                    .map(|(key, slot)| (key, SlotRefV1(slot, PhantomData))),
-            )
-        }
-
-        struct SlotV1<T>(ExternalV1<T>);
-
-        impl<'de, T> Deserialize<'de> for SlotV1<T>
-        where
-            T: Deserialize<'de> + Default,
-        {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                super::deserialize(deserializer).map(Self)
-            }
-        }
-
-        pub(in super::super) fn deserialize<'de, T, D>(
-            deserializer: D,
-        ) -> Result<BTreeMap<VectorGenerationIdV1, ExternalV1<T>>, D::Error>
-        where
-            T: Deserialize<'de> + Default,
-            D: Deserializer<'de>,
-        {
-            Ok(
-                BTreeMap::<VectorGenerationIdV1, SlotV1<T>>::deserialize(deserializer)?
-                    .into_iter()
-                    .map(|(key, slot)| (key, slot.0))
-                    .collect(),
-            )
-        }
     }
 
     /// The plan is persisted with its expected chunk list externalized. The

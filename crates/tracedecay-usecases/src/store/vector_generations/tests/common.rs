@@ -14,39 +14,6 @@ fn content_digest(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))
 }
 
-fn canonical_chunk(
-    chunk_id: &str,
-    source_generation: &CodeGenerationId,
-    digest: char,
-) -> tracedecay_domain::CodeSearchChunkV1 {
-    tracedecay_domain::CodeSearchChunkV1 {
-        id: id(chunk_id),
-        anchor: CodeSearchChunkAnchorV1 {
-            generation_id: source_generation.clone(),
-            file_occurrence_id: id::<FileOccurrenceId>("file.rs"),
-            symbol_occurrence_id: None,
-            parent_chunk_id: None,
-            source_span: SourceSpan {
-                start_byte: 0,
-                end_byte: 4,
-            },
-            grain: CodeSearchChunkGrainV1::FileWindow,
-            ordinal: 0,
-        },
-        content_digest: content_digest(digest),
-        language_descriptor_revision: id::<LanguageDescriptorRevision>("rust.v1"),
-        chunker_revision: id::<ChunkerRevision>("chunker.v1"),
-        sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
-        sensitivity: SensitivityDecision {
-            level: SensitivityLevelV1::Public,
-            policy_revision: id::<PolicyRevisionId>("policy.v1"),
-        },
-        exact_terms: vec![],
-        subtokens: vec![],
-        sanitized_text: BoundedSanitizedText::new("code").expect("sanitized text"),
-    }
-}
-
 fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
     EmbeddingProjectionKeyV1 {
         model_artifact_digest: manifest_digest('1'),
@@ -319,7 +286,10 @@ async fn state_document(database: &Database) -> String {
     let mut rows = database
         .engine_conn()
         .query(
-            "SELECT state_json FROM semantic_vector_generation_state_v1 WHERE singleton = 1",
+            "SELECT record_json
+             FROM semantic_vector_generation_v1
+             ORDER BY length(record_json) DESC
+             LIMIT 1",
             (),
         )
         .await
