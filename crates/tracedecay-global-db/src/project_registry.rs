@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use std::fmt::Write as _;
@@ -192,7 +192,7 @@ impl LegacyPathAliasKind {
 }
 
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
-    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(project_path)
+    tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(project_path)
 }
 
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {
@@ -857,21 +857,69 @@ impl RegisteredGlobalDb {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Option<CodeProjectRecord> {
+    ) -> tracedecay_runtime_core::errors::Result<Option<CodeProjectRecord>> {
+        const OPERATION: &str = "upsert code project";
+
         // The one door through which a project authority is minted. Enforcing
         // admission here rather than at each caller means an ephemeral root
         // cannot become a durable authority even from a call site that has
         // never heard of the policy.
         if let Some(reason) = self.ephemeral_root_rejection(project_root) {
             eprintln!("warning: refusing to register a TraceDecay project — {reason}");
-            return None;
+            return Ok(None);
         }
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
         let current_root_alias = project_path_alias_key(&canonical_project_root);
         let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().into_owned());
-        let transaction = self.begin_write_transaction().await.ok()?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut aliases = BTreeSet::from([current_root_alias]);
+        let mut prior_rows = transaction
+            .query(
+                "SELECT canonical_root, display_root, primary_root_platform, primary_root_bytes
+                 FROM code_projects
+                 WHERE project_id = ?1",
+                params![project_id],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if let Some(row) = prior_rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            aliases.insert(
+                row.get::<String>(0)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            );
+            aliases.insert(
+                row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            );
+            let platform = row
+                .get::<Option<String>>(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let native_path = row
+                .get::<Option<Vec<u8>>>(3)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            match (platform, native_path) {
+                (Some(platform), Some(native_path)) => {
+                    aliases.insert(encode_native_project_path_alias(&platform, &native_path));
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(global_db_operation_message(
+                        OPERATION,
+                        format!("project '{project_id}' has incomplete native root identity"),
+                    ));
+                }
+            }
+        }
+        drop(prior_rows);
         transaction
             .execute(
                 "INSERT INTO code_projects
@@ -901,11 +949,10 @@ impl RegisteredGlobalDb {
                 ],
             )
             .await
-            .ok()?;
-        let mut aliases = vec![current_root_alias];
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         aliases.extend(super::repo_identity_aliases(git_common_dir));
         if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
-            aliases.push(alias);
+            aliases.insert(alias);
         }
         for alias in aliases {
             transaction
@@ -918,10 +965,16 @@ impl RegisteredGlobalDb {
                     params![alias, project_id, now],
                 )
                 .await
-                .ok()?;
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
         }
-        transaction.commit().await.ok()?;
-        self.get_code_project(project_id).await
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(self
+            .project_registry_context_by_id(project_id)
+            .await?
+            .map(|context| context.project))
     }
 
     pub async fn upsert_project_alias(

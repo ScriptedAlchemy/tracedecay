@@ -34,7 +34,11 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
     let mut current = path;
     let mut missing_suffix = PathBuf::new();
     while let Some(name) = current.file_name() {
-        missing_suffix = Path::new(name).join(missing_suffix);
+        missing_suffix = if missing_suffix.as_os_str().is_empty() {
+            PathBuf::from(name)
+        } else {
+            Path::new(name).join(missing_suffix)
+        };
         current = current.parent()?;
         if let Ok(canonical_parent) = current.canonicalize() {
             return Some(canonical_parent.join(missing_suffix));
@@ -130,6 +134,13 @@ mod tests {
         assert_eq!(
             canonicalize_existing_prefix(&missing),
             Some(existing.join("absent").join("deeper.db"))
+        );
+        assert!(
+            !canonicalize_existing_prefix(&missing)
+                .expect("canonicalized missing path")
+                .to_string_lossy()
+                .ends_with('/'),
+            "canonical identity must not gain a trailing separator"
         );
     }
 

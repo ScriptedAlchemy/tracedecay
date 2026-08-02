@@ -80,6 +80,12 @@ impl DashboardTestRuntimeV1 {
         self.profile_database
             .upsert_code_project(project_id.as_str(), project_root, None, None, None)
             .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "could not write dashboard test project '{}': {error}",
+                    project_root.display()
+                ),
+            })?
             .ok_or_else(|| TraceDecayError::Config {
                 message: format!(
                     "dashboard test project '{}' was rejected by the registry",

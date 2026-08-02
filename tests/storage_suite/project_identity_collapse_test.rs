@@ -184,7 +184,8 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
 
     let registered = db
         .upsert_code_project("proj_ephemeral", ephemeral.path(), None, None, None)
-        .await;
+        .await
+        .expect("evaluate durable project root admission");
 
     assert!(
         registered.is_none(),
@@ -213,6 +214,7 @@ async fn ephemeral_project_root_is_allowed_by_a_hermetic_profile() {
     assert!(
         db.upsert_code_project("proj_hermetic", &project, None, None, None)
             .await
+            .expect("write hermetic project registry")
             .is_some(),
         "a throwaway profile must still accept throwaway project fixtures"
     );

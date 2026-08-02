@@ -57,7 +57,7 @@ impl RegisteredGlobalDbTestRuntime {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
-        std::fs::create_dir_all(profile_root)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             profile_root,
@@ -269,7 +269,7 @@ impl HostAdmissionTestRuntimeV1 {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
-        std::fs::create_dir_all(profile_root)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
         if let Some((project_root, _)) = project.as_ref() {
             std::fs::create_dir_all(project_root)?;
         }

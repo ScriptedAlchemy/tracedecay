@@ -108,6 +108,7 @@ async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: 
             Some("main"),
         )
         .await
+        .unwrap()
         .unwrap();
     db.upsert_project_alias(&project_root.join("."), &project.project_id)
         .await

@@ -240,7 +240,9 @@ impl TestProfile {
                 None,
                 tracedecay::branch::current_branch(&project_root).as_deref(),
             )
-            .await;
+            .await
+            .expect("write fixture project registry")
+            .expect("fixture project root admission");
 
         RegisteredProject {
             profile: self.clone(),

@@ -739,7 +739,9 @@ mod tests {
         }
 
         async fn assert_memory_merge_waits_for_writer(source_path: &Path, target_path: &Path) {
-            let source = tracedecay_runtime_core::sqlite_read_snapshot::open(source_path)
+            let source = test_read_database(source_path).await;
+            let source = source
+                .begin_memory_read_transaction("read Hermes writer-lane source")
                 .await
                 .unwrap();
             let target = Self::create(target_path).await;
@@ -751,7 +753,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut merge = Box::pin(super::memory::merge_memory_snapshot_for_test(
-                source.connection(),
+                &source,
                 &target.connection,
             ));
 
@@ -762,7 +764,6 @@ mod tests {
             );
             writer.rollback().await.unwrap();
             assert!(merge.await.unwrap() > 0);
-            source.validate_source().unwrap();
         }
 
         fn create_legacy_state_without_cwd(path: &Path) {
@@ -862,21 +863,21 @@ mod tests {
     }
 
     async fn immutable_source_count(path: &Path, table: HermesFixtureTable) -> i64 {
-        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(path)
+        let database = test_read_database(path).await;
+        let snapshot = database
+            .begin_engine_read_snapshot("inspect Hermes source table")
             .await
             .unwrap();
-        let count = query_count(snapshot.connection(), table).await;
-        snapshot.validate_source().unwrap();
-        count
+        query_count(&snapshot, table).await
     }
 
     async fn immutable_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
-        let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(path)
+        let database = test_read_database(path).await;
+        let snapshot = database
+            .begin_memory_read_transaction("inspect Hermes source memory")
             .await
             .unwrap();
-        let facts = memory_facts(snapshot.connection()).await;
-        snapshot.validate_source().unwrap();
-        facts
+        memory_facts(&snapshot).await
     }
 
     async fn runtime_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
@@ -1624,7 +1625,7 @@ mod tests {
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.failed.len(), 1, "{report:?}");
-        assert!(report.failed[0].reason.contains("conflicts"));
+        assert!(report.failed[0].reason.contains("conflicts"), "{report:?}");
     }
 
     #[tokio::test]
@@ -1662,8 +1663,8 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
 
         assert_eq!(report.failed.len(), 1, "{report:?}");
-        assert!(report.failed[0].reason.contains("collides"));
-        assert!(report.failed[0].reason.contains("sessions"));
+        assert!(report.failed[0].reason.contains("collides"), "{report:?}");
+        assert!(report.failed[0].reason.contains("sessions"), "{report:?}");
     }
 
     #[tokio::test]

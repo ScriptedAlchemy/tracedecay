@@ -164,6 +164,9 @@ impl TraceDecay {
                 default_branch,
             )
             .await
+            .map_err(|error| {
+                registry_registration_error(format!("upsert code project failed: {error}"))
+            })?
             .ok_or_else(|| registry_registration_error("upsert code project failed"))?;
 
         storage::write_repository_identity_marker(&self.project_root, &project.project_id)?;

@@ -274,6 +274,7 @@ async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectS
         runtime
             .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
             .await
+            .expect("write project registry")
             .is_some(),
         "register the authoritative project before project-scoped admission"
     );
@@ -331,6 +332,7 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
         runtime
             .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
             .await
+            .expect("write project registry")
             .is_some(),
         "register the authoritative project before session fixture admission"
     );

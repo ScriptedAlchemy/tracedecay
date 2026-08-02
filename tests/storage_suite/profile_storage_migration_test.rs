@@ -255,6 +255,7 @@ async fn seed_public_archive_fact(
             MemoryOperationContext::generated(&owner, "cutover-update", None).unwrap(),
         )
         .await
+        .unwrap()
         .unwrap();
     memory
         .record_fact_feedback_v1(
@@ -267,6 +268,7 @@ async fn seed_public_archive_fact(
             MemoryOperationContext::generated(&owner, "cutover-feedback", None).unwrap(),
         )
         .await
+        .unwrap()
         .unwrap();
     let related_fact = memory
         .add_fact_v1(
@@ -1643,6 +1645,7 @@ async fn registry_resolves_project_store_by_canonical_alias() {
             Some("main"),
         )
         .await
+        .unwrap()
         .unwrap();
     db.upsert_project_alias(&project_root.join("."), &project.project_id)
         .await

@@ -233,6 +233,7 @@ pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<Dashboar
     runtime
         .upsert_code_project(&project_id_text, cg.project_root(), None, None, None)
         .await
+        .unwrap_or_else(|error| panic!("write dashboard fixture project: {error}"))
         .unwrap_or_else(|| panic!("register dashboard fixture project"));
     runtime
 }

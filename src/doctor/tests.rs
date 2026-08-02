@@ -937,7 +937,7 @@ async fn registry_backed_profile_shard_is_not_stale_without_marker()
     let db = runtime.database();
     db.upsert(&project_root, 42).await;
     db.upsert_code_project("proj_doctor", &project_root, None, None, Some("main"))
-        .await
+        .await?
         .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: "store:proj_doctor:profile_sharded".to_string(),
@@ -1003,7 +1003,7 @@ async fn registry_backed_profile_shard_manifest_relpath_uses_profile_root()
         None,
         Some("main"),
     )
-    .await
+    .await?
     .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: "store:proj_doctor_manifest:profile_sharded".to_string(),
@@ -1050,7 +1050,7 @@ async fn registry_backed_profile_shard_rejects_unsafe_store_relpath()
         None,
         Some("main"),
     )
-    .await
+    .await?
     .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: "store:proj_doctor_escape:profile_sharded".to_string(),
@@ -1107,7 +1107,7 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
         DoctorTestRuntime::open(&profile_root, "doctor registry drift findings test").await;
     let db = runtime.database();
     db.upsert_code_project("proj_registry", &registry_root, None, None, Some("main"))
-        .await
+        .await?
         .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
     db.upsert_store_instance(StoreInstanceUpsert {
         store_id: "store:proj_registry:profile_sharded".to_string(),

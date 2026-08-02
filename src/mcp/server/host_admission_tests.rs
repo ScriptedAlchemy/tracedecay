@@ -1169,6 +1169,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
             Some("main"),
         )
         .await
+        .expect("write route project registry")
         .expect("register route project");
     test_runtime
         .upsert_project_alias(project.path(), &registered.project_id)
@@ -1385,6 +1386,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
             Some("main"),
         )
         .await
+        .expect("write identity project registry")
         .expect("register identity project");
     test_runtime
         .upsert_project_alias(project.path(), &registered.project_id)

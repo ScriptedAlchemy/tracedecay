@@ -320,6 +320,7 @@ async fn project_registry_path_aliases_resolve_exactly_without_active_fallback()
     let target = db
         .upsert_code_project("proj_target", &target_root, None, None, Some("main"))
         .await
+        .expect("target project registry should write")
         .expect("target project should upsert");
     db.upsert_project_alias(&nested_target_alias, &target.project_id)
         .await

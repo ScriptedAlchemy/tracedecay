@@ -989,7 +989,7 @@ async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
         .await
         .ok()?;
     for project_id in [FIXTURE_SOURCE_ID, FIXTURE_TARGET_ID] {
-        global
+        match global
             .profile_registry()
             .upsert_code_project(
                 project_id,
@@ -998,7 +998,11 @@ async fn apply_fixture_fixups(project: &Path, profile: &Path) -> Option<()> {
                 None,
                 Some("main"),
             )
-            .await?;
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return None,
+        }
     }
     global
         .profile_registry()

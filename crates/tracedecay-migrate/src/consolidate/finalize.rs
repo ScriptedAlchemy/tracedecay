@@ -118,6 +118,7 @@ pub(super) async fn register_destination(
             Some(&resolved.target_meta.default_branch),
         )
         .await
+        .map_err(|error| config_error(error.to_string()))?
         .ok_or_else(|| config_error("could not register consolidated project"))?;
     db.upsert_project_alias(&resolved.report.project_root, &project.project_id)
         .await
