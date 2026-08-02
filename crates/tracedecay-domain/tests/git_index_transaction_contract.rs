@@ -473,6 +473,49 @@ fn commit_preview_persists_only_a_digest_bound_to_full_canonical_intent() {
 }
 
 #[test]
+fn commit_intent_digest_uses_git_second_precision_without_changing_wire_values() {
+    let make_intent = |author_at: i64, committer_at: i64| {
+        GitIndexCommitIntentV1::new(
+            "canonical timestamp intent\n".to_owned(),
+            GitCommitIdentityV1 {
+                name: "TraceDecay Author".to_owned(),
+                email: "author@example.com".to_owned(),
+                at: UtcMicros(author_at),
+            },
+            GitCommitIdentityV1 {
+                name: "TraceDecay Committer".to_owned(),
+                email: "committer@example.com".to_owned(),
+                at: UtcMicros(committer_at),
+            },
+            GitIndexSigningPolicyV1::UnsignedPermitted,
+        )
+        .expect("commit intent")
+    };
+
+    let unaligned = make_intent(1_234_567, 2_999_999);
+    let aligned = make_intent(1_000_000, 2_000_000);
+    assert_eq!(unaligned.author.at, UtcMicros(1_234_567));
+    assert_eq!(unaligned.committer.at, UtcMicros(2_999_999));
+    assert_eq!(
+        unaligned.compute_digest().expect("unaligned digest"),
+        aligned.compute_digest().expect("aligned digest")
+    );
+
+    assert!(
+        make_intent(i64::MIN, i64::MAX).compute_digest().is_ok(),
+        "timestamp canonicalization must not overflow at the i64 bounds"
+    );
+    let lower_bound_seconds = i64::MIN.div_euclid(1_000_000);
+    let lower_bound_micros = git_commit_timestamp_micros(lower_bound_seconds);
+    assert_eq!(lower_bound_micros, UtcMicros(i64::MIN));
+    assert_eq!(
+        lower_bound_micros,
+        git_commit_timestamp_micros(lower_bound_micros.0.div_euclid(1_000_000)),
+        "recovery must map Git's lower bound second to the same saturated micros"
+    );
+}
+
+#[test]
 fn snapshot_without_complete_native_identity_is_read_only() {
     let mut value = serde_json::to_value(snapshot()).expect("serialize snapshot");
     value["git_version"] = serde_json::Value::Null;

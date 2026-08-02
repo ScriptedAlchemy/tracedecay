@@ -128,14 +128,19 @@ impl GitIndexCommitIntentV1 {
     }
 
     /// Commit to every canonical intent field without retaining plaintext
-    /// commit material in a preview or durable transaction record.
+    /// commit material in a preview or durable transaction record. Git stores
+    /// author and committer timestamps at whole-second precision, so the
+    /// digest uses the same canonical representation without changing the
+    /// request's wire-visible identity values.
     pub fn compute_digest(&self) -> Result<ManifestDigest, DomainError> {
         self.validate()?;
+        let author = canonical_git_commit_identity(&self.author);
+        let committer = canonical_git_commit_identity(&self.committer);
         canonical_sha256(&GitIndexCommitIntentDigestMaterial {
             domain: GIT_INDEX_COMMIT_INTENT_DIGEST_DOMAIN_V1,
             message_digest: &self.message_digest,
-            author: &self.author,
-            committer: &self.committer,
+            author: &author,
+            committer: &committer,
             signing_policy: &self.signing_policy,
         })
     }
@@ -152,6 +157,21 @@ impl GitIndexCommitIntentV1 {
         }
         Ok(())
     }
+}
+
+/// Convert Git's signed whole-second timestamp to microseconds without
+/// overflowing the domain representation. The lower Git second that cannot
+/// be represented exactly in microseconds clamps to `i64::MIN`; applying this
+/// helper to the same second during recovery yields the same value.
+pub fn git_commit_timestamp_micros(seconds: i64) -> UtcMicros {
+    UtcMicros(seconds.saturating_mul(1_000_000))
+}
+
+fn canonical_git_commit_identity(identity: &GitCommitIdentityV1) -> GitCommitIdentityV1 {
+    let seconds = identity.at.0.div_euclid(1_000_000);
+    let mut canonical = identity.clone();
+    canonical.at = git_commit_timestamp_micros(seconds);
+    canonical
 }
 
 fn validate_git_commit_message(message: &str) -> Result<(), DomainError> {
