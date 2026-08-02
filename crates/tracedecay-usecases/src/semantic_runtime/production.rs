@@ -1080,6 +1080,36 @@ impl ProductionSemanticRuntimeV1 {
                 );
             }
         };
+        // A full projection of this corpus under this projection key may have
+        // already been proven to fail terminally at publish time. Rescheduling
+        // it re-embeds the whole corpus inside the shared reservation before
+        // failing identically, so the memo suppresses it under backoff. This is
+        // a scheduling guard only: the memo clears on anything that could
+        // change the outcome (key, corpus-size class, witness, or a success).
+        let failure_key = super::SemanticPublishFailureKeyV1::new(
+            projection.projection_key().clone(),
+            generation.chunks().chunks().len(),
+        );
+        let failure_witness =
+            super::publish_failure_witness(&self.code_index_store_root, &self.resources);
+        if let super::SemanticPublishAdmissionV1::Suppressed(suppressed) =
+            super::semantic_publish_failure_memo().admit(&failure_key, &failure_witness)
+        {
+            tracing::warn!(
+                event = "semantic_projection_schedule",
+                outcome = "suppressed",
+                stored_failure = %suppressed.reason,
+                failures = suppressed.failures,
+                retry_after_ms = u64::try_from(suppressed.retry_after.as_millis())
+                    .unwrap_or(u64::MAX),
+                corpus_size_class = failure_key.corpus_size_class,
+                projection_kind = ?failure_key.projection_key.kind,
+                "semantic publication previously failed for this projection key and \
+                 corpus-size class; suppressing the full re-projection until backoff elapses"
+            );
+            drop(fair_lease);
+            return false;
+        }
         let current = self.handle.current();
         let request = match semantic_projection_request(generation, &projection, current.as_ref()) {
             Ok(request) => request,
@@ -1197,10 +1227,22 @@ impl ProductionSemanticRuntimeV1 {
                             let _ = lifecycle.mark_indexing(completed_units, total_units);
                         }
                         SemanticRuntimeScheduleStatusV1::Current { .. } => {
+                            super::semantic_publish_failure_memo().record_success(&failure_key);
                             let _ = lifecycle.mark_ready();
                             break;
                         }
                         SemanticRuntimeScheduleStatusV1::Failed { reason, .. } => {
+                            // Publication failure is the reproducible one: it is
+                            // decided by the corpus and the projection key, not
+                            // by this attempt. Memoize it so the next published
+                            // generation does not pay the full re-embed again.
+                            if matches!(reason, SemanticRuntimeScheduleFailureV1::Publication) {
+                                super::semantic_publish_failure_memo().record_failure(
+                                    &failure_key,
+                                    &failure_witness,
+                                    &format!("{reason:?}"),
+                                );
+                            }
                             let _ = lifecycle
                                 .mark_runtime_failed(format!("semantic runtime {reason:?}"), true);
                             break;
