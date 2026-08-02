@@ -918,6 +918,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Answering with a component while several projects hold one would attach
     /// a request to whichever project happened to sort first.
+    #[cfg(test)]
     pub(crate) async fn sole<C>(&self) -> Option<C>
     where
         C: ProjectRuntimeComponent + Clone,

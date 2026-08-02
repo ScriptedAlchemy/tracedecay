@@ -23,12 +23,15 @@ fn legacy_sealed_generation_is_rejected_before_manifest_decode() {
 fn parallel_collection_preserves_input_order() {
     let items = (0..1_024_usize).collect::<Vec<_>>();
 
-    let values = collect_bounded_ordered(&items, |item| Ok::<_, ()>(*item * 2))
-        .expect("infallible mapping");
+    let values =
+        collect_bounded_ordered(&items, |item| Ok::<_, ()>(*item * 2)).expect("infallible mapping");
 
     assert_eq!(values.len(), items.len());
     assert!(
-        values.iter().enumerate().all(|(index, value)| *value == index * 2),
+        values
+            .iter()
+            .enumerate()
+            .all(|(index, value)| *value == index * 2),
         "completion order must not reorder results"
     );
 }
