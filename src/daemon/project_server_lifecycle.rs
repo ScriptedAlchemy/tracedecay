@@ -172,23 +172,8 @@ pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
-    let profile_root = client_identity.profile_root.clone();
-    let operation_store_administration = store_administration.clone();
-    let operation_client_identity = client_identity.clone();
-    let operation: profile_host_admission_replay::ProfileHostAdmissionBootstrapOperation =
-        Arc::new(move || {
-            let store_administration = operation_store_administration.clone();
-            let client_identity = operation_client_identity.clone();
-            Box::pin(async move {
-                ensure_user_profile_host_admission_replay_for_identity(
-                    &store_administration,
-                    &client_identity,
-                )
-                .await
-            })
-        });
     store_administration
-        .ensure_profile_host_admission_bootstrap(&profile_root, operation)
+        .ensure_profile_host_admission_bootstrap(&client_identity.profile_root)
         .await
 }
 
