@@ -21,8 +21,8 @@ use crate::storage::resolve_response_handle_root;
 // live in `tracedecay-usecases`. The root module keeps the MCP-facing extras:
 // telemetry-instrumented store/retrieve, cleanup, stats, and truncation
 // observation.
-pub use tracedecay_usecases::response_handles::{ResponseHandleLookup, ResponseHandleRecord};
 pub(crate) use tracedecay_usecases::response_handles::is_valid_response_handle;
+pub use tracedecay_usecases::response_handles::{ResponseHandleLookup, ResponseHandleRecord};
 
 pub const RESPONSE_HANDLE_TTL_SECS: i64 = 86_400;
 pub const RESPONSE_RETRIEVE_TOOL: &str = "tracedecay_retrieve";

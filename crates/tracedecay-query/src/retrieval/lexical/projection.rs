@@ -486,9 +486,9 @@ impl CodeLexicalProjectionAdapterV1 {
         let phrase_document_frequencies = phrase_candidates
             .iter()
             .map(|(phrase, candidates)| {
-                let frequency =
-                    self.postings
-                        .phrase_document_frequency(&self.rows, phrase, candidates);
+                let frequency = self
+                    .postings
+                    .phrase_document_frequency(&self.rows, phrase, candidates);
                 (phrase.clone(), frequency)
             })
             .collect::<BTreeMap<_, _>>();

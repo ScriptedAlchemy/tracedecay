@@ -400,10 +400,12 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
 
 pub fn default_catalog_discovery_authority()
 -> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
-    Ok(crate::application_surface::application_surface_catalog_ref()?
-        .capabilities()
-        .map(|capability| capability.capability_id().clone())
-        .collect())
+    Ok(
+        crate::application_surface::application_surface_catalog_ref()?
+            .capabilities()
+            .map(|capability| capability.capability_id().clone())
+            .collect(),
+    )
 }
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {

@@ -70,11 +70,7 @@ impl WireSeparators {
             estimator_version_key: measure_raw(",\"estimator_version\":", policy, control)?,
             bundle_records: measure_raw(",\"bundle\":{\"records\":[", policy, control)?,
             omissions_key: measure_raw("],\"omissions\":", policy, control)?,
-            continuation_anchors_key: measure_raw(
-                ",\"continuation_anchors\":[",
-                policy,
-                control,
-            )?,
+            continuation_anchors_key: measure_raw(",\"continuation_anchors\":[", policy, control)?,
             coverage_key: measure_raw("],\"coverage\":", policy, control)?,
             conflicts_key: measure_raw(",\"conflicts\":", policy, control)?,
             lineage_key: measure_raw(",\"lineage\":", policy, control)?,
@@ -631,9 +627,16 @@ mod separator_equivalence_tests {
             .expect("prepare admission");
             for admitted in 0..=available.len() {
                 for limit in [None, Some(BudgetLimit::Byte), Some(BudgetLimit::Token)] {
-                    let optimized =
-                        measure_candidate(&prepared, &bundle, &[], admitted, limit, policy, &control)
-                            .expect("optimized measure");
+                    let optimized = measure_candidate(
+                        &prepared,
+                        &bundle,
+                        &[],
+                        admitted,
+                        limit,
+                        policy,
+                        &control,
+                    )
+                    .expect("optimized measure");
                     let reference =
                         measure_candidate_reference(&prepared, admitted, limit, policy, &control)
                             .expect("reference measure");
