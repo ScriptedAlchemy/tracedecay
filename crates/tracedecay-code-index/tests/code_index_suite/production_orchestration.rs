@@ -205,7 +205,20 @@ fn request_at_path(
     logical_path: &str,
     sealed_at: i64,
 ) -> CodeIndexBuildRequestV1 {
-    let source = RUST_SOURCE.as_bytes();
+    request_with_source(
+        file_occurrence,
+        logical_path,
+        sealed_at,
+        RUST_SOURCE.as_bytes(),
+    )
+}
+
+fn request_with_source(
+    file_occurrence: &str,
+    logical_path: &str,
+    sealed_at: i64,
+    source: &[u8],
+) -> CodeIndexBuildRequestV1 {
     let file = SanitizedCodeFileV1 {
         file_occurrence_id: id::<FileOccurrenceId>(file_occurrence),
         logical_path: logical_path.to_owned(),
@@ -405,11 +418,25 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
         sealed, resealed,
         "the memoized gate must reach the same verdict and payload as the first check"
     );
+    let resident_estimate =
+        CodeIndexPublishedGenerationV1::sealed_resident_memory_estimate(&sealed)
+            .expect("sealed allocation counts");
+    assert_eq!(
+        resident_estimate.generation_id(),
+        &generation.manifest().generation_id
+    );
 
     // Restoring re-reads bytes from the sealed store, so it must verify fresh
     // rather than trust any carried mark.
     let restored =
         CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("valid generation restores");
+    let measured_resident_bytes = restored
+        .structural_resident_memory_bytes(u64::try_from(sealed.len()).expect("sealed byte length"))
+        .expect("decoded structural charge");
+    assert!(
+        measured_resident_bytes <= resident_estimate.reservation_bytes(),
+        "pre-decode reservation must upper-bound the decoded structural charge"
+    );
     assert!(
         restored.is_validated(),
         "a restored generation must be fully verified before it can serve"
@@ -468,6 +495,44 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
         ),
         "amortized attribution must return the same evidence as the first read"
     );
+}
+
+#[test]
+fn sealed_resident_estimate_upper_bounds_varied_decoded_generations() {
+    for function_count in [1_usize, 4, 16, 64, 256] {
+        let source = (0..function_count)
+            .map(|index| format!("pub fn resident_{index}() -> usize {{ {index} }}\n"))
+            .collect::<String>();
+        let store = SharedPublicationStore::default();
+        let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+            .expect("production owner");
+        let generation = owner
+            .build_and_publish(
+                request_with_source(
+                    &format!("file.resident.{function_count}"),
+                    "src/resident.rs",
+                    1_400_000 + i64::try_from(function_count).expect("fixture size"),
+                    source.as_bytes(),
+                ),
+                &ActiveControl,
+            )
+            .expect("varied generation publishes");
+        let sealed = generation.encode_sealed().expect("varied generation seals");
+        let estimate = CodeIndexPublishedGenerationV1::sealed_resident_memory_estimate(&sealed)
+            .expect("resident estimate");
+        let decoded =
+            CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("generation decodes");
+        let measured = decoded
+            .structural_resident_memory_bytes(
+                u64::try_from(sealed.len()).expect("sealed byte length"),
+            )
+            .expect("resident measurement");
+        assert!(
+            measured <= estimate.reservation_bytes(),
+            "{function_count}-function generation undercharged: measured={measured} estimated={}",
+            estimate.reservation_bytes()
+        );
+    }
 }
 
 /// Corruption of chunk evidence must still be caught by the very first

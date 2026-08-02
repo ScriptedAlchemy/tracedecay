@@ -8,6 +8,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::Write,
+    num::NonZeroU64,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
@@ -26,6 +28,10 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
     SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId,
     canonical_sha256,
+};
+use tracedecay_runtime_core::resident_memory::{
+    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
+    ResidentMemoryKeyV1, ResidentMemoryReservationV1,
 };
 
 use crate::{
@@ -186,6 +192,25 @@ enum DecodeSubjectV1 {
     Generation(CodeGenerationId),
 }
 
+/// One canonical decoded generation and the exact process-memory charge that
+/// authorizes retaining it.
+///
+/// Serving handles clone this outer `Arc`, never the inner generation alone.
+/// Eviction therefore removes the cache's owner without releasing the charge
+/// while an in-flight query still holds the generation.
+struct ResidentPublishedGenerationV1 {
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+    _reservation: ResidentMemoryReservationV1,
+}
+
+impl Deref for ResidentPublishedGenerationV1 {
+    type Target = CodeIndexPublishedGenerationV1;
+
+    fn deref(&self) -> &Self::Target {
+        self.generation.as_ref()
+    }
+}
+
 /// Decoded-generation cache state.
 ///
 /// Guarded by [`DecodedGenerationCacheV1::state`]. The lock is only ever held
@@ -197,7 +222,7 @@ struct DecodedGenerationStateV1 {
     /// Held outside the LRU deque: every unpinned query serves from it, so LRU
     /// pressure from pinned or cursor-paged reads of older generations must
     /// never be able to drop it and force a re-decode on the request path.
-    active: Option<Arc<CodeIndexPublishedGenerationV1>>,
+    active: Option<Arc<ResidentPublishedGenerationV1>>,
     /// Bumped by every successful publication. A decode that started before a
     /// publication landed must not install its now-superseded result.
     active_epoch: u64,
@@ -208,7 +233,7 @@ struct DecodedGenerationStateV1 {
     /// repeated that whole scan per access. A published generation is immutable
     /// and content-addressed by its sealed filename, so a generation that
     /// loaded once can be served again without redoing the load-time checks.
-    decoded: VecDeque<Arc<CodeIndexPublishedGenerationV1>>,
+    decoded: VecDeque<Arc<ResidentPublishedGenerationV1>>,
     /// Decodes currently running. A caller that wants one of these parks on the
     /// condvar instead of starting a second sweep over the same bytes.
     in_flight: Vec<DecodeSubjectV1>,
@@ -228,7 +253,7 @@ impl DecodedGenerationStateV1 {
     fn cached(
         &mut self,
         generation_id: &CodeGenerationId,
-    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+    ) -> Option<Arc<ResidentPublishedGenerationV1>> {
         let position = self
             .decoded
             .iter()
@@ -297,7 +322,7 @@ impl DecodedGenerationCacheV1 {
     /// evict the generation every unpinned query serves from.
     fn remember(
         &self,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
+        generation: Arc<ResidentPublishedGenerationV1>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let mut state = self.lock_state()?;
         let generation_id = generation.manifest().generation_id.clone();
@@ -347,7 +372,7 @@ impl Drop for DecodeLeaseV1<'_> {
 #[cfg(test)]
 pub(super) struct HeldActiveDecodeV1 {
     cache: Arc<DecodedGenerationCacheV1>,
-    restore: Option<Arc<CodeIndexPublishedGenerationV1>>,
+    restore: Option<Arc<ResidentPublishedGenerationV1>>,
 }
 
 #[cfg(test)]
@@ -373,6 +398,9 @@ impl Drop for HeldActiveDecodeV1 {
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
     cache: Arc<DecodedGenerationCacheV1>,
+    resident_memory: Arc<ProcessResidentMemoryV1>,
+    project_id: ProjectId,
+    worktree_id: WorktreeId,
     active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
@@ -380,14 +408,36 @@ struct DaemonCodeIndexPublicationStoreV1 {
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
+    #[cfg(test)]
     fn new(
         store_root: &Path,
         expected_sanitizer_revision: SanitizerRevision,
+    ) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        Self::new_with_resident_memory(
+            store_root,
+            expected_sanitizer_revision,
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+            id::<ProjectId>("project.code-index-publication-test")?,
+            id::<WorktreeId>("worktree.code-index-publication-test")?,
+        )
+    }
+
+    fn new_with_resident_memory(
+        store_root: &Path,
+        expected_sanitizer_revision: SanitizerRevision,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+        project_id: ProjectId,
+        worktree_id: WorktreeId,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
+            resident_memory,
+            project_id,
+            worktree_id,
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
@@ -397,6 +447,75 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     fn unavailable(error: impl std::fmt::Display) -> CodeIndexPublicationStoreErrorV1 {
         CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string())
+    }
+
+    fn reserve_authenticated_generation(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(CodeGenerationId, ResidentMemoryReservationV1), CodeIndexPublicationStoreErrorV1>
+    {
+        let estimate = CodeIndexPublishedGenerationV1::sealed_resident_memory_estimate(bytes)
+            .map_err(Self::unavailable)?;
+        let requested_bytes = NonZeroU64::new(estimate.reservation_bytes())
+            .ok_or_else(|| Self::unavailable("canonical generation resident estimate is zero"))?;
+        let component = ResidentMemoryComponentIdV1::new("code_index.canonical_generation.v1")
+            .map_err(Self::unavailable)?;
+        let key = ResidentMemoryKeyV1 {
+            project_id: self.project_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            generation_id: estimate.generation_id().clone(),
+            component,
+        };
+        let reservation =
+            self.resident_memory
+                .reserve(key, requested_bytes)
+                .map_err(
+                    |failure| CodeIndexPublicationStoreErrorV1::ResidentMemoryUnavailable {
+                        used_bytes: failure.used_bytes,
+                        requested_bytes: failure.requested_bytes,
+                        limit_bytes: failure.limit_bytes,
+                    },
+                )?;
+        Ok((estimate.generation_id().clone(), reservation))
+    }
+
+    fn finish_resident_generation(
+        &self,
+        generation: CodeIndexPublishedGenerationV1,
+        expected_generation_id: &CodeGenerationId,
+        bytes: &[u8],
+        mut reservation: ResidentMemoryReservationV1,
+    ) -> Result<Arc<ResidentPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        if generation.manifest().generation_id != *expected_generation_id {
+            return Err(Self::unavailable(
+                "sealed generation resident probe identity does not match decoded identity",
+            ));
+        }
+        let sealed_bytes = u64::try_from(bytes.len())
+            .map_err(|_| Self::unavailable("sealed generation byte length exceeds u64"))?;
+        let measured_bytes = generation
+            .structural_resident_memory_bytes(sealed_bytes)
+            .map_err(Self::unavailable)?;
+        reservation.shrink_to(measured_bytes).map_err(|error| {
+            Self::unavailable(format!(
+                "canonical generation resident estimate undercharged decoded allocation: {error}"
+            ))
+        })?;
+        Ok(Arc::new(ResidentPublishedGenerationV1 {
+            generation: Arc::new(generation),
+            _reservation: reservation,
+        }))
+    }
+
+    fn decode_authenticated_generation(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Arc<ResidentPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        let (expected_generation_id, reservation) = self.reserve_authenticated_generation(bytes)?;
+        self.cache.note_decode();
+        let generation =
+            CodeIndexPublishedGenerationV1::decode_sealed(bytes).map_err(Self::unavailable)?;
+        self.finish_resident_generation(generation, &expected_generation_id, bytes, reservation)
     }
 
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -441,7 +560,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn load_generation(
         &self,
         generation_id: &CodeGenerationId,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<ResidentPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         if let Some(active) = self.load_active_shared()?
             && active.manifest().generation_id == *generation_id
         {
@@ -489,7 +608,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn scan_sealed_generations(
         &self,
         generation_id: &CodeGenerationId,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<ResidentPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let mut paths = std::fs::read_dir(&self.generations_root)
             .map_err(Self::unavailable)?
             .filter_map(Result::ok)
@@ -530,13 +649,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             {
                 continue;
             }
-            self.cache.note_decode();
-            let generation =
-                CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
+            let generation = self.decode_authenticated_generation(&bytes)?;
             if generation.manifest().generation_id != *generation_id {
                 continue;
             }
-            if matched.replace(Arc::new(generation)).is_some() {
+            if matched.replace(generation).is_some() {
                 return Err(Self::unavailable(
                     "multiple immutable code-generation files claim one generation identity",
                 ));
@@ -556,7 +673,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// fail-closed verdict on its own.
     fn active_already_decoded(
         &self,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<ResidentPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         Ok(self.cache.lock_state()?.active.as_ref().map(Arc::clone))
     }
 
@@ -587,7 +704,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// a corrupt or unreadable store still errors every request.
     fn load_active_shared(
         &self,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<ResidentPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let lease = loop {
             let mut state = self.cache.lock_state()?;
             if let Some(generation) = state.active.as_ref() {
@@ -635,7 +752,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// pointer. Never called with the decoded-generation cache lock held.
     fn decode_active_generation(
         &self,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<ResidentPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let pointer_bytes = match std::fs::read(&self.active_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -660,9 +777,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(None);
         }
-        self.cache.note_decode();
-        let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
-            .map_err(Self::unavailable)?;
+        let generation = self.decode_authenticated_generation(&generation_bytes)?;
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
@@ -678,7 +793,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
-        Ok(Some(Arc::new(generation)))
+        Ok(Some(generation))
     }
 
     fn active_encoded_bytes(&self) -> Arc<AtomicU64> {
@@ -699,7 +814,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .load_active_shared()?
-            .map(|generation| generation.as_ref().clone()))
+            .map(|generation| generation.generation.as_ref().clone()))
     }
 
     fn publish_atomically(
@@ -708,6 +823,16 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
+        let generation_id = generation.manifest().generation_id.clone();
+        let (resident_generation_id, reservation) =
+            self.reserve_authenticated_generation(&generation_bytes)?;
+        let generation = self.finish_resident_generation(
+            generation,
+            &resident_generation_id,
+            &generation_bytes,
+            reservation,
+        )?;
         let store_root = self
             .active_path
             .parent()
@@ -724,7 +849,6 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
-        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
         let state_digest = Self::state_digest(&generation_bytes);
         let generation_file = format!(
             "generation-{}.json",
@@ -790,10 +914,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         // so activation costs nothing: no request ever re-reads these bytes.
         // Bumping the epoch retires any decode that started against the prior
         // pointer so it cannot install itself over this newer generation.
-        let generation_id = generation.manifest().generation_id.clone();
         state.active_epoch = state.active_epoch.wrapping_add(1);
         state.forget(&generation_id);
-        state.active = Some(Arc::new(generation));
+        state.active = Some(generation);
         Ok(())
     }
 }
@@ -940,7 +1063,7 @@ type GenerationServingCachesV1 = (
 
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
-    generation: Arc<CodeIndexPublishedGenerationV1>,
+    generation: Arc<ResidentPublishedGenerationV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
     /// Single-flight gate for the O(store) lane-owner build. Without it every
@@ -973,7 +1096,7 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
-        self.generation.as_ref()
+        self.generation.generation.as_ref()
     }
 
     /// Point-lookup indices over this sealed generation's record vectors.
@@ -1262,12 +1385,49 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
+    pub(in crate::daemon) fn open_with_resident_memory(
+        project_id: ProjectId,
+        project_root: &Path,
+        store_root: PathBuf,
+        byte_pool: Arc<SharedCodeIndexBytePoolV1>,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
+    ) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        Self::open_with_policy_and_resident_memory(
+            project_id,
+            project_root,
+            store_root,
+            byte_pool,
+            CodeIndexHintPolicyV1::default(),
+            resident_memory,
+        )
+    }
+
     pub fn open_with_policy(
         project_id: ProjectId,
         project_root: &Path,
         store_root: PathBuf,
         byte_pool: Arc<SharedCodeIndexBytePoolV1>,
         policy: CodeIndexHintPolicyV1,
+    ) -> Result<Self, CodeIndexSchedulerErrorV1> {
+        Self::open_with_policy_and_resident_memory(
+            project_id,
+            project_root,
+            store_root,
+            byte_pool,
+            policy,
+            Arc::new(ProcessResidentMemoryV1::new(
+                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            )),
+        )
+    }
+
+    fn open_with_policy_and_resident_memory(
+        project_id: ProjectId,
+        project_root: &Path,
+        store_root: PathBuf,
+        byte_pool: Arc<SharedCodeIndexBytePoolV1>,
+        policy: CodeIndexHintPolicyV1,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
         // Resolve exact identity BEFORE any indexing work. Paths located this
@@ -1278,8 +1438,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         let worktree_id = identity.worktree_id().clone();
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&project_root);
         let sanitizer_revision = id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
-        let publication =
-            DaemonCodeIndexPublicationStoreV1::new(&store_root, sanitizer_revision.clone())?;
+        let publication = DaemonCodeIndexPublicationStoreV1::new_with_resident_memory(
+            &store_root,
+            sanitizer_revision.clone(),
+            resident_memory,
+            project_id.clone(),
+            worktree_id.clone(),
+        )?;
         let owner = open_production_code_index_owner_v1(
             CodeIndexProductionConfigV1 {
                 project_id: project_id.clone(),
@@ -1820,7 +1985,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// derivations, so every reader of the same generation shares one build.
     fn bind_latest_complete(
         &self,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
+        generation: Arc<ResidentPublishedGenerationV1>,
     ) -> LatestCompleteCodeIndexV1 {
         let generation_id = generation.manifest().generation_id.clone();
         let mut cached = self

@@ -595,11 +595,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is zero".to_owned(),
             ));
         }
-        CodeIndexWorktreeSchedulerV1::open(
+        CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
             project_id,
             project_root,
             store_root,
             Arc::clone(&self.byte_pool),
+            Arc::clone(&self.resident_memory),
         )
     }
 
@@ -696,13 +697,15 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
+        let open_resident_memory = Arc::clone(&self.resident_memory);
         let open_semantic_schedule = semantic_schedule.clone();
         let (opened, restored_generation) = tokio::task::spawn_blocking(move || {
-            let mut opened = CodeIndexWorktreeSchedulerV1::open(
+            let mut opened = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
                 open_project_id,
                 &open_project_root,
                 scoped_store_root,
                 open_byte_pool,
+                open_resident_memory,
             )?;
             if let Some(hook) = open_semantic_schedule {
                 opened.replace_semantic_schedule_hook(Some(hook));
