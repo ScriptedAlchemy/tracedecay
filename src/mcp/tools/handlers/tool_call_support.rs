@@ -174,6 +174,10 @@ impl McpToolDispatchControl {
         &self.policy
     }
 
+    pub(crate) const fn requires_cooperative_worker_cleanup(&self) -> bool {
+        self.policy.requires_cooperative_worker_cleanup()
+    }
+
     pub(crate) fn cancel(&self, requested_at: tracedecay_domain::UtcMicros) -> bool {
         self.cancellation.cancel(requested_at)
     }

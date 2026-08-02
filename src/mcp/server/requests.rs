@@ -1345,7 +1345,7 @@ impl McpServer {
             Some(dispatch_control.cancellation()),
             Some(dispatch_control.clone()),
         );
-        let outcome = if tool_name == "tracedecay_pr_context" {
+        let outcome = if dispatch_control.requires_cooperative_worker_cleanup() {
             dispatch_control
                 .run_cooperatively(McpToolDispatchStage::Handler, execution)
                 .await

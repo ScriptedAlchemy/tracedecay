@@ -106,6 +106,9 @@ pub(crate) struct McpToolBinding {
     pub(crate) group: Option<McpToolDispatchGroup>,
     pub(crate) project: RegisteredProjectAccess,
     pub(crate) execution: LegacyMcpToolExecutionClass,
+    /// The handler owns blocking work that must observe cancellation and join
+    /// before dispatch can emit a terminal deadline or cancellation response.
+    pub(crate) cooperative_worker_cleanup: bool,
 }
 
 macro_rules! legacy_binding {
@@ -115,6 +118,7 @@ macro_rules! legacy_binding {
             group: $group,
             project: $project,
             execution: LegacyMcpToolExecutionClass::for_group($group),
+            cooperative_worker_cleanup: false,
         }
     };
     ($name:literal, $group:expr, $project:expr, $execution:expr) => {
@@ -123,6 +127,16 @@ macro_rules! legacy_binding {
             group: $group,
             project: $project,
             execution: $execution,
+            cooperative_worker_cleanup: false,
+        }
+    };
+    ($name:literal, $group:expr, $project:expr, $execution:expr, $cooperative_worker_cleanup:expr) => {
+        McpToolBinding {
+            name: $name,
+            group: $group,
+            project: $project,
+            execution: $execution,
+            cooperative_worker_cleanup: $cooperative_worker_cleanup,
         }
     };
 }
@@ -131,7 +145,7 @@ macro_rules! legacy_binding {
 pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     legacy_binding!("tracedecay_search", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_grep", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::Reader),
-    legacy_binding!("tracedecay_ast_grep_search", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly),
+    legacy_binding!("tracedecay_ast_grep_search", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::InteractiveRead, true),
     legacy_binding!("tracedecay_retrieve", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::Reader),
     legacy_binding!("tracedecay_context", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::Reader),
     legacy_binding!("tracedecay_callers", Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::Reader),
@@ -181,15 +195,15 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     legacy_binding!("tracedecay_doc_coverage", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_god_class", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_unsafe_patterns", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
-    legacy_binding!("tracedecay_constructors", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
+    legacy_binding!("tracedecay_constructors", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::InteractiveRead, true),
     legacy_binding!("tracedecay_field_sites", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_diagnostics", Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_admin_branch_add", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::ExtendedAdministrative),
     legacy_binding!("tracedecay_affected", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_diff_context", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
-    legacy_binding!("tracedecay_changelog", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
-    legacy_binding!("tracedecay_commit_context", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
-    legacy_binding!("tracedecay_pr_context", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
+    legacy_binding!("tracedecay_changelog", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::InteractiveRead, true),
+    legacy_binding!("tracedecay_commit_context", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::InteractiveRead, true),
+    legacy_binding!("tracedecay_pr_context", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly, LegacyMcpToolExecutionClass::InteractiveRead, true),
     legacy_binding!("tracedecay_branch_search", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_branch_diff", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
     legacy_binding!("tracedecay_branch_list", Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly),
@@ -247,6 +261,12 @@ pub(crate) fn legacy_execution_class(tool_name: &str) -> Option<LegacyMcpToolExe
     binding(tool_name).map(|binding| binding.execution)
 }
 
+/// Whether a legacy handler must settle its cancellation-aware workers before
+/// dispatch returns a terminal deadline or cancellation response.
+pub(crate) fn legacy_requires_cooperative_worker_cleanup(tool_name: &str) -> bool {
+    binding(tool_name).is_some_and(|binding| binding.cooperative_worker_cleanup)
+}
+
 /// The statically bound dispatch group, if this tool has one.
 pub(crate) fn dispatch_group_for_tool(tool_name: &str) -> Option<McpToolDispatchGroup> {
     binding(tool_name).and_then(|binding| binding.group)
@@ -289,6 +309,25 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), total, "a tool name is bound twice");
+    }
+
+    #[test]
+    fn blocking_legacy_handlers_require_cooperative_cleanup() {
+        for tool_name in [
+            "tracedecay_ast_grep_search",
+            "tracedecay_constructors",
+            "tracedecay_changelog",
+            "tracedecay_commit_context",
+            "tracedecay_pr_context",
+        ] {
+            assert!(
+                legacy_requires_cooperative_worker_cleanup(tool_name),
+                "{tool_name} must settle its worker before terminal dispatch"
+            );
+        }
+        assert!(!legacy_requires_cooperative_worker_cleanup(
+            "tracedecay_search"
+        ));
     }
 
     /// Reads that resolve their own authority stay on the active project. A
