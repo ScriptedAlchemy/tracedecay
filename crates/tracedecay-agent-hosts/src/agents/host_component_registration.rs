@@ -2063,8 +2063,11 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let managed = home.path().join(".claude/agents");
 
-        let (mut delegate, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), &[managed.clone()]);
+        let (mut delegate, operation_id) = missing_directory_fixture(
+            home.path(),
+            lifecycle.path(),
+            std::slice::from_ref(&managed),
+        );
         delegate.declared_artifact_writes = [managed.join("code-explorer.md")].into();
 
         // The artifact writer already created the directory tree.
@@ -2091,8 +2094,11 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let foreign = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), &[foreign.clone()]);
+        let (delegate, operation_id) = missing_directory_fixture(
+            home.path(),
+            lifecycle.path(),
+            std::slice::from_ref(&foreign),
+        );
         fs::create_dir_all(&foreign).unwrap();
 
         assert!(
@@ -2114,7 +2120,7 @@ mod tests {
         let path = home.path().join(".claude/agents");
 
         let (mut delegate, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), &[path.clone()]);
+            missing_directory_fixture(home.path(), lifecycle.path(), std::slice::from_ref(&path));
         delegate.declared_artifact_writes = [path.clone()].into();
         fs::create_dir_all(&path).unwrap();
 
@@ -2136,8 +2142,11 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), &[orphaned.clone()]);
+        let (delegate, operation_id) = missing_directory_fixture(
+            home.path(),
+            lifecycle.path(),
+            std::slice::from_ref(&orphaned),
+        );
         // The state the dead operation left behind: the directory exists, but
         // no `directory-0.applied.metadata.json` ever got written.
         fs::create_dir_all(&orphaned).unwrap();
@@ -2167,8 +2176,11 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude/agents");
 
-        let (delegate, operation_id) =
-            missing_directory_fixture(home.path(), lifecycle.path(), &[orphaned.clone()]);
+        let (delegate, operation_id) = missing_directory_fixture(
+            home.path(),
+            lifecycle.path(),
+            std::slice::from_ref(&orphaned),
+        );
         fs::create_dir_all(&orphaned).unwrap();
         fs::write(orphaned.join("someone-elses.md"), b"keep me").unwrap();
 
