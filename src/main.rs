@@ -646,7 +646,7 @@ fn validate_host_bundle_options(
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
     // (rather than via a global clap `requires = "component"`) keeps the flags
     // from leaking a spurious `--component` requirement onto unrelated verbs
-    // such as `branch gc` and `migrate registry-gc`.
+    // such as `branch gc` and `migrate storage-report`.
     if !matches!(family, CommandFamily::Agent)
         && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
     {

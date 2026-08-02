@@ -13,27 +13,20 @@ use crate::tracedecay::current_timestamp;
 use self::legacy_reclamation::LegacyReclamationAuthorization;
 use super::super::types::OwnerKey;
 use super::super::{
-    MemoryV2Executor, OPERATION, canonical_replay, current_fact_state, db_error, db_message,
-    load_legacy_entity_ids, optional_i64, optional_string, owner_key, row_exists, validate_scope,
-    validate_v1_compatibility_source,
+    MemoryV2Executor, current_fact_state, db_error, db_message, load_legacy_entity_ids,
+    optional_i64, owner_key, row_exists, validate_scope, validate_v1_compatibility_source,
 };
 #[cfg(test)]
 use super::super::{begin, finish_transaction};
-use super::lineage::insert_event;
+use super::insert_event;
 
-/// Why a fact's payload is being purged. The variant, not an incidental
-/// `Option`, decides whether the legacy compatibility row may be reclaimed.
+/// A live purge that also reclaims the legacy compatibility row. It carries the
+/// lineage CAS expectation and requires a verified completed backfill; the
+/// backfill's tombstone-replay intent disappeared with the backfill itself.
 #[derive(Clone, Copy)]
-pub(in crate::db::memory_v2) enum PurgeIntent<'a> {
-    /// Backfill replaying a historical legacy tombstone. Backfill has not yet
-    /// proven the payload was copied, so the legacy row is always retained.
-    ReplayLegacyTombstone,
-    /// Live purge that also reclaims the legacy compatibility row. Carries the
-    /// lineage CAS expectation and requires a verified completed backfill.
-    ReclaimLegacyPayload {
-        expected_last_event_id: &'a FactEventId,
-        actor: Option<&'a ActorId>,
-    },
+pub(in crate::db::memory_v2) struct PurgeIntent<'a> {
+    expected_last_event_id: &'a FactEventId,
+    actor: Option<&'a ActorId>,
 }
 
 /// Type-level authority to destroy legacy compatibility payloads.
@@ -120,7 +113,7 @@ pub(in crate::db) async fn purge_memory_v2_fact(
         &owner_key,
         source_store_id,
         fact_id,
-        PurgeIntent::ReclaimLegacyPayload {
+        PurgeIntent {
             expected_last_event_id,
             actor: None,
         },
@@ -160,7 +153,7 @@ pub(in crate::db) async fn purge_memory_v2_fact_in_transaction(
         &owner_key,
         source_store_id,
         fact_id,
-        PurgeIntent::ReclaimLegacyPayload {
+        PurgeIntent {
             expected_last_event_id,
             actor,
         },
@@ -175,70 +168,6 @@ pub(in crate::db) async fn purge_memory_v2_fact_in_transaction(
         occurred_at,
         payload_purged,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::db::memory_v2) async fn quarantine_fact(
-    conn: &impl MemoryV2Executor,
-    owner: &FactOwnerV1,
-    owner_key: &OwnerKey,
-    source_store_id: &SourceStoreId,
-    fact_id: &FactId,
-    legacy_fact_id: i64,
-    reason: &'static str,
-    recorded_at: i64,
-) -> Result<()> {
-    insert_quarantine(
-        conn,
-        owner_key,
-        source_store_id,
-        "memory_facts",
-        legacy_fact_id,
-        reason,
-        recorded_at,
-    )
-    .await?;
-    purge_payload_rows(conn, owner_key, fact_id).await?;
-    let previous = current_fact_state(conn, owner_key, fact_id).await?.access;
-    let event_id =
-        if previous != PayloadAccessState::Deleted && previous != PayloadAccessState::Quarantined {
-            let event = FactLineageEventV1::new(
-                fact_id.clone(),
-                owner.clone(),
-                FactLineageEventKindV1::PayloadAccessChanged {
-                    previous,
-                    current: PayloadAccessState::Quarantined,
-                },
-                UtcMicros(recorded_at),
-                None,
-            )
-            .map_err(|_| db_message(OPERATION, "typed quarantine event construction failed"))?;
-            insert_event(conn, owner_key, &event, recorded_at).await?;
-            Some(event.event_id().clone())
-        } else {
-            None
-        };
-    // A failed import is evidence, not authorization to destroy its only raw
-    // payload. Keep the legacy row intact so an operator can repair or export
-    // it; only the rejected V2 projection is made inaccessible.
-    if let Some(event_id) = event_id {
-        conn.execute(
-            "UPDATE memory_v2_current_facts SET
-                payload_access = 'quarantined', active_assertion_id = NULL,
-                last_event_id = ?1, updated_at = MAX(updated_at, ?2)
-             WHERE fact_id = ?3 AND owner_kind = ?4 AND project_id = ?5",
-            params![
-                event_id.as_str(),
-                recorded_at,
-                fact_id.as_str(),
-                owner_key.kind,
-                owner_key.project_id.as_str()
-            ],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    }
-    Ok(())
 }
 
 pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
@@ -295,20 +224,15 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     // Reclaiming the legacy row is the only step here that can destroy the last
     // surviving copy of a payload. Mint its authorization before any mutation
     // so the cutover gate is proven up front and cannot be routed around.
-    let reclamation = match (intent, legacy_fact_id) {
-        (PurgeIntent::ReclaimLegacyPayload { .. }, Some(legacy_fact_id)) => Some((
+    let reclamation = match legacy_fact_id {
+        Some(legacy_fact_id) => Some((
             LegacyReclamationAuthorization::authorize(conn, owner_key, source_store_id).await?,
             legacy_fact_id,
         )),
-        _ => None,
+        None => None,
     };
     let current = current_fact_state(conn, owner_key, fact_id).await?;
-    if let PurgeIntent::ReclaimLegacyPayload {
-        expected_last_event_id,
-        ..
-    } = intent
-        && expected_last_event_id != &current.last_event_id
-    {
+    if intent.expected_last_event_id != &current.last_event_id {
         return Err(db_message(
             "memory_v2_purge",
             "fact lineage changed before payload purge",
@@ -317,10 +241,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     if current.access == PayloadAccessState::Deleted {
         return Ok(false);
     }
-    let actor = match intent {
-        PurgeIntent::ReplayLegacyTombstone => None,
-        PurgeIntent::ReclaimLegacyPayload { actor, .. } => actor.cloned(),
-    };
+    let actor = intent.actor.cloned();
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -339,9 +260,8 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     })?;
     insert_event(conn, owner_key, &event, occurred_at.0).await?;
     purge_payload_rows(conn, owner_key, fact_id).await?;
-    // Backfill replays historical tombstones before snapshot facts. It must
-    // never erase the source snapshot while migration is still proving
-    // completeness, so only an authorized live reclamation reaches this.
+    // Only an authorized live reclamation — one that minted the
+    // `cutover_complete` token above — reaches this destructive step.
     if let Some((authorization, legacy_fact_id)) = &reclamation {
         purge_legacy_fact(conn, *legacy_fact_id, authorization).await?;
     }
@@ -363,14 +283,14 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     Ok(true)
 }
 
-pub(in crate::db::memory_v2) async fn purge_payload_rows(
+async fn purge_payload_rows(
     conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
     fact_id: &FactId,
 ) -> Result<()> {
-    // Backfill quarantine reaches this helper without passing through the
-    // public purge entrypoint, so set the deletion policy at every destructive
-    // payload path.
+    // Transactional callers reach this helper without passing through the
+    // connection-level purge entrypoint, so set the deletion policy at every
+    // destructive payload path.
     conn.execute_batch("PRAGMA secure_delete = ON")
         .await
         .map_err(|error| db_error("memory_v2_purge", error))?;
@@ -442,51 +362,5 @@ async fn purge_legacy_fact(
         .await
         .map_err(|error| db_error("memory_v2_purge", error))?;
     }
-    Ok(())
-}
-
-pub(in crate::db::memory_v2) async fn insert_quarantine(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    source_store_id: &SourceStoreId,
-    source_table: &'static str,
-    source_row_id: i64,
-    reason_code: &'static str,
-    recorded_at: i64,
-) -> Result<()> {
-    if let Some(existing) = optional_string(
-        conn,
-        "SELECT reason_code FROM memory_v2_legacy_quarantine
-         WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
-           AND source_table = ?4 AND source_row_id = ?5",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            source_store_id.as_str(),
-            source_table,
-            source_row_id
-        ],
-    )
-    .await?
-    {
-        return canonical_replay(existing, reason_code, "legacy quarantine record");
-    }
-    conn.execute(
-        "INSERT INTO memory_v2_legacy_quarantine(
-            owner_kind, project_id, source_store_id, source_table,
-            source_row_id, reason_code, recorded_at
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            source_store_id.as_str(),
-            source_table,
-            source_row_id,
-            reason_code,
-            recorded_at
-        ],
-    )
-    .await
-    .map_err(|error| db_error(OPERATION, error))?;
     Ok(())
 }
