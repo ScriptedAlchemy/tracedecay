@@ -280,7 +280,7 @@ impl RegisteredGlobalDb {
         let snapshot = self.read_snapshot().await.ok()?;
         let mut rows = snapshot
             .query(
-                "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
+                "SELECT provider, message_id, session_id, role, timestamp, ordinal, snippet_text, kind,
                         model, tool_names, source_path, source_offset, metadata_json
                  FROM session_messages WHERE provider = ?1 AND message_id = ?2",
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
@@ -317,7 +317,8 @@ impl RegisteredGlobalDb {
                 s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
                 s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
                 s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
+                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal,
+                m.snippet_text,
                 m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json,
                 bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0) AS rank
              FROM session_messages_fts
@@ -339,7 +340,7 @@ impl RegisteredGlobalDb {
             query_params.push(Value::Text(term.clone()));
             let _ = write!(
                 sql,
-                " AND instr(lower(m.text), ?{}) > 0",
+                " AND instr(lower(m.index_text), ?{}) > 0",
                 query_params.len()
             );
         }
