@@ -4536,9 +4536,8 @@ mod tests {
                 &mut registration,
             )
             .expect_err("an unowned file on the artifact path must refuse the apply");
-        assert_ne!(
-            error,
-            HostBundleError::StalePreview,
+        assert!(
+            !matches!(error, HostBundleError::StalePreview(_)),
             "a standing refusal must not be laundered into a retryable staleness report"
         );
         assert_eq!(error, HostBundleError::OwnershipConflict);
@@ -4601,9 +4600,11 @@ mod tests {
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
 
-        assert_eq!(
-            registration.apply(&component_set.component_set, &request),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            matches!(
+                registration.apply(&component_set.component_set, &request),
+                Err(HostBundleError::StalePreview(_))
+            ),
             "a foreign mid-transaction edit must still abort the apply"
         );
     }
@@ -4677,14 +4678,12 @@ mod tests {
             registration.apply(&component_set.component_set, &request)
         };
 
-        assert_ne!(
-            drive(true),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            !matches!(drive(true), Err(HostBundleError::StalePreview(_))),
             "the transaction's own declared write must not read back as drift"
         );
-        assert_eq!(
-            drive(false),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            matches!(drive(false), Err(HostBundleError::StalePreview(_))),
             "the same write is foreign drift when the transaction did not declare it"
         );
     }
@@ -5563,10 +5562,10 @@ mod tests {
         let registration_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
-        assert_eq!(
+        assert!(matches!(
             registration.stage(&component_set.component_set, &request),
-            Err(HostBundleError::StalePreview)
-        );
+            Err(HostBundleError::StalePreview(_))
+        ));
         registration
             .rollback(&component_set.component_set, &request)
             .unwrap();
