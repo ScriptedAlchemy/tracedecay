@@ -35,9 +35,6 @@ struct ExtractionState {
     access_specifier: Visibility,
     /// Tracks class nesting depth (for inner classes).
     class_depth: usize,
-    /// True if currently inside a `class` (default private), false if inside a `struct` (default public).
-    #[allow(dead_code)]
-    in_class_default_private: bool,
 }
 
 impl ExtractionState {
@@ -57,7 +54,6 @@ impl ExtractionState {
             timestamp,
             access_specifier: Visibility::Private,
             class_depth: 0,
-            in_class_default_private: true,
         }
     }
 
@@ -914,7 +910,6 @@ impl CppExtractor {
 
         // Save and set access specifier state
         let old_access = state.access_specifier.clone();
-        let old_in_class_default = state.in_class_default_private;
         let old_depth = state.class_depth;
 
         state.access_specifier = if default_private {
@@ -922,7 +917,6 @@ impl CppExtractor {
         } else {
             Visibility::Pub
         };
-        state.in_class_default_private = default_private;
         state.class_depth += 1;
 
         // Walk the class body
@@ -934,7 +928,6 @@ impl CppExtractor {
 
         // Restore state
         state.access_specifier = old_access;
-        state.in_class_default_private = old_in_class_default;
         state.class_depth = old_depth;
     }
 
@@ -996,11 +989,9 @@ impl CppExtractor {
 
         // Save and set access specifier state
         let old_access = state.access_specifier.clone();
-        let old_in_class_default = state.in_class_default_private;
         let old_depth = state.class_depth;
 
         state.access_specifier = Visibility::Pub;
-        state.in_class_default_private = false;
         state.class_depth += 1;
 
         // Walk the struct body
@@ -1012,7 +1003,6 @@ impl CppExtractor {
 
         // Restore state
         state.access_specifier = old_access;
-        state.in_class_default_private = old_in_class_default;
         state.class_depth = old_depth;
     }
 
