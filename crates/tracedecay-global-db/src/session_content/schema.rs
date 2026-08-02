@@ -70,6 +70,11 @@ pub const SESSION_CONTENT_SCHEMA_DDL: &str = r#"
         columnsize=0
     );
 
+    CREATE TRIGGER session_content_objects_immutable_update
+    BEFORE UPDATE ON session_content_objects
+    BEGIN
+        SELECT RAISE(ABORT, 'session content objects are immutable');
+    END;
     CREATE TRIGGER session_content_references_immutable_update
     BEFORE UPDATE ON session_content_references
     BEGIN
@@ -128,10 +133,18 @@ pub async fn validate_session_content_schema(conn: &impl QueryExecutor) -> Resul
     ) {
         return Err(unsupported_session_content_schema("session_content_fts"));
     }
-    for trigger in ["session_content_references_immutable_update"] {
+    for (trigger, message) in [
+        (
+            "session_content_objects_immutable_update",
+            "raise(abort,'sessioncontentobjectsareimmutable')",
+        ),
+        (
+            "session_content_references_immutable_update",
+            "raise(abort,'sessioncontentreferencesareimmutable')",
+        ),
+    ] {
         let trigger_sql = schema_sql(conn, trigger).await?;
-        if !normalized(&trigger_sql).contains("raise(abort,'sessioncontentreferencesareimmutable')")
-        {
+        if !normalized(&trigger_sql).contains(message) {
             return Err(unsupported_session_content_schema(trigger));
         }
     }
@@ -299,6 +312,18 @@ mod tests {
             .await
             .is_err(),
             "an authorized content reference must not be mutable"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE session_content_objects
+                 SET inline_bytes = X'7265706c61636564'
+                 WHERE content_digest =
+                    'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+                (),
+            )
+            .await
+            .is_err(),
+            "canonical content bytes must not be mutable"
         );
     }
 

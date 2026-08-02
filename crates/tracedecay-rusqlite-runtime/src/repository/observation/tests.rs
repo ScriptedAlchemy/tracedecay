@@ -113,8 +113,24 @@ fn connection() -> Connection {
                     observation_id TEXT NOT NULL UNIQUE,
                     payload_digest TEXT NOT NULL,
                     receipt_id TEXT NOT NULL,
-                    observation_json TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
                     committed_cursor_json TEXT NOT NULL
+                 );
+                 CREATE TABLE session_content_objects (
+                    content_digest TEXT PRIMARY KEY,
+                    inline_bytes BLOB,
+                    durable_file_locator TEXT,
+                    byte_count INTEGER NOT NULL,
+                    char_count INTEGER NOT NULL
+                 );
+                 CREATE TABLE session_content_references (
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    content_kind TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    sanitization_receipt_id TEXT,
+                    retrieval_anchor_id TEXT,
+                    PRIMARY KEY(owner_kind, owner_id)
                  );
                  CREATE TABLE source_cursors (
                     source_json TEXT NOT NULL,
@@ -212,6 +228,17 @@ fn anchored_write_persists_all_authority_rows_atomically() {
 
     execute(&mut connection, &write).unwrap();
 
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_xinfo('observations')
+                 WHERE name = 'observation_json'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
     for table in [
         "observations",
         "sanitization_receipts",
@@ -221,6 +248,8 @@ fn anchored_write_persists_all_authority_rows_atomically() {
         "observation_repository_provenance",
         "source_cursors",
         "projection_queue",
+        "session_content_objects",
+        "session_content_references",
     ] {
         let count = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -322,6 +351,26 @@ fn exact_replay_is_a_no_op_after_the_source_cursor_advanced() {
         connection
             .query_row("SELECT COUNT(*) FROM projection_queue", [], |row| row
                 .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM session_content_objects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_content_references
+                 WHERE owner_kind = 'projection'
+                   AND content_kind = 'observation_json'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
         1
     );
@@ -690,4 +739,32 @@ fn point_and_replay_reads_reject_incomplete_observation_authority() {
                 .contains("observation retrieval anchor is missing")
         );
     }
+}
+
+#[test]
+fn point_read_rejects_missing_projection_content_authority() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    connection
+        .execute(
+            "DELETE FROM session_content_references
+             WHERE owner_kind = 'projection'",
+            [],
+        )
+        .unwrap();
+
+    let error = read(
+        &mut connection,
+        &ObservationReadOperationV1::Observation {
+            observation_id: write.observation().observation_id().clone(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("observation content authorization is missing")
+    );
 }
