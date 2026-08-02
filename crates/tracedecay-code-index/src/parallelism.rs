@@ -99,17 +99,16 @@ pub fn clear_forced_indexing_workers_for_test() {
     FORCED_WORKERS.store(0, Ordering::Relaxed);
 }
 
-/// The process-wide indexing pool, or `None` when the host is narrow enough
-/// that the caller should just run inline.
+/// The process-wide indexing pool. Always built, even at width 1: the pool
+/// is what CONFINES indexing to its reservation. Without it, the nested
+/// chunk-level `par_iter` sweeps would land on rayon's global pool, which is
+/// sized to every logical CPU — the reservation would leak exactly where the
+/// work is heaviest.
 fn indexing_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let workers = configured_indexing_workers();
-        if workers < 2 {
-            return None;
-        }
         rayon::ThreadPoolBuilder::new()
-            .num_threads(workers)
+            .num_threads(configured_indexing_workers())
             .thread_name(|index| format!("tracedecay-index-{index}"))
             .build()
             .ok()
@@ -121,8 +120,8 @@ fn indexing_pool() -> Option<&'static rayon::ThreadPool> {
 ///
 /// Nested calls (chunking fanning out inside a per-file extraction) stay on
 /// the same pool, so the reservation holds for the whole pipeline rather than
-/// being multiplied by pipeline depth. Falls back to running inline when no
-/// pool exists.
+/// being multiplied by pipeline depth. Falls back to running inline only if
+/// the pool could not be built at all.
 pub fn install<R, F>(operation: F) -> R
 where
     F: FnOnce() -> R + Send,
