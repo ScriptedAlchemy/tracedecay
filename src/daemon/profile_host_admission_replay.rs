@@ -42,6 +42,10 @@ type ReplayPassOverride = Arc<
         + Sync,
 >;
 
+#[cfg(test)]
+type PendingReplayCountOverride =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = usize> + Send>> + Send + Sync>;
+
 pub(super) struct ProfileHostAdmissionReplayRegistry {
     workers: Arc<tokio::sync::Mutex<HashMap<PathBuf, ReplayWorkerEntry>>>,
     bootstrap_workers:
@@ -89,6 +93,8 @@ struct ProfileHostAdmissionReplayWorker {
     cancellation: Arc<ProfileHostAdmissionCancellation>,
     #[cfg(test)]
     pass_override: Option<ReplayPassOverride>,
+    #[cfg(test)]
+    pending_count_override: Option<PendingReplayCountOverride>,
 }
 
 impl Default for ProfileHostAdmissionReplayRegistry {
@@ -168,6 +174,8 @@ impl ProfileHostAdmissionReplayRegistry {
             Arc::clone(&self.cancellation),
             #[cfg(test)]
             None,
+            #[cfg(test)]
+            None,
         ));
         self.ensure_worker(broker_path, worker).await;
     }
@@ -185,6 +193,7 @@ impl ProfileHostAdmissionReplayRegistry {
             profile_root,
             Arc::clone(&self.cancellation),
             Some(pass_override),
+            None,
         ));
         self.ensure_worker(broker_path, worker).await;
     }
@@ -266,18 +275,25 @@ impl ProfileHostAdmissionReplayRegistry {
         };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if worker.is_idle().await {
-                return true;
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
+            if tokio::time::Instant::now() >= deadline {
                 return false;
             }
+            let idle_notified = worker.idle.notified();
+            tokio::pin!(idle_notified);
+            idle_notified.as_mut().enable();
+            let idle = tokio::select! {
+                () = self.cancellation.wait() => return false,
+                () = tokio::time::sleep_until(deadline) => return false,
+                () = idle_notified.as_mut() => continue,
+                idle = worker.is_idle() => idle,
+            };
+            if idle {
+                return true;
+            }
             tokio::select! {
-                () = worker.idle.notified() => {}
-                () = tokio::time::sleep(remaining) => {
-                    return worker.is_idle().await;
-                }
+                () = self.cancellation.wait() => return false,
+                () = idle_notified.as_mut() => {}
+                () = tokio::time::sleep_until(deadline) => return false,
             }
         }
     }
@@ -495,6 +511,7 @@ impl ProfileHostAdmissionReplayWorker {
         profile_root: &Path,
         cancellation: Arc<ProfileHostAdmissionCancellation>,
         #[cfg(test)] pass_override: Option<ReplayPassOverride>,
+        #[cfg(test)] pending_count_override: Option<PendingReplayCountOverride>,
     ) -> Self {
         Self {
             broker: Arc::clone(broker),
@@ -508,6 +525,8 @@ impl ProfileHostAdmissionReplayWorker {
             cancellation,
             #[cfg(test)]
             pass_override,
+            #[cfg(test)]
+            pending_count_override,
         }
     }
 
@@ -517,32 +536,80 @@ impl ProfileHostAdmissionReplayWorker {
     }
 
     async fn is_idle(&self) -> bool {
-        !self.busy.load(Ordering::Acquire)
-            && !self.dirty.load(Ordering::Acquire)
-            && !self.broker.has_pending_replay().await
+        if self.busy.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) {
+            return false;
+        }
+        self.has_pending_replay_or_cancelled().await == Some(false)
     }
 
     async fn wait_for_cancellation(&self) {
         self.cancellation.wait().await;
     }
 
+    async fn pending_replay_count_or_cancelled(&self) -> Option<usize> {
+        #[cfg(test)]
+        if let Some(pending_count_override) = &self.pending_count_override {
+            return tokio::select! {
+                () = self.wait_for_cancellation() => None,
+                pending = pending_count_override() => Some(pending),
+            };
+        }
+        tokio::select! {
+            () = self.wait_for_cancellation() => None,
+            pending = self.broker.pending_replay_count() => Some(pending.unwrap_or(0)),
+        }
+    }
+
+    async fn has_pending_replay_or_cancelled(&self) -> Option<bool> {
+        self.pending_replay_count_or_cancelled()
+            .await
+            .map(|pending| pending > 0)
+    }
+
+    fn mark_idle(&self) {
+        self.busy.store(false, Ordering::Release);
+        self.idle.notify_waiters();
+    }
+
     async fn run(&self, idle_eviction_after: Duration) {
         let mut consecutive_retryable = 0u32;
         loop {
             if self.cancellation.cancelled.load(Ordering::Acquire) {
+                self.mark_idle();
                 return;
             }
             // Drain work that arrived before this wait (broker create / admit kicks).
-            while self.dirty.load(Ordering::Acquire) || self.broker.has_pending_replay().await {
+            loop {
+                let has_work = if self.dirty.load(Ordering::Acquire) {
+                    true
+                } else {
+                    let Some(has_pending) = self.has_pending_replay_or_cancelled().await else {
+                        self.mark_idle();
+                        return;
+                    };
+                    has_pending
+                };
+                if !has_work {
+                    break;
+                }
                 let _ = self.dirty.swap(false, Ordering::AcqRel);
                 self.busy.store(true, Ordering::Release);
                 self.pass_count.fetch_add(1, Ordering::AcqRel);
-                let pending_before = self.broker.pending_replay_count().await.unwrap_or(0);
+                let Some(pending_before) = self.pending_replay_count_or_cancelled().await else {
+                    self.mark_idle();
+                    return;
+                };
                 let outcome = tokio::select! {
-                    () = self.wait_for_cancellation() => return,
+                    () = self.wait_for_cancellation() => {
+                        self.mark_idle();
+                        return;
+                    },
                     outcome = self.run_pass() => outcome,
                 };
-                let pending_after = self.broker.pending_replay_count().await.unwrap_or(0);
+                let Some(pending_after) = self.pending_replay_count_or_cancelled().await else {
+                    self.mark_idle();
+                    return;
+                };
                 match classify_replay_pass(pending_before, pending_after, &outcome) {
                     ReplayPassDecision::ProgressPending => {
                         consecutive_retryable = 0;
@@ -553,7 +620,10 @@ impl ProfileHostAdmissionReplayWorker {
                         self.backoff_count.fetch_add(1, Ordering::AcqRel);
                         self.dirty.store(true, Ordering::Release);
                         tokio::select! {
-                            () = self.wait_for_cancellation() => return,
+                            () = self.wait_for_cancellation() => {
+                                self.mark_idle();
+                                return;
+                            },
                             () = tokio::time::sleep(profile_replay_backoff(consecutive_retryable)) => {}
                         }
                     }
@@ -577,17 +647,18 @@ impl ProfileHostAdmissionReplayWorker {
                     }
                 }
             }
-            self.busy.store(false, Ordering::Release);
-            self.idle.notify_waiters();
+            self.mark_idle();
             tokio::select! {
                 () = self.wait_for_cancellation() => return,
                 () = self.wake.notified() => {}
                 () = self.broker.wait_for_replay_request() => {}
                 () = tokio::time::sleep(idle_eviction_after) => {
+                    let Some(has_pending) = self.has_pending_replay_or_cancelled().await else {
+                        return;
+                    };
                     if !self.dirty.load(Ordering::Acquire)
-                        && !self.broker.has_pending_replay().await
-                        && Arc::strong_count(&self.broker) <= 2
-                    {
+                        && !has_pending
+                        && Arc::strong_count(&self.broker) <= 2 {
                         return;
                     }
                 }
@@ -988,6 +1059,138 @@ mod tests {
             .expect("shutdown must cancel and join replay workers");
 
         assert_eq!(registry.worker_count().await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_probe_deadline_and_shutdown_are_cancellable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+                .unwrap();
+        let broker =
+            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let probe_started = Arc::new(Notify::new());
+        let override_started = Arc::clone(&probe_started);
+        let pending_count_override: PendingReplayCountOverride = Arc::new(move || {
+            let started = Arc::clone(&override_started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<usize>().await
+            })
+        });
+        let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
+            &broker,
+            &profile_root,
+            Arc::clone(&registry.cancellation),
+            None,
+            Some(pending_count_override),
+        ));
+        let task_worker = Arc::clone(&worker);
+        let task = tokio::spawn(async move {
+            task_worker.run(Duration::from_secs(30)).await;
+        });
+        registry.workers.lock().await.insert(
+            db_path.clone(),
+            ReplayWorkerEntry {
+                worker: Arc::clone(&worker),
+                task,
+            },
+        );
+        probe_started.notified().await;
+
+        let started = Instant::now();
+        assert!(
+            !registry
+                .wait_idle(&db_path, Duration::from_millis(20))
+                .await,
+            "blocked pending probe must respect the caller's replay grace"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "blocked pending probe exceeded its bounded grace"
+        );
+        tokio::time::timeout(Duration::from_secs(1), registry.shutdown())
+            .await
+            .expect("shutdown must cancel and join a blocked pending probe");
+        assert_eq!(registry.worker_count().await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_notification_during_probe_is_not_lost() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+                .unwrap();
+        let broker =
+            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+        let registry = Arc::new(ProfileHostAdmissionReplayRegistry::default());
+        let probe_started = Arc::new(Notify::new());
+        let release_probe = Arc::new(Notify::new());
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let pending_count_override: PendingReplayCountOverride = {
+            let probe_started = Arc::clone(&probe_started);
+            let release_probe = Arc::clone(&release_probe);
+            let probe_calls = Arc::clone(&probe_calls);
+            Arc::new(move || {
+                let probe_started = Arc::clone(&probe_started);
+                let release_probe = Arc::clone(&release_probe);
+                let probe_calls = Arc::clone(&probe_calls);
+                Box::pin(async move {
+                    if probe_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                        probe_started.notify_one();
+                        release_probe.notified().await;
+                        1
+                    } else {
+                        0
+                    }
+                })
+            })
+        };
+        let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
+            &broker,
+            &profile_root,
+            Arc::clone(&registry.cancellation),
+            None,
+            Some(pending_count_override),
+        ));
+        let cancellation = Arc::clone(&registry.cancellation);
+        let task = tokio::spawn(async move {
+            cancellation.wait().await;
+        });
+        registry.workers.lock().await.insert(
+            db_path.clone(),
+            ReplayWorkerEntry {
+                worker: Arc::clone(&worker),
+                task,
+            },
+        );
+
+        let wait_registry = Arc::clone(&registry);
+        let wait_db_path = db_path.clone();
+        let wait = tokio::spawn(async move {
+            wait_registry
+                .wait_idle(&wait_db_path, Duration::from_secs(1))
+                .await
+        });
+        probe_started.notified().await;
+        worker.mark_idle();
+        release_probe.notify_one();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), wait)
+                .await
+                .expect("idle notification must avoid the full grace")
+                .expect("wait task"),
+            "a fresh idle probe must observe the completed replay"
+        );
+        registry.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
