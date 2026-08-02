@@ -143,16 +143,16 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn existing_profile_memory_is_migrated_before_exposure() {
+async fn existing_profile_memory_is_schema_verified_before_exposure() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
-    crate::db::migrations::migrate_test_connection_to_version(&seed, 22)
+    crate::db::migrations::create_schema_connection(&seed)
         .await
-        .expect("migrate profile memory fixture through production v22");
+        .expect("create the profile memory fixture at the production schema");
     drop(seed);
 
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -161,7 +161,7 @@ async fn existing_profile_memory_is_migrated_before_exposure() {
     let database = registry
         .profile_memory()
         .await
-        .expect("migrated profile memory");
+        .expect("mounted profile memory");
     let mut rows = database
         .conn()
         .query(
@@ -170,7 +170,7 @@ async fn existing_profile_memory_is_migrated_before_exposure() {
             (),
         )
         .await
-        .expect("query migrated profile memory schema");
+        .expect("query mounted profile memory schema");
     let table_count: i64 = rows
         .next()
         .await

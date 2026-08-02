@@ -18,22 +18,22 @@ use crate::types::*;
 
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
-const MIGRATION_REINDEX_STATE_KEY: &str = "migration_reindex_state_v1";
-const MIGRATION_REINDEX_CHECKPOINT_DIR: &str = "migration-reindex-checkpoint-v1";
-const MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE: usize = 1_024;
-static MIGRATION_REINDEX_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
+const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";
+const GRAPH_REBUILD_CHECKPOINT_DIR: &str = "graph-rebuild-checkpoint-v1";
+const GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE: usize = 1_024;
+static GRAPH_REBUILD_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 #[cfg(any(test, feature = "test-transport"))]
-static MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES: AtomicUsize = AtomicUsize::new(0);
+static GRAPH_REBUILD_TEST_ABORT_AFTER_BATCHES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "test-transport"))]
-static MIGRATION_REINDEX_TEST_EXTRACTIONS: AtomicUsize = AtomicUsize::new(0);
+static GRAPH_REBUILD_TEST_EXTRACTIONS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(test, feature = "test-transport"))]
-static MIGRATION_REINDEX_TEST_HOLD_LEASE_MS: AtomicU64 = AtomicU64::new(0);
+static GRAPH_REBUILD_TEST_HOLD_LEASE_MS: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(test, feature = "test-transport"))]
-static MIGRATION_REINDEX_TEST_DISABLE_SPAWN: AtomicBool = AtomicBool::new(false);
+static GRAPH_REBUILD_TEST_DISABLE_SPAWN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct MigrationReindexCheckpointEntryV1 {
+struct GraphRebuildCheckpointEntryV1 {
     file_path: String,
     result: ExtractionResult,
     content_hash: String,
@@ -41,7 +41,7 @@ struct MigrationReindexCheckpointEntryV1 {
     modified_at: i64,
 }
 
-impl From<ExtractTuple> for MigrationReindexCheckpointEntryV1 {
+impl From<ExtractTuple> for GraphRebuildCheckpointEntryV1 {
     fn from((file_path, result, content_hash, size, modified_at): ExtractTuple) -> Self {
         Self {
             file_path,
@@ -53,7 +53,7 @@ impl From<ExtractTuple> for MigrationReindexCheckpointEntryV1 {
     }
 }
 
-impl MigrationReindexCheckpointEntryV1 {
+impl GraphRebuildCheckpointEntryV1 {
     fn into_extraction(self) -> ExtractTuple {
         (
             self.file_path,
@@ -66,21 +66,21 @@ impl MigrationReindexCheckpointEntryV1 {
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct MigrationReindexCheckpointBatchV1 {
+struct GraphRebuildCheckpointBatchV1 {
     schema_version: u32,
-    entries: Vec<MigrationReindexCheckpointEntryV1>,
+    entries: Vec<GraphRebuildCheckpointEntryV1>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MigrationReindexAvailabilityV1 {
+pub enum GraphRebuildAvailabilityV1 {
     Stale,
     Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum MigrationReindexStatusV1 {
+pub enum GraphRebuildStatusV1 {
     Current {
         schema_version: u32,
         completed_at: i64,
@@ -89,46 +89,46 @@ pub enum MigrationReindexStatusV1 {
         schema_version: u32,
         completed_files: u64,
         total_files: Option<u64>,
-        availability: MigrationReindexAvailabilityV1,
+        availability: GraphRebuildAvailabilityV1,
     },
     Failed {
         schema_version: u32,
-        availability: MigrationReindexAvailabilityV1,
+        availability: GraphRebuildAvailabilityV1,
         retryable: bool,
         reason: String,
     },
 }
 
-fn should_schedule_migration_reindex(status: &MigrationReindexStatusV1) -> bool {
+fn should_schedule_graph_rebuild(status: &GraphRebuildStatusV1) -> bool {
     matches!(
         status,
-        MigrationReindexStatusV1::Indexing { .. }
-            | MigrationReindexStatusV1::Failed {
+        GraphRebuildStatusV1::Indexing { .. }
+            | GraphRebuildStatusV1::Failed {
                 retryable: true,
                 ..
             }
     )
 }
 
-struct MigrationReindexWorkerRegistration {
+struct GraphRebuildWorkerRegistration {
     key: PathBuf,
 }
 
-impl Drop for MigrationReindexWorkerRegistration {
+impl Drop for GraphRebuildWorkerRegistration {
     fn drop(&mut self) {
-        MIGRATION_REINDEX_WORKERS
+        GRAPH_REBUILD_WORKERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.key);
     }
 }
 
-fn migration_reindex_checkpoint_error(
+fn graph_rebuild_checkpoint_error(
     operation: &str,
     error: impl std::fmt::Display,
 ) -> TraceDecayError {
     TraceDecayError::Database {
-        operation: format!("{operation} migration re-index checkpoint"),
+        operation: format!("{operation} graph rebuild checkpoint"),
         message: error.to_string(),
     }
 }
@@ -353,37 +353,42 @@ fn should_use_subprocess() -> bool {
 impl TraceDecay {
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    pub fn configure_migration_reindex_for_test(
+    pub fn configure_graph_rebuild_for_test(
         abort_after_batches: usize,
         hold_lease_ms: u64,
         disable_spawn: bool,
     ) {
-        MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.store(abort_after_batches, Ordering::SeqCst);
-        MIGRATION_REINDEX_TEST_HOLD_LEASE_MS.store(hold_lease_ms, Ordering::SeqCst);
-        MIGRATION_REINDEX_TEST_DISABLE_SPAWN.store(disable_spawn, Ordering::SeqCst);
-        MIGRATION_REINDEX_TEST_EXTRACTIONS.store(0, Ordering::SeqCst);
+        GRAPH_REBUILD_TEST_ABORT_AFTER_BATCHES.store(abort_after_batches, Ordering::SeqCst);
+        GRAPH_REBUILD_TEST_HOLD_LEASE_MS.store(hold_lease_ms, Ordering::SeqCst);
+        GRAPH_REBUILD_TEST_DISABLE_SPAWN.store(disable_spawn, Ordering::SeqCst);
+        GRAPH_REBUILD_TEST_EXTRACTIONS.store(0, Ordering::SeqCst);
     }
 
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    pub fn migration_reindex_extractions_for_test() -> usize {
-        MIGRATION_REINDEX_TEST_EXTRACTIONS.load(Ordering::SeqCst)
+    pub fn graph_rebuild_extractions_for_test() -> usize {
+        GRAPH_REBUILD_TEST_EXTRACTIONS.load(Ordering::SeqCst)
     }
 
-    pub async fn migration_reindex_status(&self) -> Result<MigrationReindexStatusV1> {
-        let Some(encoded) = self.db.get_metadata(MIGRATION_REINDEX_STATE_KEY).await? else {
+    /// Reports whether the published graph generation matches this binary.
+    ///
+    /// A store whose graph was never extracted by this binary — a freshly
+    /// created one, or one whose generation stamp is absent or stale — reports
+    /// `Indexing` so the background rebuild republishes it.
+    pub async fn graph_rebuild_status(&self) -> Result<GraphRebuildStatusV1> {
+        let Some(encoded) = self.db.get_metadata(GRAPH_REBUILD_STATE_KEY).await? else {
             let generation_is_current = self
                 .db
                 .get_metadata(crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY)
                 .await?
                 .and_then(|value| value.parse::<u32>().ok())
-                == Some(crate::db::migrations::LATEST_VERSION);
+                == Some(crate::db::migrations::SCHEMA_VERSION);
             if !generation_is_current {
-                return Ok(MigrationReindexStatusV1::Indexing {
-                    schema_version: crate::db::migrations::LATEST_VERSION,
+                return Ok(GraphRebuildStatusV1::Indexing {
+                    schema_version: crate::db::migrations::SCHEMA_VERSION,
                     completed_files: 0,
                     total_files: None,
-                    availability: self.migration_reindex_availability().await?,
+                    availability: self.graph_rebuild_availability().await?,
                 });
             }
             let completed_at = self
@@ -392,68 +397,55 @@ impl TraceDecay {
                 .await?
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
-            return Ok(MigrationReindexStatusV1::Current {
-                schema_version: crate::db::migrations::LATEST_VERSION,
+            return Ok(GraphRebuildStatusV1::Current {
+                schema_version: crate::db::migrations::SCHEMA_VERSION,
                 completed_at,
             });
         };
         match serde_json::from_str(&encoded) {
             Ok(status) => Ok(status),
-            Err(_) => Ok(MigrationReindexStatusV1::Failed {
-                schema_version: crate::db::migrations::LATEST_VERSION,
-                availability: self.migration_reindex_availability().await?,
+            Err(_) => Ok(GraphRebuildStatusV1::Failed {
+                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                availability: self.graph_rebuild_availability().await?,
                 retryable: true,
-                reason: "stored migration re-index state is unreadable".to_owned(),
+                reason: "stored graph rebuild state is unreadable".to_owned(),
             }),
         }
     }
 
-    pub(super) async fn mark_migration_reindex_pending(&self) -> Result<()> {
-        let availability = self.migration_reindex_availability().await?;
-        self.write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
-            schema_version: crate::db::migrations::LATEST_VERSION,
-            completed_files: 0,
-            total_files: None,
-            availability,
-        })
-        .await
-    }
-
-    async fn migration_reindex_availability(&self) -> Result<MigrationReindexAvailabilityV1> {
+    async fn graph_rebuild_availability(&self) -> Result<GraphRebuildAvailabilityV1> {
         Ok(
             if self
                 .db
                 .query_scalar_i64(
-                    "inspect pre-migration graph availability",
+                    "inspect published graph availability",
                     "SELECT EXISTS(SELECT 1 FROM files LIMIT 1)",
                 )
                 .await?
                 != 0
             {
-                MigrationReindexAvailabilityV1::Stale
+                GraphRebuildAvailabilityV1::Stale
             } else {
-                MigrationReindexAvailabilityV1::Unavailable
+                GraphRebuildAvailabilityV1::Unavailable
             },
         )
     }
 
-    pub(super) async fn schedule_migration_reindex_if_needed(&self) -> Result<()> {
-        let status = self.migration_reindex_status().await?;
-        if !should_schedule_migration_reindex(&status) {
+    pub(super) async fn schedule_graph_rebuild_if_needed(&self) -> Result<()> {
+        let status = self.graph_rebuild_status().await?;
+        if !should_schedule_graph_rebuild(&status) {
             return Ok(());
         }
-        if let Err(error) = self.ensure_branch_writable("schedule migration re-index") {
-            eprintln!(
-                "[tracedecay] migration re-index remains pending on a read-only branch: {error}"
-            );
+        if let Err(error) = self.ensure_branch_writable("schedule graph rebuild") {
+            eprintln!("[tracedecay] graph rebuild remains pending on a read-only branch: {error}");
             return Ok(());
         }
         #[cfg(any(test, feature = "test-transport"))]
-        if MIGRATION_REINDEX_TEST_DISABLE_SPAWN.load(Ordering::SeqCst) {
+        if GRAPH_REBUILD_TEST_DISABLE_SPAWN.load(Ordering::SeqCst) {
             return Ok(());
         }
         let key = self.active_graph_layout.sync_lock_path.clone();
-        if !MIGRATION_REINDEX_WORKERS
+        if !GRAPH_REBUILD_WORKERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key.clone())
@@ -461,36 +453,38 @@ impl TraceDecay {
             return Ok(());
         }
         let availability = match status {
-            MigrationReindexStatusV1::Indexing { availability, .. }
-            | MigrationReindexStatusV1::Failed { availability, .. } => availability,
-            MigrationReindexStatusV1::Current { .. } => return Ok(()),
+            GraphRebuildStatusV1::Indexing { availability, .. }
+            | GraphRebuildStatusV1::Failed { availability, .. } => availability,
+            GraphRebuildStatusV1::Current { .. } => return Ok(()),
         };
         let worker = self.clone_for_background_index();
         tokio::spawn(async move {
-            let _registration = MigrationReindexWorkerRegistration { key };
-            worker.run_migration_reindex(availability).await;
+            let _registration = GraphRebuildWorkerRegistration { key };
+            worker.run_graph_rebuild(availability).await;
         });
         Ok(())
     }
 
-    async fn run_migration_reindex(self, availability: MigrationReindexAvailabilityV1) {
+    async fn run_graph_rebuild(self, availability: GraphRebuildAvailabilityV1) {
         let total = u64::try_from(self.scan_files().len()).unwrap_or(u64::MAX);
         if let Err(error) = self
-            .write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
-                schema_version: crate::db::migrations::LATEST_VERSION,
+            .write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
+                schema_version: crate::db::migrations::SCHEMA_VERSION,
                 completed_files: 0,
                 total_files: Some(total),
                 availability,
             })
             .await
         {
-            eprintln!("[tracedecay] could not checkpoint migration re-index state: {error}");
+            eprintln!("[tracedecay] could not checkpoint graph rebuild state: {error}");
             return;
         }
 
-        eprintln!("[tracedecay] schema changed — rebuilding {total} files in the background");
+        eprintln!(
+            "[tracedecay] published graph generation is not current — rebuilding {total} files in the background"
+        );
         let result = self
-            .index_all_with_migration_checkpoint(availability, |current, total, file| {
+            .index_all_with_rebuild_checkpoint(availability, |current, total, file| {
                 if current == total || current % 250 == 0 {
                     eprintln!("[tracedecay] background re-index [{current}/{total}] {file}");
                 }
@@ -498,46 +492,43 @@ impl TraceDecay {
             .await;
         match result {
             Ok(_) => {
-                eprintln!("[tracedecay] background migration re-index complete");
+                eprintln!("[tracedecay] background graph rebuild complete");
             }
             Err(TraceDecayError::SyncLock { message })
                 if message.contains(super::locking::SYNC_IN_PROGRESS_MESSAGE) =>
             {
                 eprintln!(
-                    "[tracedecay] background migration re-index deferred while another sync is active"
+                    "[tracedecay] background graph rebuild deferred while another sync is active"
                 );
             }
             Err(error) => {
-                eprintln!("[tracedecay] background migration re-index failed: {error}");
-                let status = MigrationReindexStatusV1::Failed {
-                    schema_version: crate::db::migrations::LATEST_VERSION,
+                eprintln!("[tracedecay] background graph rebuild failed: {error}");
+                let status = GraphRebuildStatusV1::Failed {
+                    schema_version: crate::db::migrations::SCHEMA_VERSION,
                     availability,
                     retryable: true,
                     reason: error.to_string(),
                 };
-                if let Err(error) = self.write_migration_reindex_status(&status).await {
-                    eprintln!("[tracedecay] could not publish migration re-index state: {error}");
+                if let Err(error) = self.write_graph_rebuild_status(&status).await {
+                    eprintln!("[tracedecay] could not publish graph rebuild state: {error}");
                 }
             }
         }
     }
 
-    async fn write_migration_reindex_status(
-        &self,
-        status: &MigrationReindexStatusV1,
-    ) -> Result<()> {
+    async fn write_graph_rebuild_status(&self, status: &GraphRebuildStatusV1) -> Result<()> {
         let encoded = serde_json::to_string(status).map_err(|error| TraceDecayError::Database {
-            operation: "write migration re-index state".to_owned(),
+            operation: "write graph rebuild state".to_owned(),
             message: error.to_string(),
         })?;
         self.db
-            .set_metadata(MIGRATION_REINDEX_STATE_KEY, &encoded)
+            .set_metadata(GRAPH_REBUILD_STATE_KEY, &encoded)
             .await
     }
 
-    async fn index_all_with_migration_checkpoint<F>(
+    async fn index_all_with_rebuild_checkpoint<F>(
         &self,
-        availability: MigrationReindexAvailabilityV1,
+        availability: GraphRebuildAvailabilityV1,
         on_file: F,
     ) -> Result<IndexResult>
     where
@@ -547,12 +538,12 @@ impl TraceDecay {
             .index_all_with_progress_verbose_mode(on_file, |_| {}, Some(availability))
             .await;
         if result.is_ok() {
-            let checkpoint_root = self.migration_reindex_checkpoint_root();
+            let checkpoint_root = self.graph_rebuild_checkpoint_root();
             match std::fs::remove_dir_all(&checkpoint_root) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => eprintln!(
-                    "[tracedecay] could not remove completed migration checkpoint '{}': {error}",
+                    "[tracedecay] could not remove completed rebuild checkpoint '{}': {error}",
                     checkpoint_root.display()
                 ),
             }
@@ -560,14 +551,14 @@ impl TraceDecay {
         result
     }
 
-    async fn migration_reindex_extractions(
+    async fn graph_rebuild_extractions(
         &self,
         files: &[String],
-        availability: MigrationReindexAvailabilityV1,
+        availability: GraphRebuildAvailabilityV1,
     ) -> Result<Vec<ExtractTuple>> {
-        let checkpoint_root = self.migration_reindex_checkpoint_root();
+        let checkpoint_root = self.graph_rebuild_checkpoint_root();
         let (mut completed, mut sequence) =
-            self.load_migration_reindex_checkpoints(&checkpoint_root)?;
+            self.load_graph_rebuild_checkpoints(&checkpoint_root)?;
         let current_files = files.iter().cloned().collect::<HashSet<_>>();
         completed.retain(|path, entry| {
             current_files.contains(path)
@@ -582,7 +573,7 @@ impl TraceDecay {
             .cloned()
             .collect::<Vec<_>>();
         for (batch_index, batch) in pending
-            .chunks(MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE)
+            .chunks(GRAPH_REBUILD_CHECKPOINT_BATCH_SIZE)
             .enumerate()
         {
             #[cfg(not(any(test, feature = "test-transport")))]
@@ -590,28 +581,27 @@ impl TraceDecay {
             let (extractions, _skipped) =
                 extract_files_isolated(&self.project_root, &self.registry, batch.to_vec());
             #[cfg(any(test, feature = "test-transport"))]
-            MIGRATION_REINDEX_TEST_EXTRACTIONS.fetch_add(extractions.len(), Ordering::SeqCst);
+            GRAPH_REBUILD_TEST_EXTRACTIONS.fetch_add(extractions.len(), Ordering::SeqCst);
             let entries = extractions
                 .into_iter()
-                .map(MigrationReindexCheckpointEntryV1::from)
+                .map(GraphRebuildCheckpointEntryV1::from)
                 .collect::<Vec<_>>();
             sequence = sequence.saturating_add(1);
-            self.write_migration_reindex_checkpoint_batch(&checkpoint_root, sequence, &entries)?;
+            self.write_graph_rebuild_checkpoint_batch(&checkpoint_root, sequence, &entries)?;
             for entry in entries {
                 completed.insert(entry.file_path.clone(), entry);
             }
-            self.write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
-                schema_version: crate::db::migrations::LATEST_VERSION,
+            self.write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
+                schema_version: crate::db::migrations::SCHEMA_VERSION,
                 completed_files: u64::try_from(completed.len()).unwrap_or(u64::MAX),
                 total_files: Some(u64::try_from(files.len()).unwrap_or(u64::MAX)),
                 availability,
             })
             .await?;
             #[cfg(any(test, feature = "test-transport"))]
-            if MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.load(Ordering::SeqCst) == batch_index + 1
-            {
+            if GRAPH_REBUILD_TEST_ABORT_AFTER_BATCHES.load(Ordering::SeqCst) == batch_index + 1 {
                 return Err(TraceDecayError::Database {
-                    operation: "test migration re-index interruption".to_owned(),
+                    operation: "test graph rebuild interruption".to_owned(),
                     message: format!("aborted after {} checkpoint batch(es)", batch_index + 1),
                 });
             }
@@ -620,20 +610,20 @@ impl TraceDecay {
         Ok(files
             .iter()
             .filter_map(|path| completed.remove(path))
-            .map(MigrationReindexCheckpointEntryV1::into_extraction)
+            .map(GraphRebuildCheckpointEntryV1::into_extraction)
             .collect())
     }
 
-    fn load_migration_reindex_checkpoints(
+    fn load_graph_rebuild_checkpoints(
         &self,
         checkpoint_root: &Path,
-    ) -> Result<(BTreeMap<String, MigrationReindexCheckpointEntryV1>, u64)> {
+    ) -> Result<(BTreeMap<String, GraphRebuildCheckpointEntryV1>, u64)> {
         let entries = match std::fs::read_dir(checkpoint_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok((BTreeMap::new(), 0));
             }
-            Err(error) => return Err(migration_reindex_checkpoint_error("list", error)),
+            Err(error) => return Err(graph_rebuild_checkpoint_error("list", error)),
         };
         let mut paths = entries
             .filter_map(std::result::Result::ok)
@@ -655,23 +645,23 @@ impl TraceDecay {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     eprintln!(
-                        "[tracedecay] ignoring unreadable migration checkpoint '{}': {error}",
+                        "[tracedecay] ignoring unreadable rebuild checkpoint '{}': {error}",
                         path.display()
                     );
                     continue;
                 }
             };
-            let batch: MigrationReindexCheckpointBatchV1 = match serde_json::from_slice(&bytes) {
+            let batch: GraphRebuildCheckpointBatchV1 = match serde_json::from_slice(&bytes) {
                 Ok(batch) => batch,
                 Err(error) => {
                     eprintln!(
-                        "[tracedecay] ignoring malformed migration checkpoint '{}': {error}",
+                        "[tracedecay] ignoring malformed rebuild checkpoint '{}': {error}",
                         path.display()
                     );
                     continue;
                 }
             };
-            if batch.schema_version != crate::db::migrations::LATEST_VERSION {
+            if batch.schema_version != crate::db::migrations::SCHEMA_VERSION {
                 continue;
             }
             sequence = sequence.max(
@@ -688,31 +678,31 @@ impl TraceDecay {
         Ok((completed, sequence))
     }
 
-    fn write_migration_reindex_checkpoint_batch(
+    fn write_graph_rebuild_checkpoint_batch(
         &self,
         checkpoint_root: &Path,
         sequence: u64,
-        entries: &[MigrationReindexCheckpointEntryV1],
+        entries: &[GraphRebuildCheckpointEntryV1],
     ) -> Result<()> {
-        let batch = MigrationReindexCheckpointBatchV1 {
-            schema_version: crate::db::migrations::LATEST_VERSION,
+        let batch = GraphRebuildCheckpointBatchV1 {
+            schema_version: crate::db::migrations::SCHEMA_VERSION,
             entries: entries.to_vec(),
         };
         let bytes = serde_json::to_vec(&batch).map_err(|error| TraceDecayError::Database {
-            operation: "write migration re-index checkpoint".to_owned(),
+            operation: "write graph rebuild checkpoint".to_owned(),
             message: error.to_string(),
         })?;
         let path = checkpoint_root.join(format!("batch-{sequence:020}.json"));
         let temporary =
             checkpoint_root.join(format!(".batch-{sequence:020}.{}.tmp", std::process::id()));
         crate::storage::PrivateStoreIo::write_file_atomically_durable(&path, &temporary, &bytes)
-            .map_err(|error| migration_reindex_checkpoint_error("write", error))
+            .map_err(|error| graph_rebuild_checkpoint_error("write", error))
     }
 
-    fn migration_reindex_checkpoint_root(&self) -> PathBuf {
+    fn graph_rebuild_checkpoint_root(&self) -> PathBuf {
         self.active_graph_layout
             .sync_lock_path
-            .with_extension(MIGRATION_REINDEX_CHECKPOINT_DIR)
+            .with_extension(GRAPH_REBUILD_CHECKPOINT_DIR)
     }
 
     fn clone_for_background_index(&self) -> Self {
@@ -776,7 +766,7 @@ impl TraceDecay {
         &self,
         on_file: F,
         on_verbose: V,
-        migration_availability: Option<MigrationReindexAvailabilityV1>,
+        rebuild_availability: Option<GraphRebuildAvailabilityV1>,
     ) -> Result<IndexResult>
     where
         F: Fn(usize, usize, &str),
@@ -793,8 +783,8 @@ impl TraceDecay {
         self.ensure_branch_writable_with("full index", &live_branch)?;
         let sync_lease = self.begin_active_sync()?;
         #[cfg(any(test, feature = "test-transport"))]
-        if migration_availability.is_some() {
-            let hold_ms = MIGRATION_REINDEX_TEST_HOLD_LEASE_MS.load(Ordering::SeqCst);
+        if rebuild_availability.is_some() {
+            let hold_ms = GRAPH_REBUILD_TEST_HOLD_LEASE_MS.load(Ordering::SeqCst);
             if hold_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(hold_ms)).await;
             }
@@ -816,9 +806,8 @@ impl TraceDecay {
         let registry = &self.registry;
 
         let phase_start = Instant::now();
-        let extractions = if let Some(availability) = migration_availability {
-            self.migration_reindex_extractions(&files, availability)
-                .await?
+        let extractions = if let Some(availability) = rebuild_availability {
+            self.graph_rebuild_extractions(&files, availability).await?
         } else {
             extract_files_isolated(&project_root, registry, files.clone()).0
         };
@@ -951,20 +940,20 @@ impl TraceDecay {
             .set_metadata_unguarded(
                 &transaction,
                 crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY,
-                &crate::db::migrations::LATEST_VERSION.to_string(),
+                &crate::db::migrations::SCHEMA_VERSION.to_string(),
             )
             .await?;
-        if migration_availability.is_some() {
-            let status = serde_json::to_string(&MigrationReindexStatusV1::Current {
-                schema_version: crate::db::migrations::LATEST_VERSION,
+        if rebuild_availability.is_some() {
+            let status = serde_json::to_string(&GraphRebuildStatusV1::Current {
+                schema_version: crate::db::migrations::SCHEMA_VERSION,
                 completed_at: now,
             })
             .map_err(|error| TraceDecayError::Database {
-                operation: "publish migration re-index generation".to_owned(),
+                operation: "publish graph rebuild generation".to_owned(),
                 message: error.to_string(),
             })?;
             self.db
-                .set_metadata_unguarded(&transaction, MIGRATION_REINDEX_STATE_KEY, &status)
+                .set_metadata_unguarded(&transaction, GRAPH_REBUILD_STATE_KEY, &status)
                 .await?;
         }
         transaction.commit().await?;
@@ -2136,61 +2125,60 @@ mod worker_pool_tests {
 }
 
 #[cfg(test)]
-mod migration_reindex_tests {
+mod graph_rebuild_tests {
     use super::{
-        MigrationReindexAvailabilityV1, MigrationReindexCheckpointBatchV1,
-        MigrationReindexCheckpointEntryV1, MigrationReindexStatusV1,
-        should_schedule_migration_reindex,
+        GraphRebuildAvailabilityV1, GraphRebuildCheckpointBatchV1, GraphRebuildCheckpointEntryV1,
+        GraphRebuildStatusV1, should_schedule_graph_rebuild,
     };
 
     #[test]
-    fn pending_and_interrupted_migration_generations_resume() {
-        let pending = MigrationReindexStatusV1::Indexing {
+    fn pending_and_interrupted_graph_generations_resume() {
+        let pending = GraphRebuildStatusV1::Indexing {
             schema_version: 25,
             completed_files: 0,
             total_files: None,
-            availability: MigrationReindexAvailabilityV1::Stale,
+            availability: GraphRebuildAvailabilityV1::Stale,
         };
-        let interrupted = MigrationReindexStatusV1::Failed {
+        let interrupted = GraphRebuildStatusV1::Failed {
             schema_version: 25,
-            availability: MigrationReindexAvailabilityV1::Unavailable,
+            availability: GraphRebuildAvailabilityV1::Unavailable,
             retryable: true,
             reason: "worker terminated".to_owned(),
         };
 
-        assert!(should_schedule_migration_reindex(&pending));
-        assert!(should_schedule_migration_reindex(&interrupted));
+        assert!(should_schedule_graph_rebuild(&pending));
+        assert!(should_schedule_graph_rebuild(&interrupted));
     }
 
     #[test]
-    fn current_migration_generation_does_not_rebuild() {
-        let current = MigrationReindexStatusV1::Current {
+    fn current_graph_generation_does_not_rebuild() {
+        let current = GraphRebuildStatusV1::Current {
             schema_version: 25,
             completed_at: 42,
         };
-        let terminal = MigrationReindexStatusV1::Failed {
+        let terminal = GraphRebuildStatusV1::Failed {
             schema_version: 25,
-            availability: MigrationReindexAvailabilityV1::Unavailable,
+            availability: GraphRebuildAvailabilityV1::Unavailable,
             retryable: false,
             reason: "manual intervention required".to_owned(),
         };
 
-        assert!(!should_schedule_migration_reindex(&current));
-        assert!(!should_schedule_migration_reindex(&terminal));
+        assert!(!should_schedule_graph_rebuild(&current));
+        assert!(!should_schedule_graph_rebuild(&terminal));
     }
 
     #[test]
-    fn migration_state_is_typed_and_restart_safe() {
-        let state = MigrationReindexStatusV1::Indexing {
+    fn rebuild_state_is_typed_and_restart_safe() {
+        let state = GraphRebuildStatusV1::Indexing {
             schema_version: 25,
             completed_files: 17,
             total_files: Some(41),
-            availability: MigrationReindexAvailabilityV1::Stale,
+            availability: GraphRebuildAvailabilityV1::Stale,
         };
 
-        let encoded = serde_json::to_string(&state).expect("encode migration state");
-        let restored: MigrationReindexStatusV1 =
-            serde_json::from_str(&encoded).expect("restore migration state");
+        let encoded = serde_json::to_string(&state).expect("encode rebuild state");
+        let restored: GraphRebuildStatusV1 =
+            serde_json::from_str(&encoded).expect("restore rebuild state");
 
         assert_eq!(restored, state);
         assert!(encoded.contains("\"state\":\"indexing\""));
@@ -2198,10 +2186,10 @@ mod migration_reindex_tests {
     }
 
     #[test]
-    fn migration_checkpoint_retains_completed_extraction_across_restart() {
-        let batch = MigrationReindexCheckpointBatchV1 {
+    fn rebuild_checkpoint_retains_completed_extraction_across_restart() {
+        let batch = GraphRebuildCheckpointBatchV1 {
             schema_version: 25,
-            entries: vec![MigrationReindexCheckpointEntryV1 {
+            entries: vec![GraphRebuildCheckpointEntryV1 {
                 file_path: "src/lib.rs".to_owned(),
                 result: crate::types::ExtractionResult {
                     nodes: Vec::new(),
@@ -2217,7 +2205,7 @@ mod migration_reindex_tests {
         };
 
         let encoded = serde_json::to_vec(&batch).expect("encode checkpoint");
-        let restored: MigrationReindexCheckpointBatchV1 =
+        let restored: GraphRebuildCheckpointBatchV1 =
             serde_json::from_slice(&encoded).expect("restore checkpoint");
 
         assert_eq!(restored.schema_version, 25);
