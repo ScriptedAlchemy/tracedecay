@@ -187,13 +187,18 @@ pub(super) fn def_inheritance_depth() -> ToolDefinition {
 }
 
 pub(super) fn def_distribution() -> ToolDefinition {
-    def_path_flag_tool(
+    def_object(
         "tracedecay_distribution",
         "Distribution",
         "Show node kind distribution (classes, methods, fields, etc.) per file or directory.",
-        "Directory or file path prefix to filter (e.g. 'src/main/java/com/example'). Omit for entire codebase.",
-        "summary",
-        "If true, aggregate counts across all matching files instead of per-file breakdown (default: false)",
+        json!({
+            "path": string_property("Directory or file path prefix to filter (e.g. 'src/main/java/com/example'). Omit for entire codebase."),
+            "summary": {
+                "type": "boolean",
+                "description": "If true, aggregate counts across all matching files instead of per-file breakdown (default: false)"
+            },
+            "limit": number_property("Maximum number of files in the per-file breakdown, highest node count first (default: 100, max: 1000). Ignored when summary is true; the response states total_file_count and omitted_file_count.")
+        }),
     )
 }
 
