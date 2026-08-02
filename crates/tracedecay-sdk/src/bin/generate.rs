@@ -503,6 +503,9 @@ fn render_server_operations() -> String {
          export const SERVER_OPERATIONS = [\n",
     );
     for operation in HttpApplicationOperation::ALL {
+        if !operation.is_http_exposed() {
+            continue;
+        }
         emit!(
             out,
             "  {{ operation: {}, route: {}, sdkAvailability: \"unavailable\", disposition: \"schema_unavailable\" }},",
@@ -581,8 +584,8 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
          \x20   pub route: String,\n\
          \x20   pub disposition: ExecutableUnavailableDispositionV1,\n\
          }\n\n\
-         pub fn base_operation_capabilities() -> impl ExactSizeIterator<Item = BaseOperationCapability> {\n\
-         \x20   HttpApplicationOperation::ALL.iter().copied().map(|operation| BaseOperationCapability {\n\
+         pub fn base_operation_capabilities() -> impl Iterator<Item = BaseOperationCapability> {\n\
+         \x20   HttpApplicationOperation::ALL.iter().copied().filter(|operation| operation.is_http_exposed()).map(|operation| BaseOperationCapability {\n\
          \x20       route: format!(\"/application{}\", operation.route_path()),\n\
          \x20       operation,\n\
          \x20       disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,\n\

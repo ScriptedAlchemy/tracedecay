@@ -6,6 +6,8 @@
 
 use std::{error::Error, fmt};
 
+use serde::{Deserialize, Serialize};
+
 use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeReadRequestV1, RuntimeRequestProbeV1, SaturationScopeV1,
     StorageRuntimeContractErrorV1, UnavailableReasonV1,
@@ -13,13 +15,19 @@ use tracedecay_store::{
 
 use super::super::{ReaderStartError, ReaderWorkerError};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReaderPoolState {
     Ready,
     Draining,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Point-in-time occupancy of one shard's reader pool.
+///
+/// Serializable because live saturation is only diagnosable from outside the
+/// process: `available + leased + limbo` per lane says where the workers went,
+/// and `waiting_*` says whether anyone is being turned away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReaderPoolSnapshot {
     pub state: ReaderPoolState,
     pub general_workers: u16,
@@ -28,6 +36,13 @@ pub struct ReaderPoolSnapshot {
     pub available_health: u16,
     pub leased_general: u16,
     pub leased_health: u16,
+    /// Workers whose lease ended but whose snapshot rollback has not been
+    /// confirmed. They belong to neither `available_*` nor `leased_*`.
+    pub limbo_general: u16,
+    pub limbo_health: u16,
+    /// Acquisitions blocked waiting for capacity in each lane.
+    pub waiting_general: u16,
+    pub waiting_health: u16,
 }
 
 #[derive(Debug)]

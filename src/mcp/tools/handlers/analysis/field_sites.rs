@@ -41,9 +41,18 @@ pub(crate) async fn handle_field_sites(
         let Ok(source) = crate::sync::read_source_file(&abs) else {
             continue;
         };
+
+        // Cheap textual pre-filter before any per-file store read. Most files
+        // in a repository never mention the field, and fetching their nodes
+        // anyway cost one daemon round trip per file in the project — O(store)
+        // work to answer a question whose result is a handful of sites.
+        let sites = find_field_references(&source, &field_name);
+        if sites.is_empty() {
+            continue;
+        }
         let nodes = cg.get_nodes_by_file(&file.path).await?;
 
-        for site in find_field_references(&source, &field_name) {
+        for site in sites {
             let line_text = line_at(&source, site.byte).unwrap_or("");
             let enclosing = nodes
                 .iter()
