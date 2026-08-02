@@ -37,20 +37,49 @@ A published code-index generation is content-addressed and immutable.
   candidates by hash lookup; `.iter().find()` over snapshot vectors on a
   query path is a defect.
 
-### 2. Serving has priority; maintenance runs on a budget
+### 2. Serving is protected by a reservation; batch work races to idle
 
-Interactive requests never queue behind background CPU.
+Interactive requests never queue behind background CPU. The mechanism is a
+**reserved slice of cores**, not a slower background job.
 
-- Every maintenance loop (reconcile, redundancy, retention, projection
-  refresh) does bounded work per tick — a work budget plus a fairness cursor
-  (the retention round-robin is the reference implementation) — and yields
-  between slices.
-- Background concurrency is capped (bounded semaphores, sized to cores), and
-  long CPU slices run in `spawn_blocking` chunks, never on the request
+Maintenance splits into two kinds of work, and they get opposite treatment:
+
+**Batch work with a finish line** — a full index, a worktree reconcile — runs
+at full machine width and finishes. Throttling it does not reduce
+interference; it stretches the interference window. A reindex that pins 8 of
+96 cores for ten minutes is worse for every agent on the box than one that
+pins 90 cores for one minute. So:
+
+- One process-wide indexing pool is sized to
+  `total_cores - max(2, cores/16)` (90 of 96), and every per-file stage —
+  read, sanitize, tree-sitter extract, chunk, digest — fans out across it
+  with **no batch barrier**. Barriers are the hidden throttle: re-joining
+  every N files means the slowest file in each group gates the group, and
+  the pipeline never reaches its nominal width.
+- The reserved cores are what keep reads fast during a reindex. They are
+  reserved, not merely deprioritized, so an interactive request always has a
+  runnable CPU no matter how deep the indexing queue is.
+- Width is sizing policy and never semantics. Per-file results are collected
+  in input order and the lowest-index failure is the reported one, so a
+  sealed generation is byte-identical at width 1 and at width 90. That
+  equivalence is a test, not a claim.
+- Cross-worktree admission does **not** multiply throughput, because every
+  worktree shares that one pool. Admitting N worktrees only interleaves
+  them: the makespan is unchanged, each worktree's index lands N times
+  later, and N snapshots sit in RSS at once. Reconcile admission is
+  therefore 2 (enough to overlap one worktree's git/store/publication I/O
+  with another's extraction), not "half the cores".
+
+**Open-ended sweeps** — redundancy scanning, retention, projection refresh —
+have no finish line, so they stay paced:
+
+- Bounded work per tick (a work budget plus a fairness cursor; the retention
+  round-robin is the reference implementation), yielding between slices.
+- Long CPU slices run in `spawn_blocking` chunks, never on the request
   runtime's workers for unbounded stretches.
-- A cheap serving-pressure signal (in-flight interactive request count)
-  lets maintenance defer or shrink its slice while agents are actively
-  querying. Results are identical; only pacing changes.
+- A cheap serving-pressure signal (in-flight interactive request count) lets
+  them defer or shrink a slice while agents are actively querying. Results
+  are identical; only pacing changes.
 
 ### 3. Hash where data is born, never where it is served
 

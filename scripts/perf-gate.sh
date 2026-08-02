@@ -50,6 +50,15 @@ PERF_BUDGET_MIN_NODE_COUNT="${PERF_BUDGET_MIN_NODE_COUNT:-10000}"       # proves
 PERF_BUDGET_MIN_THROUGHPUT_RPS="${PERF_BUDGET_MIN_THROUGHPUT_RPS:-0.5}" # calls/s across all workers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Reindex-under-load. When > 0, that many private clones of the target repo are
+# mounted into the SAME daemon during the load window, so the read battery is
+# measured while the daemon is running full cold code-index builds — the
+# "agent worktrees reindexing while a live tool battery runs" shape. This is
+# the probe for docs/SERVING-PATH-PERFORMANCE.md Principle 2: indexing races to
+# idle at machine width, and interactive reads stay fast because of the
+# reserved core slice, not because indexing was slowed down.
+PERF_REINDEX_WORKTREES="${PERF_REINDEX_WORKTREES:-0}"
+
 # Load shape. Overridable so a laptop can run a shorter pass than CI.
 PERF_WORKERS="${PERF_WORKERS:-6}"
 PERF_DURATION_SECONDS="${PERF_DURATION_SECONDS:-60}"
@@ -151,6 +160,7 @@ teardown() {
   for pid in ${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}; do
     stop_tree "$pid" "load worker"
   done
+  stop_tree "${REINDEX_PID:-}" "reindex driver"
   stop_tree "$SAMPLER_PID" "rss sampler"
   stop_tree "$DAEMON_PID" "daemon"
   if ((status != 0)) && [[ -s "$DAEMON_LOG" ]]; then
@@ -376,9 +386,46 @@ setsid bash -c '
 ' _ "$DAEMON_PID" >"$RSS_SAMPLES" 2>/dev/null &
 SAMPLER_PID=$!
 
+# Reindex driver: keeps the daemon building fresh code-index generations for
+# the whole load window. Each `status` call against an unmounted project root
+# mounts that worktree and triggers its cold reconcile, so cycling over N
+# private clones holds the indexing pipeline busy while the workers read.
+REINDEX_PID=""
+if ((PERF_REINDEX_WORKTREES > 0)); then
+  log "==> PHASE LOAD: preparing $PERF_REINDEX_WORKTREES reindex clone(s)"
+  REINDEX_ROOTS=()
+  for ((r = 0; r < PERF_REINDEX_WORKTREES; r++)); do
+    clone="$RUN_DIR/reindex-$r"
+    if git clone --local --quiet "$PERF_TARGET_REPO" "$clone" >/dev/null 2>&1; then
+      REINDEX_ROOTS+=("$clone")
+    else
+      log "    WARNING could not clone $PERF_TARGET_REPO into $clone"
+    fi
+  done
+  ((${#REINDEX_ROOTS[@]} > 0)) || die "no reindex clone could be created"
+  reindex_driver() {
+    local deadline="$1" root
+    while (($(date +%s) < deadline)); do
+      for root in "${REINDEX_ROOTS[@]}"; do
+        (($(date +%s) < deadline)) || break
+        # Drop the mount so the next touch is a cold full build again.
+        rm -rf "$root/.tracedecay" 2>/dev/null || true
+        "$BIN" tool status "{\"format\":\"json\"}" --project "$root" --json >/dev/null 2>&1 || true
+        "$BIN" tool search '{"query":"TraceDecay","limit":10,"format":"json"}' \
+          --project "$root" --json >/dev/null 2>&1 || true
+      done
+    done
+  }
+fi
+
 WORKER_PIDS=()
 load_deadline=$(($(date +%s) + PERF_DURATION_SECONDS))
 load_start="$EPOCHREALTIME"
+if ((PERF_REINDEX_WORKTREES > 0)); then
+  reindex_driver "$load_deadline" &
+  REINDEX_PID=$!
+  log "    reindex driver running over ${#REINDEX_ROOTS[@]} clone(s)"
+fi
 for ((w = 0; w < PERF_WORKERS; w++)); do
   worker "$w" "$load_deadline" &
   WORKER_PIDS+=("$!")
@@ -388,6 +435,8 @@ for pid in "${WORKER_PIDS[@]}"; do
 done
 LOAD_SECONDS="$(elapsed_since "$load_start")"
 
+stop_tree "$REINDEX_PID" "reindex driver"
+REINDEX_PID=""
 stop_tree "$SAMPLER_PID" "rss sampler"
 SAMPLER_PID=""
 
@@ -413,6 +462,7 @@ PERF_CALLS_DIR="$CALLS_DIR" \
   PERF_BINARY_VERSION="$BUILD_VERSION" \
   PERF_CARGO_PROFILE="$PERF_CARGO_PROFILE" \
   PERF_WORKERS="$PERF_WORKERS" \
+  PERF_REINDEX_WORKTREES="$PERF_REINDEX_WORKTREES" \
   PERF_BUDGET_INDEX_SECONDS="$PERF_BUDGET_INDEX_SECONDS" \
   PERF_BUDGET_WARM_P95_SECONDS="$PERF_BUDGET_WARM_P95_SECONDS" \
   PERF_BUDGET_MAX_CALL_SECONDS="$PERF_BUDGET_MAX_CALL_SECONDS" \
@@ -521,6 +571,7 @@ metrics = {
     "binary_version": env["PERF_BINARY_VERSION"].strip(),
     "cargo_profile": env["PERF_CARGO_PROFILE"],
     "workers": int(env["PERF_WORKERS"]),
+    "reindex_worktrees_under_load": int(env["PERF_REINDEX_WORKTREES"]),
     "load_seconds": load_seconds,
     "index": {
         "seconds": round(index_seconds, 3),
