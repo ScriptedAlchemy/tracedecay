@@ -139,6 +139,7 @@ impl RmcpConnectionAdapter {
             method: method.to_owned(),
             params,
         };
+        let enqueued_at = std::time::Instant::now();
         let mut connection = self.connection.lock().await;
         let pre_cancelled = request_cancellation.is_cancelled();
         let response = if pre_cancelled {
@@ -148,6 +149,7 @@ impl RmcpConnectionAdapter {
                     self.timings_enabled,
                     &mut connection,
                     true,
+                    enqueued_at,
                 )
                 .await
         } else {
@@ -157,6 +159,7 @@ impl RmcpConnectionAdapter {
                     self.timings_enabled,
                     &mut connection,
                     false,
+                    enqueued_at,
                 ),
                 request_cancellation.cancelled(),
                 || {
@@ -189,7 +192,13 @@ impl RmcpConnectionAdapter {
         let mut connection = self.connection.lock().await;
         let _ = self
             .server
-            .handle_request_for_connection(&request, self.timings_enabled, &mut connection, false)
+            .handle_request_for_connection(
+                &request,
+                self.timings_enabled,
+                &mut connection,
+                false,
+                std::time::Instant::now(),
+            )
             .await;
     }
 

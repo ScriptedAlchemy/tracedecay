@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 
@@ -46,6 +46,37 @@ pub(crate) enum McpToolDispatchStage {
     Serialization,
 }
 
+/// What the lifecycle can truthfully say about request-owned worker cleanup at
+/// the terminal response boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum McpToolWorkerSettlement {
+    Joined = 0,
+    Cancelled = 1,
+    Indeterminate = 2,
+    Leaked = 3,
+}
+
+impl McpToolWorkerSettlement {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Joined,
+            1 => Self::Cancelled,
+            2 => Self::Indeterminate,
+            _ => Self::Leaked,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::Cancelled => "cancelled",
+            Self::Indeterminate => "indeterminate",
+            Self::Leaked => "leaked",
+        }
+    }
+}
+
 impl McpToolDispatchStage {
     const fn as_u8(self) -> u8 {
         match self {
@@ -83,6 +114,8 @@ pub(crate) struct McpToolDispatchControl {
     deadline_at: tokio::time::Instant,
     cancellation: tracedecay_application::CancellationSignal,
     stage: Arc<AtomicU8>,
+    owned_workers: Arc<AtomicUsize>,
+    worker_settlement: Arc<AtomicU8>,
 }
 
 impl McpToolDispatchControl {
@@ -124,6 +157,8 @@ impl McpToolDispatchControl {
             stage: Arc::new(AtomicU8::new(
                 McpToolDispatchStage::SchemaValidation.as_u8(),
             )),
+            owned_workers: Arc::new(AtomicUsize::new(0)),
+            worker_settlement: Arc::new(AtomicU8::new(McpToolWorkerSettlement::Joined as u8)),
         })
     }
 
@@ -143,13 +178,25 @@ impl McpToolDispatchControl {
         self.cancellation.cancel(requested_at)
     }
 
+    /// The terminal worker settlement state for the execution receipt.
+    pub(crate) fn worker_settlement(&self) -> McpToolWorkerSettlement {
+        if self.owned_workers.load(Ordering::Acquire) != 0 {
+            return McpToolWorkerSettlement::Leaked;
+        }
+        McpToolWorkerSettlement::from_u8(self.worker_settlement.load(Ordering::Acquire))
+    }
+
     pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
         self.stage.store(stage.as_u8(), Ordering::Release);
         if self.cancellation.is_cancelled() {
+            self.worker_settlement
+                .store(McpToolWorkerSettlement::Cancelled as u8, Ordering::Release);
             return Err(self.cancelled_error(stage));
         }
         if tokio::time::Instant::now() >= self.deadline_at {
             self.cancel(tracedecay_application::clock::now_micros());
+            self.worker_settlement
+                .store(McpToolWorkerSettlement::Cancelled as u8, Ordering::Release);
             return Err(self.deadline_error(stage));
         }
         Ok(())
@@ -167,9 +214,41 @@ impl McpToolDispatchControl {
             result = &mut future => result,
             () = &mut deadline => {
                 self.cancel(tracedecay_application::clock::now_micros());
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
                 Err(self.deadline_error(stage))
             }
-            () = self.cancellation.cancelled() => Err(self.cancelled_error(stage)),
+            () = self.cancellation.cancelled() => {
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            },
+        }
+    }
+
+    /// Run a lifecycle operation whose successful value is not itself a
+    /// TraceDecay result (for example a completed JSON-RPC response).
+    pub(crate) async fn run_value<T, F>(&self, stage: McpToolDispatchStage, future: F) -> Result<T>
+    where
+        F: Future<Output = T>,
+    {
+        self.check(stage)?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        tokio::pin!(deadline);
+        tokio::pin!(future);
+        tokio::select! {
+            value = &mut future => Ok(value),
+            () = &mut deadline => {
+                self.cancel(tracedecay_application::clock::now_micros());
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
+                Err(self.deadline_error(stage))
+            }
+            () = self.cancellation.cancelled() => {
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            },
         }
     }
 
@@ -181,35 +260,44 @@ impl McpToolDispatchControl {
         stage: McpToolDispatchStage,
         mut worker: tokio::task::JoinHandle<Result<T>>,
     ) -> Result<T> {
-        if let Err(error) = self.check(stage) {
-            worker.abort();
-            let _ = worker.await;
-            return Err(error);
-        }
-        let deadline = tokio::time::sleep_until(self.deadline_at);
-        tokio::pin!(deadline);
-        tokio::select! {
-            result = &mut worker => match result {
-                Ok(result) => result,
-                Err(error) => Err(TraceDecayError::mcp_tool_dispatch(
-                    "tool_dispatch_worker_failed",
-                    stage.as_str(),
-                    true,
-                    format!("tool '{}' worker did not complete: {error}", self.tool_name),
-                )),
-            },
-            () = &mut deadline => {
-                self.cancel(tracedecay_application::clock::now_micros());
+        self.owned_workers.fetch_add(1, Ordering::AcqRel);
+        let result = match self.check(stage) {
+            Err(error) => {
                 worker.abort();
                 let _ = worker.await;
-                Err(self.deadline_error(stage))
+                Err(error)
             }
-            () = self.cancellation.cancelled() => {
-                worker.abort();
-                let _ = worker.await;
-                Err(self.cancelled_error(stage))
+            Ok(()) => {
+                let deadline = tokio::time::sleep_until(self.deadline_at);
+                tokio::pin!(deadline);
+                tokio::select! {
+                    result = &mut worker => match result {
+                        Ok(result) => result,
+                        Err(error) => Err(TraceDecayError::mcp_tool_dispatch(
+                            "tool_dispatch_worker_failed",
+                            stage.as_str(),
+                            true,
+                            format!("tool '{}' worker did not complete: {error}", self.tool_name),
+                        )),
+                    },
+                    () = &mut deadline => {
+                        self.cancel(tracedecay_application::clock::now_micros());
+                        worker.abort();
+                        let _ = worker.await;
+                        Err(self.deadline_error(stage))
+                    }
+                    () = self.cancellation.cancelled() => {
+                        worker.abort();
+                        let _ = worker.await;
+                        Err(self.cancelled_error(stage))
+                    }
+                }
             }
-        }
+        };
+        self.owned_workers.fetch_sub(1, Ordering::AcqRel);
+        self.worker_settlement
+            .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
+        result
     }
 
     fn deadline_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
@@ -416,6 +504,7 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
 #[cfg(test)]
 mod dispatch_control_tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use tracedecay_application::CancellationSignal;
@@ -449,6 +538,30 @@ mod dispatch_control_tests {
     }
 
     #[tokio::test]
+    async fn serialization_value_is_covered_by_the_same_deadline() {
+        let cancellation = CancellationSignal::active("cancel.dispatch.serialization").unwrap();
+        let control = McpToolDispatchControl::new(
+            "tracedecay_serialization_fixture",
+            McpToolExecutionPolicyV1::interactive_read(20),
+            cancellation,
+        )
+        .unwrap();
+
+        let error = control
+            .run_value(McpToolDispatchStage::Serialization, async {
+                std::future::pending::<()>().await
+            })
+            .await
+            .unwrap_err();
+        let (reason_code, stage, retryable, _) = error
+            .mcp_tool_dispatch_context()
+            .expect("serialization deadline must retain structured MCP dispatch context");
+        assert_eq!(reason_code, "tool_dispatch_deadline_exceeded");
+        assert_eq!(stage, "serialization");
+        assert!(retryable);
+    }
+
+    #[tokio::test]
     async fn cancellation_aborts_and_joins_an_owned_worker() {
         let cancellation = CancellationSignal::active("cancel.dispatch.worker").unwrap();
         let control = McpToolDispatchControl::new(
@@ -458,18 +571,18 @@ mod dispatch_control_tests {
         )
         .unwrap();
         let started = Arc::new(tokio::sync::Notify::new());
-        let stopped = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(AtomicBool::new(false));
         let worker_started = Arc::clone(&started);
         let worker_stopped = Arc::clone(&stopped);
         let worker = tokio::spawn(async move {
-            struct Stop(Arc<tokio::sync::Notify>);
+            struct Stop(Arc<AtomicBool>);
             impl Drop for Stop {
                 fn drop(&mut self) {
-                    self.0.notify_waiters();
+                    self.0.store(true, Ordering::Release);
                 }
             }
             let _stop = Stop(worker_stopped);
-            worker_started.notify_waiters();
+            worker_started.notify_one();
             std::future::pending::<()>().await;
             Ok::<(), crate::errors::TraceDecayError>(())
         });
@@ -495,8 +608,9 @@ mod dispatch_control_tests {
         assert_eq!(reason_code, "tool_dispatch_cancelled");
         assert_eq!(stage, "handler");
         assert!(retryable);
-        tokio::time::timeout(Duration::from_millis(100), stopped.notified())
-            .await
-            .expect("owned worker must be aborted and joined before dispatch returns");
+        assert!(
+            stopped.load(Ordering::Acquire),
+            "owned worker must be aborted and joined before dispatch returns"
+        );
     }
 }

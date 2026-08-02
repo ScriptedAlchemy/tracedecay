@@ -5,16 +5,21 @@ use super::*;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
+struct PendingMcpRequestLine {
+    line: String,
+    enqueued_at: std::time::Instant,
+}
+
 fn queued_cancellable_request_key(
-    pending_lines: &VecDeque<String>,
+    pending_lines: &VecDeque<PendingMcpRequestLine>,
     request_id: &Value,
     connection_scope: &str,
 ) -> Option<String> {
     let expected = application_surface_request_id(request_id, connection_scope)?;
     pending_lines
         .iter()
-        .any(|line| {
-            let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
+        .any(|pending| {
+            let Ok(request) = serde_json::from_str::<JsonRpcRequest>(pending.line.trim()) else {
                 return false;
             };
             request.method == "tools/call"
@@ -55,8 +60,9 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
+        pending_lines: &mut VecDeque<PendingMcpRequestLine>,
         pending_cancellations: &mut HashSet<String>,
+        enqueued_at: std::time::Instant,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
@@ -70,6 +76,7 @@ impl McpServer {
             timings_enabled,
             connection,
             pre_cancelled,
+            enqueued_at,
         ));
         tokio::pin!(handling);
         // One-shot clients (the CLI and the stdio proxy) shut down their write
@@ -152,7 +159,10 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(PendingMcpRequestLine {
+                        line,
+                        enqueued_at: std::time::Instant::now(),
+                    });
                 }
             }
         }
@@ -168,7 +178,8 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
+        pending_lines: &mut VecDeque<PendingMcpRequestLine>,
+        enqueued_at: std::time::Instant,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
@@ -177,6 +188,7 @@ impl McpServer {
             timings_enabled,
             connection,
             false,
+            enqueued_at,
         ));
         tokio::pin!(handling);
         let mut peer_close_check: Option<
@@ -245,7 +257,10 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(PendingMcpRequestLine {
+                        line,
+                        enqueued_at: std::time::Instant::now(),
+                    });
                 }
             }
         }
@@ -355,8 +370,8 @@ impl McpServer {
         let mut pending_cancellations = HashSet::new();
 
         'connection: loop {
-            let line: String = if let Some(line) = pending_lines.pop_front() {
-                line
+            let pending = if let Some(pending) = pending_lines.pop_front() {
+                pending
             } else {
                 let read = {
                     #[cfg(unix)]
@@ -389,7 +404,10 @@ impl McpServer {
                     }
                 };
                 match read {
-                    Ok(Some(line)) => line,
+                    Ok(Some(line)) => PendingMcpRequestLine {
+                        line,
+                        enqueued_at: std::time::Instant::now(),
+                    },
                     Ok(None) => break,
                     Err(e) => {
                         if is_wire_oversized_io_error(&e) {
@@ -402,7 +420,8 @@ impl McpServer {
                 }
             };
 
-            let line = line.trim().to_string();
+            let enqueued_at = pending.enqueued_at;
+            let line = pending.line.trim().to_string();
             if line.is_empty() {
                 continue;
             }
@@ -512,6 +531,7 @@ impl McpServer {
                                     transport,
                                     &mut pending_lines,
                                     &mut pending_cancellations,
+                                    enqueued_at,
                                     shutdown_requested.as_mut(),
                                 )
                                 .await?;
@@ -556,6 +576,7 @@ impl McpServer {
                                     &mut connection_route,
                                     transport,
                                     &mut pending_lines,
+                                    enqueued_at,
                                     shutdown_requested.as_mut(),
                                 )
                                 .await?;

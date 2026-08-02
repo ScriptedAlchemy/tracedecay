@@ -2,8 +2,141 @@
 //! handshake handling, resources, and `tools/call` execution.
 
 use super::*;
+use std::time::{Duration, Instant};
+
 use crate::mcp::ToolResult;
 use tracedecay_sessions::WorkflowIndexReadPort;
+
+const EXECUTION_RECEIPT_KEY: &str = "tracedecay/execution_receipt";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpToolCallTerminal {
+    Completed,
+    Denied,
+    Unavailable,
+    DeadlineExceeded,
+    Cancelled,
+}
+
+impl McpToolCallTerminal {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Denied => "denied",
+            Self::Unavailable => "unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Server-observed timing for one `tools/call` response. The transport queue
+/// ends at request dispatch; result materialization ends before transport
+/// encoding/writing, which belongs to the adapter rather than this authority.
+#[derive(Debug)]
+struct McpToolCallTiming {
+    queue_us: u64,
+    entered_at: Instant,
+    route_admission_us: u64,
+    handler_us: u64,
+    result_materialization_us: u64,
+}
+
+impl McpToolCallTiming {
+    fn new(enqueued_at: Instant) -> Self {
+        Self {
+            queue_us: elapsed_micros(enqueued_at.elapsed()),
+            entered_at: Instant::now(),
+            route_admission_us: 0,
+            handler_us: 0,
+            result_materialization_us: 0,
+        }
+    }
+
+    fn receipt(&self, terminal: McpToolCallTerminal, worker_settlement: &str) -> Value {
+        let total_us = self
+            .queue_us
+            .saturating_add(elapsed_micros(self.entered_at.elapsed()));
+        json!({
+            "queue_us": self.queue_us,
+            "route_admission_us": self.route_admission_us,
+            "handler_us": self.handler_us,
+            "result_materialization_us": self.result_materialization_us,
+            "total_us": total_us,
+            "terminal": terminal.as_str(),
+            "worker_settlement": worker_settlement,
+        })
+    }
+}
+
+fn elapsed_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal {
+    let reason_code = response
+        .error
+        .as_ref()
+        .and_then(|error| error.data.as_ref())
+        .and_then(|data| data.get("reason_code"))
+        .and_then(Value::as_str);
+    match reason_code {
+        Some("tool_dispatch_deadline_exceeded") => McpToolCallTerminal::DeadlineExceeded,
+        Some("tool_dispatch_cancelled") => McpToolCallTerminal::Cancelled,
+        Some(reason) if reason == "tool_unavailable" || reason.ends_with("_unavailable") => {
+            McpToolCallTerminal::Unavailable
+        }
+        Some(_) | None if response.error.is_some() => McpToolCallTerminal::Denied,
+        None => McpToolCallTerminal::Completed,
+    }
+}
+
+fn attach_execution_receipt(response: &mut JsonRpcResponse, receipt: Value) {
+    if let Some(result) = response.result.as_mut() {
+        let Some(result) = result.as_object_mut() else {
+            tracing::error!("MCP tool result is not an object; execution receipt omitted");
+            return;
+        };
+        let meta = result.entry("_meta").or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
+        } else {
+            *meta = json!({ EXECUTION_RECEIPT_KEY: receipt });
+        }
+        return;
+    }
+
+    let Some(error) = response.error.as_mut() else {
+        tracing::error!(
+            "MCP tool response has neither result nor error; execution receipt omitted"
+        );
+        return;
+    };
+    let data = error.data.get_or_insert_with(|| json!({}));
+    if let Some(data) = data.as_object_mut() {
+        data.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
+        return;
+    }
+    let original_data = std::mem::take(data);
+    *data = json!({
+        "original_data": original_data,
+        EXECUTION_RECEIPT_KEY: receipt,
+    });
+}
+
+fn finish_tool_call_response(
+    mut response: JsonRpcResponse,
+    timing: &McpToolCallTiming,
+    dispatch_control: Option<&McpToolDispatchControl>,
+    terminal: Option<McpToolCallTerminal>,
+) -> JsonRpcResponse {
+    let terminal = terminal.unwrap_or_else(|| terminal_for_tool_response(&response));
+    let worker_settlement = dispatch_control.map_or("indeterminate", |control| {
+        control.worker_settlement().as_str()
+    });
+    attach_execution_receipt(&mut response, timing.receipt(terminal, worker_settlement));
+    response
+}
 
 struct PreparedToolCall<'a> {
     tool_name: String,
@@ -21,6 +154,8 @@ struct DispatchedToolCall {
     selected_scope: Option<tracedecay_application::ResolvedScope>,
     outcome: Result<ToolResult>,
     elapsed_us: Option<u64>,
+    route_admission_us: u64,
+    handler_us: u64,
 }
 
 struct RoutedToolCall {
@@ -260,6 +395,7 @@ impl McpServer {
             self.timings_enabled(),
             &mut connection,
             false,
+            Instant::now(),
         ))
         .await
     }
@@ -288,6 +424,7 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         pre_cancelled: bool,
+        enqueued_at: Instant,
     ) -> Option<JsonRpcResponse> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         *recover_lock(&self.method_call_counts)
@@ -335,6 +472,7 @@ impl McpServer {
                     connection.implicit_project_path(),
                     connection.memory_request_scope(),
                     pre_cancelled,
+                    enqueued_at,
                 ))
                 .await,
             ),
@@ -1036,9 +1174,10 @@ impl McpServer {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
-        let handler_start = timings_enabled.then(std::time::Instant::now);
+        let dispatch_started = timings_enabled.then(Instant::now);
+        let route_started = Instant::now();
         let (active_cg, live_branch) = match dispatch_control
-            .run(
+            .run_value(
                 McpToolDispatchStage::WarmOpen,
                 self.reopen_if_branch_drifted_memoized(),
             )
@@ -1051,7 +1190,9 @@ impl McpServer {
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
-                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
+                    route_admission_us: elapsed_micros(route_started.elapsed()),
+                    handler_us: 0,
                 };
             }
         };
@@ -1073,7 +1214,9 @@ impl McpServer {
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
-                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
+                    route_admission_us: elapsed_micros(route_started.elapsed()),
+                    handler_us: 0,
                 };
             }
         };
@@ -1112,7 +1255,9 @@ impl McpServer {
                 selected_owner,
                 selected_scope,
                 outcome: Err(error),
-                elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
+                route_admission_us: elapsed_micros(route_started.elapsed()),
+                handler_us: 0,
             };
         }
 
@@ -1130,8 +1275,10 @@ impl McpServer {
                         selected_owner,
                         selected_scope,
                         outcome: Err(error),
-                        elapsed_us: handler_start
-                            .map(|started| started.elapsed().as_micros() as u64),
+                        elapsed_us: dispatch_started
+                            .map(|started| elapsed_micros(started.elapsed())),
+                        route_admission_us: elapsed_micros(route_started.elapsed()),
+                        handler_us: 0,
                     };
                 }
             }
@@ -1154,10 +1301,13 @@ impl McpServer {
                     selected_owner,
                     selected_scope,
                     outcome: Err(error),
-                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
+                    route_admission_us: elapsed_micros(route_started.elapsed()),
+                    handler_us: 0,
                 };
             }
         };
+        let handler_started = Instant::now();
         let outcome = dispatch_control
             .run(
                 McpToolDispatchStage::Handler,
@@ -1182,7 +1332,9 @@ impl McpServer {
             selected_owner,
             selected_scope,
             outcome,
-            elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
+            elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
+            route_admission_us: elapsed_micros(handler_started.duration_since(route_started)),
+            handler_us: elapsed_micros(handler_started.elapsed()),
         }
     }
 
@@ -1619,6 +1771,7 @@ impl McpServer {
             selected_scope,
             outcome,
             elapsed_us,
+            ..
         } = dispatch;
         let request_id = id.clone();
 
@@ -1790,7 +1943,10 @@ impl McpServer {
         implicit_project_path: Option<&Path>,
         memory_request_scope: &str,
         pre_cancelled: bool,
+        enqueued_at: Instant,
     ) -> JsonRpcResponse {
+        let mut timing = McpToolCallTiming::new(enqueued_at);
+        let admission_started = Instant::now();
         let PreparedToolCall {
             tool_name,
             arguments,
@@ -1801,13 +1957,17 @@ impl McpServer {
             _cancellation_registration,
         } = match self.prepare_tool_call(&id, params, memory_request_scope, pre_cancelled) {
             Ok(call) => call,
-            Err(response) => return response,
+            Err(response) => {
+                timing.route_admission_us = elapsed_micros(admission_started.elapsed());
+                return finish_tool_call_response(response, &timing, None, None);
+            }
         };
+        let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
+        timing.route_admission_us = elapsed_micros(admission_started.elapsed());
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return finish_tool_call_response(response, &timing, Some(&dispatch_control), None);
         }
 
-        let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
         let dispatch = self
             .dispatch_tool_call(
                 &id,
@@ -1821,11 +1981,16 @@ impl McpServer {
                 !fast_unavailable,
             )
             .await;
+        timing.route_admission_us = timing
+            .route_admission_us
+            .saturating_add(dispatch.route_admission_us);
+        timing.handler_us = dispatch.handler_us;
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return finish_tool_call_response(response, &timing, Some(&dispatch_control), None);
         }
+        let materialization_started = Instant::now();
         if fast_unavailable {
-            return match dispatch_control
+            let (response, terminal) = match dispatch_control
                 .run(McpToolDispatchStage::Serialization, async {
                     Ok(Self::finish_unavailable_tool_call(
                         id.clone(),
@@ -1835,12 +2000,14 @@ impl McpServer {
                 })
                 .await
             {
-                Ok(response) => response,
-                Err(error) => tool_error_response(id, &tool_name, &error),
+                Ok(response) => (response, Some(McpToolCallTerminal::Unavailable)),
+                Err(error) => (tool_error_response(id, &tool_name, &error), None),
             };
+            timing.result_materialization_us = elapsed_micros(materialization_started.elapsed());
+            return finish_tool_call_response(response, &timing, Some(&dispatch_control), terminal);
         }
         let response = match dispatch_control
-            .run(
+            .run_value(
                 McpToolDispatchStage::Serialization,
                 self.complete_tool_call(
                     id.clone(),
@@ -1855,10 +2022,11 @@ impl McpServer {
             Ok(response) => response,
             Err(error) => tool_error_response(id.clone(), &tool_name, &error),
         };
+        timing.result_materialization_us = elapsed_micros(materialization_started.elapsed());
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return finish_tool_call_response(response, &timing, Some(&dispatch_control), None);
         }
-        response
+        finish_tool_call_response(response, &timing, Some(&dispatch_control), None)
     }
 }
 

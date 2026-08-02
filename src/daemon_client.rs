@@ -664,46 +664,36 @@ impl DaemonInvocationClient {
         let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
             stage: CancellationStage::BeforeAdmission,
         })?;
-        let client = self.clone();
-        tokio::spawn(async move {
-            let stage = match policy {
-                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
-                InvocationCancellationPolicy::AuthoritativeEffect => {
-                    CancellationStage::EffectInFlight
+        let stage = match policy {
+            InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
+            InvocationCancellationPolicy::AuthoritativeEffect => CancellationStage::EffectInFlight,
+        };
+        if !policy.may_interrupt(stage) {
+            return self
+                .invoke(request)
+                .await
+                .map_err(|_| DaemonInvocationError::Unavailable);
+        }
+        let outcome = {
+            let invocation = self.invoke(request);
+            tokio::pin!(invocation);
+            let cancellation_wait = wait_for_cancellation(cancellation);
+            tokio::pin!(cancellation_wait);
+            tokio::select! {
+                result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
+                () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
+                () = tokio::time::sleep(remaining) => {
+                    Err(DaemonInvocationError::TimedOut { stage })
                 }
-            };
-            if !policy.may_interrupt(stage) {
-                return client
-                    .invoke(request)
-                    .await
-                    .map_err(|_| DaemonInvocationError::Unavailable);
             }
-            let outcome = {
-                let invocation = client.invoke(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                tokio::select! {
-                    result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
-                    () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
-                    () = tokio::time::sleep(remaining) => {
-                        Err(DaemonInvocationError::TimedOut { stage })
-                    }
-                }
-            };
-            if matches!(
-                outcome,
-                Err(
-                    DaemonInvocationError::Cancelled { .. }
-                        | DaemonInvocationError::TimedOut { .. }
-                )
-            ) {
-                *client.state.lock().await = None;
-            }
-            outcome
-        })
-        .await
-        .map_err(|_| DaemonInvocationError::Unavailable)?
+        };
+        if matches!(
+            outcome,
+            Err(DaemonInvocationError::Cancelled { .. } | DaemonInvocationError::TimedOut { .. })
+        ) {
+            *self.state.lock().await = None;
+        }
+        outcome
     }
 }
 

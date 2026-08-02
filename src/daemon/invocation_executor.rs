@@ -545,35 +545,30 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                     stage: CancellationStage::BeforeAdmission,
                 },
             )?;
-            let executor = self.clone();
-            tokio::spawn(async move {
-                let stage = match policy {
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
-                        CancellationStage::DuringRead
-                    }
-                    crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
-                        CancellationStage::EffectInFlight
-                    }
-                };
-                if !policy.may_interrupt(stage) {
-                    return Ok(executor.invoke_once(request).await);
+            let stage = match policy {
+                crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+                    CancellationStage::DuringRead
                 }
-                let invocation = executor.invoke_once(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                tokio::select! {
-                    response = &mut invocation => Ok(response),
-                    () = &mut cancellation_wait => {
-                        Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
-                    }
-                    () = tokio::time::sleep(remaining) => {
-                        Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
-                    }
+                crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+                    CancellationStage::EffectInFlight
                 }
-            })
-            .await
-            .map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable)?
+            };
+            if !policy.may_interrupt(stage) {
+                return Ok(self.invoke_once(request).await);
+            }
+            let invocation = self.invoke_once(request);
+            tokio::pin!(invocation);
+            let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
+            tokio::pin!(cancellation_wait);
+            tokio::select! {
+                response = &mut invocation => Ok(response),
+                () = &mut cancellation_wait => {
+                    Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
+                }
+                () = tokio::time::sleep(remaining) => {
+                    Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
+                }
+            }
         })
     }
 
