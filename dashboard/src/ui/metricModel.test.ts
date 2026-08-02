@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { MetricValueV1 } from '../contracts/wire.ts';
+import type { MetricValueV1 } from '../contracts/generated.ts';
 import {
   availableCount,
   coverageSentence,

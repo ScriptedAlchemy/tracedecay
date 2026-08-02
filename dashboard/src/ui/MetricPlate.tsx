@@ -1,4 +1,4 @@
-import type { MetricValueV1 } from '../contracts/wire.ts';
+import type { MetricValueV1 } from '../contracts/generated.ts';
 import { cn } from './cn';
 import { EvidencePattern } from './EvidencePattern.tsx';
 import { StateChip } from './StateChip';

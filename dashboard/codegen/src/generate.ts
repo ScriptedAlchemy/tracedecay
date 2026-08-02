@@ -345,10 +345,14 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   blocks.push(`export const WIRE_SCHEMA_REVISION = ${literal(schemaRevision)} as const;`);
 
   for (const [name, schema] of defs) {
-    if (name === "DashboardPayloadMarkerV1") continue;
+    if (
+      name === "DashboardPayloadMarkerV1" ||
+      (name.startsWith("DashboardEnvelopeV1") && name !== "DashboardEnvelopeV1")
+    ) {
+      continue;
+    }
     blocks.push(emitNamedDef(name, schema));
   }
-  blocks.push(emitCompatibilityAliases(defs));
 
   const generated = blocks.join("\n\n") + "\n";
 
@@ -365,55 +369,6 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
       [INDEX_FILE]: index,
     },
   };
-}
-
-function emitCompatibilityAliases(defs: Array<[string, JsonSchema]>): string {
-  const names = new Set(defs.map(([name]) => name));
-  const aliases: string[] = [
-    "export const DomainStateSchema = DashboardDomainStateV1Schema;",
-    "export type WireDomainState = DashboardDomainStateV1;",
-    "export const ScopeSchema = DashboardScopeV1Schema;",
-    "export type WireScope = DashboardScopeV1;",
-    "export const VersionSchema = DashboardVersionV1Schema;",
-    "export type WireVersion = DashboardVersionV1;",
-    "export const TimeSchema = DashboardTimeV1Schema;",
-    "export type WireTime = DashboardTimeV1;",
-    "export const WatermarkSchema = DashboardWatermarkV1Schema;",
-    "export type WireWatermark = DashboardWatermarkV1;",
-    "export const AuthorizationSchema = DashboardAuthorizationV1Schema;",
-    "export type WireAuthorization = DashboardAuthorizationV1;",
-    "export const CoverageSchema = DashboardCoverageV1Schema;",
-    "export type WireCoverage = DashboardCoverageV1;",
-    "export const FreshnessSchema = DashboardFreshnessV1Schema;",
-    "export type WireFreshness = DashboardFreshnessV1;",
-    "export const LegalActionKindSchema = DashboardLegalActionKindV1Schema;",
-    "export type WireLegalActionKind = DashboardLegalActionKindV1;",
-    "export const LegalActionRefSchema = DashboardLegalActionRefV1Schema;",
-    "export type WireLegalActionRef = DashboardLegalActionRefV1;",
-    "export const EnvelopeSchema = DashboardEnvelopeV1Schema;",
-    "export type WireEnvelope<TPayload> = DashboardEnvelopeV1<TPayload>;",
-  ];
-
-  for (const name of [...names].sort()) {
-    if (!name.endsWith("V1") || name.startsWith("Dashboard")) continue;
-    const alias = name.slice(0, -2);
-    aliases.push(`export const ${alias}Schema = ${name}Schema;`);
-    aliases.push(`export type ${alias} = ${name};`);
-  }
-
-  const doctorAliases: Array<[string, string]> = [
-    ["DoctorCancellationStage", "CancellationStage"],
-    ["DoctorOperationTermination", "OperationTermination"],
-    ["DoctorOperationReceipt", "OperationReceipt"],
-    ["DoctorEffectReceipt", "EffectReceipt"],
-  ];
-  for (const [alias, source] of doctorAliases) {
-    if (!names.has(source)) continue;
-    aliases.push(`export const ${alias}Schema = ${source}Schema;`);
-    aliases.push(`export type ${alias} = ${source};`);
-  }
-
-  return aliases.join("\n");
 }
 
 export const OUTPUT_FILES = { GENERATED_FILE, INDEX_FILE };

@@ -41,7 +41,7 @@ import {
   type FactMatchesMeasurementV1,
   type NodeSessionsMeasurementV1,
   type TestMapMeasurementV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { absenceReason, useStructure, type StructureResult } from '../../data/query/structure.ts';
 import { cn } from '../../ui/cn';
 import { elideStart } from '../../ui/format.ts';

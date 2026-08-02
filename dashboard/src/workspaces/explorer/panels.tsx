@@ -7,7 +7,7 @@ import { MetaLabel } from '../../ui/search/Highlight.tsx';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
-import type { ExplorerQueryRunV1 } from '../../contracts/wire.ts';
+import type { ExplorerQueryRunV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { LANE_BY_ID, LANE_ICON } from './laneChrome.ts';
 import {

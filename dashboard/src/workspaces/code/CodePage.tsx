@@ -24,14 +24,14 @@ import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import type { TraceFocus } from './TraceView.tsx';
 import {
-  type GraphNode,
-  type GraphOverviewPayload,
-  GraphOverviewPayloadSchema,
-  type GraphSearchPayload,
-  GraphSearchPayloadSchema,
-  type GraphSubgraphPayload,
-  GraphSubgraphPayloadSchema,
-} from '../../contracts/wire.ts';
+  type GraphNodeV1,
+  type GraphOverviewPayloadV1,
+  GraphOverviewPayloadV1Schema,
+  type GraphSearchPayloadV1,
+  GraphSearchPayloadV1Schema,
+  type GraphSubgraphPayloadV1,
+  GraphSubgraphPayloadV1Schema,
+} from '../../contracts/generated.ts';
 
 // Imports live at the top of a module; a `lazy` dynamic import is the
 // documented exception, because the point is that the module is NOT fetched
@@ -54,14 +54,14 @@ export function CodePage() {
   const overview = useLegacy(
     ['graph', 'overview'],
     `${BASE}/overview`,
-    GraphOverviewPayloadSchema,
+    GraphOverviewPayloadV1Schema,
   );
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
   const search = useLegacy(
     ['graph', 'search', submitted],
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=100`,
-    GraphSearchPayloadSchema,
+    GraphSearchPayloadV1Schema,
   );
   const [selected, setSelected] = useState<TraceFocus | null>(null);
   // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:
@@ -72,7 +72,7 @@ export function CodePage() {
   const subgraph = useLegacy(
     ['graph', 'subgraph', selected?.id ?? ''],
     `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
-    GraphSubgraphPayloadSchema,
+    GraphSubgraphPayloadV1Schema,
   );
   const canvasNodes = useMemo(() => {
     if (subgraph.data?.outcome !== 'ok') return [];
@@ -367,7 +367,7 @@ function GraphSlicePane({
   seedLabel,
 }: {
   pending: boolean;
-  result: LegacyResult<GraphSubgraphPayload> | undefined;
+  result: LegacyResult<GraphSubgraphPayloadV1> | undefined;
   nodes: ComponentProps<typeof GraphCanvas>['nodes'];
   edges: ComponentProps<typeof GraphCanvas>['edges'];
   selectedId: string | null;
@@ -434,10 +434,10 @@ function SymbolMatches({
   onSelect,
 }: {
   pending: boolean;
-  result: LegacyResult<GraphSearchPayload> | undefined;
+  result: LegacyResult<GraphSearchPayloadV1> | undefined;
   submitted: string;
   selected: TraceFocus | null;
-  onSelect: (node: GraphNode) => void;
+  onSelect: (node: GraphNodeV1) => void;
 }) {
   return (
     <LegacyBoundary title="Symbols" pending={pending} result={result}>
@@ -502,8 +502,8 @@ function TopConnectedList({
   selected,
 }: {
   overviewPending: boolean;
-  overviewResult: LegacyResult<GraphOverviewPayload> | undefined;
-  onSelect: (node: GraphNode) => void;
+  overviewResult: LegacyResult<GraphOverviewPayloadV1> | undefined;
+  onSelect: (node: GraphNodeV1) => void;
   selected: TraceFocus | null;
 }) {
   return (
@@ -537,7 +537,7 @@ function SubgraphCaption({
   totalNodes,
   seedLabel,
 }: {
-  payload: GraphSubgraphPayload | undefined;
+  payload: GraphSubgraphPayloadV1 | undefined;
   totalNodes: number | null;
   seedLabel: string | null;
 }) {
@@ -583,9 +583,9 @@ function HubField({
   onSelect,
   selected,
 }: {
-  hubs: GraphNode[];
+  hubs: GraphNodeV1[];
   indexedNodes: number | null;
-  onSelect: (node: GraphNode) => void;
+  onSelect: (node: GraphNodeV1) => void;
   selected: TraceFocus | null;
 }) {
   // The endpoint already orders by degree, but the view's whole grammar is
@@ -771,7 +771,7 @@ function HubCard({
   selected,
   onSelect,
 }: {
-  node: GraphNode;
+  node: GraphNodeV1;
   /** The headline, already resolved by `annotateHubs`. */
   display: string;
   rank: number;
@@ -874,7 +874,7 @@ function SymbolRow({
   selected,
   onSelect,
 }: {
-  node: GraphNode;
+  node: GraphNodeV1;
   degreeCeiling: number;
   selected: boolean;
   onSelect: () => void;

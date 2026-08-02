@@ -31,9 +31,9 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { TRACE_BUDGET } from '../../viz/trace/model.ts';
 import {
-  GraphNeighborsPayloadSchema,
-  type GraphNeighborsPayload,
-} from '../../contracts/wire.ts';
+  GraphNeighborsPayloadV1Schema,
+  type GraphNeighborsPayloadV1,
+} from '../../contracts/generated.ts';
 
 const BASE = '/api/plugins/graph';
 /** The endpoint's own hard cap (`coerce_limit(params.limit, 50, 200)`). */
@@ -53,7 +53,7 @@ function neighborsUrl(id: string): string {
  * this is one read per id.
  */
 export function expansionTargets(
-  payload: GraphNeighborsPayload,
+  payload: GraphNeighborsPayloadV1,
   focusId: string,
 ): readonly string[] {
   const seen = new Set<string>();
@@ -75,12 +75,12 @@ export interface TraceNeighborhood {
   /** The focus's own hop-1 read has not answered yet. */
   readonly pending: boolean;
   /** Its outcome, or `undefined` before the first response. */
-  readonly result: LegacyResult<GraphNeighborsPayload> | undefined;
+  readonly result: LegacyResult<GraphNeighborsPayloadV1> | undefined;
   /**
    * Hop-1 payloads of the expanded neighbours, keyed by neighbour id. A
    * neighbour that failed is simply absent, which the model counts.
    */
-  readonly expanded: ReadonlyMap<string, GraphNeighborsPayload>;
+  readonly expanded: ReadonlyMap<string, GraphNeighborsPayloadV1>;
   /** At least one expansion is still in flight. */
   readonly expanding: boolean;
 }
@@ -96,7 +96,7 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
   const root = useLegacy(
     ['graph', 'neighbors', focusId],
     neighborsUrl(focusId),
-    GraphNeighborsPayloadSchema,
+    GraphNeighborsPayloadV1Schema,
   );
 
   const hop1 = useMemo<readonly string[]>(
@@ -108,7 +108,7 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
     queries: hop1.map((id) => ({
       queryKey: ['graph', 'neighbors', id, scopeKey(scope)],
       queryFn: () =>
-        fetchLegacy(scopedUrl(scope, neighborsUrl(id)), GraphNeighborsPayloadSchema),
+        fetchLegacy(scopedUrl(scope, neighborsUrl(id)), GraphNeighborsPayloadV1Schema),
       staleTime: 60_000,
     })),
   });
@@ -119,9 +119,9 @@ export function useTraceNeighborhood(focusId: string): TraceNeighborhood {
   // settled, which is exactly what this signature carries.
   const signature = hop1.map((id, i) => `${id}:${expansions[i]?.status ?? 'idle'}`).join('|');
   const expanded = useMemo(() => {
-    const out = new Map<string, GraphNeighborsPayload>();
+    const out = new Map<string, GraphNeighborsPayloadV1>();
     hop1.forEach((id, i) => {
-      const result = expansions[i]?.data as LegacyResult<GraphNeighborsPayload> | undefined;
+      const result = expansions[i]?.data as LegacyResult<GraphNeighborsPayloadV1> | undefined;
       if (result?.outcome === 'ok') out.set(id, result.data);
     });
     return out;

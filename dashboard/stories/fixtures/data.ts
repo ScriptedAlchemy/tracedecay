@@ -30,7 +30,7 @@ function pick<T>(arr: readonly T[], i: number): T {
   return arr[((i % arr.length) + arr.length) % arr.length]!;
 }
 
-/** DashboardEnvelopeV1 wrapper (see EnvelopeSchema in wire.ts). */
+/** DashboardEnvelopeV1 wrapper (see DashboardEnvelopeV1Schema in wire.ts). */
 function envelope<T>(
   payload: T,
   domainState = 'ready',
@@ -171,7 +171,7 @@ function syntheticGroup(repo: {
   };
 }
 
-/** GET /api/projects — brain/delivery registry (ProjectsPayloadSchema;
+/** GET /api/projects — brain/delivery registry (ProjectsPayloadV1Schema;
  * src/dashboard/projects.rs `list`). */
 const projectTree: ReadonlyArray<Record<string, unknown>> = [
     {
@@ -293,7 +293,7 @@ const projects: Record<string, unknown> = {
  * /api/plugins/holographic/ — memory overview + facts + entities
  * (memory_api.rs::overview; facts.rs fact_summary_json / entity_json /
  * overview_payload / trust_histogram). Consumed by KnowledgePage
- * (MemoryOverviewPayloadSchema) and ExplorerPage memory source.
+ * (MemoryOverviewPayloadV1Schema) and ExplorerPage memory source.
  * ========================================================================== */
 
 const FACT_CATEGORIES = [
@@ -1149,7 +1149,7 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
 
 /* ==========================================================================
  * /api/plugins/savings/overview (savings_api.rs::overview). Consumed by
- * CostsPage (SavingsOverviewPayloadSchema).
+ * CostsPage (SavingsOverviewPayloadV1Schema).
  * ========================================================================== */
 
 /**
@@ -1581,7 +1581,7 @@ function factProposalsPayload(): Record<string, unknown> {
 
 /* ==========================================================================
  * /api/doctor/findings (doctor_findings_api.rs::findings). Consumed by
- * DoctorInspector on the Observatory surface (DoctorFindingsPayloadSchema).
+ * DoctorInspector on the Observatory surface (DoctorFindingsPayloadV1Schema).
  * ========================================================================== */
 
 const DOCTOR_FAMILIES = [
@@ -1891,7 +1891,7 @@ const TABLE_GROWTH_STATES = [
   },
 ] as const;
 
-/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadSchema).
+/** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadV1Schema).
  *
  * One entry per distinct store *file*: the graph and project-memory roles share
  * a database in project storage mode and are therefore one card carrying both

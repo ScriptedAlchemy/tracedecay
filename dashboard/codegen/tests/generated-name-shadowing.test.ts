@@ -6,8 +6,8 @@
  * shadow and the original are indistinguishable — the only difference is which
  * module the line happens to name, and both look equally correct in review.
  *
- * This is not hypothetical. Explorer declared `ExplorerQueryRunSchema`,
- * `ExplorerSourceProgressSchema` and `ExplorerSourceIdSchema` by hand under
+ * This is not hypothetical. Explorer declared `ExplorerQueryRunV1Schema`,
+ * `ExplorerSourceProgressV1Schema` and `ExplorerSourceIdV1Schema` by hand under
  * exactly the generated names, and drifted stricter than Rust: `freshness` was
  * a five-member `z.enum` against a plain `z.string()`, so the first new
  * freshness value from the server would have failed the parse and taken the
@@ -40,7 +40,6 @@ const GENERATED_FILE = join(DASHBOARD_ROOT, "src/contracts/generated.ts");
 const BOUNDARY_FILES = new Set([
   "src/contracts/generated.ts",
   "src/contracts/index.ts",
-  "src/contracts/wire.ts",
 ]);
 
 const SEARCH_ROOTS = ["src", "e2e", "stories", "codegen"];
@@ -104,8 +103,8 @@ describe("generated wire names are not shadowed", () => {
     // Sanity: a regex that silently matched nothing would make this gate pass
     // for the wrong reason, which is the failure mode of a check like this.
     expect(generated.size).toBeGreaterThan(100);
-    expect(generated.has("ExplorerQueryRunSchema")).toBe(true);
-    expect(generated.has("StorageFindingsPayloadSchema")).toBe(true);
+    expect(generated.has("ExplorerQueryRunV1Schema")).toBe(true);
+    expect(generated.has("StorageFindingsPayloadV1Schema")).toBe(true);
 
     const offences: string[] = [];
     for (const root of SEARCH_ROOTS) {
@@ -123,7 +122,7 @@ describe("generated wire names are not shadowed", () => {
       offences,
       `These modules export a name that src/contracts/generated.ts already exports, so an ` +
         `import of that name is ambiguous at the call site. Import it from ` +
-        `src/contracts/wire.ts instead of re-declaring or re-exporting it:\n  ` +
+        `src/contracts/generated.ts instead of re-declaring or re-exporting it:\n  ` +
         offences.join("\n  "),
     ).toEqual([]);
   });
@@ -133,7 +132,7 @@ describe("generated wire names are not shadowed", () => {
     // only job was declaring wire shapes, sitting at a shorter import path than
     // the generated barrel with nothing to stop it reusing a generated name.
     // Every route these declared is now modelled in Rust, so they are read from
-    // `src/contracts/wire.ts` and there is nowhere else for a wire shape to
+    // `src/contracts/generated.ts` and there is nowhere else for a wire shape to
     // live. A route Rust does not model yet is a backend gap to report, not a
     // shape to hand-write.
     const strays = sourceFiles("src/workspaces").filter((file) =>
@@ -142,7 +141,7 @@ describe("generated wire names are not shadowed", () => {
     expect(
       strays,
       "Per-workspace contracts modules are not a thing any more. Import the " +
-        "generated schema from src/contracts/wire.ts.",
+        "generated schema from src/contracts/generated.ts.",
     ).toEqual([]);
   });
 });

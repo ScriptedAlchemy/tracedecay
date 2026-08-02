@@ -24,9 +24,9 @@
  */
 import {
   assertNever,
-  type MemoryFactRow,
-  type MemoryHrrCoverage,
-} from '../../contracts/wire.ts';
+  type MemoryFactRowV1,
+  type MemoryHrrCoverageV1,
+} from '../../contracts/generated.ts';
 
 export interface TrustBand {
   /** Printed label, e.g. `0.75–1.00`. */
@@ -90,7 +90,7 @@ function finish(source: TrustSource, bands: TrustBand[]): TrustDistribution {
 export function composeTrustDistribution(
   histogram: ReadonlyArray<{ label: string; count: number; bucket: number }> | undefined,
   status: TrustStatusBands | undefined,
-  facts: ReadonlyArray<Pick<MemoryFactRow, 'trust_score'>> | undefined,
+  facts: ReadonlyArray<Pick<MemoryFactRowV1, 'trust_score'>> | undefined,
 ): TrustDistribution {
   const fromHistogram = (histogram ?? []).map((bucket) => ({
     label: bucket.label,
@@ -162,7 +162,7 @@ export interface LoadedTrust {
 /** The trust spread across the facts actually on screen. `null` when there is
  * nothing loaded to measure. */
 export function summarizeLoadedTrust(
-  facts: ReadonlyArray<Pick<MemoryFactRow, 'trust_score'>>,
+  facts: ReadonlyArray<Pick<MemoryFactRowV1, 'trust_score'>>,
   flatThreshold = 0.25,
 ): LoadedTrust | null {
   const scores = facts
@@ -208,7 +208,7 @@ export interface HrrSummary {
   /** Lowest per-category coverage, 0–1. */
   floor: number;
   /** Banks whose status is anything other than `ready`. */
-  exceptions: MemoryHrrCoverage[];
+  exceptions: MemoryHrrCoverageV1[];
   /** The one-line reading that replaces a rail of near-identical bars. */
   line: string;
 }
@@ -220,7 +220,7 @@ export interface HrrSummary {
  * and it buries the reading that does vary: four of those banks are stale or
  * incompletely vectorized, which no coverage percentage shows.
  */
-export function summarizeHrrCoverage(rows: readonly MemoryHrrCoverage[]): HrrSummary | null {
+export function summarizeHrrCoverage(rows: readonly MemoryHrrCoverageV1[]): HrrSummary | null {
   if (rows.length === 0) return null;
   const floor = rows.reduce((min, row) => Math.min(min, row.coverage), 1);
   const exceptions = rows.filter((row) => row.status !== 'ready');
@@ -245,7 +245,7 @@ export function summarizeHrrCoverage(rows: readonly MemoryHrrCoverage[]): HrrSum
  * mapped onto the nearest known wording — the reader learns the store said
  * something this build does not know about, which is the truth, instead of
  * being told a state the daemon never reported. */
-export function hrrStatusLabel(status: MemoryHrrCoverage['status']): string {
+export function hrrStatusLabel(status: MemoryHrrCoverageV1['status']): string {
   switch (status) {
     case 'ready':
       return 'ready';
