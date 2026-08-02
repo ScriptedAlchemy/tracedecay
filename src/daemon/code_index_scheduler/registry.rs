@@ -460,15 +460,40 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         drop(mounted);
-        let mut opened = self.open_worktree(
-            project_id,
-            &project_root,
-            super::scoped_code_index_store_root(&store_root, &project_root),
-        )?;
-        if let Some(hook) = semantic_schedule.clone() {
-            opened.replace_semantic_schedule_hook(Some(hook));
-        }
-        let restored_generation = opened.latest_complete();
+        // Opening a worktree restores the sealed generation: an O(store) decode
+        // that re-mints every file's exact-extraction authority and repeats the
+        // full canonical validation sweep. That is CPU, not I/O, and it must not
+        // occupy an async runtime worker — mount is exactly the activation point
+        // where this work is supposed to be paid, on a blocking thread, so no
+        // request ever pays it.
+        let scoped_store_root = super::scoped_code_index_store_root(&store_root, &project_root);
+        let open_project_id = project_id.clone();
+        let open_project_root = project_root.clone();
+        let open_byte_pool = Arc::clone(&self.byte_pool);
+        let open_semantic_schedule = semantic_schedule.clone();
+        let (opened, restored_generation) = tokio::task::spawn_blocking(move || {
+            let mut opened = CodeIndexWorktreeSchedulerV1::open(
+                open_project_id,
+                &open_project_root,
+                scoped_store_root,
+                open_byte_pool,
+            )?;
+            if let Some(hook) = open_semantic_schedule {
+                opened.replace_semantic_schedule_hook(Some(hook));
+            }
+            // Warm every per-generation serving derivation while still on the
+            // blocking pool. Without this the exact-admission sweep, record
+            // indices, and lane owners are all built lazily by whichever query
+            // arrives first, putting the same O(store) canonical hashing back on
+            // the request path that the decode was just moved off.
+            opened.prime_serving_caches();
+            let restored = opened.latest_complete();
+            Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
+        })
+        .await
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Identity(format!("code-index mount task failed: {error}"))
+        })??;
         // When the restore-time freshness witness proved the retained generation
         // still equals the on-disk source, the mount-time verification pass is
         // redundant: skip it so an unchanged reopen costs a stat-scan, not a
@@ -542,6 +567,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let result = scheduler.reconcile_now();
                     let latest = scheduler.latest_complete();
+                    // Reconcile completion is an activation point: build this
+                    // generation's serving derivations here, on the blocking
+                    // pool, so the first query against it stays O(result).
+                    if let Some(latest) = latest.as_ref() {
+                        latest.warm_serving_caches();
+                    }
                     (result, latest)
                 })
                 .await;
