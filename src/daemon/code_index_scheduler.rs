@@ -1691,6 +1691,48 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
     }
 
+    /// Whether this worktree's git authority still resolves.
+    ///
+    /// The freshness ladder used to run inline at query admission, so a
+    /// vanished or unreadable `.git` surfaced as a `reconcile_now` error and the
+    /// query failed closed rather than serving retained bytes attributed to an
+    /// identity nothing could confirm. Now that the rebuild is backgrounded
+    /// (see [`Self::request_fresh_for_query_background`]) that error is no
+    /// longer reached on the request path, so the fail-closed gate needs its own
+    /// cheap probe. Opening the repository is the O(1) part of what reconcile
+    /// did: it proves the authority exists without walking, hashing, or
+    /// classifying anything.
+    pub(super) fn git_authority_available(&self) -> bool {
+        gix::open(&self.project_root).is_ok()
+    }
+
+    /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
+    /// request path.
+    ///
+    /// Runs the identical ladder — unverified restore, tier-1 git metadata,
+    /// tier-2 bounded staleness — but where `ensure_fresh_for_query` calls
+    /// `reconcile_now()` inline this only *requests* the background worker.
+    /// The ladder's checks are cheap (stat-level metadata); its remedy is not,
+    /// and a query must never pay for it. This mirrors what
+    /// [`Self::latest_complete_ready_for_query_with`] already does for the
+    /// latency-sensitive application paths.
+    ///
+    /// Returns whether a reconcile was actually requested. A quiet repository
+    /// must answer `false` and wake nothing: the ladder suppressing work is the
+    /// common case, and waking the worker on every read would turn each query
+    /// into a rebuild trigger — exactly the coupling this change removes.
+    pub(super) fn request_fresh_for_query_background(&mut self) -> bool {
+        if !self.verified_against_source
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+        {
+            self.request_background_reconcile();
+            return true;
+        }
+        false
+    }
+
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
