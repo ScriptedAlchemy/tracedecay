@@ -874,8 +874,50 @@ mod tests {
         let snapshot = tracedecay_runtime_core::sqlite_read_snapshot::open(path)
             .await
             .unwrap();
-        let mut rows = snapshot
-            .connection()
+        let facts = memory_facts(snapshot.connection()).await;
+        snapshot.validate_source().unwrap();
+        facts
+    }
+
+    async fn runtime_memory_facts(path: &Path) -> Vec<(String, String, Vec<String>, i64, i64)> {
+        let database = test_read_database(path).await;
+        let snapshot = database
+            .begin_memory_read_transaction("inspect migrated Hermes memory")
+            .await
+            .unwrap();
+        memory_facts(&snapshot).await
+    }
+
+    async fn runtime_count(path: &Path, table: HermesFixtureTable) -> i64 {
+        let database = test_read_database(path).await;
+        let snapshot = database
+            .begin_engine_read_snapshot("inspect migrated Hermes table")
+            .await
+            .unwrap();
+        query_count(&snapshot, table).await
+    }
+
+    async fn test_read_database(path: &Path) -> tracedecay_runtime_core::db::Database {
+        tracedecay_global_db::register_test_schema_installer();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            path,
+            "inspect migrated Hermes database",
+        )
+        .unwrap();
+        tracedecay_runtime_core::db::Database::publish_test_runtime(
+            path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::ReadOnly,
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    async fn memory_facts(
+        connection: &(impl QueryExecutor + ?Sized),
+    ) -> Vec<(String, String, Vec<String>, i64, i64)> {
+        let mut rows = connection
             .query(
                 "SELECT f.content, f.tags, COALESCE(group_concat(e.name, char(31)), ''),
                         f.helpful_count, f.unhelpful_count
@@ -905,7 +947,6 @@ mod tests {
                 row.get(4).unwrap(),
             ));
         }
-        snapshot.validate_source().unwrap();
         facts
     }
 
@@ -1156,7 +1197,7 @@ mod tests {
             .unwrap();
         assert_eq!((counts.0, counts.1, counts.2), (1, 1, 1));
         assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        let facts = immutable_memory_facts(&layout.graph_db_path).await;
+        let facts = runtime_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].0, "legacy Hermes fact");
         assert!(facts[0].2.contains(&"TraceDecay".to_string()));
@@ -1182,7 +1223,7 @@ mod tests {
                 .is_some()
         );
         assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        assert_eq!(immutable_memory_facts(&layout.graph_db_path).await.len(), 1);
+        assert_eq!(runtime_memory_facts(&layout.graph_db_path).await.len(), 1);
         assert_eq!(
             immutable_source_count(&source, HermesFixtureTable::Sessions).await,
             1
@@ -1311,7 +1352,7 @@ mod tests {
         assert_eq!(report.migrated.len(), 1, "{report:?}");
         let layout =
             tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
-        let facts = immutable_memory_facts(&layout.graph_db_path).await;
+        let facts = runtime_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].0, "facts survive without sessions");
     }
@@ -1519,16 +1560,16 @@ mod tests {
 
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
-        let facts = immutable_memory_facts(&layout.graph_db_path).await;
+        let facts = runtime_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].3, 1);
         assert_eq!(facts[0].4, 1);
         assert!(facts[0].1.contains("legacy"));
         assert!(facts[0].1.contains("target"));
         assert_eq!(
-            immutable_source_count(
+            runtime_count(
                 &layout.graph_db_path,
-                HermesFixtureTable::MemoryFeedbackEvents
+                HermesFixtureTable::MemoryFeedbackEvents,
             )
             .await,
             2
@@ -1537,14 +1578,14 @@ mod tests {
         let second = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(second.already_migrated.len(), 1, "{second:?}");
         assert_eq!(
-            immutable_source_count(
+            runtime_count(
                 &layout.graph_db_path,
-                HermesFixtureTable::MemoryFeedbackEvents
+                HermesFixtureTable::MemoryFeedbackEvents,
             )
             .await,
             2
         );
-        let facts = immutable_memory_facts(&layout.graph_db_path).await;
+        let facts = runtime_memory_facts(&layout.graph_db_path).await;
         assert_eq!(facts[0].3, 1);
         assert_eq!(facts[0].4, 1);
     }

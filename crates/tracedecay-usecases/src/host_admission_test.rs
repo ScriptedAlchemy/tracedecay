@@ -1,5 +1,3 @@
-use tracedecay_store::ObservationStoreError;
-
 use super::*;
 
 #[test]
@@ -18,18 +16,28 @@ fn probe_distinguishes_unknown_provider_and_unbound_project_authority() {
 
 #[test]
 fn all_production_provider_ids_are_supported() {
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
     for provider in tracedecay_sessions::runtime::SessionProvider::ALL
         .into_iter()
         .filter(|provider| provider.supports_host_admission())
     {
-        assert!(
-            supported_provider(provider.id()),
+        assert_ne!(
+            facade
+                .probe(provider.id(), HostAdmissionScope::Project)
+                .status,
+            HostAdmissionStatus::Unknown,
             "unsupported provider {}",
-            provider.id()
+            provider.id(),
         );
     }
-    assert!(!supported_provider("roo"));
-    assert!(!supported_provider("vibe"));
+    assert_eq!(
+        facade.probe("roo", HostAdmissionScope::Project).status,
+        HostAdmissionStatus::Unknown
+    );
+    assert_eq!(
+        facade.probe("vibe", HostAdmissionScope::Project).status,
+        HostAdmissionStatus::Unknown
+    );
 }
 
 #[test]
@@ -73,29 +81,4 @@ fn quarantine_outcomes_serialize_as_static_payload_free_dispositions() {
             HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
         ));
     }
-}
-
-#[test]
-fn application_errors_map_to_bounded_static_outcomes() {
-    assert_eq!(
-        classify_error(&ObservationApplicationError::Cancelled),
-        HostAdmissionOutcome::new(
-            HostAdmissionStatus::Backpressured,
-            true,
-            Some("admission_cancelled"),
-        )
-    );
-    assert_eq!(
-        classify_error(&ObservationApplicationError::Store(
-            ObservationStoreError::Storage {
-                operation: "write",
-                source: Box::new(std::io::Error::other("provider content must not escape",)),
-            },
-        )),
-        HostAdmissionOutcome::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("authority_write_failed"),
-        )
-    );
 }

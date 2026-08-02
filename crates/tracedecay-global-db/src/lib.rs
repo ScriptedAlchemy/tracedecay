@@ -11,7 +11,9 @@ use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 mod api_types;
 pub mod configuration;
+mod external_source_store;
 mod git_index_transactions;
+mod host_admission;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
@@ -59,6 +61,7 @@ mod transcript;
 pub use git_index_transactions::{
     GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, ensure_git_index_transaction_schema,
 };
+pub use host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;
 /// Registry reap contract, moved down beside `plan_registry_reap` — its only

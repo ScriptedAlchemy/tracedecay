@@ -44,9 +44,6 @@ pub mod edit;
 // adapters (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
 pub mod event_lane;
 pub mod evidence_assembly;
-// Widened from `pub(crate)`: `tracedecay-global-db` reaches the runtime
-// external-source store through the root shim (see that crate's SEAMS.md).
-pub mod external_source_store;
 pub mod feedback;
 // Moved down from the root binary. `analytics_bridge` kept only its durable
 // hook-JSONL importer; `git_intelligence`/`git_query` are the native git

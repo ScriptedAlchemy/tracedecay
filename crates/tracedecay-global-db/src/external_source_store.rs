@@ -26,7 +26,6 @@ use tracedecay_store::{
     SourceObservationEvidenceV1, SourceStoreStateV1, StorageRuntimeReadPort,
 };
 
-use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
 use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeHandle;
 
 #[derive(Debug, Error)]
@@ -203,10 +202,10 @@ impl RuntimeExternalSourceStore {
             ))
             .map_err(invalid)?,
         );
-        let idempotency_key = derive_logical_effect_idempotency(
-            LogicalEffectIdempotencyDomain::HostObservation,
+        let idempotency_key = canonical_sha256(&(
+            "tracedecay.host-observation.idempotency.v1",
             observation.observation_id(),
-        )
+        ))
         .map_err(invalid)?;
         let native_object = SourceNativeObjectIdV1::new(
             canonical_sha256(&(

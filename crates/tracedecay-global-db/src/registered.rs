@@ -281,10 +281,8 @@ impl RegisteredGlobalDb {
     /// The store runtime this registered database is mounted on.
     ///
     /// Exposed so the composition root can build the adapters it owns —
-    /// `RuntimeEvidenceAssemblyStore`, `RuntimeExternalSourceStore`,
-    /// `GlobalDbObservationStore`, `DaemonWorkRuntimeV1` — without this crate
-    /// naming a root type. See the "root-owned adapters" seam note in
-    /// `SEAMS.md`.
+    /// `RuntimeEvidenceAssemblyStore` and `DaemonWorkRuntimeV1` — while this
+    /// crate composes its registered observation and source-lineage stores.
     pub fn runtime(&self) -> &StoreRuntimeHandle {
         &self.runtime
     }
@@ -395,11 +393,6 @@ impl RegisteredGlobalDb {
             )
         })
     }
-
-    // Root-owned adapter, deliberately not built here: `external_source_store`
-    // returned `crate::application::external_source_store::
-    // RuntimeExternalSourceStore`. The composition root builds it from
-    // `runtime().clone()` and `authority().clone()`; see `SEAMS.md`.
 
     pub fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         self.runtime

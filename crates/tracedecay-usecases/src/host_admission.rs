@@ -1,16 +1,13 @@
-use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tracedecay_domain::{
-    BrainId, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceIdentityV1, ProjectId, RetrievalAnchorId, UserProfileId,
+    FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
+    RetrievalAnchorId,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ParseOffset, ProjectionPersistOutcome, StoreShardScopeV1,
-    build_scope_resolution_authorization_v1,
+    ObservationPersistOutcome, ParseOffset, build_scope_resolution_authorization_v1,
 };
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -18,13 +15,8 @@ use crate::memory::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
 use crate::observation::{
-    AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use crate::store::observation::GlobalDbObservationStore;
-use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::privacy::RecordSanitizerV1;
-use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 mod disposition;
 mod durability;
@@ -353,215 +345,13 @@ impl HostAdmissionOutcome {
             Some("spool_quarantine_recovery_required"),
         )
     }
-
-    const fn project_authority_unbound() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("project_authority_unbound"),
-        )
-    }
-
-    const fn project_authority_mismatch() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            false,
-            Some("project_authority_mismatch"),
-        )
-    }
-
-    const fn registered_authority_unavailable() -> Self {
-        Self::new(
-            HostAdmissionStatus::Unavailable,
-            true,
-            Some("registered_authority_unavailable"),
-        )
-    }
 }
 
+pub use tracedecay_global_db::HostAdmissionAuthorities;
 pub use tracedecay_sessions::admission::HostAdmissionScope;
 
-#[derive(Clone, Default)]
-pub struct HostAdmissionAuthorities<'a> {
-    project_id: Option<ProjectId>,
-    project_registered: Option<&'a RegisteredGlobalDb>,
-    brain_id: Option<BrainId>,
-    profile_id: Option<UserProfileId>,
-    profile_registered: Option<&'a RegisteredGlobalDb>,
-    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
-}
-
-impl<'a> HostAdmissionAuthorities<'a> {
-    pub fn registered_for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: Some(registered),
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub(crate) fn registered_for_profile(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: Some(registered),
-            repository_provenance: None,
-        }
-    }
-
-    pub fn for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_project(brain_id, profile_id, project_id, registered)
-    }
-
-    pub fn for_profile(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        Self::registered_for_profile(brain_id, profile_id, registered)
-    }
-
-    /// Adds the registered profile-session authority to project admission.
-    #[must_use]
-    pub fn with_profile_registered(
-        mut self,
-        profile_id: UserProfileId,
-        registered: &'a RegisteredGlobalDb,
-    ) -> Self {
-        self.profile_id = Some(profile_id);
-        self.profile_registered = Some(registered);
-        self
-    }
-
-    /// Admission bound to a project identity with **no** registered database
-    /// and no resolved profile identity behind it.
-    ///
-    /// Standalone callers (a CLI invocation with no daemon-owned registry
-    /// mount) still need an admission handle to walk a transcript and count
-    /// what it *would* admit. Every capture fails closed; only scope
-    /// validation against `project_id` is authoritative.
-    pub fn unregistered_for_project(project_id: ProjectId) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: None,
-            brain_id: None,
-            profile_id: None,
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    /// Profile-scoped counterpart of [`Self::unregistered_for_project`].
-    #[must_use]
-    pub const fn unregistered_for_profile() -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: None,
-            profile_id: None,
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub fn unavailable_for_project(
-        brain_id: BrainId,
-        profile_id: UserProfileId,
-        project_id: ProjectId,
-    ) -> Self {
-        Self {
-            project_id: Some(project_id),
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    pub fn unavailable_for_profile(brain_id: BrainId, profile_id: UserProfileId) -> Self {
-        Self {
-            project_id: None,
-            project_registered: None,
-            brain_id: Some(brain_id),
-            profile_id: Some(profile_id),
-            profile_registered: None,
-            repository_provenance: None,
-        }
-    }
-
-    #[must_use]
-    pub fn with_repository_provenance(
-        mut self,
-        repository_provenance: RepositoryProvenanceAdmissionContext,
-    ) -> Self {
-        self.repository_provenance = Some(repository_provenance);
-        self
-    }
-
-    fn registered_database(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<Option<&'a RegisteredGlobalDb>, HostAdmissionOutcome> {
-        let database = match scope {
-            HostAdmissionScope::Project => self.project_registered,
-            HostAdmissionScope::Profile => self.profile_registered,
-        };
-        let Some(database) = database else {
-            return Ok(None);
-        };
-        let shard = &database.binding().shard_id;
-        let profile_matches = self.brain_id.as_ref() == Some(&shard.brain_id)
-            && self.profile_id.as_ref() == Some(&shard.profile_id);
-        let valid = profile_matches
-            && match (scope, &shard.scope) {
-                (
-                    HostAdmissionScope::Project,
-                    StoreShardScopeV1::ProjectSessions { project_id },
-                ) => self.project_id.as_ref() == Some(project_id),
-                (HostAdmissionScope::Profile, StoreShardScopeV1::ProfileSessions) => true,
-                _ => false,
-            };
-        if valid {
-            Ok(Some(database))
-        } else {
-            Err(HostAdmissionOutcome::project_authority_mismatch())
-        }
-    }
-
-    fn validate_scope(&self, scope: &ObservationScopeV1) -> Result<(), HostAdmissionOutcome> {
-        let ObservationScopeV1::Project { project_id } = scope else {
-            return Ok(());
-        };
-        match self.project_id.as_ref() {
-            Some(expected) if expected == project_id => Ok(()),
-            Some(_) => Err(HostAdmissionOutcome::project_authority_mismatch()),
-            None => Err(HostAdmissionOutcome::project_authority_unbound()),
-        }
-    }
-}
-
 pub struct HostAdmissionFacade<'a> {
-    authorities: HostAdmissionAuthorities<'a>,
+    core: tracedecay_global_db::HostAdmissionFacade<'a>,
 }
 
 impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
@@ -569,11 +359,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         &'a self,
         request: CaptureObservationRequest,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CaptureObservationOutcome> {
-        Box::pin(async move {
-            HostAdmissionFacade::capture_observation(self, request)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::capture_observation(&self.core, request)
     }
 
     fn advance_non_durable_source_cursor<'a>(
@@ -581,11 +367,11 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         advance: ObservationCursorAdvance,
         cancellation: ObservationCancellation,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, CursorAdvanceOutcome> {
-        Box::pin(async move {
-            HostAdmissionFacade::advance_non_durable_source_cursor(self, advance, cancellation)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::advance_non_durable_source_cursor(
+            &self.core,
+            advance,
+            cancellation,
+        )
     }
 
     fn get_source_cursor<'a>(
@@ -594,11 +380,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         scope: &'a ObservationScopeV1,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ObservationSourceCursorV1>>
     {
-        Box::pin(async move {
-            HostAdmissionFacade::get_source_cursor(self, source, scope)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::get_source_cursor(&self.core, source, scope)
     }
 
     fn drain_projection_queue<'a>(
@@ -611,12 +393,13 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         'a,
         tracedecay_sessions::admission::HostProjectionDrainOutcome,
     > {
-        Box::pin(async move {
-            HostAdmissionFacade::drain_projection_queue(self, provider, scope, cancellation, max)
-                .await
-                .map(canonical_projection_drain_outcome)
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::drain_projection_queue(
+            &self.core,
+            provider,
+            scope,
+            cancellation,
+            max,
+        )
     }
 
     fn has_session_message<'a>(
@@ -625,11 +408,9 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         provider: &'a str,
         message_id: &'a str,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, bool> {
-        Box::pin(async move {
-            HostAdmissionFacade::has_session_message(self, scope, provider, message_id)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::has_session_message(
+            &self.core, scope, provider, message_id,
+        )
     }
 
     fn get_parse_offset<'a>(
@@ -637,11 +418,7 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         scope: &'a ObservationScopeV1,
         path: &'a str,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, Option<ParseOffset>> {
-        Box::pin(async move {
-            HostAdmissionFacade::get_parse_offset(self, scope, path)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::get_parse_offset(&self.core, scope, path)
     }
 
     fn advance_parse_offset<'a>(
@@ -650,59 +427,26 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
         path: &'a str,
         offset: ParseOffset,
     ) -> tracedecay_sessions::admission::AdmissionFuture<'a, ()> {
-        Box::pin(async move {
-            HostAdmissionFacade::advance_parse_offset(self, scope, path, offset)
-                .await
-                .map_err(canonical_admission_outcome)
-        })
+        tracedecay_sessions::admission::HostAdmission::advance_parse_offset(
+            &self.core, scope, path, offset,
+        )
     }
 }
 
-const fn canonical_admission_status(
-    status: HostAdmissionStatus,
-) -> tracedecay_sessions::admission::HostAdmissionStatus {
-    match status {
-        HostAdmissionStatus::Supported => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Supported
-        }
-        HostAdmissionStatus::Degraded => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Degraded
-        }
-        HostAdmissionStatus::Unavailable => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Unavailable
-        }
-        HostAdmissionStatus::Unknown => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Unknown
-        }
-        HostAdmissionStatus::Backpressured => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Backpressured
-        }
-        HostAdmissionStatus::AcceptedForReplay => {
-            tracedecay_sessions::admission::HostAdmissionStatus::AcceptedForReplay
-        }
-        HostAdmissionStatus::Committed => {
-            tracedecay_sessions::admission::HostAdmissionStatus::Committed
-        }
-        HostAdmissionStatus::ExactDuplicate => {
-            tracedecay_sessions::admission::HostAdmissionStatus::ExactDuplicate
-        }
-    }
-}
-
-const fn canonical_admission_outcome(
-    outcome: HostAdmissionOutcome,
-) -> tracedecay_sessions::admission::HostAdmissionOutcome {
-    tracedecay_sessions::admission::HostAdmissionOutcome {
-        status: canonical_admission_status(outcome.status),
+const fn product_admission_outcome(
+    outcome: tracedecay_sessions::admission::HostAdmissionOutcome,
+) -> HostAdmissionOutcome {
+    HostAdmissionOutcome {
+        status: outcome.status,
         retryable: outcome.retryable,
         reason_code: outcome.reason_code,
     }
 }
 
-fn canonical_projection_drain_outcome(
-    outcome: HostProjectionDrainOutcome,
-) -> tracedecay_sessions::admission::HostProjectionDrainOutcome {
-    tracedecay_sessions::admission::HostProjectionDrainOutcome {
+fn product_projection_drain_outcome(
+    outcome: tracedecay_sessions::admission::HostProjectionDrainOutcome,
+) -> HostProjectionDrainOutcome {
+    HostProjectionDrainOutcome {
         projected: outcome.projected,
         projected_outputs: outcome.projected_outputs,
         skipped: outcome.skipped,
@@ -712,8 +456,14 @@ fn canonical_projection_drain_outcome(
 }
 
 impl<'a> HostAdmissionFacade<'a> {
-    pub const fn new(authorities: HostAdmissionAuthorities<'a>) -> Self {
-        Self { authorities }
+    pub fn new(authorities: HostAdmissionAuthorities<'a>) -> Self {
+        Self {
+            core: tracedecay_global_db::HostAdmissionFacade::new(authorities),
+        }
+    }
+
+    fn authorities(&self) -> &HostAdmissionAuthorities<'a> {
+        self.core.authorities()
     }
 
     #[allow(dead_code)] // evidence-assembly admission port — preserve authority surface
@@ -733,11 +483,11 @@ impl<'a> HostAdmissionFacade<'a> {
         let scope = ObservationScopeV1::Project {
             project_id: project_id.clone(),
         };
-        self.authorities
+        self.authorities()
             .validate_scope(&scope)
             .map_err(|_| unavailable())?;
         let database = self
-            .authorities
+            .authorities()
             .registered_database(HostAdmissionScope::Project)
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?;
@@ -751,30 +501,11 @@ impl<'a> HostAdmissionFacade<'a> {
     }
 
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
-        if !supported_provider(provider) {
-            return HostAdmissionOutcome::new(
-                HostAdmissionStatus::Unknown,
-                false,
-                Some("unknown_provider"),
-            );
-        }
-        if scope == HostAdmissionScope::Project && self.authorities.project_id.is_none() {
-            return HostAdmissionOutcome::project_authority_unbound();
-        }
-        match self.authorities.registered_database(scope) {
-            Ok(Some(_)) => HostAdmissionOutcome::supported(),
-            Ok(None) => HostAdmissionOutcome::registered_authority_unavailable(),
-            Err(outcome) => outcome,
-        }
+        product_admission_outcome(self.core.probe(provider, scope))
     }
 
     pub fn accept_replay(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
-        let probe = self.probe(provider, scope);
-        if probe.status == HostAdmissionStatus::Supported {
-            HostAdmissionOutcome::accepted_for_replay()
-        } else {
-            probe
-        }
+        product_admission_outcome(self.core.accept_replay(provider, scope))
     }
 
     pub async fn get_source_cursor(
@@ -782,107 +513,18 @@ impl<'a> HostAdmissionFacade<'a> {
         source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> Result<Option<ObservationSourceCursorV1>, HostAdmissionOutcome> {
-        let store = self.store(source.provider().as_str(), scope)?;
-        store
-            .get_source_cursor(source, scope)
+        tracedecay_sessions::admission::HostAdmission::get_source_cursor(&self.core, source, scope)
             .await
-            .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
-    }
-
-    pub(crate) async fn get_parse_offset(
-        &self,
-        scope: &ObservationScopeV1,
-        path: &str,
-    ) -> Result<Option<tracedecay_global_db::ParseOffset>, HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .get_parse_offset_result(path)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset read failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
-    }
-
-    pub(crate) async fn advance_parse_offset(
-        &self,
-        scope: &ObservationScopeV1,
-        path: &str,
-        offset: tracedecay_global_db::ParseOffset,
-    ) -> Result<(), HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .advance_parse_offset_result(path, offset)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset advance failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
-    }
-
-    pub(crate) async fn has_session_message(
-        &self,
-        scope: &ObservationScopeV1,
-        provider: &str,
-        message_id: &str,
-    ) -> Result<bool, HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .has_session_message(provider, message_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "registered host session-message lookup failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
+            .map_err(product_admission_outcome)
     }
 
     pub async fn capture_observation(
         &self,
         request: CaptureObservationRequest,
     ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
-        let provider = request.provider().to_owned();
-        let scope = request.scope().clone();
-        self.authorities.validate_scope(&scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(&scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        let application = self.application(&provider, &scope)?;
-        let outcome = application
-            .capture_observation(
-                request.with_repository_provenance(self.authorities.repository_provenance.clone()),
-            )
+        tracedecay_sessions::admission::HostAdmission::capture_observation(&self.core, request)
             .await
-            .map_err(|error| classify_error(&error))?;
-        if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
-            crate::external_source_store::RuntimeExternalSourceStore::new(
-                database.runtime().clone(),
-                database.authority().clone(),
-            )
-            .map_err(|error| {
-                tracing::warn!(%error, "registered external-source adapter is unavailable");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })?
-            .capture_host_observation(outcome.receipt())
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "registered external-source commit failed");
-                HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
-            })?;
-        }
-        Ok(outcome)
+            .map_err(product_admission_outcome)
     }
 
     pub async fn capture(&self, request: CaptureObservationRequest) -> HostAdmissionOutcome {
@@ -897,15 +539,13 @@ impl<'a> HostAdmissionFacade<'a> {
         advance: ObservationCursorAdvance,
         cancellation: ObservationCancellation,
     ) -> Result<CursorAdvanceOutcome, HostAdmissionOutcome> {
-        let cursor = advance.next_cursor();
-        let application = self.application(cursor.source().provider().as_str(), cursor.scope())?;
-        application
-            .advance_non_durable_source_cursor(AdvanceNonDurableSourceCursorRequest::new(
-                advance,
-                cancellation,
-            ))
-            .await
-            .map_err(|error| classify_error(&error))
+        tracedecay_sessions::admission::HostAdmission::advance_non_durable_source_cursor(
+            &self.core,
+            advance,
+            cancellation,
+        )
+        .await
+        .map_err(product_admission_outcome)
     }
 
     pub async fn drain_projection_queue(
@@ -915,96 +555,16 @@ impl<'a> HostAdmissionFacade<'a> {
         cancellation: &ObservationCancellation,
         max: usize,
     ) -> Result<HostProjectionDrainOutcome, HostAdmissionOutcome> {
-        let store = self.store(provider, scope)?;
-        let mut outcome = HostProjectionDrainOutcome::default();
-        let mut session_ids = BTreeSet::new();
-        for _ in 0..max {
-            if cancellation.is_cancelled() {
-                return Err(classify_error(&ObservationApplicationError::Cancelled));
-            }
-            let Some(observation_id) = store.next_queued_observation().await.map_err(|error| {
-                tracing::warn!(%error, "projection store operation failed during host drain");
-                projection_store_unavailable()
-            })?
-            else {
-                break;
-            };
-            match store
-                .project_observation(&observation_id)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "projection store operation failed during host drain");
-                    projection_store_unavailable()
-                })? {
-                ProjectionPersistOutcome::Projected(projected) => {
-                    outcome.projected = outcome.projected.saturating_add(1);
-                    outcome.projected_outputs = outcome.projected_outputs.saturating_add(
-                        u64::try_from(projected.output_count()).unwrap_or(u64::MAX),
-                    );
-                    if let Some(observation) = store
-                        .get_observation(&observation_id)
-                        .await
-                        .map_err(|error| {
-                    tracing::warn!(%error, "projection store operation failed during host drain");
-                    projection_store_unavailable()
-                })?
-                    {
-                        session_ids.insert(
-                            observation
-                                .observation()
-                                .source()
-                                .session_id()
-                                .as_str()
-                                .to_owned(),
-                        );
-                    }
-                }
-                ProjectionPersistOutcome::Skipped { .. } => {
-                    outcome.skipped = outcome.skipped.saturating_add(1);
-                }
-                ProjectionPersistOutcome::ExactDuplicate(_) => {
-                    outcome.exact_duplicates = outcome.exact_duplicates.saturating_add(1);
-                }
-            }
-        }
-        outcome.session_ids = session_ids.into_iter().collect();
-        Ok(outcome)
-    }
-
-    fn application(
-        &self,
-        provider: &str,
-        scope: &ObservationScopeV1,
-    ) -> Result<ObservationApplication<GlobalDbObservationStore<'a>>, HostAdmissionOutcome> {
-        let store = self.store(provider, scope)?;
-        let sanitizer = RecordSanitizerV1::observation_v1().map_err(|_| {
-            HostAdmissionOutcome::new(
-                HostAdmissionStatus::Unavailable,
-                false,
-                Some("sanitizer_unavailable"),
-            )
-        })?;
-        Ok(ObservationApplication::new(store, sanitizer))
-    }
-
-    fn store(
-        &self,
-        provider: &str,
-        scope: &ObservationScopeV1,
-    ) -> Result<GlobalDbObservationStore<'a>, HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let scope = host_scope(scope);
-        let probe = self.probe(provider, scope);
-        if probe.status != HostAdmissionStatus::Supported {
-            return Err(probe);
-        }
-        match self.authorities.registered_database(scope)? {
-            Some(database) => Ok(GlobalDbObservationStore::with_runtime(
-                database.runtime(),
-                database.authority(),
-            )),
-            None => Err(HostAdmissionOutcome::registered_authority_unavailable()),
-        }
+        tracedecay_sessions::admission::HostAdmission::drain_projection_queue(
+            &self.core,
+            provider,
+            scope,
+            cancellation,
+            max,
+        )
+        .await
+        .map(product_projection_drain_outcome)
+        .map_err(product_admission_outcome)
     }
 }
 
@@ -1027,16 +587,16 @@ impl EvidenceAnchorResolver for HostAdmissionFacade<'_> {
                 source: Box::new(error),
             })?;
         let scope = ObservationScopeV1::from(owner.clone());
-        self.authorities.validate_scope(&scope).map_err(|outcome| {
-            EvidenceAnchorResolutionError::Authority {
+        self.authorities()
+            .validate_scope(&scope)
+            .map_err(|outcome| EvidenceAnchorResolutionError::Authority {
                 operation: "validate evidence anchor authority scope",
                 source: Box::new(std::io::Error::other(
                     outcome.reason_code.unwrap_or("authority_unavailable"),
                 )),
-            }
-        })?;
+            })?;
         let authority_scope = host_scope(&scope);
-        let record = match self.authorities.registered_database(authority_scope) {
+        let record = match self.authorities().registered_database(authority_scope) {
             Ok(Some(registered)) => registered
                 .resolve_observation_evidence_anchor(&scope, &anchor_id)
                 .await
@@ -1094,16 +654,16 @@ impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
                 source: Box::new(error),
             })?;
         let scope = ObservationScopeV1::from(owner.clone());
-        self.authorities.validate_scope(&scope).map_err(|outcome| {
-            EvidenceAnchorResolutionError::Authority {
+        self.authorities()
+            .validate_scope(&scope)
+            .map_err(|outcome| EvidenceAnchorResolutionError::Authority {
                 operation: "validate evidence anchor authority scope",
                 source: Box::new(std::io::Error::other(
                     outcome.reason_code.unwrap_or("authority_unavailable"),
                 )),
-            }
-        })?;
+            })?;
         let authority_scope = host_scope(&scope);
-        let observed = match self.authorities.registered_database(authority_scope) {
+        let observed = match self.authorities().registered_database(authority_scope) {
             Ok(Some(registered)) => registered
                 .resolve_observation_evidence_anchor_report(&scope, &anchor_id)
                 .await
@@ -1143,25 +703,11 @@ impl EvidenceAnchorReportResolver for HostAdmissionFacade<'_> {
     }
 }
 
-const fn projection_store_unavailable() -> HostAdmissionOutcome {
-    HostAdmissionOutcome::new(
-        HostAdmissionStatus::Unavailable,
-        true,
-        Some("projection_store_unavailable"),
-    )
-}
-
 fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {
     match scope {
         ObservationScopeV1::Profile => HostAdmissionScope::Profile,
         ObservationScopeV1::Project { .. } => HostAdmissionScope::Project,
     }
-}
-
-fn supported_provider(provider: &str) -> bool {
-    matches!(provider, "kimi" | "opencode")
-        || tracedecay_sessions::runtime::SessionProvider::parse(provider)
-            .is_some_and(tracedecay_sessions::runtime::SessionProvider::supports_host_admission)
 }
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
@@ -1189,48 +735,6 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
             false,
             Some("sanitizer_quarantined"),
         ),
-    }
-}
-
-fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
-    match error {
-        ObservationApplicationError::Cancelled => HostAdmissionOutcome::new(
-            HostAdmissionStatus::Backpressured,
-            true,
-            Some("admission_cancelled"),
-        ),
-        ObservationApplicationError::Store(ObservationStoreError::CursorConflict { .. }) => {
-            HostAdmissionOutcome::new(
-                HostAdmissionStatus::Backpressured,
-                true,
-                Some("cursor_conflict"),
-            )
-        }
-        ObservationApplicationError::Store(ObservationStoreError::Storage { .. }) => {
-            HostAdmissionOutcome::new(
-                HostAdmissionStatus::Unavailable,
-                true,
-                Some("authority_write_failed"),
-            )
-        }
-        ObservationApplicationError::Contract(_) => HostAdmissionOutcome::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("invalid_observation_contract"),
-        ),
-        ObservationApplicationError::Privacy(_) => HostAdmissionOutcome::new(
-            HostAdmissionStatus::Degraded,
-            false,
-            Some("privacy_boundary_failed"),
-        ),
-        ObservationApplicationError::Store(_)
-        | ObservationApplicationError::PersistedObservationUnavailable => {
-            HostAdmissionOutcome::new(
-                HostAdmissionStatus::Degraded,
-                false,
-                Some("observation_commit_failed"),
-            )
-        }
     }
 }
 

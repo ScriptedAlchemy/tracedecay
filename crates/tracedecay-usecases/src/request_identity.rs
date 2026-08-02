@@ -97,7 +97,6 @@ impl GlobalOperationIdentityKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalEffectIdempotencyDomain {
-    HostObservation,
     FeedbackObservation,
     FeedbackSourceEvent,
     ConfigurationEffect,
@@ -108,7 +107,6 @@ pub enum LogicalEffectIdempotencyDomain {
 impl LogicalEffectIdempotencyDomain {
     const fn domain(self) -> &'static str {
         match self {
-            Self::HostObservation => "tracedecay.host-observation.idempotency.v1",
             Self::FeedbackObservation => "tracedecay.feedback.observation.plan26.v1",
             Self::FeedbackSourceEvent => "tracedecay.feedback.source-event.plan26.v1",
             Self::ConfigurationEffect => "tracedecay.configuration.effect-idempotency.v1",
@@ -549,25 +547,6 @@ mod tests {
         let centralized =
             derive_preview_identity(PreviewIdentityDomain::SourceEdit, &request, &edit).unwrap();
         assert_eq!(centralized, legacy);
-    }
-
-    #[test]
-    fn host_observation_identity_preserves_flat_persisted_derivation() {
-        let observation = "observation.fixture";
-        let legacy =
-            canonical_sha256(&("tracedecay.host-observation.idempotency.v1", observation)).unwrap();
-        assert_eq!(
-            legacy.as_str(),
-            "sha256:fc24322522dbedaa19d0135034a190db386d40498b4f3dcae55b00388a837ea3"
-        );
-        assert_eq!(
-            derive_logical_effect_idempotency(
-                LogicalEffectIdempotencyDomain::HostObservation,
-                &observation,
-            )
-            .unwrap(),
-            legacy
-        );
     }
 
     #[test]
