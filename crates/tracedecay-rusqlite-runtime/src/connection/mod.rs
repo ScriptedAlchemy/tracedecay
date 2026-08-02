@@ -157,14 +157,14 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn verify_connection(
         &self,
-        connection: &Connection,
+        _connection: &Connection,
         canonical_path: &Path,
     ) -> Result<(), OpenedDatabaseFileError> {
         // Check the pathname identity first. If it changes during this stat,
         // HAS_MOVED below still observes the SQLite handle's different inode.
         self.verify_current_path(canonical_path)?;
         #[cfg(unix)]
-        if sqlite_connection_has_moved(connection)? {
+        if sqlite_connection_has_moved(_connection)? {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         #[cfg(unix)]
