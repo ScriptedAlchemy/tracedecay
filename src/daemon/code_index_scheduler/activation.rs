@@ -432,7 +432,7 @@ mod tests {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let activation = activation(
             repository.path(),
-            mount_attempts,
+            Arc::clone(&mount_attempts),
             Some(Arc::clone(&gate)),
             Arc::clone(&batches),
         );
@@ -440,6 +440,7 @@ mod tests {
         paths.extend((0..=MAX_PENDING_HOOK_PATHS).map(|index| format!("src/{index}.rs")));
 
         assert!(activation.notify_hook_paths(repository.path(), paths).await);
+        wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         gate.notify_waiters();
         wait_until(|| !batches.lock().expect("batches").is_empty()).await;
         let batch = batches.lock().expect("batches").remove(0);
