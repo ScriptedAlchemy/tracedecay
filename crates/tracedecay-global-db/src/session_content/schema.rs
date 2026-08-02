@@ -27,7 +27,7 @@ pub const SESSION_CONTENT_SCHEMA_DDL: &str = r#"
     );
 
     CREATE TABLE session_content_references (
-        owner_kind TEXT NOT NULL CHECK(owner_kind IN ('occurrence', 'summary')),
+        owner_kind TEXT NOT NULL CHECK(owner_kind IN ('projection', 'occurrence', 'summary')),
         owner_id TEXT NOT NULL CHECK(length(owner_id) > 0),
         content_kind TEXT NOT NULL CHECK(content_kind IN (
             'observation_json', 'message_text', 'summary_text'
@@ -40,7 +40,7 @@ pub const SESSION_CONTENT_SCHEMA_DDL: &str = r#"
             REFERENCES session_content_objects(content_digest)
             ON DELETE RESTRICT,
         CHECK(
-            (owner_kind = 'occurrence'
+            (owner_kind IN ('projection', 'occurrence')
                 AND sanitization_receipt_id IS NOT NULL
                 AND retrieval_anchor_id IS NULL)
             OR (owner_kind = 'summary'

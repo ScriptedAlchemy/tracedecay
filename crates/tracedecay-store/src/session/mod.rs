@@ -32,9 +32,9 @@ pub use content::{
     MAX_SESSION_CONTENT_FTS_CHARS, MAX_SESSION_CONTENT_GC_PAGE_SIZE, SessionContentErrorV1,
     SessionContentFileLocatorV1, SessionContentGcRequestV1, SessionContentKeyV1,
     SessionContentKindV1, SessionContentObjectV1, SessionContentOccurrenceOwnerV1,
-    SessionContentOwnerV1, SessionContentReadRequestV1, SessionContentReferenceV1,
-    SessionContentResult, SessionContentSearchTextV1, SessionContentStorageV1,
-    SessionContentSummaryOwnerV1, SessionContentValueV1,
+    SessionContentOwnerV1, SessionContentProjectionOwnerV1, SessionContentReadRequestV1,
+    SessionContentReferenceV1, SessionContentResult, SessionContentSearchTextV1,
+    SessionContentStorageV1, SessionContentSummaryOwnerV1, SessionContentValueV1,
 };
 pub use projection::{
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionGenerationActivationReceiptV1,

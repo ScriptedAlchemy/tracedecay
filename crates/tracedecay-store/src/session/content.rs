@@ -259,6 +259,33 @@ impl SessionContentOccurrenceOwnerV1 {
     }
 }
 
+/// Projection-owned authorization for the canonical observation envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionContentProjectionOwnerV1 {
+    observation_id: CanonicalObservationIdV1,
+    receipt_id: SanitizationReceiptId,
+}
+
+impl SessionContentProjectionOwnerV1 {
+    pub fn new(
+        observation_id: CanonicalObservationIdV1,
+        receipt_id: SanitizationReceiptId,
+    ) -> Self {
+        Self {
+            observation_id,
+            receipt_id,
+        }
+    }
+
+    pub fn observation_id(&self) -> &CanonicalObservationIdV1 {
+        &self.observation_id
+    }
+
+    pub fn receipt_id(&self) -> &SanitizationReceiptId {
+        &self.receipt_id
+    }
+}
+
 /// Summary-owned authorization, bound to the summary's retrieval anchor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionContentSummaryOwnerV1 {
@@ -286,6 +313,7 @@ impl SessionContentSummaryOwnerV1 {
 /// The only valid content read authorities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionContentOwnerV1 {
+    Projection(SessionContentProjectionOwnerV1),
     Occurrence(SessionContentOccurrenceOwnerV1),
     Summary(SessionContentSummaryOwnerV1),
 }
@@ -293,6 +321,7 @@ pub enum SessionContentOwnerV1 {
 impl SessionContentOwnerV1 {
     const fn kind_name(&self) -> &'static str {
         match self {
+            Self::Projection(_) => "projection",
             Self::Occurrence(_) => "occurrence",
             Self::Summary(_) => "summary",
         }
@@ -316,7 +345,10 @@ impl SessionContentReferenceV1 {
         let valid_owner = matches!(
             (content_kind, &owner),
             (
-                SessionContentKindV1::ObservationJson | SessionContentKindV1::MessageText,
+                SessionContentKindV1::ObservationJson,
+                SessionContentOwnerV1::Projection(_)
+            ) | (
+                SessionContentKindV1::MessageText,
                 SessionContentOwnerV1::Occurrence(_)
             ) | (
                 SessionContentKindV1::SummaryText,
@@ -576,6 +608,39 @@ mod tests {
             error,
             SessionContentErrorV1::OwnerKindMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn observation_json_requires_projection_authorization() {
+        let object =
+            SessionContentObjectV1::inline(SessionContentValueV1::MessageText("{}".to_owned()))
+                .unwrap();
+        let observation_id =
+            CanonicalObservationIdV1::new(format!("sha256:{}", "c".repeat(64))).unwrap();
+        let receipt_id = SanitizationReceiptId::new("receipt.content.projection").unwrap();
+        let occurrence = SessionContentOccurrenceOwnerV1::derive(
+            &observation_id,
+            ProjectionOutputOrdinalV1::new(0),
+            receipt_id.clone(),
+        );
+        assert!(
+            SessionContentReferenceV1::new(
+                &object,
+                SessionContentKindV1::ObservationJson,
+                SessionContentOwnerV1::Occurrence(occurrence),
+            )
+            .is_err()
+        );
+
+        let projection = SessionContentProjectionOwnerV1::new(observation_id, receipt_id);
+        assert!(
+            SessionContentReferenceV1::new(
+                &object,
+                SessionContentKindV1::ObservationJson,
+                SessionContentOwnerV1::Projection(projection),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
