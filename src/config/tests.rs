@@ -2193,7 +2193,7 @@ mod runtime_configuration_cutover {
     }
 
     #[tokio::test]
-    async fn read_only_open_serves_registry_defaults_for_uninitialized_store() {
+    async fn read_only_open_rejects_uninitialized_store_without_fabricating_authority() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         crate::storage::write_enrollment_marker(
@@ -2222,21 +2222,21 @@ mod runtime_configuration_cutover {
         )
         .await
         .expect("open retained project runtime");
-        // A read-only reopen must degrade to the registry-default snapshot rather
-        // than hard-erroring on the absent current revision. This is what lets a
-        // moved, consolidated project be inspected read-only.
-        let configuration = runtime
+        let error = runtime
             .load_runtime_configuration_read_only_for_test(root.path(), &layout)
             .await
-            .expect("read-only open serves registry defaults for an uninitialized store");
-        assert_eq!(
-            configuration.target.project_id.as_str(),
-            "proj_read_only_uninitialized"
+            .expect_err("an uninitialized store has no configuration authority");
+        assert!(
+            matches!(error, crate::errors::TraceDecayError::Config { .. }),
+            "missing durable authority must remain typed, got {error:?}"
         );
-        assert_eq!(
-            configuration.revision_id.as_str(),
-            "configuration.read_only.default.v1",
-            "an uninitialized store must resolve the read-only registry default revision"
+        assert!(
+            crate::config::cached_runtime_configuration_for_project_id(
+                root.path(),
+                "proj_read_only_uninitialized",
+            )
+            .is_err(),
+            "a failed read-only open must not publish a synthetic revision"
         );
     }
 }

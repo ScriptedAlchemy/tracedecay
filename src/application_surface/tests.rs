@@ -16,6 +16,7 @@ use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
 };
+use tracedecay_tool_catalog::EffectClass;
 use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
 use super::{
@@ -253,6 +254,46 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
             assert_eq!(binding.result_schema.revision(), 1);
         }
     }
+}
+
+#[test]
+fn resolved_bindings_carry_catalog_invocation_policy() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .expect("application profile");
+    let resolve = |name| {
+        crate::daemon_client::BindingResolver::resolve_binding(
+            &resolver,
+            tracedecay_tool_catalog::BindingSurface::Http,
+            &crate::daemon_client::BindingResolution {
+                profile_id: profile_id.clone(),
+                operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
+                    .expect("operation"),
+                protocol_revision: APPLICATION_PROTOCOL_REVISION,
+                negotiated_features: application_negotiated_features(),
+            },
+        )
+        .expect("binding")
+    };
+
+    let read = resolve("feedback_list");
+    assert_eq!(read.policy.effect, EffectClass::Read);
+    assert_eq!(read.policy.deadline.maximum_millis(), 15_000);
+    assert_eq!(
+        read.policy.cancellation_policy(),
+        crate::daemon_client::InvocationCancellationPolicy::ReadOnly
+    );
+
+    let effect = resolve("configuration_set");
+    assert_eq!(effect.policy.effect, EffectClass::ConfigurationWrite);
+    assert_eq!(effect.policy.deadline.maximum_millis(), 15_000);
+    assert_eq!(
+        effect.policy.cancellation_policy(),
+        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect
+    );
 }
 
 #[test]

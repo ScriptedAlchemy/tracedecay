@@ -98,7 +98,7 @@ use crate::daemon_contract::{
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
-const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
+const DEFAULT_HTTP_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
@@ -1565,7 +1565,7 @@ async fn application_http_context(
     let Ok(observed_at) = current_micros() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
+    let default_expires_at = observed_at.0.saturating_add(DEFAULT_HTTP_DEADLINE_MICROS);
     let caller_expires_at = match request.headers().get(HTTP_DEADLINE_HEADER) {
         Some(value) => match value
             .to_str()
@@ -3227,9 +3227,19 @@ pub async fn execute_application_surface(
     let delivery_route = plan26_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
-    let deadline = invocation.deadline.unwrap_or(Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS),
-    ))?);
+    let maximum_deadline_micros = i64::try_from(invocation.policy.deadline.maximum_millis())
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000);
+    let catalog_deadline = observed_at.0.saturating_add(maximum_deadline_micros);
+    let deadline = Deadline::new(UtcMicros(
+        invocation
+            .deadline
+            .as_ref()
+            .map_or(catalog_deadline, |deadline| {
+                deadline.expires_at.0.min(catalog_deadline)
+            }),
+    ))?;
+    let policy = invocation.policy.cancellation_policy();
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();
@@ -3458,26 +3468,6 @@ pub async fn execute_application_surface(
             )),
             requested_format,
         });
-    };
-    let policy = if matches!(
-        operation,
-        ApplicationSurfaceOperation::GitApply
-            | ApplicationSurfaceOperation::ConfigurationSet
-            | ApplicationSurfaceOperation::ConfigurationUnset
-            | ApplicationSurfaceOperation::ConfigurationBatch
-            | ApplicationSurfaceOperation::ConfigurationWriteCredential
-            | ApplicationSurfaceOperation::ConfigurationProtectedApply
-            | ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | ApplicationSurfaceOperation::ContextScoutPause
-            | ApplicationSurfaceOperation::ContextScoutResume
-            | ApplicationSurfaceOperation::ContextScoutCancel
-            | ApplicationSurfaceOperation::ContextScoutClaim
-            | ApplicationSurfaceOperation::ContextScoutDelivery
-            | ApplicationSurfaceOperation::ContextScoutFeedback
-    ) {
-        InvocationCancellationPolicy::AuthoritativeEffect
-    } else {
-        InvocationCancellationPolicy::ReadOnly
     };
     let response = executor
         .invoke_controlled(request, request_deadline, cancellation, policy)

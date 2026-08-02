@@ -69,7 +69,7 @@ fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     // `hook_completed` row once a runtime configuration snapshot is
     // published. Bootstrap the default snapshot so duration telemetry and
     // hint dedupe rows are observable in these tests.
-    crate::config::bootstrap_runtime_configuration(project_root, &layout)
+    crate::config::bootstrap_runtime_configuration_for_test(project_root, &layout)
         .expect("publish hook test runtime configuration");
     layout.data_root
 }

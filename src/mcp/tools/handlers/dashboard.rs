@@ -178,6 +178,53 @@ fn dashboard_configuration_unavailable(
 struct RunningDashboard {
     url: String,
     shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::result::Result<(), String>>,
+}
+
+impl RunningDashboard {
+    async fn stop(self) -> Result<()> {
+        let _ = self.shutdown.send(());
+        match self.task.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(TraceDecayError::Config {
+                message: format!("dashboard server failed while stopping: {message}"),
+            }),
+            Err(error) => Err(TraceDecayError::Config {
+                message: format!("dashboard server task failed while stopping: {error}"),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::RunningDashboard;
+
+    #[tokio::test]
+    async fn stop_waits_for_the_server_task_terminal_outcome() {
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_observed, shutdown_observed_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            shutdown_rx.await.expect("shutdown signal");
+            shutdown_observed.send(()).expect("observe shutdown");
+            release_rx.await.expect("release server task");
+            Ok(())
+        });
+        let dashboard = RunningDashboard {
+            url: "http://127.0.0.1:1/".to_owned(),
+            shutdown,
+            task,
+        };
+        let mut stop = Box::pin(dashboard.stop());
+
+        tokio::select! {
+            result = &mut stop => panic!("stop returned before server completion: {result:?}"),
+            result = shutdown_observed_rx => result.expect("server observed shutdown"),
+        }
+        release.send(()).expect("release server");
+        stop.await.expect("server stopped cleanly");
+    }
 }
 
 /// Global manager for at most one dashboard per MCP server process.
@@ -223,10 +270,11 @@ pub(super) async fn handle_dashboard(
     match action {
         "stop" => {
             let manager = get_manager();
-            let mut guard = manager.lock().await;
-            let payload = if let Some(handle) = guard.take() {
-                let _ = handle.shutdown.send(());
-                json!({ "status": "stopped", "previous_url": handle.url })
+            let running = manager.lock().await.take();
+            let payload = if let Some(handle) = running {
+                let previous_url = handle.url.clone();
+                handle.stop().await?;
+                json!({ "status": "stopped", "previous_url": previous_url })
             } else {
                 json!({ "status": "not_running" })
             };
@@ -311,18 +359,20 @@ pub(super) async fn handle_dashboard(
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 // Use with_graceful_shutdown so `stop` can cleanly terminate serve.
-                let _ = axum::serve(listener, app)
+                axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         let _ = shutdown_rx.await;
                     })
-                    .await;
+                    .await
+                    .map_err(|error| error.to_string())
             });
 
             *guard = Some(RunningDashboard {
                 url: url.clone(),
                 shutdown: shutdown_tx,
+                task,
             });
 
             Ok(dashboard_tool_result(

@@ -4,6 +4,8 @@
 
 use std::fs;
 #[cfg(feature = "test-transport")]
+use std::net::{SocketAddr, TcpListener};
+#[cfg(feature = "test-transport")]
 use std::time::Duration;
 
 #[cfg(feature = "test-transport")]
@@ -195,8 +197,30 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
         "stop should report stopped: {}",
         stop_text
     );
+    let addr: SocketAddr = url1
+        .trim_end_matches('/')
+        .trim_start_matches("http://")
+        .parse()
+        .expect("dashboard socket address");
+    let rebound = TcpListener::bind(addr)
+        .expect("stopped must mean the dashboard listener has been released");
+    drop(rebound);
 
-    // stop again is not_running
+    let restart = handle_real_server_tool_call(
+        &server,
+        "tracedecay_dashboard",
+        json!({"host": addr.ip().to_string(), "port": addr.port()}),
+    )
+    .await;
+    assert!(
+        extract_text(&restart).contains("started"),
+        "the stopped dashboard address must be immediately reusable"
+    );
+
+    // stop the restarted server, then stop again is not_running
+    let _ =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
+            .await;
     let stop2 =
         handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
             .await;

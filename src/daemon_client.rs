@@ -22,8 +22,8 @@ use tracedecay_application::{
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_lsp::{FramePoll, FrameSend};
 use tracedecay_tool_catalog::{
-    BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
-    SurfaceOperationName,
+    BindingId, BindingSurface, CancellationContract, CatalogSnapshotV1, DeadlineContract,
+    EffectClass, FeatureId, ProfileId, SchemaRef, SurfaceOperationName,
 };
 
 use crate::application::feedback::observations::{
@@ -107,6 +107,7 @@ pub struct BoundInvocation<T> {
     pub binding_id: BindingId,
     pub request_schema: SchemaRef,
     pub result_schema: SchemaRef,
+    pub policy: ResolvedInvocationPolicy,
     pub invocation: CanonicalInvocation<T>,
 }
 
@@ -116,6 +117,7 @@ impl<T> BoundInvocation<T> {
             binding_id: binding.binding_id,
             request_schema: binding.request_schema,
             result_schema: binding.result_schema,
+            policy: binding.policy,
             invocation,
         }
     }
@@ -126,6 +128,7 @@ impl<T> BoundInvocation<T> {
             binding_id,
             request_schema: _,
             result_schema: _,
+            policy,
             invocation,
         } = self;
         let CanonicalInvocation {
@@ -145,6 +148,7 @@ impl<T> BoundInvocation<T> {
                 page,
                 deadline,
                 cancellation,
+                policy,
             },
             requested_format,
         )
@@ -162,6 +166,7 @@ pub struct AdapterInvocation<T> {
     pub page: PageRequest,
     pub deadline: Option<Deadline>,
     pub cancellation: CancellationRef,
+    pub policy: ResolvedInvocationPolicy,
 }
 
 /// Catalog inputs needed to resolve a surface operation to one binding ID.
@@ -178,6 +183,24 @@ pub struct ResolvedBinding {
     pub binding_id: BindingId,
     pub request_schema: SchemaRef,
     pub result_schema: SchemaRef,
+    pub policy: ResolvedInvocationPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedInvocationPolicy {
+    pub effect: EffectClass,
+    pub cancellation: CancellationContract,
+    pub deadline: DeadlineContract,
+}
+
+impl ResolvedInvocationPolicy {
+    pub const fn cancellation_policy(&self) -> InvocationCancellationPolicy {
+        if self.effect.is_read_only() {
+            InvocationCancellationPolicy::ReadOnly
+        } else {
+            InvocationCancellationPolicy::AuthoritativeEffect
+        }
+    }
 }
 
 /// Resolves a visible, callable surface binding without exposing why lookup
@@ -240,6 +263,11 @@ impl BindingResolver for CatalogBindingResolver<'_> {
             binding_id,
             request_schema,
             result_schema,
+            policy: ResolvedInvocationPolicy {
+                effect: capability.effect(),
+                cancellation: capability.cancellation().clone(),
+                deadline: capability.deadline().clone(),
+            },
         })
     }
 }

@@ -1164,18 +1164,9 @@ async fn open_runtime_configuration_read_only_from_store(
         .await
         .map_err(map_configuration_error)?
     {
-        // The durable store exists but holds no configuration revision or
-        // migration receipt yet — for example a consolidated destination whose
-        // configuration authority was never migrated in, reopened read-only
-        // after a repository move. Read-only inspection degrades to the
-        // registry-default snapshot exactly as it does for a never-writable
-        // store, rather than hard-erroring on the absent current revision. A
-        // non-empty store with an unreadable current revision is not
-        // uninitialized, so it still surfaces a typed authority error below and
-        // durable authority is never silently replaced.
-        let configuration = read_only_default_runtime_configuration(target)?;
-        install_pinned_runtime_configuration(configuration.clone())?;
-        return Ok(configuration);
+        return Err(config_error(
+            "configuration authority unavailable: the durable store has no current revision",
+        ));
     }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
@@ -1198,27 +1189,6 @@ fn validate_registered_configuration_database(
             "configuration authority unavailable: registered database is not the exact project session shard",
         )),
     }
-}
-
-/// Builds the registry-default runtime configuration for a read-only open of a
-/// store that has no durable configuration history yet. This mirrors the
-/// snapshot a fresh writable open would migrate in, but stays entirely
-/// in-memory so inspecting a never-opened store never mutates it.
-fn read_only_default_runtime_configuration(
-    target: RuntimeConfigurationTarget,
-) -> Result<PinnedRuntimeConfiguration> {
-    let registry = registry::ConfigurationRegistry::core()
-        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
-    let resolution = resolver::resolve_configuration(&registry, &[]).map_err(|error| {
-        config_error(format!(
-            "configuration authority unavailable: could not resolve default snapshot: {error}"
-        ))
-    })?;
-    let revision_id =
-        ConfigurationRevisionId::new("configuration.read_only.default.v1").map_err(|error| {
-            config_error(format!("invalid default configuration revision: {error}"))
-        })?;
-    PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
 }
 
 pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
@@ -1311,11 +1281,9 @@ pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
     Ok(cached_runtime_configuration(project_root)?.config.telemetry)
 }
 
-/// Creates the only permitted pre-store runtime snapshot: registry defaults
-/// with a synthetic bootstrap revision. It does not read or write
-/// `config.json`, and a daemon must replace it with its migrated canonical
-/// snapshot before a subsequent process can serve the project.
-pub fn bootstrap_runtime_configuration(
+/// Creates a test-only pre-store snapshot for isolated hook fixtures.
+#[cfg(test)]
+pub(crate) fn bootstrap_runtime_configuration_for_test(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
