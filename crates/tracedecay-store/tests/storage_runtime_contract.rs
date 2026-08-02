@@ -729,6 +729,12 @@ fn runtime_submit_outcomes_validate_request_identity() {
     .validate_for(&request)
     .unwrap();
 
+    let recovery = RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+        reason: RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+    };
+    recovery.validate_for(&request).unwrap();
+    round_trip(&recovery);
+
     assert!(matches!(
         RuntimeSubmitOutcomeV1::Unavailable {
             reason: UnavailableReasonV1::DeadlineExceeded,

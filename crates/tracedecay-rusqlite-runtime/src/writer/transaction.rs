@@ -8,14 +8,14 @@ use std::{
 
 use rusqlite::{Connection, Savepoint, Transaction, TransactionBehavior};
 use tracedecay_store::{
-    RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1,
-    StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
+    RuntimeCancellationStageV1, RuntimeCommitRecoveryReasonV1, RuntimeSubmitOutcomeV1,
+    StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
 };
 
 use crate::{
     RuntimeWriteAuthorityStage,
     admission::QueueItem,
-    connection,
+    connection::{self, file_family::SqliteFamilyGuard},
     read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
     telemetry::{WriterBatchMetrics, WriterTelemetry},
 };
@@ -48,14 +48,23 @@ struct Processed {
 
 pub(super) fn process_batch(
     connection: &mut Connection,
-    binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
+    context: BatchExecutionContext<'_>,
 ) {
+    let BatchExecutionContext {
+        binding,
+        telemetry,
+        state,
+        watermark_publisher,
+        family_guard,
+    } = context;
     let started = Instant::now();
+    if probe_family(family_guard).is_err() {
+        state.store(WriterState::Faulted as u8, Ordering::Release);
+        settle_quarantined(batch.items, telemetry);
+        return;
+    }
     let mut transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
     {
         Ok(transaction) => transaction,
@@ -120,9 +129,20 @@ pub(super) fn process_batch(
         settle_authority_denied(prepared, authority_denied, telemetry);
         return;
     }
+    if probe_family(family_guard).is_err() {
+        drop(transaction);
+        state.store(WriterState::Faulted as u8, Ordering::Release);
+        settle_precommit_quarantine(prepared, telemetry);
+        return;
+    }
 
     let commit_failure = match transaction.commit() {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
+        Ok(()) if probe_family_after_write(family_guard).is_err() => {
+            state.store(WriterState::Faulted as u8, Ordering::Release);
+            settle_postcommit_quarantine(prepared, telemetry);
+            return;
+        }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
             Err(_) => {
@@ -134,6 +154,69 @@ pub(super) fn process_batch(
         },
     };
     settle_prepared(prepared, commit_failure, started, telemetry);
+}
+
+pub(super) struct BatchExecutionContext<'a> {
+    pub(super) binding: &'a StoreRuntimeBindingV1,
+    pub(super) telemetry: &'a WriterTelemetry,
+    pub(super) state: &'a AtomicU8,
+    pub(super) watermark_publisher: &'a CommittedWatermarkPublisher,
+    pub(super) family_guard: Option<&'a SqliteFamilyGuard>,
+}
+
+fn probe_family(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), crate::SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe)
+}
+
+fn probe_family_after_write(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), crate::SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe_after_write)
+}
+
+fn settle_quarantined(items: Vec<AcceptedRequest>, telemetry: &WriterTelemetry) {
+    telemetry.error();
+    for item in items {
+        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        });
+        telemetry.completed(&result);
+        item.settle(result);
+    }
+}
+
+fn settle_precommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
+    telemetry.error();
+    for prepared in prepared {
+        let result = match prepared.result {
+            PreparedResult::Final(result) => result,
+            PreparedResult::AwaitingTransactionCommit(_) => {
+                Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::Faulted,
+                })
+            }
+        };
+        telemetry.completed(&result);
+        prepared.item.settle(result);
+    }
+}
+
+fn settle_postcommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
+    telemetry.error();
+    for prepared in prepared {
+        let result = match prepared.result {
+            PreparedResult::Final(result) => result,
+            PreparedResult::AwaitingTransactionCommit(_) => {
+                Ok(RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+                    reason: RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+                })
+            }
+        };
+        telemetry.completed(&result);
+        prepared.item.settle(result);
+    }
 }
 
 fn publish_committed(

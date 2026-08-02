@@ -6,6 +6,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -28,6 +29,7 @@ const PROGRESS_INTERVAL_OPS: i32 = 1_000;
 pub(crate) struct OpenedDatabaseFile {
     file: File,
     identity: u64,
+    family_guard: Arc<file_family::SqliteFamilyGuard>,
 }
 
 impl OpenedDatabaseFile {
@@ -40,7 +42,19 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        let family_guard = Arc::new(
+            file_family::SqliteFamilyGuard::new(
+                path.to_path_buf(),
+                file.try_clone()
+                    .map_err(|_| OpenedDatabaseFileError::Open)?,
+            )
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?,
+        );
+        Ok(Self {
+            file,
+            identity,
+            family_guard,
+        })
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
@@ -52,7 +66,19 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::NotFile);
         }
         let identity = opened_file_identity(&file)?;
-        Ok(Self { file, identity })
+        let family_guard = Arc::new(
+            file_family::SqliteFamilyGuard::new(
+                path.to_path_buf(),
+                file.try_clone()
+                    .map_err(|_| OpenedDatabaseFileError::Open)?,
+            )
+            .map_err(|_| OpenedDatabaseFileError::Inspect)?,
+        );
+        Ok(Self {
+            file,
+            identity,
+            family_guard,
+        })
     }
 
     pub(crate) const fn identity(&self) -> u64 {
@@ -66,7 +92,12 @@ impl OpenedDatabaseFile {
                 .try_clone()
                 .map_err(|_| OpenedDatabaseFileError::Open)?,
             identity: self.identity,
+            family_guard: Arc::clone(&self.family_guard),
         })
+    }
+
+    pub(crate) fn family_guard(&self) -> &Arc<file_family::SqliteFamilyGuard> {
+        &self.family_guard
     }
 
     #[cfg(any(unix, windows))]
@@ -853,5 +884,6 @@ fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError
     ConnectionPolicyError { stage, source }
 }
 
+pub(crate) mod file_family;
 #[cfg(test)]
 mod tests;

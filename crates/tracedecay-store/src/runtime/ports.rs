@@ -126,9 +126,21 @@ pub enum RuntimeSubmitOutcomeV1 {
         receipt: StoreCommitReceiptV1,
         cancellation: RuntimeCancellationIdentityV1,
     },
+    /// SQLite reported commit success, but the physical store identity changed
+    /// before the runtime could publish a receipt. Automatic retry is unsafe;
+    /// recovery must verify the authoritative idempotency ledger first.
+    CommitRecoveryRequired {
+        reason: RuntimeCommitRecoveryReasonV1,
+    },
     Unavailable {
         reason: UnavailableReasonV1,
     },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCommitRecoveryReasonV1 {
+    PhysicalStoreIdentityChanged,
 }
 
 impl RuntimeSubmitOutcomeV1 {
@@ -239,6 +251,7 @@ impl RuntimeSubmitOutcomeV1 {
                 }
                 receipt.validate_for(metadata)
             }
+            Self::CommitRecoveryRequired { .. } => Ok(()),
             Self::Unavailable { reason } => {
                 if matches!(
                     reason,

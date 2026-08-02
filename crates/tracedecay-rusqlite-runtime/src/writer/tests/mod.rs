@@ -65,6 +65,13 @@ struct TestPersistence {
     sequence: u64,
 }
 
+#[cfg(unix)]
+struct ReplaceWalOnCommitPersistence {
+    inner: TestPersistence,
+    wal_path: PathBuf,
+    replacement_installed: Arc<AtomicBool>,
+}
+
 struct ToggleAuthority {
     allowed: Arc<AtomicBool>,
 }
@@ -294,6 +301,45 @@ impl WriterPersistence for TestPersistence {
     }
 }
 
+#[cfg(unix)]
+impl WriterPersistence for ReplaceWalOnCommitPersistence {
+    fn lookup_idempotency(
+        &mut self,
+        transaction: &Transaction<'_>,
+        binding: &StoreRuntimeBindingV1,
+        idempotency: &IdempotencyIdentityV1,
+    ) -> Result<Option<StoreCommitReceiptV1>, StorageRuntimeErrorV1> {
+        self.inner
+            .lookup_idempotency(transaction, binding, idempotency)
+    }
+
+    fn apply_and_record(
+        &mut self,
+        savepoint: &mut Savepoint<'_>,
+        binding: &StoreRuntimeBindingV1,
+        request: &RuntimeSubmitRequestV1,
+    ) -> Result<StoreCommitReceiptV1, StorageRuntimeErrorV1> {
+        let receipt = self.inner.apply_and_record(savepoint, binding, request)?;
+        let wal_path = self.wal_path.clone();
+        let displaced = wal_path.with_extension("wal-displaced");
+        let replacement_installed = Arc::clone(&self.replacement_installed);
+        let mut injected = false;
+        savepoint
+            .commit_hook(Some(move || {
+                if !injected {
+                    let installed = std::fs::rename(&wal_path, &displaced)
+                        .and_then(|()| std::fs::File::create(&wal_path).map(drop))
+                        .is_ok();
+                    replacement_installed.store(installed, Ordering::SeqCst);
+                    injected = true;
+                }
+                false
+            }))
+            .map_err(|_| settlement::infrastructure("install WAL replacement commit hook"))?;
+        Ok(receipt)
+    }
+}
+
 struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
@@ -379,6 +425,55 @@ fn start(
             applied,
             sequence: 0,
         }),
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn start_pinned(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    applied: Arc<AtomicU64>,
+) -> PersistentWriter {
+    let binding = binding(&request.envelope().metadata);
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+    );
+    let opened = crate::connection::OpenedDatabaseFile::pin(&database.0).unwrap();
+    PersistentWriter::start_with_persistence(
+        ExistingWriterLocator::new(binding, locator, database.0.clone())
+            .unwrap()
+            .with_opened_database(opened),
+        AdmissionConfigV1::default(),
+        Box::new(TestPersistence {
+            applied,
+            sequence: 0,
+        }),
+    )
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn start_pinned_with_persistence(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    persistence: Box<dyn WriterPersistence>,
+) -> PersistentWriter {
+    let binding = binding(&request.envelope().metadata);
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
+    );
+    let opened = crate::connection::OpenedDatabaseFile::pin(&database.0).unwrap();
+    PersistentWriter::start_with_persistence(
+        ExistingWriterLocator::new(binding, locator, database.0.clone())
+            .unwrap()
+            .with_opened_database(opened),
+        AdmissionConfigV1::default(),
+        persistence,
     )
     .unwrap()
 }
@@ -501,6 +596,92 @@ fn actor_commits_before_reply_and_releases_admission() {
         .query_row("SELECT COUNT(*) FROM writer_test", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn actor_quarantines_before_dequeue_after_the_wal_is_unlinked() {
+    let database = TestDatabase::new();
+    let seed_request = request(metadata(
+        "operation.writer.family",
+        "key.writer.family",
+        'f',
+    ));
+    let applied = Arc::new(AtomicU64::new(0));
+    let writer = start_pinned(&database, &seed_request, Arc::clone(&applied));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let seed_probe = Arc::new(Probe::new(&seed_request, None));
+    assert!(matches!(
+        runtime
+            .block_on(writer.submit(seed_request, seed_probe))
+            .unwrap(),
+        RuntimeSubmitOutcomeV1::Committed { .. }
+    ));
+    let wal = PathBuf::from(format!("{}-wal", database.0.display()));
+    assert!(wal.is_file());
+    std::fs::remove_file(wal).unwrap();
+    let request = request(metadata(
+        "operation.writer.family.rejected",
+        "key.writer.family.rejected",
+        'g',
+    ));
+    let probe = Arc::new(Probe::new(&request, None));
+
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
+
+    assert_eq!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        }
+    );
+    assert_eq!(writer.state(), WriterState::Faulted);
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn postcommit_wal_replacement_requires_recovery_instead_of_retry() {
+    let database = TestDatabase::new();
+    let request = request(metadata(
+        "operation.writer.family.postcommit",
+        "key.writer.family.postcommit",
+        'h',
+    ));
+    let applied = Arc::new(AtomicU64::new(0));
+    let replacement_installed = Arc::new(AtomicBool::new(false));
+    let writer = start_pinned_with_persistence(
+        &database,
+        &request,
+        Box::new(ReplaceWalOnCommitPersistence {
+            inner: TestPersistence {
+                applied: Arc::clone(&applied),
+                sequence: 0,
+            },
+            wal_path: PathBuf::from(format!("{}-wal", database.0.display())),
+            replacement_installed: Arc::clone(&replacement_installed),
+        }),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let probe = Arc::new(Probe::new(&request, None));
+
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
+
+    assert!(replacement_installed.load(Ordering::SeqCst));
+    assert_eq!(
+        outcome,
+        RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+            reason: tracedecay_store::RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+        }
+    );
+    assert_eq!(writer.state(), WriterState::Faulted);
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
     writer.shutdown_and_join().unwrap();
 }
 

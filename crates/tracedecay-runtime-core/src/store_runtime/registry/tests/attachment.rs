@@ -229,6 +229,33 @@ async fn eviction_drains_verifies_closes_once_and_drops_database_proxy() {
 }
 
 #[tokio::test]
+async fn quarantined_runtime_rejects_work_but_remains_closable() {
+    let (registry, publisher) = attachment_registry();
+    let pin = profile_pin(&registry).await;
+    let first = open_published(
+        &registry,
+        code_request("worktree.attachment-quarantined", &pin),
+    )
+    .await;
+    let attachment = publisher.attachment(1);
+    attachment.snapshot.lock().unwrap().healthy = false;
+
+    assert!(matches!(
+        first.validate_registered_read("probe quarantined runtime"),
+        Err(StoreRuntimeRegistryFailure::PhysicalRuntimeQuarantined {
+            operation: "probe quarantined runtime",
+            ..
+        })
+    ));
+    drop(first);
+
+    open_published(&registry, code_request("worktree.after-quarantined", &pin)).await;
+    assert_eq!(attachment.drain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(attachment.close_calls.load(Ordering::SeqCst), 1);
+    assert!(attachment.snapshot().is_drained());
+}
+
+#[tokio::test]
 async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
     let (registry, publisher) = attachment_registry();
     let pin = profile_pin(&registry).await;
