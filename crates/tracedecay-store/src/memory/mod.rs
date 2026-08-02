@@ -4,7 +4,6 @@ use tracedecay_domain::{
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 
-mod archive;
 mod compatibility;
 mod error;
 mod queries;
@@ -12,12 +11,6 @@ mod telemetry;
 mod traits;
 mod write;
 
-pub use archive::{
-    MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, MemoryV2ArchiveConflictV1, MemoryV2ArchiveError,
-    MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
-    MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
-    authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
-};
 pub use compatibility::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
     CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,
