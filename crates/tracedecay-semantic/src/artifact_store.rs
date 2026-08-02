@@ -19,7 +19,6 @@
 //! directories, then atomically publishes the inventory record. Corrupt,
 //! revoked, quarantined, or runtime-incompatible artifacts disable semantics
 //! without substitution or query-time download.
-#![allow(dead_code)] // model artifact store; Plan 31
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -604,10 +603,12 @@ impl ModelArtifactStore {
         Ok(store)
     }
 
+    #[cfg(test)]
     fn inventory_path(&self) -> PathBuf {
         self.root.join("inventory.json")
     }
 
+    #[cfg(test)]
     fn recovery_path(&self) -> PathBuf {
         self.root.join(".artifact-store-recovery.json")
     }
@@ -639,10 +640,12 @@ impl ModelArtifactStore {
         self.artifact_dir(digest)
     }
 
+    #[cfg(test)]
     fn artifact_path(&self, digest: &Sha256DigestHex) -> PathBuf {
         self.member_path(digest, ArtifactMemberRoleV1::Model)
     }
 
+    #[cfg(test)]
     fn member_path(&self, digest: &Sha256DigestHex, role: ArtifactMemberRoleV1) -> PathBuf {
         self.artifact_dir(digest).join(member_file_name(role))
     }
@@ -677,6 +680,7 @@ impl ModelArtifactStore {
         self.load_inventory_locked()
     }
 
+    #[cfg(test)]
     fn save_inventory(&self, inventory: &ArtifactInventoryV1) -> Result<(), ArtifactImportErrorV1> {
         let _lock = self.acquire_lock()?;
         self.recover_locked()?;
@@ -701,7 +705,6 @@ impl ModelArtifactStore {
     }
 
     /// Verify the canonical manifest before any bytes are staged.
-    #[allow(dead_code)] // public import gate retained for artifact runtime prep
     pub fn verify_manifest(
         &self,
         manifest: &ModelArtifactManifestV1,
@@ -849,6 +852,7 @@ impl ModelArtifactStore {
     /// declared length are rejected as size expansion and quarantine the
     /// staged bytes (recorded against the declared digest) without exposing
     /// them to runtime discovery.
+    #[cfg(test)]
     pub fn stage_chunk(
         &self,
         session: &mut ImportSession,
@@ -1173,6 +1177,7 @@ impl ModelArtifactStore {
 
     /// Mark an installed artifact revoked. Revoked artifacts are never
     /// admitted and are protected from GC (revocation evidence is retained).
+    #[cfg(test)]
     pub fn revoke_artifact(
         &self,
         digest: &Sha256DigestHex,
@@ -1190,6 +1195,7 @@ impl ModelArtifactStore {
 
     /// Retain an installed artifact explicitly for rollback; retained
     /// artifacts are never collected.
+    #[cfg(test)]
     pub fn retain_for_rollback(
         &self,
         digest: &Sha256DigestHex,
@@ -1583,6 +1589,7 @@ impl ModelArtifactStore {
     /// `RetainedForRollback`, `Revoked`, and `Installed` records are never
     /// collected here; each removal appends one receipt to
     /// `receipts/gc.jsonl`.
+    #[cfg(test)]
     pub fn gc(&self, now_unix: u64) -> Result<Vec<GcReceiptV1>, ArtifactImportErrorV1> {
         self.gc_locked_by_policy(now_unix, false)
     }
