@@ -37708,10 +37708,11 @@ pub struct BaseOperationCapability {
     pub route: String,
     pub disposition: ExecutableUnavailableDispositionV1,
 }
-pub fn base_operation_capabilities() -> impl ExactSizeIterator<Item = BaseOperationCapability> {
+pub fn base_operation_capabilities() -> impl Iterator<Item = BaseOperationCapability> {
     HttpApplicationOperation::ALL
         .iter()
         .copied()
+        .filter(|operation| operation.is_http_exposed())
         .map(|operation| BaseOperationCapability {
             route: format!("/application{}", operation.route_path()),
             operation,
