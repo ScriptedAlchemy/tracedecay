@@ -212,11 +212,17 @@ pub fn is_generated_dir_segment(segment: &str) -> bool {
     GENERATED_DIR_SEGMENTS.contains(&segment)
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+// Deliberately unconditional (not gated behind `cfg(test)` /
+// `feature = "test-helpers"`): some non-test call sites — e.g. the root
+// crate's `src/sessions/session_temporal_benchmark.rs`, which backs
+// `cargo bench` and is always compiled as part of the lib — need this lock
+// outside a test build. The mutex and accessor are trivial and side-effect
+// free, so keeping them unconditional costs nothing while guaranteeing every
+// consumer, test or not, serializes on the same lock.
 static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Serializes tests that mutate process-wide profile discovery variables.
-#[cfg(any(test, feature = "test-helpers"))]
+/// Serializes tests (and benchmark harnesses) that mutate process-wide
+/// profile discovery variables.
 pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
     USER_DATA_DIR_TEST_LOCK
         .lock()
