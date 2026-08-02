@@ -226,6 +226,14 @@ fn append_tool_response_analytics(
     internal_analytics: Option<&Value>,
     metadata: &mut Value,
 ) {
+    if let Some(stage_timings) = internal_analytics.and_then(|value| value.get("stage_timings_us"))
+    {
+        metadata["stage_timings_us"] = stage_timings.clone();
+    }
+    if let Some(symbol_coverage) = internal_analytics.and_then(|value| value.get("symbol_coverage"))
+    {
+        metadata["symbol_coverage"] = symbol_coverage.clone();
+    }
     if tool_name != "tracedecay_context" {
         return;
     }

@@ -161,6 +161,7 @@ pub(super) fn tool_allows_identical_read_coalescing(tool_name: &str) -> bool {
     if matches!(
         tool_name,
         "tracedecay_search"
+            | "tracedecay_pr_context"
             | "tracedecay_git_status"
             | "tracedecay_git_diff"
             | "tracedecay_git_history"
@@ -362,6 +363,7 @@ mod tests {
     fn canonical_tool_annotations_gate_coalescing() {
         for controlled_read in [
             "tracedecay_search",
+            "tracedecay_pr_context",
             "tracedecay_git_status",
             "tracedecay_git_diff",
             "tracedecay_git_history",

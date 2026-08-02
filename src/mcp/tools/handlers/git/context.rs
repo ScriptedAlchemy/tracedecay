@@ -5,6 +5,9 @@ use super::shell::{
     git_pr_comparison, git_recent_commits,
 };
 use super::*;
+use crate::types::{EdgeKind, Node};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Runs one synchronous gix span on the blocking pool.
 ///
@@ -339,8 +342,133 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     ))
 }
 
+const PR_CONTEXT_DEFAULT_SYMBOLS: usize = 200;
+const PR_CONTEXT_MAX_SYMBOLS: usize = 500;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PrContextCursorV1 {
+    version: u8,
+    fingerprint: String,
+    next_offset: usize,
+}
+
+#[derive(Clone)]
+struct PrContextControls {
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+impl PrContextControls {
+    fn checkpoint(&self) -> Result<()> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+        {
+            return Err(TraceDecayError::project_route(
+                "pr_context_cancelled",
+                true,
+                "PR context was cancelled",
+            ));
+        }
+        if self
+            .deadline
+            .as_ref()
+            .is_some_and(|deadline| crate::daemon_client::deadline_remaining(deadline).is_none())
+        {
+            return Err(TraceDecayError::project_route(
+                "tool_dispatch_deadline_exceeded",
+                true,
+                "PR context exceeded its dispatch deadline",
+            ));
+        }
+        Ok(())
+    }
+}
+
+struct PrContextSymbol {
+    status: &'static str,
+    identity: String,
+    file: String,
+    line: u32,
+    value: Value,
+}
+
+fn pr_context_cursor(encoded: Option<&str>) -> Result<Option<PrContextCursorV1>> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    if encoded.len() > 4_096 {
+        return Err(TraceDecayError::Config {
+            message: "PR context cursor exceeds its bounded envelope".to_owned(),
+        });
+    }
+    let bytes = hex::decode(encoded).map_err(|_| TraceDecayError::Config {
+        message: "PR context cursor is invalid".to_owned(),
+    })?;
+    let cursor = serde_json::from_slice::<PrContextCursorV1>(&bytes).map_err(|_| {
+        TraceDecayError::Config {
+            message: "PR context cursor is invalid".to_owned(),
+        }
+    })?;
+    if cursor.version != 1 {
+        return Err(TraceDecayError::Config {
+            message: "PR context cursor version is unsupported".to_owned(),
+        });
+    }
+    Ok(Some(cursor))
+}
+
+fn encode_pr_context_cursor(fingerprint: &str, next_offset: usize) -> Result<String> {
+    serde_json::to_vec(&PrContextCursorV1 {
+        version: 1,
+        fingerprint: fingerprint.to_owned(),
+        next_offset,
+    })
+    .map(hex::encode)
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("failed to encode PR context cursor: {error}"),
+    })
+}
+
+fn pr_context_fingerprint(
+    base: &str,
+    head: &str,
+    merge_base: &str,
+    symbols: &[PrContextSymbol],
+) -> Result<String> {
+    let identities: Vec<(&str, &str)> = symbols
+        .iter()
+        .map(|symbol| (symbol.status, symbol.identity.as_str()))
+        .collect();
+    let encoded = serde_json::to_vec(&(base, head, merge_base, identities)).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("failed to bind PR context cursor: {error}"),
+        }
+    })?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
+}
+
 /// Handles `tracedecay_pr_context` tool calls.
-pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_pr_context(
+    cg: &TraceDecay,
+    args: Value,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    require_object_args(&args, "tracedecay_pr_context")?;
+    let controls = PrContextControls {
+        deadline,
+        cancellation,
+    };
+    controls.checkpoint()?;
+    let total_started = std::time::Instant::now();
+    let mut stage_timings = serde_json::Map::new();
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
@@ -356,6 +484,7 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     // dispatch deadline enforced in `dispatch_git_tools` can actually preempt
     // this span (a `tokio::time::timeout` cannot interrupt an inline blocking
     // call — only the `spawn_blocking` join future it awaits here).
+    let stage_started = std::time::Instant::now();
     let comparison = {
         let project_root = cg.project_root().to_path_buf();
         let base_ref = base.clone();
@@ -376,124 +505,241 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
             }
         }
     };
+    controls.checkpoint()?;
+    stage_timings.insert("git".to_owned(), json!(elapsed_micros(stage_started)));
     let GitPrComparison {
         merge_base,
         changes,
         commits,
     } = comparison;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
+    let changed_paths: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
 
-    let mut symbols_added: Vec<Value> = Vec::new();
-    let mut symbols_modified: Vec<Value> = Vec::new();
+    let maximum_symbols = args
+        .get("maximum_symbols")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(PR_CONTEXT_DEFAULT_SYMBOLS)
+        .clamp(1, PR_CONTEXT_MAX_SYMBOLS);
+    let supplied_cursor = pr_context_cursor(args.get("cursor").and_then(Value::as_str))?;
+
     let mut test_files_changed: Vec<String> = Vec::new();
     let mut impacted_modules: HashSet<String> = HashSet::new();
 
     // Pre-compute files with inline test modules.
+    let stage_started = std::time::Instant::now();
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    controls.checkpoint()?;
+    stage_timings.insert(
+        "test_annotations".to_owned(),
+        json!(elapsed_micros(stage_started)),
+    );
     let has_tests = |path: &str| {
         crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
     };
 
+    let stage_started = std::time::Instant::now();
+    let nodes = cg
+        .get_nodes_by_files_controlled(&changed_files, || controls.checkpoint())
+        .await?;
+    controls.checkpoint()?;
+    stage_timings.insert(
+        "node_snapshot".to_owned(),
+        json!(elapsed_micros(stage_started)),
+    );
+    let mut nodes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
+    for node in &nodes {
+        nodes_by_file
+            .entry(node.file_path.as_str())
+            .or_default()
+            .push(node);
+    }
+    let mut symbols = Vec::with_capacity(nodes.len());
     for change in &changes {
         let file = &change.path;
         if has_tests(file) {
             test_files_changed.push(file.clone());
         }
 
-        let nodes = cg.get_nodes_by_file(file).await?;
+        let file_nodes = nodes_by_file
+            .get(file.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
 
         // Config files explode into one node per key — Cargo.toml with 50
         // dependencies blows past the response budget. Treat them as a
         // single summary symbol attributed to `symbols_modified` (they're
         // never "added" since the file pre-exists in a typical PR).
         if classify_file_role(file, &files_with_inline_tests) == "config" {
-            symbols_modified.push(json!({
-                "file": file,
-                "kind": "config_summary",
-                "config_keys": nodes.len(),
-            }));
+            symbols.push(PrContextSymbol {
+                status: "modified",
+                identity: format!("config:{file}:{}", file_nodes.len()),
+                file: file.clone(),
+                line: 0,
+                value: json!({
+                    "file": file,
+                    "kind": "config_summary",
+                    "config_keys": file_nodes.len(),
+                }),
+            });
             continue;
         }
 
-        for node in &nodes {
-            let sym = json!({
-                "name": node.name,
-                "kind": node.kind.as_str(),
-                "file": node.file_path,
-                "line": node.start_line,
-            });
-
-            // Only brand symbols as added when the file itself is added. For
-            // modified files the graph only has the post-change symbol set, so
-            // per-symbol added/modified inference would overstate additions.
-            let callers = cg.get_callers(&node.id, 1).await?;
-            let has_external_callers = callers
-                .iter()
-                .any(|(c, _)| !changed_files.contains(&c.file_path));
-
-            if change.status == "added" {
-                symbols_added.push(sym);
+        for node in file_nodes {
+            let status = if change.status == "added" {
+                "added"
             } else {
-                symbols_modified.push(sym);
-            }
-
-            if has_external_callers {
-                for (caller, _) in &callers {
-                    if !changed_files.contains(&caller.file_path) {
-                        let dir = caller
-                            .file_path
-                            .rfind('/')
-                            .map_or(caller.file_path.as_str(), |i| &caller.file_path[..i]);
-                        impacted_modules.insert(dir.to_string());
-                    }
-                }
-            }
+                "modified"
+            };
+            symbols.push(PrContextSymbol {
+                status,
+                identity: node.id.clone(),
+                file: node.file_path.clone(),
+                line: node.start_line,
+                value: json!({
+                    "name": node.name,
+                    "kind": node.kind.as_str(),
+                    "file": node.file_path,
+                    "line": node.start_line,
+                }),
+            });
         }
     }
+    symbols.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then(left.line.cmp(&right.line))
+            .then(left.identity.cmp(&right.identity))
+    });
+    test_files_changed.sort();
+    test_files_changed.dedup();
+
+    let node_ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
+    let stage_started = std::time::Instant::now();
+    let incoming_calls = cg
+        .get_incoming_edges_bulk_controlled(&node_ids, &[EdgeKind::Calls], || controls.checkpoint())
+        .await?;
+    controls.checkpoint()?;
+    stage_timings.insert(
+        "incoming_calls".to_owned(),
+        json!(elapsed_micros(stage_started)),
+    );
 
     // Find transitively affected test files
+    let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    for file in &changed_files {
-        if has_tests(file) {
-            continue;
-        }
-        let nodes = cg.get_nodes_by_file(file).await?;
-        for node in &nodes {
-            let impact = cg.get_impact_radius(&node.id, 2).await?;
-            for impacted in &impact.nodes {
-                if has_tests(&impacted.file_path) {
-                    affected_tests.insert(impacted.file_path.clone());
-                }
-            }
+    let mut checkpoint = || controls.checkpoint();
+    let impact = cg
+        .get_impact_radius_multi_from_nodes_controlled(&nodes, 2, &mut checkpoint)
+        .await?;
+    controls.checkpoint()?;
+    let impacted_by_id: HashMap<&str, &Node> =
+        impact.iter().map(|node| (node.id.as_str(), node)).collect();
+    for edge in &incoming_calls {
+        if let Some(caller) = impacted_by_id.get(edge.source.as_str())
+            && !changed_paths.contains(caller.file_path.as_str())
+        {
+            let dir = caller
+                .file_path
+                .rfind('/')
+                .map_or(caller.file_path.as_str(), |index| {
+                    &caller.file_path[..index]
+                });
+            impacted_modules.insert(dir.to_owned());
         }
     }
+    for impacted in &impact {
+        if !changed_paths.contains(impacted.file_path.as_str()) && has_tests(&impacted.file_path) {
+            affected_tests.insert(impacted.file_path.clone());
+        }
+    }
+    stage_timings.insert("impact".to_owned(), json!(elapsed_micros(stage_started)));
 
     let mut impacted_sorted: Vec<String> = impacted_modules.into_iter().collect();
     impacted_sorted.sort();
     let mut affected_sorted: Vec<String> = affected_tests.into_iter().collect();
     affected_sorted.sort();
 
+    let stage_started = std::time::Instant::now();
+    let fingerprint = pr_context_fingerprint(&base, head, &merge_base, &symbols)?;
+    let offset = match supplied_cursor {
+        Some(cursor)
+            if cursor.fingerprint == fingerprint && cursor.next_offset <= symbols.len() =>
+        {
+            cursor.next_offset
+        }
+        Some(_) => {
+            return Err(TraceDecayError::Config {
+                message: "PR context cursor does not match the current comparison".to_owned(),
+            });
+        }
+        None => 0,
+    };
+    let page_end = offset.saturating_add(maximum_symbols).min(symbols.len());
+    let page = &symbols[offset..page_end];
+    let symbols_added = symbols
+        .iter()
+        .filter(|symbol| symbol.status == "added")
+        .count();
+    let symbols_modified = symbols.len().saturating_sub(symbols_added);
+    let added: Vec<Value> = page
+        .iter()
+        .filter(|symbol| symbol.status == "added")
+        .map(|symbol| symbol.value.clone())
+        .collect();
+    let modified: Vec<Value> = page
+        .iter()
+        .filter(|symbol| symbol.status == "modified")
+        .map(|symbol| symbol.value.clone())
+        .collect();
+    let next_cursor = if page_end < symbols.len() {
+        Some(encode_pr_context_cursor(&fingerprint, page_end)?)
+    } else {
+        None
+    };
+    let complete = page_end == symbols.len();
     let output = json!({
         "base": base,
         "head": head,
         "merge_base": merge_base,
         "commits": commits,
         "files_changed": changed_files.len(),
-        "symbols_added": symbols_added.len(),
-        "symbols_modified": symbols_modified.len(),
-        "added": symbols_added,
-        "modified": symbols_modified,
+        "symbols_added": symbols_added,
+        "symbols_modified": symbols_modified,
+        "added": added,
+        "modified": modified,
+        "symbol_page": {
+            "offset": offset,
+            "limit": maximum_symbols,
+            "returned": page.len(),
+            "total": symbols.len(),
+            "covered_through": page_end,
+            "remaining": symbols.len().saturating_sub(page_end),
+            "complete": complete,
+        },
+        "next_cursor": next_cursor,
         "test_files_changed": test_files_changed,
         "affected_tests": affected_sorted,
         "impacted_modules": impacted_sorted,
     });
+    stage_timings.insert("assemble".to_owned(), json!(elapsed_micros(stage_started)));
+    stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
+    let timing_value = Value::Object(stage_timings.clone());
+    tracing::info!(
+        tool = "tracedecay_pr_context",
+        files = changed_files.len(),
+        symbols = symbols.len(),
+        timings = %timing_value,
+        "PR context stage timings"
+    );
 
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        &args,
-        &output,
-        changed_files,
-    ))
+    Ok(
+        generic_tool_result(Some(cg.project_root()), &args, &output, changed_files)
+            .with_internal_analytics(json!({
+                "stage_timings_us": stage_timings,
+                "symbol_coverage": output["symbol_page"],
+            })),
+    )
 }
 
 #[cfg(test)]

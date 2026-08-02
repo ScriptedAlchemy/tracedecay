@@ -2,10 +2,11 @@
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseWriteTransaction};
-use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
+use super::rows::{NODE_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{
-    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with, collect_rows, opt_str,
-    push_int, push_opt_quoted, push_quoted,
+    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with,
+    collect_rowid_pages_with_controlled, collect_rows, opt_str, push_int, push_opt_quoted,
+    push_quoted,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
@@ -15,6 +16,27 @@ pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
     "SELECT ",
     node_select_columns!(),
     ", rowid FROM nodes WHERE file_path = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+);
+
+/// One page of nodes declared by any path in one JSON-array bind.
+///
+/// The path count never changes the SQL parameter count, so a repository-scale
+/// PR remains one bulk snapshot read rather than one query per changed file.
+pub(super) const NODES_BY_FILES_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes \
+     WHERE file_path IN (SELECT value FROM json_each(?1)) \
+       AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+);
+
+/// One page of nodes selected by an arbitrary-size JSON-array id bind.
+pub(super) const NODES_BY_IDS_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes \
+     WHERE id IN (SELECT value FROM json_each(?1)) \
+       AND rowid > ?2 ORDER BY rowid LIMIT ?3"
 );
 
 /// [`NODES_BY_FILE_PAGE_SQL`] narrowed to just the node ids.
@@ -398,24 +420,35 @@ impl Database {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        // Build `?, ?, ?, …` in one allocation instead of `Vec<String>` of
-        // `?1`/`?2`/`?N`. SQLite binds anonymous `?` parameters in order, so
-        // dropping the numbered form changes nothing for the driver. Large
-        // BFS frontiers (`traverse_bfs` calls this once per level) hit this
-        // path often enough that the per-id `format!` allocations showed up
-        // on profiles.
-        let placeholders = build_qmark_placeholders(ids.len());
-        let sql = format!("SELECT {NODE_SELECT_COLUMNS} FROM nodes WHERE id IN ({placeholders})");
-        let param_values: Vec<Value> = ids.iter().map(|id| Value::Text(id.clone())).collect();
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to batch query nodes: {e}"),
-                operation: "get_nodes_by_ids".to_string(),
-            })?;
-        collect_rows(&mut rows, row_to_node, "get_nodes_by_ids").await
+        self.get_nodes_by_ids_controlled(ids, || Ok(())).await
+    }
+
+    /// [`Database::get_nodes_by_ids`] with cooperative page checkpoints.
+    pub async fn get_nodes_by_ids_controlled<F>(
+        &self,
+        ids: &[String],
+        checkpoint: F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded = serde_json::to_string(ids).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to encode node ids: {error}"),
+            operation: "get_nodes_by_ids".to_string(),
+        })?;
+        collect_rowid_pages_with_controlled(
+            &self.engine_conn(),
+            NODES_BY_IDS_PAGE_SQL,
+            &[Value::Text(encoded)],
+            NODE_COLUMNS,
+            row_to_node,
+            "get_nodes_by_ids",
+            checkpoint,
+        )
+        .await
     }
 
     /// Returns all nodes for a given file, ordered by start line.
@@ -436,6 +469,48 @@ impl Database {
         )
         .await?;
         nodes.sort_by_key(|node| node.start_line);
+        Ok(nodes)
+    }
+
+    /// Returns one deterministic snapshot of every node declared by `file_paths`.
+    pub async fn get_nodes_by_files(&self, file_paths: &[String]) -> Result<Vec<Node>> {
+        self.get_nodes_by_files_controlled(file_paths, || Ok(()))
+            .await
+    }
+
+    /// [`Database::get_nodes_by_files`] with cooperative page checkpoints.
+    pub async fn get_nodes_by_files_controlled<F>(
+        &self,
+        file_paths: &[String],
+        checkpoint: F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        if file_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let encoded =
+            serde_json::to_string(file_paths).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to encode file paths: {error}"),
+                operation: "get_nodes_by_files".to_string(),
+            })?;
+        let mut nodes = collect_rowid_pages_with_controlled(
+            &self.engine_conn(),
+            NODES_BY_FILES_PAGE_SQL,
+            &[Value::Text(encoded)],
+            NODE_COLUMNS,
+            row_to_node,
+            "get_nodes_by_files",
+            checkpoint,
+        )
+        .await?;
+        nodes.sort_by(|left, right| {
+            left.file_path
+                .cmp(&right.file_path)
+                .then(left.start_line.cmp(&right.start_line))
+                .then(left.id.cmp(&right.id))
+        });
         Ok(nodes)
     }
 

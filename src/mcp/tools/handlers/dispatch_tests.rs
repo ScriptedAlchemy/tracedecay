@@ -902,7 +902,11 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "base commit"]);
     run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(project.join("src/feature.rs"), "pub fn feature_fn() {}\n").unwrap();
+    fs::write(
+        project.join("src/feature.rs"),
+        "pub fn feature_fn() {}\npub fn second_feature_fn() {}\n",
+    )
+    .unwrap();
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "feature commit"]);
 
@@ -940,6 +944,108 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     assert!(
         rendered.contains("files_changed"),
         "the payload must carry the PR-context summary: {rendered}",
+    );
+    assert!(
+        result
+            .internal_analytics()
+            .and_then(|analytics| analytics.get("stage_timings_us"))
+            .and_then(|timings| timings.get("total"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "the handler must emit stage timing telemetry",
+    );
+
+    let first = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "format": "json",
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect("the first bounded symbol page succeeds");
+    let first: serde_json::Value = serde_json::from_str(
+        first.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("JSON PR context");
+    assert_eq!(first["symbol_page"]["returned"], 1);
+    let total = first["symbol_page"]["total"]
+        .as_u64()
+        .expect("exact symbol total");
+    assert!(total > 1);
+    assert_eq!(first["symbol_page"]["complete"], false);
+    let mut cursor = first["next_cursor"]
+        .as_str()
+        .expect("a non-exhausted page returns a cursor")
+        .to_owned();
+    let mut returned = 1_u64;
+    loop {
+        let next = dispatch_git_tools(
+            "tracedecay_pr_context",
+            &cg,
+            json!({
+                "base_ref": "main",
+                "head_ref": "HEAD",
+                "maximum_symbols": 1,
+                "cursor": cursor,
+                "format": "json",
+            }),
+            ToolCallRegistryOptions {
+                application_deadline: Some(deadline_from_now(30_000_000)),
+                ..ToolCallRegistryOptions::default()
+            },
+        )
+        .await
+        .expect("the next bounded symbol page succeeds");
+        let next: serde_json::Value = serde_json::from_str(
+            next.value["content"][0]["text"]
+                .as_str()
+                .expect("JSON tool text"),
+        )
+        .expect("JSON PR context");
+        assert_eq!(next["symbol_page"]["total"], total);
+        returned += next["symbol_page"]["returned"]
+            .as_u64()
+            .expect("returned count");
+        match next["next_cursor"].as_str() {
+            Some(next_cursor) => cursor = next_cursor.to_owned(),
+            None => {
+                assert_eq!(next["symbol_page"]["complete"], true);
+                break;
+            }
+        }
+    }
+    assert_eq!(returned, total, "cursor exhaustion covers every symbol");
+
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.pr-context-fixture").unwrap();
+    cancellation.cancel(tracedecay_domain::UtcMicros(1));
+    let started = std::time::Instant::now();
+    let error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            application_cancellation: Some(cancellation),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("a pre-cancelled PR context must not start graph work");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("pr_context_cancelled"),
     );
 
     cg.close();

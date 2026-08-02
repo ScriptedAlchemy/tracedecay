@@ -140,7 +140,7 @@ pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
         || is_source_edit_tool(tool_name)
         || matches!(
             tool_name,
-            "tracedecay_search" | "tracedecay_run_affected_tests"
+            "tracedecay_search" | "tracedecay_run_affected_tests" | "tracedecay_pr_context"
         )
 }
 
@@ -1843,6 +1843,7 @@ mod git_read_control_tests {
         assert!(tool_supports_live_cancellation(
             "tracedecay_run_affected_tests"
         ));
+        assert!(tool_supports_live_cancellation("tracedecay_pr_context"));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",

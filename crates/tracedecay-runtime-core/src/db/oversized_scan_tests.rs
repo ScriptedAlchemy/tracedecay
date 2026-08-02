@@ -27,11 +27,29 @@ use super::analytics::{
 use super::coverage::{
     SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
 };
-use super::edges::edges_by_endpoint_page_sql;
-use super::engine::{TestConnection, Value};
+use super::edges::{bulk_edges_by_endpoint_page_sql, single_edges_by_endpoint_page_sql};
+use super::engine::{
+    IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, Value,
+};
 use super::files::FILE_PATH_PAGE_SQL;
-use super::nodes::NODES_BY_KIND_PAGE_SQL;
+use super::nodes::{NODES_BY_FILES_PAGE_SQL, NODES_BY_KIND_PAGE_SQL};
 use super::sql::{collect_rowid_pages, collect_rowid_pages_with};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct CountingConnection<'a> {
+    inner: &'a TestConnection,
+    queries: AtomicUsize,
+}
+
+impl QueryExecutor for CountingConnection<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        QueryExecutor::query(self.inner, sql, params).await
+    }
+}
 
 /// The `SQLite` runtime refuses a single query that materializes more than this
 /// many rows.
@@ -454,7 +472,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     let hub = Value::Text(HUB_ID.to_string());
     let unfiltered = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 1, 0),
+        &single_edges_by_endpoint_page_sql("target", 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -464,7 +482,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let filtered = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 1, 1),
+        &single_edges_by_endpoint_page_sql("target", 1),
         &[hub.clone(), Value::Text("calls".to_string())],
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -476,7 +494,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     // `source` rather than silently reading the same endpoint.
     let outgoing = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("source", 1, 0),
+        &single_edges_by_endpoint_page_sql("source", 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_outgoing_edges",
@@ -506,16 +524,50 @@ async fn bulk_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let edges = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 2, 0),
-        &[
-            Value::Text(HUB_ID.to_string()),
-            Value::Text("fn::00000".to_string()),
-        ],
+        &bulk_edges_by_endpoint_page_sql("target", 0),
+        &[Value::Text(
+            serde_json::to_string(&[HUB_ID, "fn::00000"]).expect("endpoint JSON"),
+        )],
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges_bulk",
     )
     .await;
     assert_eq!(i64::try_from(edges.len()).expect("edge count"), ROWS + 1);
+}
+
+/// The bulk node snapshot binds the complete file set as one value: its query
+/// count is independent of the number of changed paths when the result cardinality
+/// is unchanged.
+#[tokio::test]
+async fn nodes_by_files_query_count_is_independent_of_file_count() {
+    let directory = TempDir::new().expect("bulk node query-count tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+
+    for paths in [
+        vec!["missing/one.rs".to_owned()],
+        (0..3_815)
+            .map(|index| format!("missing/{index:04}.rs"))
+            .collect(),
+    ] {
+        let before = counted.queries.load(Ordering::Relaxed);
+        let encoded = serde_json::to_string(&paths).expect("path JSON");
+        let nodes = collect_rowid_pages_with(
+            &counted,
+            NODES_BY_FILES_PAGE_SQL,
+            &[Value::Text(encoded)],
+            super::rows::NODE_COLUMNS,
+            super::rows::row_to_node,
+            "get_nodes_by_files",
+        )
+        .await
+        .expect("bulk node snapshot");
+        assert!(nodes.is_empty());
+        assert_eq!(counted.queries.load(Ordering::Relaxed) - before, 1);
+    }
 }
 
 /// `get_nodes_by_file` and the id gather in `delete_nodes_by_file` read one
