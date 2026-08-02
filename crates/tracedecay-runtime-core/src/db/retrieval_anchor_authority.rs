@@ -83,6 +83,7 @@ async fn current_disposition(
         .transpose()?)
 }
 
+#[allow(dead_code)]
 pub(crate) async fn publish_anchor_derivative(
     connection: &(impl Executor + Sync),
     derivative: &RetrievalAnchorDerivativeV1,

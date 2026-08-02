@@ -1073,25 +1073,6 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
-    /// Union every branch store's durable memory into project memory.
-    #[command(name = "memory-cutover")]
-    MemoryCutover {
-        /// Enrolled repository whose branch stores should be harvested.
-        #[arg(long, default_value = ".")]
-        project: String,
-        /// TraceDecay profile root containing the enrolled project store.
-        #[arg(long = "profile-root")]
-        profile_root: Option<String>,
-        /// Apply the cutover. Omit for a read-only inventory.
-        #[arg(long)]
-        apply: bool,
-        /// Confirmation token printed by the read-only inventory.
-        #[arg(long = "confirm-token", requires = "apply")]
-        confirm_token: Option<String>,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Build a readonly migration inventory or manifest plan
     Plan {
         /// Root directory to scan (repeatable). Defaults to the current directory.
@@ -1161,22 +1142,6 @@ pub enum MigrateAction {
         #[arg(long = "profile-root")]
         profile_root: String,
         /// Apply registry reconstruction plans after scanning manifests.
-        #[arg(long)]
-        apply: bool,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Repair session-temporal state in profile store manifests.
-    #[command(name = "repair-sessions")]
-    RepairSessions {
-        /// Profile root containing projects/<project_id>/store_manifest.json files.
-        #[arg(long = "profile-root")]
-        profile_root: String,
-        /// Limit repair to one registered project id.
-        #[arg(long = "project-id")]
-        project_id: Option<String>,
-        /// Apply repairs. Omit for a read-only inventory.
         #[arg(long)]
         apply: bool,
         /// Output as JSON.

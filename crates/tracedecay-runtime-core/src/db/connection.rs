@@ -2,7 +2,6 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay_domain::{FactOwnerV1, SourceStoreId};
 use tracedecay_rusqlite_runtime::{CheckpointBlockers, CheckpointOutcome, CheckpointRequest};
 use tracedecay_store::{
     RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
@@ -15,10 +14,7 @@ use crate::db::engine::{Connection, ReadSnapshot, Transaction, TransactionBehavi
 use crate::errors::{Result, TraceDecayError};
 use crate::store_runtime::registry::StoreRuntimeHandle;
 
-use super::{
-    CapturedMemoryV2Frontiers, DatabaseAuthority, DatabaseAuthorityRole,
-    MemoryV2BackfillBatchOutcome, memory_v2,
-};
+use super::{DatabaseAuthority, DatabaseAuthorityRole};
 
 mod facade;
 mod integrity;
