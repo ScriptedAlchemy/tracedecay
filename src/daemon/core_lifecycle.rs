@@ -12,7 +12,6 @@ use tokio::time::Duration;
 #[cfg(unix)]
 pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 #[cfg(unix)]
-pub(crate) const DAEMON_SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 

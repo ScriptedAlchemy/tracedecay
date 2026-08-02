@@ -316,9 +316,12 @@ use project_server_lifecycle::{
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
+#[cfg(unix)]
+mod scheduler_shutdown;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
+mod store_shutdown;
 mod store_writer_gate;
 mod wire_io;
 pub(crate) mod work_runtime;

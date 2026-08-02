@@ -14,7 +14,6 @@ use std::{
 };
 
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 use crate::errors::{Result, TraceDecayError};
 use tracedecay_store::{
@@ -23,9 +22,7 @@ use tracedecay_store::{
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::scheduler::{MaintenanceTaskTermination, same_scheduler_owner};
-use super::{
-    DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event};
 
 pub(super) struct MemoryRepairSchedulerHandle {
     pub(super) task: Option<JoinHandle<()>>,
@@ -398,37 +395,6 @@ impl DaemonEngine {
             );
         }
         Some(MemoryRepairSchedulerRetirement { termination })
-    }
-
-    pub(super) async fn shutdown_memory_repair_schedulers(&self) {
-        // The daemon is already draining, so scheduler registration is closed.
-        // Retire the owned tasks through their dedicated map instead of waiting
-        // behind unrelated migration/branch administration.
-        let owners: Vec<ProjectServerKey> = self
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        let mut retirements = Vec::with_capacity(owners.len());
-        for owner in owners {
-            if let Some(retirement) = self.retire_memory_repair_scheduler_locked(&owner).await {
-                retirements.push(retirement);
-            }
-        }
-        self.store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .clear();
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for retirement in retirements {
-                retirement.wait().await;
-            }
-        })
-        .await;
     }
 }
 

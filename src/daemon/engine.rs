@@ -8,6 +8,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::shutdown_coordination::{ShutdownOwner, ShutdownReceipt, join_shutdown_owners};
 use super::*;
 
 #[cfg(unix)]
@@ -66,7 +67,7 @@ pub(super) struct DaemonEngine {
     /// but never owns its cadence or lifecycle.
     maintenance_coordinator: maintenance::MaintenanceCoordinator,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
-    pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    pr_autotrack_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// Retain one daemon-owned Git index transaction service for the project store
@@ -172,8 +173,11 @@ impl DaemonEngine {
         self
     }
 
-    pub(super) async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
-        *self.pr_autotrack_task.lock().await = Some(task);
+    pub(super) fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
+        *self
+            .pr_autotrack_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
         self
     }
 
@@ -524,6 +528,7 @@ impl DaemonEngine {
         Ok(tasks.cached_failure(&route).await)
     }
 
+    #[cfg(test)]
     pub(super) async fn shutdown_project_open_tasks(&self) {
         project_open_tasks(&self.project_open_gates)
             .await
@@ -826,38 +831,135 @@ impl DaemonEngine {
         })
     }
 
-    pub(super) async fn shutdown_background_tasks(&self) {
-        self.shutdown_project_open_tasks().await;
-        self.invocation.shutdown().await;
-        self.store_administration
-            .session_temporal_refresh_schedulers()
-            .shutdown()
-            .await;
-        self.shutdown_automation_schedulers().await;
-        self.shutdown_memory_repair_schedulers().await;
-        self.store_administration
-            .shutdown_retirement_reapers()
-            .await;
-        self.store_administration
-            .shutdown_host_admission_replay()
-            .await;
+    pub(super) async fn shutdown_background_tasks(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> ShutdownReceipt {
+        let project_open = project_open_tasks(&self.project_open_gates).await;
+        let project_open_cancel = project_open.clone();
+        let project_open_join = project_open;
 
-        self.maintenance_coordinator.shutdown().await;
-        self.git_watcher.shutdown().await;
-        if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
-        }
+        let invocation_cancel = self.invocation.clone();
+        let invocation_join = self.invocation.clone();
+
+        let session_cancel = Arc::clone(
+            self.store_administration
+                .session_temporal_refresh_schedulers(),
+        );
+        let session_join = Arc::clone(
+            self.store_administration
+                .session_temporal_refresh_schedulers(),
+        );
+
+        let automation_cancel = self.clone();
+        let automation_join = self.clone();
+        let repair_cancel = self.clone();
+        let repair_join = self.clone();
+
+        let retirement_cancel = self.store_administration.clone();
+        let retirement_join = self.store_administration.clone();
+        let replay_cancel = self.store_administration.clone();
+        let replay_join = self.store_administration.clone();
+
+        let maintenance_cancel = self.maintenance_coordinator.clone();
+        let maintenance_join = self.maintenance_coordinator.clone();
+        let watcher_cancel = self.git_watcher.clone();
+        let watcher_join = self.git_watcher.clone();
+
+        let pr_cancel = Arc::clone(&self.pr_autotrack_task);
+        let pr_join = Arc::clone(&self.pr_autotrack_task);
+
+        join_shutdown_owners(
+            deadline,
+            vec![
+                ShutdownOwner::with_deadline_result(
+                    "project_open",
+                    move || project_open_cancel.cancel(),
+                    move |deadline| async move { project_open_join.shutdown_until(deadline).await },
+                ),
+                ShutdownOwner::new(
+                    "invocation",
+                    move || invocation_cancel.cancel(),
+                    async move { invocation_join.shutdown().await },
+                ),
+                ShutdownOwner::with_deadline(
+                    "session_temporal_refresh",
+                    move || session_cancel.cancel(),
+                    move |deadline| async move {
+                        session_join.shutdown_until(deadline).await;
+                    },
+                ),
+                ShutdownOwner::with_deadline_result(
+                    "automation",
+                    move || automation_cancel.cancel_automation_schedulers(),
+                    move |deadline| async move {
+                        automation_join
+                            .shutdown_automation_schedulers_until(deadline)
+                            .await
+                    },
+                ),
+                ShutdownOwner::with_deadline_result(
+                    "memory_repair",
+                    move || repair_cancel.cancel_memory_repair_schedulers(),
+                    move |deadline| async move {
+                        repair_join
+                            .shutdown_memory_repair_schedulers_until(deadline)
+                            .await
+                    },
+                ),
+                ShutdownOwner::new(
+                    "retirement_reapers",
+                    move || retirement_cancel.cancel_retirement_reapers(),
+                    async move { retirement_join.shutdown_retirement_reapers().await },
+                ),
+                ShutdownOwner::new(
+                    "host_admission_replay",
+                    move || replay_cancel.cancel_host_admission_replay(),
+                    async move { replay_join.shutdown_host_admission_replay().await },
+                ),
+                ShutdownOwner::new(
+                    "maintenance",
+                    move || maintenance_cancel.cancel(),
+                    async move { maintenance_join.shutdown().await },
+                ),
+                ShutdownOwner::new("git_watcher", move || watcher_cancel.cancel(), async move {
+                    watcher_join.shutdown().await;
+                }),
+                ShutdownOwner::new(
+                    "pr_autotrack",
+                    move || {
+                        if let Some(task) = pr_cancel
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_ref()
+                        {
+                            task.abort();
+                        }
+                    },
+                    async move {
+                        let task = pr_join
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        if let Some(task) = task {
+                            let _ = task.await;
+                        }
+                    },
+                ),
+            ],
+        )
+        .await
     }
 
-    pub(super) async fn shutdown_servers(&self) {
-        shutdown_project_servers(&self.store_administration).await;
+    pub(super) async fn shutdown_servers(&self, deadline: tokio::time::Instant) -> usize {
+        shutdown_project_servers(deadline, &self.store_administration).await
     }
 
     #[cfg(test)]
     pub(super) async fn shutdown_all(&self) {
         self.lifecycle.begin_draining();
-        self.shutdown_background_tasks().await;
-        self.shutdown_servers().await;
+        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+        let _ = self.shutdown_background_tasks(deadline).await;
+        let _ = self.shutdown_servers(deadline).await;
     }
 }

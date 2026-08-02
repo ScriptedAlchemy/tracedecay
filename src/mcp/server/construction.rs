@@ -6,15 +6,32 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
+use super::McpServer;
 use super::hook_writes::{
     BackgroundRefreshWriter, HookBranchWriter, direct_background_refresh_writer,
     direct_hook_branch_writer,
 };
+
+impl McpServer {
+    pub(crate) fn revoke_project_server_route(&self) {
+        self.project_server_lifecycle.revoke();
+        if let Some(live) = &self.project_server_live {
+            live.store(false, Ordering::Release);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_server_route_live_for_test(&self) -> bool {
+        self.project_server_live
+            .as_ref()
+            .is_none_or(|live| live.load(Ordering::Acquire))
+    }
+}
 
 /// Updates daemon ownership routing after this server changes physical graph DB.
 /// Implementations must not call back into this `McpServer`: reconciliation is

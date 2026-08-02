@@ -125,14 +125,16 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         }));
     }
     lifecycle.begin_draining();
-    maintenance.shutdown().await;
+    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+    maintenance.cancel();
+    let _ = tokio::time::timeout_at(shutdown_deadline, maintenance.shutdown()).await;
     cancel_project_server_startup_ingests(&store_administration).await;
-    let _ = timeout(
-        DAEMON_TASK_ABORT_DEADLINE,
-        http_application_service.shutdown(),
+    let _ = tokio::time::timeout_at(shutdown_deadline, http_application_service.shutdown()).await;
+    let _ = tokio::time::timeout_at(
+        shutdown_deadline,
+        shutdown_portable_project_open_tasks(project_open_gates.as_ref()),
     )
     .await;
-    shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
     cancel_project_server_startup_ingests(&store_administration).await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
@@ -144,9 +146,15 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     // all client work drains, so nothing can admit a provider process after the
     // execution registry is emptied and leave it running past shutdown. The
     // deadline bounds a provider that refuses to stop.
-    let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, invocation.shutdown()).await;
+    invocation.cancel();
+    let _ = tokio::time::timeout_at(shutdown_deadline, invocation.shutdown()).await;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    store_administration.shutdown_host_admission_replay().await;
+    store_administration.cancel_host_admission_replay();
+    let _ = tokio::time::timeout_at(
+        shutdown_deadline,
+        store_administration.shutdown_host_admission_replay(),
+    )
+    .await;
     if !in_flight_drained {
         log_daemon_event(
             "daemon_shutdown",
@@ -162,9 +170,8 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 ),
             ],
         );
-        return endpoint_cleanup;
     }
-    shutdown_project_servers(&store_administration).await;
+    let _ = shutdown_project_servers(shutdown_deadline, &store_administration).await;
     endpoint_cleanup
 }
 
@@ -267,8 +274,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let engine = engine
         .with_git_watcher(git_watcher)
         .with_maintenance_coordinator(maintenance)
-        .with_pr_autotrack_task(pr_autotrack_task)
-        .await;
+        .with_pr_autotrack_task(pr_autotrack_task);
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
@@ -312,50 +318,34 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    let shutdown_completed = timeout(DAEMON_SHUTDOWN_DEADLINE, async {
+    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+    let shutdown_completed = tokio::time::timeout_at(shutdown_deadline, async {
         cancel_project_server_startup_ingests(&engine.store_administration).await;
-        let _ = timeout(
-            DAEMON_TASK_ABORT_DEADLINE,
-            http_application_service.shutdown(),
-        )
-        .await;
-        engine.shutdown_project_open_tasks().await;
-        cancel_project_server_startup_ingests(&engine.store_administration).await;
+        let _ =
+            tokio::time::timeout_at(shutdown_deadline, http_application_service.shutdown()).await;
         // Keep auxiliary process creation blocked until every scheduler and client
         // task is drained or abandoned. A killed app-server call may retry before
         // unwinding, so a shorter guard leaves a shutdown-time respawn race.
         let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        // Stop automation before announcing shutdown or waiting for clients.
-        // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
-        // shutdown also terminates their tracked process trees before joining.
-        let (automation_stopped, memory_repair_stopped) = tokio::join!(
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_automation_schedulers(),
-            ),
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_memory_repair_schedulers(),
-            )
-        );
-        let automation_stopped = automation_stopped.is_ok();
-        let memory_repair_stopped = memory_repair_stopped.is_ok();
-        if !automation_stopped || !memory_repair_stopped {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[("outcome", "scheduler_lock_timeout".to_string())],
-            );
-        }
         log_daemon_event(
             "daemon_shutdown",
             &[("socket", socket_path.display().to_string())],
         );
-        let in_flight_drained = timeout(
+        let mut background_shutdown = Box::pin(engine.shutdown_background_tasks(shutdown_deadline));
+        let mut background_receipt = None;
+        let in_flight = timeout(
             DAEMON_CLIENT_DRAIN_DEADLINE,
             engine.lifecycle.wait_for_idle(),
-        )
-        .await
-        .is_ok();
+        );
+        tokio::pin!(in_flight);
+        let in_flight_drained = loop {
+            tokio::select! {
+                receipt = &mut background_shutdown, if background_receipt.is_none() => {
+                    background_receipt = Some(receipt);
+                }
+                drained = &mut in_flight => break drained.is_ok(),
+            }
+        };
         // Once admitted requests are finished (or their bound elapsed), every
         // remaining client task is an idle socket reader or already-cancelled
         // request wrapper. Abort those immediately instead of making shutdown wait
@@ -363,14 +353,22 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         client_tasks.abort_all();
         let clients_drained =
             drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
-        // Client setup and in-flight requests may create schedulers or project
-        // servers. Sweep owned background tasks only after all client work drains.
-        let background_drained = timeout(
-            DAEMON_TASK_ABORT_DEADLINE,
-            engine.shutdown_background_tasks(),
-        )
-        .await
-        .is_ok();
+        let (background_receipt, unfinished_servers) = tokio::join!(
+            async {
+                match background_receipt {
+                    Some(receipt) => receipt,
+                    None => background_shutdown.await,
+                }
+            },
+            async {
+                tokio::time::timeout_at(
+                    shutdown_deadline,
+                    engine.shutdown_servers(shutdown_deadline),
+                )
+                .await
+                .ok()
+            },
+        );
         if !in_flight_drained || !clients_drained {
             log_daemon_event(
                 "daemon_shutdown",
@@ -387,29 +385,26 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 ],
             );
         }
-        if !background_drained {
+        for owner in background_receipt.unfinished() {
             log_daemon_event(
                 "daemon_shutdown",
-                &[("outcome", "background_task_timeout".to_string())],
+                &[
+                    ("outcome", "background_task_timeout".to_string()),
+                    ("owner", (*owner).to_string()),
+                ],
             );
         }
-        // Graceful shutdown persists tokens-saved counters and checkpoints WALs
-        // for every live project server sequentially; with many servers or large
-        // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
-        // to the daemon. On timeout the shutdown future is dropped and we proceed
-        // to exit: the remaining persistence is best-effort and the database WAL
-        // keeps state crash-safe.
-        let completed = timeout(DAEMON_SERVER_SHUTDOWN_DEADLINE, engine.shutdown_servers())
-            .await
-            .is_ok();
-        if !completed {
+        // Detached servers drain concurrently while their routes remain revoked.
+        // A missed shared deadline is surfaced instead of extending systemd stop.
+        if unfinished_servers.is_none_or(|unfinished| unfinished != 0) {
             log_daemon_event(
                 "daemon_shutdown",
                 &[
                     ("outcome", "timeout".to_string()),
                     (
-                        "deadline_secs",
-                        DAEMON_SERVER_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                        "unfinished_project_servers",
+                        unfinished_servers
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
                     ),
                 ],
             );

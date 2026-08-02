@@ -257,10 +257,13 @@ impl ProfileHostAdmissionReplayRegistry {
         );
     }
 
+    pub(super) fn cancel(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.cancellation.cancel();
+    }
+
     pub(super) async fn shutdown(&self) {
-        if self.shutting_down.swap(true, Ordering::AcqRel) {
-            return;
-        }
+        self.cancel();
         let replay_entries = {
             let mut workers = self.workers.lock().await;
             workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
@@ -269,7 +272,6 @@ impl ProfileHostAdmissionReplayRegistry {
             let mut workers = self.bootstrap_workers.lock().await;
             workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
-        self.cancellation.cancel();
         for entry in replay_entries {
             let _ = entry.task.await;
         }

@@ -70,6 +70,7 @@ pub(super) enum MaintenanceRekeyOutcome {
 #[derive(Clone, Default)]
 pub(super) struct ProjectOpenTasks {
     registry: Arc<tokio::sync::Mutex<ProjectOpenTaskRegistry>>,
+    shutdown: CancellationToken,
 }
 
 #[derive(Default)]
@@ -278,8 +279,20 @@ impl ProjectOpenTasks {
         OpenOperation: FnOnce(CancellationToken) -> OpenFuture + Send + 'static,
         OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
     {
+        if self.shutdown.is_cancelled() {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
+                message: "daemon is draining before project warm-up".to_owned(),
+                retry_at: None,
+            });
+        }
         let now = Instant::now();
         let mut registry = self.registry.lock().await;
+        if self.shutdown.is_cancelled() {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
+                message: "daemon is draining before project warm-up".to_owned(),
+                retry_at: None,
+            });
+        }
         registry.prune(now);
         if let Some(entry) = registry.routes.get(&route) {
             return match entry.state.borrow().clone() {
@@ -294,7 +307,7 @@ impl ProjectOpenTasks {
         }
 
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
-        let cancellation = CancellationToken::new();
+        let cancellation = self.shutdown.clone();
         let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
             let state = match open(task_cancellation).await {
@@ -348,11 +361,41 @@ impl ProjectOpenTasks {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn shutdown(&self) -> bool {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
     }
 
+    pub(super) fn cancel(&self) {
+        self.shutdown.cancel();
+    }
+
+    pub(super) async fn shutdown_until(&self, deadline: tokio::time::Instant) -> bool {
+        let mut entries = {
+            let mut registry = self.registry.lock().await;
+            std::mem::take(&mut registry.routes)
+        }
+        .into_values()
+        .collect::<Vec<_>>();
+        self.cancel();
+        for entry in &entries {
+            entry.cancellation.cancel();
+        }
+        let mut drained = true;
+        for entry in &mut entries {
+            if tokio::time::timeout_at(deadline, &mut entry.task)
+                .await
+                .is_err()
+            {
+                drained = false;
+                entry.task.abort();
+            }
+        }
+        drained
+    }
+
+    #[cfg(test)]
     pub(super) async fn shutdown_with_deadline(
         &self,
         cooperative_deadline: Duration,

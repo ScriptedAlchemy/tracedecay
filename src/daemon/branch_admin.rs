@@ -480,7 +480,8 @@ pub(super) struct StoreAdministration {
     session_runtime_registries: SharedSessionRuntimeRegistries,
     gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    project_server_retirements: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    pub(super) project_server_retirements:
+        Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -488,7 +489,7 @@ pub(super) struct StoreAdministration {
         >,
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
-    profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
+    pub(super) profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -743,19 +744,6 @@ impl StoreAdministration {
         &self.project_servers
     }
 
-    pub(super) async fn track_project_server_retirement(&self, task: tokio::task::JoinHandle<()>) {
-        let mut retirements = self.project_server_retirements.lock().await;
-        retirements.retain(|retirement| !retirement.is_finished());
-        retirements.push(task);
-    }
-
-    pub(super) async fn join_project_server_retirements(&self) {
-        let retirements = std::mem::take(&mut *self.project_server_retirements.lock().await);
-        for retirement in retirements {
-            let _ = retirement.await;
-        }
-    }
-
     pub(super) async fn host_admission_broker(
         &self,
         database: &Arc<crate::global_db::RegisteredGlobalDb>,
@@ -896,10 +884,6 @@ impl StoreAdministration {
             .await
     }
 
-    pub(super) async fn shutdown_host_admission_replay(&self) {
-        self.profile_host_admission_replay.shutdown().await;
-    }
-
     #[cfg(unix)]
     pub(super) fn automation_schedulers(
         &self,
@@ -1027,6 +1011,17 @@ impl StoreAdministration {
                 termination.wait().await;
             }
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn cancel_retirement_reapers(&self) {
+        let mut state = self.retirement_reapers.state();
+        state.accepting = false;
+        for handle in state.reapers.values() {
+            handle.retired_task.abort();
+        }
+        drop(state);
+        self.retirement_reapers.changed.notify_waiters();
     }
 
     #[cfg(all(test, unix))]

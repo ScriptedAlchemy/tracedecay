@@ -8,12 +8,26 @@ pub(super) enum ShutdownState {
 }
 
 impl ProjectRuntimeRegistryV1 {
+    pub(crate) fn begin_shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.reservation_changed.send_modify(|version| {
+            *version = version.wrapping_add(1);
+        });
+        let (version, changed) = &*self.reservation_blocking_changed;
+        let mut version = version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *version = version.wrapping_add(1);
+        drop(version);
+        changed.notify_all();
+    }
+
     /// Shut every project runtime down and leave the registry empty.
     ///
     /// Routers become unavailable before feedback owners drop, Work providers
     /// are joined, and process-wide semantic handles are unregistered.
     pub(crate) async fn shut_down_all(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();

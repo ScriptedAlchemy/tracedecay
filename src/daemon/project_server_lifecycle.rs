@@ -27,10 +27,16 @@ pub(super) async fn cancel_project_server_startup_ingests(
     }
 }
 
-pub(super) async fn shutdown_project_servers(store_administration: &StoreAdministration) {
-    store_administration.join_project_server_retirements().await;
+pub(super) async fn shutdown_project_servers(
+    deadline: tokio::time::Instant,
+    store_administration: &StoreAdministration,
+) -> usize {
     let servers = detach_project_servers(store_administration).await;
-    shutdown_detached_project_servers(servers).await;
+    let (retirements, unfinished_servers) = tokio::join!(
+        store_administration.join_project_server_retirements_until(deadline),
+        shutdown_detached_project_servers(deadline, servers),
+    );
+    retirements.saturating_add(unfinished_servers)
 }
 
 pub(super) async fn detach_project_servers(
@@ -44,7 +50,14 @@ pub(super) async fn detach_project_servers(
                 .values()
                 .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
                 .cloned()
-                .collect();
+                .collect::<Vec<_>>();
+            for entry in registry.servers.values_mut() {
+                entry.publication = ProjectServerPublication::Pending;
+            }
+            for server in &servers {
+                server.revoke_project_server_route();
+                server.cancel_startup_transcript_ingest();
+            }
             // Servers retain daemon callbacks that clone StoreAdministration.
             // Remove the registry's side of that cycle before awaiting server
             // shutdown so every physical store runtime can be dropped.
@@ -56,14 +69,36 @@ pub(super) async fn detach_project_servers(
     servers
 }
 
-pub(super) async fn shutdown_detached_project_servers(servers: Vec<Arc<crate::mcp::McpServer>>) {
+pub(super) async fn shutdown_detached_project_servers(
+    deadline: tokio::time::Instant,
+    servers: Vec<Arc<crate::mcp::McpServer>>,
+) -> usize {
+    let mut shutdowns = tokio::task::JoinSet::new();
+    let mut unfinished = 0usize;
     for server in servers {
-        let graph = server.cg().await;
-        hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
-            .await;
-        drop(graph);
-        server.shutdown().await;
+        shutdowns.spawn(async move {
+            let graph = server.cg().await;
+            hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
+                .await;
+            drop(graph);
+            server.shutdown().await;
+        });
     }
+    while !shutdowns.is_empty() {
+        match tokio::time::timeout_at(deadline, shutdowns.join_next()).await {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(_))) => {
+                unfinished = unfinished.saturating_add(1);
+            }
+            Ok(None) => break,
+            Err(_) => {
+                unfinished = unfinished.saturating_add(shutdowns.len());
+                shutdowns.abort_all();
+                return unfinished;
+            }
+        }
+    }
+    unfinished
 }
 
 const PROJECT_SERVER_REQUEST_DRAIN_DEADLINE: Duration = Duration::from_secs(35);
@@ -79,6 +114,12 @@ async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
 ) {
+    if let Some(route_registered) = route_registered {
+        route_registered.store(false, Ordering::Release);
+    }
+    for server in &servers {
+        server.revoke_project_server_responses();
+    }
     if tokio::time::timeout(
         PROJECT_SERVER_REQUEST_DRAIN_DEADLINE,
         wait_for_project_server_request_drains(&servers),
@@ -108,9 +149,6 @@ async fn retire_project_servers(
             );
             wait_for_project_server_request_drains(&servers).await;
         }
-    }
-    if let Some(route_registered) = route_registered {
-        route_registered.store(false, Ordering::Release);
     }
     for server in servers {
         server.shutdown().await;

@@ -59,13 +59,10 @@ struct SessionTemporalRefreshSchedulerEntry {
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
-    async fn shutdown(self) {
+    async fn shutdown(self, deadline: tokio::time::Instant) {
         self.state.cancel();
         let mut task = self.task;
-        if tokio::time::timeout(super::super::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
             task.abort();
             let _ = task.await;
         }
@@ -201,7 +198,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
             #[allow(clippy::expect_used)]
             let finished = project.remove(&owner).expect("finished entry disappeared");
             let route = finished.wake.clone();
-            finished.shutdown().await;
+            finished
+                .shutdown(tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE)
+                .await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
@@ -242,7 +241,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .remove(&database_path)
                 .expect("finished entry disappeared");
             let route = finished.wake.clone();
-            finished.shutdown().await;
+            finished
+                .shutdown(tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE)
+                .await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
@@ -286,7 +287,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
             let staging = Arc::new(SessionTemporalRefreshWakeState::default());
             let retired_state = Arc::clone(&entry.state);
             route.bind(&staging);
-            entry.shutdown().await;
+            entry
+                .shutdown(tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE)
+                .await;
             retired_state.transfer_requests_to(&staging);
             (Some(route), Some(staging))
         } else {
@@ -321,7 +324,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub(in crate::daemon) async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
         if let Some(entry) = self.project.lock().await.remove(owner) {
-            entry.shutdown().await;
+            entry
+                .shutdown(tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE)
+                .await;
         }
     }
 
@@ -337,8 +342,22 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
-    pub(in crate::daemon) async fn shutdown(&self) {
+    pub(in crate::daemon) fn cancel(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        if let Ok(project) = self.project.try_lock() {
+            for entry in project.values() {
+                entry.state.cancel();
+            }
+        }
+        if let Ok(profile) = self.profile.try_lock() {
+            for entry in profile.values() {
+                entry.state.cancel();
+            }
+        }
+    }
+
+    pub(in crate::daemon) async fn shutdown_until(&self, deadline: tokio::time::Instant) {
+        self.cancel();
         let _guard = self.shutdown_guard.lock().await;
         let _project_lifecycle = self.project_lifecycle.lock().await;
         let project = self
@@ -357,9 +376,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .collect::<Vec<_>>();
         let mut retirements = tokio::task::JoinSet::new();
         for entry in project.into_iter().chain(profile) {
-            retirements.spawn(entry.shutdown());
+            retirements.spawn(entry.shutdown(deadline));
         }
         while retirements.join_next().await.is_some() {}
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(in crate::daemon) async fn shutdown(&self) {
+        self.shutdown_until(
+            tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE,
+        )
+        .await;
     }
 
     #[cfg(test)]

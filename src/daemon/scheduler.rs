@@ -2,16 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{
-    DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
-};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event};
 
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
@@ -854,38 +852,6 @@ impl DaemonEngine {
             );
         }
         Some(AutomationSchedulerRetirement { termination })
-    }
-
-    pub(super) async fn shutdown_automation_schedulers(&self) {
-        // Draining is latched before this runs, and every registration path
-        // rechecks that latch. Do not queue shutdown behind unrelated
-        // migration/branch administration that may hold the broad writer gate.
-        let owners: Vec<ProjectServerKey> = self
-            .store_administration
-            .automation_schedulers()
-            .lock()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        let mut retirements = Vec::with_capacity(owners.len());
-        for owner in owners {
-            if let Some(retirement) = self.retire_automation_scheduler_locked(&owner).await {
-                retirements.push(retirement);
-            }
-        }
-        self.store_administration
-            .automation_schedulers()
-            .lock()
-            .await
-            .clear();
-        let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for retirement in retirements {
-                retirement.wait().await;
-            }
-        })
-        .await;
     }
 }
 

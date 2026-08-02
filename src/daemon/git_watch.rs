@@ -376,10 +376,15 @@ impl GitWatcher {
     }
 
     /// Stops every watcher-owned task and joins it before database shutdown.
+    pub fn cancel(&self) {
+        self.inner.shutting_down.store(true, Ordering::Release);
+    }
+
     pub async fn shutdown(&self) {
-        if !self.inner.enabled || self.inner.shutting_down.swap(true, Ordering::AcqRel) {
+        if !self.inner.enabled {
             return;
         }
+        self.cancel();
 
         if let Some(handle) = self.inner.backstop_task.lock().await.take() {
             handle.abort();

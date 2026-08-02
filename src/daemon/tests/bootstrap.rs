@@ -1297,7 +1297,8 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         1,
         "portable initialize warmup must singleflight one project open"
     );
-    super::super::shutdown_project_servers(&store_administration).await;
+    let deadline = tokio::time::Instant::now() + super::super::DAEMON_SHUTDOWN_DEADLINE;
+    let _ = super::super::shutdown_project_servers(deadline, &store_administration).await;
 }
 
 #[cfg(unix)]

@@ -18,6 +18,11 @@ pub(super) fn runtime_lsp_actor(
 }
 
 impl DaemonInvocationService {
+    pub(crate) fn begin_shutdown(&self) {
+        self.code_index_schedulers.cancel();
+        self.project_runtimes.begin_shutdown();
+    }
+
     pub(super) async fn install_lsp_owner(
         &self,
         project_root: PathBuf,
@@ -398,6 +403,7 @@ impl DaemonInvocationService {
     }
 
     pub(crate) async fn expire_all(&self) {
+        self.begin_shutdown();
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();

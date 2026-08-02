@@ -80,6 +80,50 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_shutdown_revokes_publication_before_detaching_non_cooperative_server() {
+    let fixture = rmcp_route_fixture("shutdown-revoke-before-detach").await;
+    let lifecycle = fixture.server.project_server_response_lifecycle();
+    let request_gate = lifecycle.response_gate().read().await;
+
+    let detached = tokio::time::timeout(
+        Duration::from_millis(250),
+        crate::daemon::project_server_lifecycle::detach_project_servers(
+            &fixture.store_administration,
+        ),
+    )
+    .await
+    .expect("detach must not wait for a non-cooperative project request");
+
+    assert_eq!(detached.len(), 1);
+    assert!(
+        lifecycle.response_revoked().is_cancelled(),
+        "response publication must be revoked before the registry detaches"
+    );
+    assert!(
+        !fixture.server.project_server_route_live_for_test(),
+        "route-live authority must be revoked before aliases are removed"
+    );
+    assert!(
+        fixture
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .servers
+            .is_empty(),
+        "project-server publication must be absent after detach"
+    );
+
+    drop(request_gate);
+    crate::daemon::project_server_lifecycle::shutdown_detached_project_servers(
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        detached,
+    )
+    .await;
+}
+
 async fn write_line(writer: &mut (impl AsyncWrite + Unpin), value: &Value) {
     writer
         .write_all(value.to_string().as_bytes())

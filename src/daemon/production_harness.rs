@@ -424,6 +424,7 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
+    let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
     resources
         .store_administration
         .join_project_server_retirements()
@@ -444,6 +445,6 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .shutdown_host_admission_replay()
         .await;
     resources.invocation.shutdown().await;
-    shutdown_detached_project_servers(servers).await;
+    let _ = shutdown_detached_project_servers(deadline, servers).await;
     drop(resources);
 }

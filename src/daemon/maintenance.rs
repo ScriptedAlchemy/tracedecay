@@ -197,11 +197,16 @@ impl MaintenanceCoordinator {
     }
 
     pub(super) async fn shutdown(&self) {
-        self.cancellation.cancel();
+        self.cancel();
         self.wake.notify_waiters();
         if let Some(task) = self.task.lock().await.take() {
             let _ = task.await;
         }
+    }
+
+    pub(super) fn cancel(&self) {
+        self.cancellation.cancel();
+        self.wake.notify_waiters();
     }
 
     async fn run(
