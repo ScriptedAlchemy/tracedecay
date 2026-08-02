@@ -150,6 +150,15 @@ fn load_state(
     Ok(Some(state))
 }
 
+/// Write the whole source state, its authority history, and its receipt
+/// history into the caller's savepoint.
+///
+/// Every row is compared against what is already stored so a replay can never
+/// silently rewrite history. The comparison reuses the encoding that was just
+/// bound as a parameter: `encode` is a pure `serde_json::to_string` of the same
+/// value, so re-encoding produced identical bytes and only doubled the
+/// serialization this loop performs for every historical revision and receipt
+/// on every write.
 fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusqlite::Result<()> {
     state.validate().map_err(invalid)?;
     let binding = state.binding().immutable_identity().map_err(invalid)?;
@@ -176,7 +185,7 @@ fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusql
             params![definition.source_id.as_str(), definition_revision],
             |row| row.get(0),
         )?;
-        if stored != encode(definition)? {
+        if stored != encoded {
             return Err(invalid("external source definition revision collision"));
         }
     }
@@ -206,7 +215,7 @@ fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusql
             params![revision.binding_id.as_str(), binding_revision],
             |row| row.get(0),
         )?;
-        if stored != encode(revision)? {
+        if stored != encoded {
             return Err(invalid("external source binding revision collision"));
         }
     }
@@ -236,7 +245,7 @@ fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusql
             ],
             |row| row.get(0),
         )?;
-        if stored != encode(receipt)? {
+        if stored != encoded {
             return Err(invalid("external source authority receipt collision"));
         }
     }
@@ -266,7 +275,7 @@ fn persist_state(savepoint: &Savepoint<'_>, state: &SourceStoreStateV1) -> rusql
             ],
             |row| row.get(0),
         )?;
-        if stored != encode(receipt)? {
+        if stored != encoded {
             return Err(invalid("external source projection receipt collision"));
         }
     }

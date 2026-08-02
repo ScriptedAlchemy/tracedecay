@@ -41,11 +41,21 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<ManifestDigest, Domai
 
 trait CanonicalSink {
     fn write(&mut self, chunk: &str);
+
+    /// Append an already-encoded UTF-8 chunk without an intermediate buffer.
+    fn write_bytes(&mut self, chunk: &[u8]) -> Result<(), DomainError>;
 }
 
 impl CanonicalSink for String {
     fn write(&mut self, chunk: &str) {
         self.push_str(chunk);
+    }
+
+    fn write_bytes(&mut self, chunk: &[u8]) -> Result<(), DomainError> {
+        let chunk = std::str::from_utf8(chunk)
+            .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))?;
+        self.push_str(chunk);
+        Ok(())
     }
 }
 
@@ -53,12 +63,65 @@ impl CanonicalSink for Vec<u8> {
     fn write(&mut self, chunk: &str) {
         self.extend_from_slice(chunk.as_bytes());
     }
+
+    fn write_bytes(&mut self, chunk: &[u8]) -> Result<(), DomainError> {
+        self.extend_from_slice(chunk);
+        Ok(())
+    }
 }
 
 impl CanonicalSink for Sha256 {
     fn write(&mut self, chunk: &str) {
         Digest::update(self, chunk.as_bytes());
     }
+
+    fn write_bytes(&mut self, chunk: &[u8]) -> Result<(), DomainError> {
+        Digest::update(self, chunk);
+        Ok(())
+    }
+}
+
+/// Adapts a canonical sink to `io::Write`.
+///
+/// `serde_json` owns JSON string escaping, and its escape tables only ever cut
+/// a chunk at an ASCII byte, so every chunk it emits is complete UTF-8. Routing
+/// those chunks straight into the sink writes exactly the bytes
+/// `serde_json::to_string` would have produced, without allocating and dropping
+/// one `Vec<u8>` plus one `String` for every scalar and object key in the tree.
+struct SinkWriter<'a, S: CanonicalSink + ?Sized> {
+    sink: &'a mut S,
+    error: Option<DomainError>,
+}
+
+impl<S: CanonicalSink + ?Sized> std::io::Write for SinkWriter<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Err(error) = self.sink.write_bytes(buf) {
+            let message = error.to_string();
+            self.error = Some(error);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            ));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Stream one JSON string literal (quotes and escapes included) into the sink.
+fn write_json_string(value: &str, output: &mut impl CanonicalSink) -> Result<(), DomainError> {
+    let mut writer = SinkWriter {
+        sink: output,
+        error: None,
+    };
+    let outcome = serde_json::to_writer(&mut writer, value);
+    if let Some(error) = writer.error.take() {
+        return Err(error);
+    }
+    outcome.map_err(|error| DomainError::CanonicalSerialization(error.to_string()))
 }
 
 fn write_canonical(value: &Value, output: &mut impl CanonicalSink) -> Result<(), DomainError> {
@@ -66,10 +129,7 @@ fn write_canonical(value: &Value, output: &mut impl CanonicalSink) -> Result<(),
         Value::Null => output.write("null"),
         Value::Bool(value) => output.write(if *value { "true" } else { "false" }),
         Value::Number(value) => output.write(&value.to_string()),
-        Value::String(value) => output.write(
-            &serde_json::to_string(value)
-                .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))?,
-        ),
+        Value::String(value) => write_json_string(value, output)?,
         Value::Array(values) => {
             output.write("[");
             for (index, value) in values.iter().enumerate() {
@@ -88,10 +148,7 @@ fn write_canonical(value: &Value, output: &mut impl CanonicalSink) -> Result<(),
                 if index > 0 {
                     output.write(",");
                 }
-                output.write(
-                    &serde_json::to_string(key)
-                        .map_err(|error| DomainError::CanonicalSerialization(error.to_string()))?,
-                );
+                write_json_string(key, output)?;
                 output.write(":");
                 write_canonical(value, output)?;
             }
@@ -137,6 +194,54 @@ mod tests {
 
         assert_eq!(canonical_json_value(&value).unwrap(), expected);
         assert_eq!(canonical_json_bytes(&value).unwrap(), expected.as_bytes());
+    }
+
+    /// The streamed string writer must emit exactly the bytes the allocating
+    /// `serde_json::to_string` encoder produced, for keys and for values.
+    #[test]
+    fn streamed_json_strings_match_serde_json_to_string() {
+        let cases = [
+            "",
+            "plain",
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "quote: \" backslash: \\ slash: /",
+            "controls: \u{0}\u{1}\u{7}\u{8}\t\n\u{b}\u{c}\r\u{1f}",
+            "雪😀é",
+            "mixed 😀 \" \u{1} tail",
+            "\u{7f}\u{80}\u{a0}\u{2028}\u{2029}",
+        ];
+        for case in cases {
+            let expected = serde_json::to_string(case).unwrap();
+
+            let mut text = String::new();
+            write_json_string(case, &mut text).unwrap();
+            assert_eq!(text, expected, "string sink diverged for {case:?}");
+
+            let mut bytes: Vec<u8> = Vec::new();
+            write_json_string(case, &mut bytes).unwrap();
+            assert_eq!(
+                bytes,
+                expected.as_bytes(),
+                "byte sink diverged for {case:?}"
+            );
+
+            let mut hasher = Sha256::new();
+            write_json_string(case, &mut hasher).unwrap();
+            assert_eq!(
+                hasher.finalize(),
+                Sha256::digest(expected.as_bytes()),
+                "hash sink diverged for {case:?}"
+            );
+
+            // The same corpus routed through a whole document must also match.
+            let document = json!({ case: [case, {"nested": case}] });
+            let mut canonical = String::new();
+            write_canonical(&document, &mut canonical).unwrap();
+            assert_eq!(
+                canonical,
+                format!("{{{expected}:[{expected},{{\"nested\":{expected}}}]}}")
+            );
+        }
     }
 
     #[test]
