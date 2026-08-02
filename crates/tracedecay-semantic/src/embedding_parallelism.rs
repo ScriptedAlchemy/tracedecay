@@ -90,8 +90,7 @@ pub fn embedding_session_width_for(
     let intra = (intra_threads as usize).max(1);
     let configured = (configured_max_sessions as usize).max(1);
     (indexing_worker_target(total_cores) / intra)
-        .max(1)
-        .min(MAX_EMBEDDING_SESSIONS)
+        .clamp(1, MAX_EMBEDDING_SESSIONS)
         .min(configured)
 }
 
