@@ -20,7 +20,19 @@ receipts remain in the migration inventory until a separately authorized
 registered-store/profile census proves absence; Git history alone cannot remove
 their archive, compatibility-reader, or migration obligations.
 
-**Memory cutover correction (updated 2026-07-27).** The delivered Memory
+**Memory cutover correction — SUPERSEDED (2026-08-02).** The Memory V1→V2
+cutover drains, the V1 feedback-history repair and backfill pipeline, their
+scheduler drains, and the `memory-cutover` CLI verb were all removed as
+branch-added migration machinery: fresh V2 stores are created at their final
+schema, so there is no V1 memory bank left to drain. What survives is the
+archive-merge half in `crates/tracedecay-migrate/src/memory_cutover.rs` (branch
+retirement still preserves memory through it) and the fail-closed receipt gate
+in `crates/tracedecay-runtime-core/src/db/memory_v2/cutover.rs` that guards the
+legacy-payload purge path. `memory_status` no longer reports
+`legacy_backfill_complete`. The paragraph below is retained for historical
+context only and no longer describes shipping code.
+
+The delivered Memory
 V1→V2 branch-store cutover is complete. Its typed owner archive covers all 33
 authoritative Memory V2 families; the physical adapters are checked for
 one-to-one family parity, archive construction validates referential closure,
