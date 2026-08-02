@@ -94,9 +94,20 @@ describe("contracts generator", () => {
     expect(generated).toContain("export interface DashboardEnvelopeV1<TPayload>");
     expect(generated).toContain("export function DashboardEnvelopeV1Schema<TPayload>(");
     expect(generated).toContain("payload: payloadSchema,");
+    expect(generated).not.toMatch(/DashboardEnvelopeV1\d+Schema/);
     // The exact scope + authorization shapes from read_model.rs are carried.
     expect(generated).toContain("store_root");
     expect(generated).toContain("outcome");
+  });
+
+  it("emits only Rust-owned contract names", () => {
+    const { files } = generateContracts(bundles);
+    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).not.toContain("export const DashboardEnvelopeV1Schema =");
+    expect(generated).not.toContain("export type DashboardEnvelopeV1");
+    expect(generated).not.toContain("export const AnalyticsOverviewPayloadSchema =");
+    expect(generated).not.toContain("export type AnalyticsOverviewPayload =");
+    expect(generated).not.toContain("export const DoctorEffectReceiptSchema =");
   });
 
   it("emits the live index that re-exports the generated contract", () => {

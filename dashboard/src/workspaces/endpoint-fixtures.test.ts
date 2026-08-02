@@ -5,7 +5,7 @@
  * `stories/fixtures/data.ts` during the visual audit and MSW/DOM tests. This
  * suite asserts that each fixture payload parses against the exact zod schema
  * its consuming workspace validates it with — either a generated wire schema
- * from `contracts/wire.ts`, or (for the few routes Rust still answers with a
+ * from `contracts/generated.ts`, or (for the few routes Rust still answers with a
  * bare `Value`, whose pages read them through a module-local const) a faithful
  * mirror of that page's schema with a source citation. If a fixture drifts
  * from a contract, this fails.
@@ -27,30 +27,30 @@ import { resolveFixture } from '../../stories/fixtures/data.ts';
 import { MultiRootCapabilityV1Schema } from '../contracts/generated.ts';
 import { AnyObject } from '../data/query/legacy.ts';
 import {
-  AnalyticsOverviewPayloadSchema,
-  AnalyticsUsageSummarySchema,
+  AnalyticsOverviewPayloadV1Schema,
+  AnalyticsUsageSummaryV1Schema,
   AutomationSchedulerStatusV1Schema,
-  CodeIndexFreshnessPayloadSchema,
-  CostsReadModelSchema,
-  DoctorEvidenceStateSchema,
-  DoctorFindingsPayloadSchema,
-  DoctorStorageFindingKindSchema,
-  EnvelopeSchema,
-  GraphOverviewPayloadSchema,
-  GraphSearchPayloadSchema,
-  GraphSubgraphPayloadSchema,
-  LcmSessionPayloadSchema,
-  MemoryOverviewPayloadSchema,
-  MemoryStatusPayloadSchema,
-  ObservatoryReadModelSchema,
-  ProjectContextPayloadSchema,
-  ProjectsPayloadSchema,
-  SavingsOverviewPayloadSchema,
-  SavingsSessionsPayloadSchema,
+  CodeIndexFreshnessPayloadV1Schema,
+  CostsReadModelV1Schema,
+  DoctorEvidenceStateV1Schema,
+  DoctorFindingsPayloadV1Schema,
+  DoctorStorageFindingKindV1Schema,
+  DashboardEnvelopeV1Schema,
+  GraphOverviewPayloadV1Schema,
+  GraphSearchPayloadV1Schema,
+  GraphSubgraphPayloadV1Schema,
+  LcmSessionPayloadV1Schema,
+  MemoryOverviewPayloadV1Schema,
+  MemoryStatusPayloadV1Schema,
+  ObservatoryReadModelV1Schema,
+  ProjectContextPayloadV1Schema,
+  ProjectsPayloadV1Schema,
+  SavingsOverviewPayloadV1Schema,
+  SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
-  StorageFindingsPayloadSchema,
-  StorageTelemetryPayloadSchema,
-} from '../contracts/wire.ts';
+  StorageFindingsPayloadV1Schema,
+  StorageTelemetryPayloadV1Schema,
+} from '../contracts/generated.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -288,9 +288,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // `/api/projects` and used to assert it against two hand-written copies of
   // its body under two different export names, which is how the copies drifted
   // apart without anything noticing. Both surfaces' density requirements now
-  // sit on the one generated `ProjectsPayloadSchema`.
-  it('GET /api/projects — brain + delivery registry (ProjectsPayloadSchema)', () => {
-    const data = parse(ProjectsPayloadSchema, '/api/projects');
+  // sit on the one generated `ProjectsPayloadV1Schema`.
+  it('GET /api/projects — brain + delivery registry (ProjectsPayloadV1Schema)', () => {
+    const data = parse(ProjectsPayloadV1Schema, '/api/projects');
     const tree = data.project_tree ?? [];
     expect(tree.length).toBeGreaterThanOrEqual(2);
 
@@ -323,8 +323,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     }
   });
 
-  it('GET /api/projects/{id} — scoped brain backbone (ProjectContextPayloadSchema)', () => {
-    const data = parse(ProjectContextPayloadSchema, '/api/projects/tracedecay');
+  it('GET /api/projects/{id} — scoped brain backbone (ProjectContextPayloadV1Schema)', () => {
+    const data = parse(ProjectContextPayloadV1Schema, '/api/projects/tracedecay');
     expect(data.project?.project_id).toBe('tracedecay');
     const stores = data.stores ?? [];
     expect(stores.length).toBeGreaterThanOrEqual(1);
@@ -351,24 +351,24 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     );
   });
 
-  it('GET /api/plugins/graph/subgraph — scoped brain field (GraphSubgraphPayloadSchema)', () => {
+  it('GET /api/plugins/graph/subgraph — scoped brain field (GraphSubgraphPayloadV1Schema)', () => {
     const data = parse(
-      GraphSubgraphPayloadSchema,
+      GraphSubgraphPayloadV1Schema,
       '/api/projects/tracedecay/plugins/graph/subgraph',
     );
     expect((data.nodes ?? []).length).toBeGreaterThanOrEqual(20);
     expect((data.edges ?? []).length).toBeGreaterThanOrEqual(20);
   });
 
-  it('GET /api/plugins/holographic/status — scoped brain (MemoryStatusPayloadSchema)', () => {
-    const data = parse(MemoryStatusPayloadSchema, '/api/plugins/holographic/status');
+  it('GET /api/plugins/holographic/status — scoped brain (MemoryStatusPayloadV1Schema)', () => {
+    const data = parse(MemoryStatusPayloadV1Schema, '/api/plugins/holographic/status');
     expect(data.exists).toBe(true);
     expect(data.memory?.fact_count).toBeGreaterThan(0);
     expect(data.memory?.entity_count).toBeGreaterThan(0);
   });
 
-  it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusPayloadSchema)', () => {
-    const data = parse(MemoryStatusPayloadSchema, '/api/plugins/holographic/status');
+  it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusPayloadV1Schema)', () => {
+    const data = parse(MemoryStatusPayloadV1Schema, '/api/plugins/holographic/status');
     // These four bands are the ONLY trust distribution a real store serves
     // correctly, and KnowledgePage falls back to them when the overview's
     // ten-bucket histogram comes back all-zero (which it always does live).
@@ -381,14 +381,14 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(distribution.degenerate).toBe(false);
   });
 
-  it('GET /api/plugins/analytics/overview — scoped brain (AnalyticsOverviewPayloadSchema)', () => {
-    const data = parse(AnalyticsOverviewPayloadSchema, '/api/plugins/analytics/overview');
+  it('GET /api/plugins/analytics/overview — scoped brain (AnalyticsOverviewPayloadV1Schema)', () => {
+    const data = parse(AnalyticsOverviewPayloadV1Schema, '/api/plugins/analytics/overview');
     expect(data.usage?.event_count).toBeGreaterThan(0);
     expect((data.usage?.by_category ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
-  it('GET /api/plugins/holographic/ — knowledge (MemoryOverviewPayloadSchema)', () => {
-    const data = parse(MemoryOverviewPayloadSchema, '/api/plugins/holographic/');
+  it('GET /api/plugins/holographic/ — knowledge (MemoryOverviewPayloadV1Schema)', () => {
+    const data = parse(MemoryOverviewPayloadV1Schema, '/api/plugins/holographic/');
     const facts = data.holographic.facts ?? [];
     expect(facts.length).toBeGreaterThanOrEqual(25);
     // Trust spread: facts land in more than one histogram bucket.
@@ -432,8 +432,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     }
   });
 
-  it('GET /api/plugins/savings/sessions — loom threads (SavingsSessionsPayloadSchema)', () => {
-    const data = parse(SavingsSessionsPayloadSchema, '/api/plugins/savings/sessions');
+  it('GET /api/plugins/savings/sessions — loom threads (SavingsSessionsPayloadV1Schema)', () => {
+    const data = parse(SavingsSessionsPayloadV1Schema, '/api/plugins/savings/sessions');
     const sessions = data.sessions ?? [];
     expect(sessions.length).toBeGreaterThanOrEqual(30);
     expect(new Set(sessions.map((s) => s.provider)).size).toBe(3);
@@ -472,9 +472,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(weave.extent).not.toBeNull();
   });
 
-  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LcmSessionPayloadSchema)', () => {
+  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LcmSessionPayloadV1Schema)', () => {
     const data = parse(
-      LcmSessionPayloadSchema,
+      LcmSessionPayloadV1Schema,
       '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
     );
     expect(data.exists).toBe(true);
@@ -500,8 +500,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect((data.results ?? []).length).toBeGreaterThan(0);
   });
 
-  it('GET /api/plugins/graph/overview — code (GraphOverviewPayloadSchema)', () => {
-    const data = parse(GraphOverviewPayloadSchema, '/api/plugins/graph/overview');
+  it('GET /api/plugins/graph/overview — code (GraphOverviewPayloadV1Schema)', () => {
+    const data = parse(GraphOverviewPayloadV1Schema, '/api/plugins/graph/overview');
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
     // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
     // exactly five columns, so the fixture must serve twelve rows and no more.
@@ -526,8 +526,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.totals.nodes).toBeGreaterThan(0);
   });
 
-  it('GET /api/plugins/graph/search — code (GraphSearchPayloadSchema)', () => {
-    const data = parse(GraphSearchPayloadSchema, '/api/plugins/graph/search', '?q=service');
+  it('GET /api/plugins/graph/search — code (GraphSearchPayloadV1Schema)', () => {
+    const data = parse(GraphSearchPayloadV1Schema, '/api/plugins/graph/search', '?q=service');
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
@@ -536,24 +536,24 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
-  it('GET /api/plugins/graph/subgraph — code unseeded (GraphSubgraphPayloadSchema)', () => {
-    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph');
+  it('GET /api/plugins/graph/subgraph — code unseeded (GraphSubgraphPayloadV1Schema)', () => {
+    const data = parse(GraphSubgraphPayloadV1Schema, '/api/plugins/graph/subgraph');
     expect(data.seed_id).toBeNull();
     expect(data.mode).toBe('default');
     expect(data.nodes.length).toBeGreaterThanOrEqual(30);
     expect(data.edges.length).toBeGreaterThanOrEqual(40);
   });
 
-  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (GraphSubgraphPayloadSchema)', () => {
-    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
+  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (GraphSubgraphPayloadV1Schema)', () => {
+    const data = parse(GraphSubgraphPayloadV1Schema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
     expect(data.seed_id).toBe('sym-0');
     expect(data.mode).toBe('seeded');
     expect(data.nodes.some((n) => n.id === 'sym-0')).toBe(true);
     expect(data.nodes.length).toBeLessThan(40);
   });
 
-  it('GET /api/plugins/savings/overview — costs (SavingsOverviewPayloadSchema)', () => {
-    const data = parse(SavingsOverviewPayloadSchema, '/api/plugins/savings/overview');
+  it('GET /api/plugins/savings/overview — costs (SavingsOverviewPayloadV1Schema)', () => {
+    const data = parse(SavingsOverviewPayloadV1Schema, '/api/plugins/savings/overview');
     expect(data.savings.available).toBe(true);
     expect(data.savings.ledger?.today.saved_tokens).toBeGreaterThan(0);
     expect(data.savings.ledger?.all_time.saved_tokens).toBeGreaterThan(0);
@@ -561,8 +561,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.turns.available).toBe(true);
   });
 
-  it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummarySchema)', () => {
-    const data = parse(AnalyticsUsageSummarySchema, '/api/plugins/analytics/usage');
+  it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummaryV1Schema)', () => {
+    const data = parse(AnalyticsUsageSummaryV1Schema, '/api/plugins/analytics/usage');
     expect(data.available).toBe(true);
     const rows = data.by_category ?? [];
     expect(rows.length).toBeGreaterThanOrEqual(3);
@@ -668,7 +668,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // started wrapping one, and SettingsPage read envelope metadata as
   // configuration without a single test noticing.
   it('GET /api/settings — settings envelope', () => {
-    const env = parse(EnvelopeSchema(SettingsPayloadV1Schema), '/api/settings');
+    const env = parse(DashboardEnvelopeV1Schema(SettingsPayloadV1Schema), '/api/settings');
     expect(env.payload.storage.store_root.length).toBeGreaterThan(0);
     // The two write scopes are advertised independently, so the editor can
     // disable one without claiming the other is unauthorized too.
@@ -690,21 +690,21 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/storage/telemetry — observatory envelope', () => {
-    const env = parse(EnvelopeSchema(StorageTelemetryPayloadSchema), '/api/storage/telemetry');
+    const env = parse(DashboardEnvelopeV1Schema(StorageTelemetryPayloadV1Schema), '/api/storage/telemetry');
     expect(env.payload.stores.length).toBeGreaterThan(0);
   });
 
-  // Validated against the generated `StorageFindingsPayloadSchema`, which is
+  // Validated against the generated `StorageFindingsPayloadV1Schema`, which is
   // what `storage_findings_api.rs` serves. The producer set is read off the
-  // generated `DoctorStorageFindingKind` union rather than written down as a
+  // generated `DoctorStorageFindingKindV1` union rather than written down as a
   // count: a sixth kind added in Rust must make this fixture incomplete, not
   // make a passing assertion silently wrong about what it covered.
   it('GET /api/storage/findings — observatory envelope', () => {
     const env = parse(
-      EnvelopeSchema(StorageFindingsPayloadSchema),
+      DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema),
       '/api/storage/findings',
     );
-    const knownKinds = DoctorStorageFindingKindSchema.options.map((option) => option.value);
+    const knownKinds = DoctorStorageFindingKindV1Schema.options.map((option) => option.value);
     expect(new Set(env.payload.kind_statuses.map((status) => status.kind))).toEqual(
       new Set(knownKinds),
     );
@@ -716,7 +716,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/doctor/findings — observatory doctor envelope (populated report)', () => {
-    const env = parse(EnvelopeSchema(DoctorFindingsPayloadSchema), '/api/doctor/findings');
+    const env = parse(DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema), '/api/doctor/findings');
     expect(env.payload.family_filter).toBeNull();
     expect(env.payload.known_families.length).toBe(7);
 
@@ -727,7 +727,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     // than silently going unscanned.
     const states = env.payload.entries.map((e) => e.finding.state);
     expect(new Set(states).size).toBe(states.length);
-    expect(new Set(states)).toEqual(new Set(DoctorEvidenceStateSchema.options.map((o) => o.value)));
+    expect(new Set(states)).toEqual(new Set(DoctorEvidenceStateV1Schema.options.map((o) => o.value)));
 
     // The kernel invariant the projection enforces: only a healthy finding may
     // claim complete coverage of a healthy result.
@@ -764,7 +764,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // parses fine and renders a surface that never shows the unavailable plate,
   // which is the exact state these workspaces exist to render honestly.
   it('GET /api/observatory — canonical observations envelope', () => {
-    const env = parse(EnvelopeSchema(ObservatoryReadModelSchema), '/api/observatory');
+    const env = parse(DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema), '/api/observatory');
     const metrics = env.payload.metrics;
     // Both producing sources present, so the surface renders two groups.
     const sources = new Set(metrics.map((metric) => metric.provenance.source));
@@ -790,7 +790,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   });
 
   it('GET /api/costs — canonical cost envelope with an unpriced ledger', () => {
-    const env = parse(EnvelopeSchema(CostsReadModelSchema), '/api/costs');
+    const env = parse(DashboardEnvelopeV1Schema(CostsReadModelV1Schema), '/api/costs');
     expect(env.payload.usage.length).toBeGreaterThan(0);
     // Prices are recorded at ingest; a read over unpriced turns must arrive as
     // a null cost with its reason, or the surface can never be shown refusing
@@ -805,7 +805,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
 
   it('GET /api/code-index/freshness — branch-aware generation envelope', () => {
     const env = parse(
-      EnvelopeSchema(CodeIndexFreshnessPayloadSchema),
+      DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),
       '/api/code-index/freshness',
     );
     const worktree = env.payload.worktrees[0];

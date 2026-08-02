@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DoctorFindingsPayloadSchema,
-  EnvelopeSchema,
-  LegalActionRefSchema,
-  StorageTelemetryPayloadSchema,
-} from '../../contracts/wire.ts';
+  DoctorFindingsPayloadV1Schema,
+  DashboardEnvelopeV1Schema,
+  DashboardLegalActionRefV1Schema,
+  StorageTelemetryPayloadV1Schema,
+} from '../../contracts/generated.ts';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
@@ -41,7 +41,7 @@ describe('Observatory storage read models', () => {
       ]),
     ).toBeUndefined();
     expect(
-      LegalActionRefSchema.safeParse({
+      DashboardLegalActionRefV1Schema.safeParse({
         kind: 'invented_action',
         operation: 'not-an-authority',
       }).success,
@@ -74,11 +74,11 @@ describe('Observatory storage read models', () => {
       payload: { stores: [], budget_note: '', growth_note: '' },
     };
 
-    expect(EnvelopeSchema(StorageTelemetryPayloadSchema).safeParse(envelope).success).toBe(false);
+    expect(DashboardEnvelopeV1Schema(StorageTelemetryPayloadV1Schema).safeParse(envelope).success).toBe(false);
   });
 
   it('decodes the canonical Doctor storage-family projection and maps typed kinds', () => {
-    const payload = DoctorFindingsPayloadSchema.parse({
+    const payload = DoctorFindingsPayloadV1Schema.parse({
       family_filter: 'storage',
       entries: [
         {
@@ -149,7 +149,7 @@ describe('Observatory storage read models', () => {
   });
 
   it('preserves the typed budget/growth dimensions and the roles a store serves', () => {
-    const payload = StorageTelemetryPayloadSchema.parse({
+    const payload = StorageTelemetryPayloadV1Schema.parse({
       stores: [
         {
           store: 'graph.db',

@@ -1,12 +1,12 @@
-import { EnvelopeSchema, type WireDomainState, type WireEnvelope } from '../../contracts/wire.ts';
+import { DashboardEnvelopeV1Schema, type DashboardDomainStateV1, type DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal } from '../scope/store.ts';
 
 /** Result of an envelope fetch. Transport failures become truthful domain
  * states rather than exceptions: the UI always has a state to render. */
 export type EnvelopeResult<T> =
-  | { outcome: 'envelope'; envelope: WireEnvelope<T> }
-  | { outcome: 'transport'; state: WireDomainState; detail?: string };
+  | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
+  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
 
 /** Fetches and decodes a DashboardEnvelopeV1<T> from a daemon API route.
  * - network failure → offline
@@ -47,9 +47,9 @@ export async function fetchEnvelope<T>(
   } catch {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
-  const parsed = EnvelopeSchema(payloadSchema).safeParse(body);
+  const parsed = DashboardEnvelopeV1Schema(payloadSchema).safeParse(body);
   if (!parsed.success) {
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
-  return { outcome: 'envelope', envelope: parsed.data as WireEnvelope<T> };
+  return { outcome: 'envelope', envelope: parsed.data as DashboardEnvelopeV1<T> };
 }

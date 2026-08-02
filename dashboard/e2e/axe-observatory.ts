@@ -14,7 +14,7 @@
  * complete read that is separately redacted, and a read model carrying no
  * measurements at all.
  */
-import { DoctorEvidenceStateSchema } from '../src/contracts/wire.ts';
+import { DoctorEvidenceStateV1Schema } from '../src/contracts/generated.ts';
 import {
   expectAbsent,
   expectContains,
@@ -63,7 +63,7 @@ function withoutValue(metric: Record<string, unknown>, reason: string): Record<s
  * the fixture carries one finding per state, so this is also the count of
  * evidence badges the scan must find, and a ninth state added in Rust has to
  * make that requirement fail rather than go unscanned. */
-const DOCTOR_EVIDENCE_STATES = DoctorEvidenceStateSchema.options.map((option) => option.value);
+const DOCTOR_EVIDENCE_STATES = DoctorEvidenceStateV1Schema.options.map((option) => option.value);
 
 /**
  * The WCAG contrast of each evidence badge's label against the background it

@@ -17,7 +17,7 @@ import {
   type ExplorerQueryRunV1,
   type ExplorerReadContextV1,
   type ExplorerSessionSizeV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';

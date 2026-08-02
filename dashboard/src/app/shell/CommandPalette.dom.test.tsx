@@ -25,10 +25,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CommandPalette } from './CommandPalette.tsx';
 import {
-  ProjectsPayloadSchema,
+  ProjectsPayloadV1Schema,
   type ProjectRegistryEntry,
-  type ProjectsPayload,
-} from '../../contracts/wire.ts';
+  type ProjectsPayloadV1,
+} from '../../contracts/generated.ts';
 import { projectRegistryListKey } from '../../data/query/projectRegistry.ts';
 import { UNSCOPED_CACHE_KEY, scopeWritable, useScope } from '../../data/scope/store.ts';
 
@@ -74,8 +74,8 @@ function entryAt(
 /** A listing shaped like the daemon's, parsed through the generated schema so
  * a body this dashboard could not read cannot pass as one it could. The
  * palette reads `project_tree`, so that is where the entries have to be. */
-function listing(entries: readonly ProjectRegistryEntry[]): ProjectsPayload {
-  return ProjectsPayloadSchema.parse({
+function listing(entries: readonly ProjectRegistryEntry[]): ProjectsPayloadV1 {
+  return ProjectsPayloadV1Schema.parse({
     active_project_id: 'proj-active',
     active_project_root: '/repos/proj-active',
     error: null,
@@ -96,7 +96,7 @@ function listing(entries: readonly ProjectRegistryEntry[]): ProjectsPayload {
   });
 }
 
-function stubListing(payload: ProjectsPayload) {
+function stubListing(payload: ProjectsPayloadV1) {
   vi.stubGlobal(
     'fetch',
     vi.fn(

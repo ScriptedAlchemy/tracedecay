@@ -4,13 +4,13 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
-  DomainStateSchema,
-  EnvelopeSchema,
-  StorageFindingsPayloadSchema,
-  StorageTelemetryPayloadSchema,
+  DashboardDomainStateV1Schema,
+  DashboardEnvelopeV1Schema,
+  StorageFindingsPayloadV1Schema,
+  StorageTelemetryPayloadV1Schema,
   WIRE_SCHEMA_REVISION,
   assertNever,
-  type WireDomainState,
+  type DashboardDomainStateV1,
 } from "../../src/contracts/generated.ts";
 
 const PayloadSchema = z.object({ ok: z.boolean() });
@@ -45,21 +45,21 @@ function readyEnvelope(overrides: Record<string, unknown> = {}): Record<string, 
 
 describe("wire domain-state decoder", () => {
   it("decodes a known variant", () => {
-    expect(DomainStateSchema.parse("ready")).toBe("ready");
+    expect(DashboardDomainStateV1Schema.parse("ready")).toBe("ready");
   });
 
   it("keeps `unsupported` and `unsupported_schema` distinct (both server-canonical)", () => {
-    expect(DomainStateSchema.parse("unsupported")).toBe("unsupported");
-    expect(DomainStateSchema.parse("unsupported_schema")).toBe("unsupported_schema");
+    expect(DashboardDomainStateV1Schema.parse("unsupported")).toBe("unsupported");
+    expect(DashboardDomainStateV1Schema.parse("unsupported_schema")).toBe("unsupported_schema");
   });
 
   it("maps an UNKNOWN value to unsupported_schema instead of throwing", () => {
-    expect(DomainStateSchema.parse("brand_new_state")).toBe("unsupported_schema");
-    expect(DomainStateSchema.parse(42)).toBe("unsupported_schema");
+    expect(DashboardDomainStateV1Schema.parse("brand_new_state")).toBe("unsupported_schema");
+    expect(DashboardDomainStateV1Schema.parse(42)).toBe("unsupported_schema");
   });
 
   it("is exhaustively switchable with assertNever (never-checked)", () => {
-    function label(state: WireDomainState): string {
+    function label(state: DashboardDomainStateV1): string {
       switch (state) {
         case "loading":
         case "complete_zero_findings":
@@ -89,7 +89,7 @@ describe("wire domain-state decoder", () => {
 });
 
 describe("wire envelope decoder", () => {
-  const Envelope = EnvelopeSchema(PayloadSchema);
+  const Envelope = DashboardEnvelopeV1Schema(PayloadSchema);
 
   it("decodes a complete envelope carrying every normative field", () => {
     const parsed = Envelope.parse(readyEnvelope());
@@ -149,7 +149,7 @@ describe("wire storage payload decoders", () => {
   };
 
   it("decodes a storage telemetry payload", () => {
-    const parsed = StorageTelemetryPayloadSchema.parse({
+    const parsed = StorageTelemetryPayloadV1Schema.parse({
       stores: [
         {
           store: "s",
@@ -234,7 +234,7 @@ describe("wire storage payload decoders", () => {
       },
     };
     expect(
-      StorageTelemetryPayloadSchema.safeParse({
+      StorageTelemetryPayloadV1Schema.safeParse({
         stores: [entry],
         budget_note: "n",
         growth_note: "m",
@@ -249,7 +249,7 @@ describe("wire storage payload decoders", () => {
       { ...entry, roles: undefined },
     ]) {
       expect(
-        StorageTelemetryPayloadSchema.safeParse({
+        StorageTelemetryPayloadV1Schema.safeParse({
           stores: [drift],
           budget_note: "n",
           growth_note: "m",
@@ -260,7 +260,7 @@ describe("wire storage payload decoders", () => {
   });
 
   it("decodes a storage findings payload", () => {
-    const parsed = StorageFindingsPayloadSchema.parse({
+    const parsed = StorageFindingsPayloadV1Schema.parse({
       family_filter: "storage",
       entries: [],
       report_coverage: null,
