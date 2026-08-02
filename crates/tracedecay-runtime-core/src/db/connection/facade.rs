@@ -324,7 +324,6 @@ impl DatabaseWriteTransaction<'_> {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn rollback(self) -> Result<()> {
         let Self { transaction, guard } = self;
         let transaction = transaction.rollback().await;
