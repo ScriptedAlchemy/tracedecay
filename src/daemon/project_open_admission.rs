@@ -427,12 +427,16 @@ pub(super) fn project_server_requirement(request_line: &str) -> ProjectServerReq
     };
     match classify_mcp_method(&request.method) {
         McpMethod::HookEvent => ProjectServerRequirement::RegisteredHostIngest,
-        McpMethod::ToolsCall
-            if projectless_tool_call(request.params.as_ref())
-                .is_ok_and(|(tool_name, _)| tool_name == "tracedecay_hook_runtime") =>
-        {
-            ProjectServerRequirement::RegisteredHostIngest
-        }
+        McpMethod::ToolsCall => match projectless_tool_call(request.params.as_ref()) {
+            Ok(("tracedecay_hook_runtime", arguments))
+                if arguments.get("action").and_then(serde_json::Value::as_str)
+                    == Some("reset_counter") =>
+            {
+                ProjectServerRequirement::Core
+            }
+            Ok(("tracedecay_hook_runtime", _)) => ProjectServerRequirement::RegisteredHostIngest,
+            _ => ProjectServerRequirement::Core,
+        },
         _ => ProjectServerRequirement::Core,
     }
 }
