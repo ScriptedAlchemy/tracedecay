@@ -100,6 +100,38 @@ fn daemon_admission_preserves_reserved_health_capacity() {
     assert!(!super::super::is_reserved_control_request(&bulk_request));
 }
 
+/// MCP discovery must never be rejected as bulk traffic.
+///
+/// A rejected `tools/call` costs one call; a rejected `initialize` or
+/// `tools/list` costs the client its entire tracedecay tool registry for the
+/// whole session, because hosts cache the catalog from that one exchange.
+#[test]
+fn mcp_discovery_requests_are_reserved_control_traffic() {
+    for (id, method) in [(1, "initialize"), (2, "tools/list")] {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+        })
+        .to_string();
+        assert!(
+            super::super::is_reserved_control_request(&request),
+            "{method} must be admitted as reserved control traffic"
+        );
+    }
+    for method in ["notifications/initialized", "initialized"] {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+        })
+        .to_string();
+        assert!(
+            super::super::is_reserved_control_request(&notification),
+            "{method} must be admitted as reserved control traffic"
+        );
+    }
+}
+
 #[test]
 fn daemon_shutdown_requires_a_response_id() {
     let notification = serde_json::json!({
