@@ -5,7 +5,7 @@ use crate::bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
 use crate::capabilities::SemanticCapability;
 use crate::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspRange};
 use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome, WorkspaceSymbol};
-use crate::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
+use crate::overlay::{MAX_OVERLAY_BYTES, OVERLAY_DIAGNOSTIC_DEBOUNCE_MS, OverlaySnapshot};
 use crate::provider::GenerationDiagnostics;
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -913,8 +913,13 @@ fn overlays_debounce_publish_and_do_not_become_clean_generation_state() {
             br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///root/a.rs","version":2},"contentChanges":[{"text":"fn b() {}"}]}}"#,
             40,
         );
-    assert_eq!(session.flush_due(89).queued_messages, 0);
-    let output = session.flush_due(90);
+    assert_eq!(
+        session
+            .flush_due(40 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS - 1)
+            .queued_messages,
+        0
+    );
+    let output = session.flush_due(40 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
     assert!(output.queued_messages >= 1);
     let messages = session.drain_outbound();
     let publication: Value = messages
@@ -940,7 +945,7 @@ fn close_then_reopen_resets_debounce_and_publication_version_ordering() {
             br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":10,"text":"old"}}}"#,
             10,
         );
-    session.flush_due(60);
+    session.flush_due(10 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
     session.drain_outbound();
     session.handle_payload(
             br#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
@@ -950,7 +955,7 @@ fn close_then_reopen_resets_debounce_and_publication_version_ordering() {
             br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"new"}}}"#,
             62,
         );
-    session.flush_due(112);
+    session.flush_due(62 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
 
     let messages = session.drain_outbound();
     let publication: Value = messages
@@ -976,7 +981,7 @@ fn server_refresh_responses_do_not_create_json_rpc_response_loops() {
             br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"x"}}}"#,
             10,
         );
-    session.flush_due(60);
+    session.flush_due(10 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
     let messages = session.drain_outbound();
     let refresh: Value = messages
         .iter()
@@ -1065,7 +1070,7 @@ fn in_flight_publication_is_not_replaced_or_used_to_ack_a_newer_version() {
             br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///root/a.rs","version":2},"contentChanges":[{"text":"b"}]}}"#,
             11,
         );
-    session.flush_due(61);
+    session.flush_due(11 + OVERLAY_DIAGNOSTIC_DEBOUNCE_MS);
 
     assert_eq!(
         session
