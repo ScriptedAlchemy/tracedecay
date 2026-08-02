@@ -846,6 +846,14 @@ async fn test_tools_call_missing_params() {
             .contains("missing params"),
         "error message should mention missing params"
     );
+    assert_eq!(
+        resp["error"]["data"]["tracedecay/execution_receipt"]["terminal"],
+        "denied"
+    );
+    assert_eq!(
+        resp["error"]["data"]["tracedecay/execution_receipt"]["worker_settlement"],
+        "joined"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +895,14 @@ async fn test_tools_call_missing_name() {
             .unwrap()
             .contains("missing 'name'"),
         "error message should mention missing name"
+    );
+    assert_eq!(
+        resp["error"]["data"]["tracedecay/execution_receipt"]["terminal"],
+        "denied"
+    );
+    assert_eq!(
+        resp["error"]["data"]["tracedecay/execution_receipt"]["worker_settlement"],
+        "joined"
     );
 }
 

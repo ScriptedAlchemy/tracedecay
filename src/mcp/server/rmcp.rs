@@ -108,6 +108,7 @@ impl RmcpConnectionAdapter {
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
+        let enqueued_at = std::time::Instant::now();
         let request_id = context.id;
         let request_cancellation = context.ct;
         let project_tool_call = method == "tools/call" && self.server.project_server_live.is_some();
@@ -116,7 +117,7 @@ impl RmcpConnectionAdapter {
             Some(tokio::select! {
                 guard = response_gate.read() => guard,
                 () = request_cancellation.cancelled() => {
-                    return Err(request_cancelled_error());
+                    return Err(request_cancelled_error(enqueued_at));
                 }
             })
         } else {
@@ -129,7 +130,7 @@ impl RmcpConnectionAdapter {
                 .response_revoked()
                 .is_cancelled()
         {
-            return Err(project_server_retired_error());
+            return Err(project_server_retired_error(enqueued_at));
         }
         let id = serde_json::to_value(request_id)
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
@@ -139,7 +140,6 @@ impl RmcpConnectionAdapter {
             method: method.to_owned(),
             params,
         };
-        let enqueued_at = std::time::Instant::now();
         let mut connection = self.connection.lock().await;
         let pre_cancelled = request_cancellation.is_cancelled();
         let response = if pre_cancelled {
@@ -177,7 +177,7 @@ impl RmcpConnectionAdapter {
                 .response_revoked()
                 .is_cancelled()
         {
-            return Err(project_server_retired_error());
+            return Err(project_server_retired_error(enqueued_at));
         }
         Ok(response)
     }
@@ -317,30 +317,52 @@ fn rmcp_error(error: JsonRpcError) -> ErrorData {
     ErrorData::new(ErrorCode(error.code), error.message, error.data)
 }
 
-fn project_server_retired_error() -> ErrorData {
-    ErrorData::internal_error(
-        "tool project route failed: project server was retired",
-        Some(json!({
-            "reason_code": "project_server_retired",
-            "retryable": true,
-            "detail": "the retained project server was replaced or revoked; retry against the current owner",
-        })),
+fn project_server_retired_error(enqueued_at: std::time::Instant) -> ErrorData {
+    early_tool_call_error(
+        JsonRpcResponse::error_with_data(
+            Value::Null,
+            crate::mcp::transport::ErrorCode::InternalError,
+            "tool project route failed: project server was retired".to_owned(),
+            Some(json!({
+                "reason_code": "project_server_retired",
+                "retryable": true,
+                "detail": "the retained project server was replaced or revoked; retry against the current owner",
+            })),
+        ),
+        enqueued_at,
     )
 }
 
-fn request_cancelled_error() -> ErrorData {
-    ErrorData::internal_error(
-        "MCP request cancelled before project-route admission",
-        Some(json!({
-            "reason_code": "request_cancelled",
-            "retryable": false,
-        })),
+fn request_cancelled_error(enqueued_at: std::time::Instant) -> ErrorData {
+    early_tool_call_error(
+        JsonRpcResponse::error_with_data(
+            Value::Null,
+            crate::mcp::transport::ErrorCode::InternalError,
+            "MCP request cancelled before project-route admission".to_owned(),
+            Some(json!({
+                "reason_code": "request_cancelled",
+                "retryable": false,
+            })),
+        ),
+        enqueued_at,
     )
+}
+
+fn early_tool_call_error(response: JsonRpcResponse, enqueued_at: std::time::Instant) -> ErrorData {
+    let response = super::requests::finish_early_tool_call_response(response, enqueued_at);
+    match response.error {
+        Some(error) => rmcp_error(error),
+        None => ErrorData::internal_error(
+            "early MCP tool-call rejection lost its JSON-RPC error envelope",
+            None,
+        ),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
@@ -444,6 +466,21 @@ mod tests {
                 .and_then(|receipt| receipt.get("terminal")),
             Some(&json!("deadline_exceeded"))
         );
+    }
+
+    #[test]
+    fn pre_admission_cancellation_emits_a_terminal_tool_receipt() {
+        let error = request_cancelled_error(Instant::now() - Duration::from_micros(1));
+        let receipt = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("tracedecay/execution_receipt"))
+            .expect("cancelled RMCP tool call receipt");
+
+        assert_eq!(receipt["terminal"], "cancelled");
+        assert_eq!(receipt["worker_settlement"], "joined");
+        assert!(receipt["queue_us"].as_u64().is_some());
+        assert!(receipt["total_us"].as_u64().is_some());
     }
 
     #[test]
