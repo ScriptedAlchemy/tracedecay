@@ -259,6 +259,46 @@ fn refresh_batch_canonicalizes_the_project_root_once() {
 }
 
 #[test]
+fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
+    let temp = tempfile::tempdir().expect("temporary parent");
+    let project = temp.path().join("removed-project");
+    std::fs::create_dir(&project).expect("project directory");
+    let command = std::env::current_exe().expect("current executable");
+    let mut broker = DiagnosticBroker::new_for_test(
+        &project,
+        vec![adapter(
+            "rust",
+            command.to_string_lossy(),
+            "rs",
+            "Cargo.toml",
+        )],
+    );
+    std::fs::remove_dir(&project).expect("remove project directory");
+    reset_project_root_canonicalization_count();
+
+    let error = match broker.prepare_refresh(
+        "rust",
+        vec![LspDocument {
+            language: "rust".to_owned(),
+            language_id: "rust".to_owned(),
+            relative_path: "src/lib.rs".to_owned(),
+            text: "fn removed_root() {}".to_owned(),
+        }],
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("removed project root must fail closed"),
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to resolve admitted project root")
+    );
+    assert_eq!(project_root_canonicalization_count(), 1);
+    assert!(broker.clients.is_empty());
+}
+
+#[test]
 fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
     let project = tempfile::tempdir().expect("project");
     let command = project.path().join("analyzer");

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use super::super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
 use super::super::error::AnalyzerRuntimeError as TraceDecayError;
@@ -21,6 +21,48 @@ pub const MAX_ANALYZER_QUEUED_ROOT_BATCHES: usize = 128;
 /// Root batches share one analyzer configuration but run independently.
 pub const MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS: usize = 4;
 
+/// Broker-owned capacity shared by every refresh prepared from one broker.
+/// Queue permits reserve bounded work before a caller can retain it; run
+/// permits live inside spawned batches, so completion, cancellation, and task
+/// abortion release them without a separate cleanup path.
+#[derive(Clone)]
+pub(crate) struct BrokerRefreshCapacity {
+    running: Arc<Semaphore>,
+    queued: Arc<Semaphore>,
+}
+
+impl BrokerRefreshCapacity {
+    pub(crate) fn new() -> Self {
+        Self {
+            running: Arc::new(Semaphore::new(MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS)),
+            queued: Arc::new(Semaphore::new(MAX_ANALYZER_QUEUED_ROOT_BATCHES)),
+        }
+    }
+
+    pub(crate) fn reserve(&self, batches: usize) -> Option<PreparedRefreshReservation> {
+        let batches = u32::try_from(batches).ok()?;
+        self.queued
+            .clone()
+            .try_acquire_many_owned(batches)
+            .ok()
+            .map(|queued| PreparedRefreshReservation {
+                _queued: queued,
+                running: Arc::clone(&self.running),
+            })
+    }
+}
+
+pub(crate) struct PreparedRefreshReservation {
+    _queued: OwnedSemaphorePermit,
+    running: Arc<Semaphore>,
+}
+
+impl PreparedRefreshReservation {
+    async fn acquire_run(&self) -> Option<OwnedSemaphorePermit> {
+        self.running.clone().acquire_owned().await.ok()
+    }
+}
+
 pub struct PreparedRefresh {
     language: String,
     project_root: PathBuf,
@@ -28,6 +70,7 @@ pub struct PreparedRefresh {
     args: Vec<String>,
     epoch: u64,
     batches: Vec<RefreshBatch>,
+    reservation: PreparedRefreshReservation,
 }
 
 pub struct CompletedRefresh {
@@ -51,6 +94,7 @@ impl PreparedRefresh {
         args: Vec<String>,
         epoch: u64,
         batches: Vec<RefreshBatch>,
+        reservation: PreparedRefreshReservation,
     ) -> Self {
         Self {
             language,
@@ -59,6 +103,7 @@ impl PreparedRefresh {
             args,
             epoch,
             batches,
+            reservation,
         }
     }
 
@@ -100,6 +145,9 @@ impl PreparedRefresh {
             let Some((ordinal, batch)) = batches.next() else {
                 break;
             };
+            let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
+                RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
+            })?;
             pending.spawn(collect_refresh_batch(
                 ordinal,
                 batch,
@@ -107,6 +155,7 @@ impl PreparedRefresh {
                 self.command.clone(),
                 self.args.clone(),
                 timeouts,
+                run_permit,
             ));
         }
 
@@ -118,6 +167,9 @@ impl PreparedRefresh {
             })?;
             completed.push(result?);
             if let Some((ordinal, batch)) = batches.next() {
+                let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
+                    RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
+                })?;
                 pending.spawn(collect_refresh_batch(
                     ordinal,
                     batch,
@@ -125,6 +177,7 @@ impl PreparedRefresh {
                     self.command.clone(),
                     self.args.clone(),
                     timeouts,
+                    run_permit,
                 ));
             }
         }
@@ -143,6 +196,7 @@ async fn collect_refresh_batch(
     command: String,
     args: Vec<String>,
     timeouts: LspRefreshTimeouts,
+    _run_permit: OwnedSemaphorePermit,
 ) -> std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure> {
     let mut client_slot = batch.client.lock().await;
     let mut client = match client_slot.take() {
@@ -184,5 +238,94 @@ impl RefreshFailure {
             state: EngineState::Crashed,
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn prepared_refreshes_share_four_running_batch_permits() {
+        let capacity = BrokerRefreshCapacity::new();
+        let first = capacity.reserve(2).expect("first prepared refresh");
+        let second = capacity.reserve(2).expect("second prepared refresh");
+        let (first_a, first_b, second_a, second_b) = tokio::join!(
+            first.acquire_run(),
+            first.acquire_run(),
+            second.acquire_run(),
+            second.acquire_run(),
+        );
+        let permits = [first_a, first_b, second_a, second_b];
+        assert!(permits.iter().all(Option::is_some));
+        assert!(capacity.running.clone().try_acquire_owned().is_err());
+    }
+
+    #[test]
+    fn global_queued_batch_reservation_rejects_the_129th_batch() {
+        let capacity = BrokerRefreshCapacity::new();
+        let _full = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
+            .expect("full queue reservation");
+
+        assert!(capacity.reserve(1).is_none());
+    }
+
+    #[tokio::test]
+    async fn aborted_prepared_work_releases_queued_and_running_capacity() {
+        let capacity = BrokerRefreshCapacity::new();
+        let reservation = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
+            .expect("full queue reservation");
+        let (started, observed) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _run = reservation.acquire_run().await;
+            let _ = started.send(());
+            pending::<()>().await;
+        });
+        observed.await.expect("run permit acquired");
+        task.abort();
+        let _ = task.await;
+
+        let released = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
+            .expect("aborted work releases queued capacity");
+        let (one, two, three, four) = tokio::join!(
+            released.acquire_run(),
+            released.acquire_run(),
+            released.acquire_run(),
+            released.acquire_run(),
+        );
+        let permits = [one, two, three, four];
+        assert!(permits.iter().all(Option::is_some));
+        assert!(capacity.running.clone().try_acquire_owned().is_err());
+    }
+
+    #[tokio::test]
+    async fn dropped_prepared_work_releases_queued_and_running_capacity() {
+        let capacity = BrokerRefreshCapacity::new();
+        let reservation = capacity
+            .reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES)
+            .expect("initial reservation should fit");
+        let running = reservation
+            .acquire_run()
+            .await
+            .expect("run permit should be available");
+
+        drop(reservation);
+        assert!(capacity.reserve(MAX_ANALYZER_QUEUED_ROOT_BATCHES).is_some());
+
+        drop(running);
+        let (one, two, three, four) = tokio::join!(
+            capacity.running.clone().acquire_owned(),
+            capacity.running.clone().acquire_owned(),
+            capacity.running.clone().acquire_owned(),
+            capacity.running.clone().acquire_owned(),
+        );
+        assert!(one.is_ok() && two.is_ok() && three.is_ok() && four.is_ok());
     }
 }
