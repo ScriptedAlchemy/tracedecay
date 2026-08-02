@@ -59,7 +59,7 @@ pub enum DatabaseAccessMode {
 }
 
 impl DatabaseAccessMode {
-    const fn is_writable(self) -> bool {
+    const fn is_writable(&self) -> bool {
         matches!(self, Self::ReadWrite)
     }
 }
