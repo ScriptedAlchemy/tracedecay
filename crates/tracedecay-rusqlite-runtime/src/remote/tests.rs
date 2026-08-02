@@ -5,8 +5,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_application::remote::{
     capture::{
-        AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePortV1,
-        RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+        AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
+        RemoteCapturePortV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
     },
     replay::{
         RemoteReplayFrameLookupPortV1, RemoteReplaySpoolPortV1, RemoteReplayStateV1,
@@ -354,5 +354,40 @@ fn capture_is_encrypted_idempotent_and_replay_commits_once() {
             .unwrap()
             .pending_spool_items,
         0
+    );
+}
+
+#[test]
+fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let mut gap = admitted();
+    gap.sequence = RemoteCaptureSequenceV1 {
+        sequence: 2,
+        previous_event_id: Some("remote.event.missing".to_owned()),
+    };
+    assert_eq!(
+        storage.capture_pending(&gap),
+        Err(RemoteCapturePersistenceErrorV1::SequenceGap)
+    );
+
+    let capture = admitted();
+    let receipt = storage.capture_pending(&capture).unwrap();
+    fixture
+        .handle
+        .execute(
+            MigrationSqlStatement::new(
+                "UPDATE remote_spool_frames_v1 SET ciphertext = ?1 WHERE event_id = ?2".to_owned(),
+                vec![
+                    MigrationSqlValue::Blob(vec![0; 32]),
+                    text(&receipt.event_id),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        storage.load_replay_frame(&receipt.event_id),
+        Err(RemoteCapturePersistenceErrorV1::Corruption)
     );
 }
