@@ -565,7 +565,7 @@ impl GraphRuntimePhysicalAttachment {
             state.readers.clone().ok_or(GraphDispatchError::Closed)?
         };
         let mut reader = readers
-            .acquire(&request, probe, Duration::ZERO)
+            .acquire_for_dispatch(&request, probe)
             .map_err(GraphDispatchError::Reader)?;
         let mut snapshot = reader
             .begin_snapshot()

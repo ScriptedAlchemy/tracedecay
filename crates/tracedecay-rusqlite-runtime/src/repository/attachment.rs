@@ -498,7 +498,7 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         let mut reader = readers
-            .acquire(&request, probe, Duration::ZERO)
+            .acquire_for_dispatch(&request, probe)
             .map_err(RepositoryDispatchError::Reader)?;
         let mut snapshot = reader
             .begin_snapshot()
