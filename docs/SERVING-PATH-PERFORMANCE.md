@@ -12,6 +12,55 @@ Deadlines are the last resort, not the design: agents saturate the daemon with
 hundreds of concurrent calls, and the system must stay fast without dropping
 or killing requests.
 
+## Operating assumption: continuous churn
+
+Agents edit the codebase continuously — commits, branch switches, and
+transient worktrees arrive at all times. There is no quiescent window to
+finish indexing in. Three consequences are load-bearing:
+
+- **Serving never couples to indexing recency.** Reads always serve the last
+  complete generation (stale-while-revalidate); a new generation swaps in
+  atomically when ready. Blocking a query on an in-progress rebuild is
+  disqualifying — under continuous churn that read would block forever.
+- **Reindexing is incremental at file granularity.** A commit touching three
+  files costs three files, not a generation rebuild. Full rebuilds can never
+  keep up with continuous edits; they are reserved for bootstrap and
+  corruption recovery.
+- **Edits coalesce.** Bursts of commits collapse into batched reindex windows
+  (debounced), and transient agent worktrees are indexed lazily on first
+  query — never eagerly on registration — and deregistered on deletion.
+
+### Retrieval lanes degrade independently
+
+Serving never couples to indexing recency at the *lane* level either. A query
+runs whichever lanes are ready and returns their fused results with an explicit
+per-lane coverage marker (`CodeIndexSearchCoverageV1`); a lane that cannot run
+is reported `unavailable` with a stable reason, and a lane answering from an
+older complete generation is reported `stale` with the generation that
+answered. Only when *no* lane can serve does the query fail, and then it fails
+immediately with a typed reason rather than waiting on a rebuild.
+
+The coverage marker is additive: a warm response carries the same candidates,
+fallback bytes, and cursor it always did, and renders identically. A degraded
+response says "partial recall" in its body, because a short result list is
+otherwise indistinguishable from a thorough one.
+
+Known gap (owned by the code-index scheduler lane, not the retrieval lane): MCP
+search resolves its generation through
+`CodeIndexSchedulerRegistryV1::latest_complete_ready_for_scope`, which admits
+only an *already-current* generation — `latest_complete_ready_for_query`
+abstains whenever freshness is unknown, git metadata moved, or the staleness
+threshold elapsed. Every other callable code query resolves through
+`latest_complete_fresh_for_scope`, which serves the last complete generation.
+That asymmetry is why, after a daemon restart, callers/callees/grep answer from
+a published generation within seconds while `search` reports
+`GenerationUnavailable` for as long as the rebuild runs. The generation store
+makes stale-while-revalidate cheap here — the last complete generation is
+already held in the per-worktree `serving_generation` `RwLock` and needs no
+re-read — so the fix is for `execute_query_search` to fall back to that
+generation and mark the exact/lexical/graph lanes `stale` instead of failing.
+Both change points live under `src/daemon/code_index_scheduler/`.
+
 ## The invariant
 
 **A serving-path operation performs O(result) work, never O(store).**
