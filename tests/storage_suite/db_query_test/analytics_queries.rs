@@ -434,12 +434,67 @@ async fn test_get_node_distribution_no_prefix() {
         .expect("insert_nodes failed");
 
     let dist = db
-        .get_node_distribution(None)
+        .get_node_distribution(None, 100)
         .await
         .expect("get_node_distribution failed");
 
     // Should have entries for (src/a.rs, function, 2), (src/a.rs, struct, 1), (src/b.rs, function, 1)
     assert_eq!(dist.len(), 3);
+
+    // Whole-scope totals fold the same rows without reading one per file.
+    let totals = db
+        .get_node_kind_totals(None)
+        .await
+        .expect("get_node_kind_totals failed");
+    assert_eq!(
+        totals,
+        vec![("function".to_string(), 3), ("struct".to_string(), 1)]
+    );
+
+    assert_eq!(
+        db.count_distribution_files(None)
+            .await
+            .expect("count_distribution_files failed"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn test_get_node_distribution_caps_files_by_node_count() {
+    let db = setup_db().await;
+
+    // src/a.rs has two symbols, src/b.rs has one, so a one-file page must
+    // return src/a.rs and nothing from src/b.rs.
+    let mut n1 = sample_node("ndc-1", "f1", "src/a.rs");
+    n1.kind = NodeKind::Function;
+    let mut n2 = sample_node("ndc-2", "S1", "src/a.rs");
+    n2.kind = NodeKind::Struct;
+    let mut n3 = sample_node("ndc-3", "f2", "src/b.rs");
+    n3.kind = NodeKind::Function;
+
+    db.insert_nodes(&[n1, n2, n3])
+        .await
+        .expect("insert_nodes failed");
+
+    let dist = db
+        .get_node_distribution(None, 1)
+        .await
+        .expect("get_node_distribution failed");
+
+    assert_eq!(dist.len(), 2, "both kinds of the single retained file");
+    assert!(
+        dist.iter().all(|(file, _, _)| file == "src/a.rs"),
+        "expected only the highest-node-count file, got {dist:?}"
+    );
+
+    // The cap bounds files, never the whole-scope file count a caller needs to
+    // know how much was omitted.
+    assert_eq!(
+        db.count_distribution_files(None)
+            .await
+            .expect("count_distribution_files failed"),
+        2
+    );
 }
 
 #[tokio::test]
@@ -457,12 +512,18 @@ async fn test_get_node_distribution_with_prefix() {
         .expect("insert_nodes failed");
 
     let dist = db
-        .get_node_distribution(Some("src/a/"))
+        .get_node_distribution(Some("src/a/"), 100)
         .await
         .expect("get_node_distribution failed");
 
     assert_eq!(dist.len(), 1);
     assert_eq!(dist[0].0, "src/a/foo.rs");
+
+    let totals = db
+        .get_node_kind_totals(Some("src/a/"))
+        .await
+        .expect("get_node_kind_totals failed");
+    assert_eq!(totals, vec![("function".to_string(), 1)]);
 }
 
 #[tokio::test]
