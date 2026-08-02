@@ -45,9 +45,7 @@ pub fn serving_reserved_cores(total_cores: usize) -> usize {
 #[must_use]
 pub fn indexing_worker_target(total_cores: usize) -> usize {
     let total = total_cores.max(1);
-    total
-        .saturating_sub(serving_reserved_cores(total))
-        .max(1)
+    total.saturating_sub(serving_reserved_cores(total)).max(1)
 }
 
 fn detected_cores() -> usize {

@@ -1,7 +1,7 @@
 //! RAII ownership of one checked-out pool worker.
 //!
 //! Every exit path — normal drop, retirement, or a snapshot end that outran its
-//! grace period — returns the worker to the lane it came from, so pool capacity
+//! grace period — returns or retires the worker in its lane, so pool capacity
 //! cannot leak.
 
 use std::{
@@ -59,6 +59,7 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
         //
         // A retired worker is not in limbo. Its record has already left the
         // pool and is shut down below, so nothing is waiting to come back.
+        let timed_out_retirement = deferred_end.is_some() && retired.is_some();
         let deferred_end = deferred_end.filter(|_| retired.is_none());
         if deferred_end.is_some() {
             *state.limbo_mut(self.lane) += 1;
@@ -68,7 +69,9 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
 
         if let Some(mut record) = retired {
             record.client.shutdown();
-            if let Some(join) = record.join.take() {
+            if let Some(join) = record.join.take()
+                && !timed_out_retirement
+            {
                 let _ = join.join();
             }
         }

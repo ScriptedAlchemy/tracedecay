@@ -291,6 +291,7 @@ impl DaemonInvocationService {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,

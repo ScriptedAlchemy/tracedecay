@@ -861,8 +861,18 @@ pub(super) fn code_index_search_executor(
             // Additive only: the generation-bound lanes all ran against the
             // admitted generation here, so warm coverage restates what the
             // existing candidates already mean. Ranking identity, fallback
-            // bytes, and the cursor are untouched.
-            let coverage = code_search::CodeIndexSearchCoverageV1::fused(&semantic);
+            // bytes, and the cursor are untouched. When query admission had to
+            // fall back to the last complete generation because no current one
+            // was admissible, the same lanes are reported stale against the
+            // generation that actually answered.
+            let coverage = if executed.query.served_stale {
+                code_search::CodeIndexSearchCoverageV1::fused_stale(
+                    executed.query.generation.as_str(),
+                    &semantic,
+                )
+            } else {
+                code_search::CodeIndexSearchCoverageV1::fused(&semantic)
+            };
             code_search::CodeIndexSearchOutcomeV1::Complete(
                 code_search::CodeIndexSearchCompletedV1 {
                     code_generation: executed.query.generation.as_str().to_owned(),

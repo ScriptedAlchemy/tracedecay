@@ -45,21 +45,27 @@ fallback bytes, and cursor it always did, and renders identically. A degraded
 response says "partial recall" in its body, because a short result list is
 otherwise indistinguishable from a thorough one.
 
-Known gap (owned by the code-index scheduler lane, not the retrieval lane): MCP
-search resolves its generation through
+This applies to generation resolution too. MCP search resolves through
 `CodeIndexSchedulerRegistryV1::latest_complete_ready_for_scope`, which admits
 only an *already-current* generation — `latest_complete_ready_for_query`
 abstains whenever freshness is unknown, git metadata moved, or the staleness
 threshold elapsed. Every other callable code query resolves through
 `latest_complete_fresh_for_scope`, which serves the last complete generation.
-That asymmetry is why, after a daemon restart, callers/callees/grep answer from
-a published generation within seconds while `search` reports
-`GenerationUnavailable` for as long as the rebuild runs. The generation store
-makes stale-while-revalidate cheap here — the last complete generation is
-already held in the per-worktree `serving_generation` `RwLock` and needs no
-re-read — so the fix is for `execute_query_search` to fall back to that
-generation and mark the exact/lexical/graph lanes `stale` instead of failing.
-Both change points live under `src/daemon/code_index_scheduler/`.
+That asymmetry used to make `search` report `GenerationUnavailable` for as long
+as a rebuild ran, while callers/callees/grep answered from a published
+generation within seconds.
+
+`execute_query_search` now closes that gap: when the ready gate abstains it
+falls back to `latest_complete_serving_for_scope` and marks the
+exact/lexical/graph lanes `stale` against the generation that answered. The
+fallback is O(1) and never blocks — the last complete generation is already
+held in the per-worktree `serving_generation` `RwLock`, seeded at mount and
+rewritten by every publication, so it needs no re-read, no gix status, and no
+scheduler lock. Fail-closed behavior is unchanged in both directions: the
+fallback still requires an exact scope match, and when no complete generation
+exists at all the typed `GenerationUnavailable` fail-fast is preserved rather
+than degraded into an empty answer. When a ready generation does exist the
+fresh path is untouched, so a warm response is byte-identical.
 
 ## The invariant
 
@@ -118,6 +124,38 @@ pins 90 cores for one minute. So:
   later, and N snapshots sit in RSS at once. Reconcile admission is
   therefore 2 (enough to overlap one worktree's git/store/publication I/O
   with another's extraction), not "half the cores".
+
+Embedding a published generation is batch work with a finish line too, and it
+gets the same treatment — but its width has two knobs that must not be
+confused:
+
+- **Intra-op threads** are how many CPUs ONNX Runtime uses inside one tensor
+  invocation. Changing this changes how a GEMM is partitioned and can change
+  floating-point reduction order, so it is *numerics*: pinned by the artifact
+  manifest, never inferred from the host, and moved only together with a
+  re-embed.
+- **Session width** is how many independent batches are in flight. Each batch
+  is a separate invocation of the same graph over the same tensor shape, so
+  results are bit-identical at any width. This is the knob that scales with
+  the host, sized to `indexing_worker_target / intra_threads` so embedding
+  lives inside the *same* reservation as extraction rather than stacking a
+  second full-machine pool beside it. Chunk grouping is a fixed constant for
+  the same reason a batch barrier is forbidden above: regrouping changes the
+  padded tensor shape, which is semantics, not sizing.
+
+Before this split the embedder ran one session at four intra-op threads on
+every host — roughly 400% CPU on a 96-core box — which is what made post-
+dogfood rebuild windows run tens of minutes.
+
+GPU is not enabled. `fastembed`'s `InitOptionsUserDefined` does accept
+`with_execution_providers`, so wiring CUDA/DirectML is mechanical, but three
+things must land first: the `ort` EP feature must be added to the bundled
+runtime build (it changes `FASTEMBED_RUNTIME_BUILD_REVISION_V1`, which is part
+of the artifact compatibility pin), device availability must be *detected* and
+opt-in by env rather than assumed, and — the blocking one — a GPU EP changes
+kernel selection and therefore vector bytes, so `EmbeddingDeviceClassV1` has
+to participate in the projection key and force a re-embed rather than silently
+mixing CPU- and GPU-produced vectors in one generation.
 
 **Open-ended sweeps** — redundancy scanning, retention, projection refresh —
 have no finish line, so they stay paced:
@@ -199,3 +237,27 @@ box: the reserved slice, not a slower indexer, is what holds the line.
 cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
 no indexing at all, well over the 6GB gate budget — a live, separate breach
 of Principle 5 that this measurement did not introduce.
+
+## Open breach: the vector-generation store violates Principle 5
+
+`DatabaseVectorGenerationStoreV1` persists its entire state — every staged and
+published generation, including every `Vec<f32>` — as one JSON blob in a single
+SQLite row. Every `commit_batch` and `publish_generation` deserializes that
+blob, clones the staged generation, mutates, and re-serializes it. At 150K
+chunks × 768 dimensions the float payload alone is ~460MB in memory and over a
+gigabyte rendered as JSON decimal text, and several copies are live at once.
+
+Compounding it, `PhysicalVectorBytePoolV1` — the interning pool the published
+state resolves vector bytes through — is a **process-global
+`OnceLock<Arc<Mutex<BTreeMap<…>>>>` with an `intern` path and no eviction
+path**. It is shared by every project in the daemon and grows for the lifetime
+of the process. Together these are the most likely explanation for the 14–37GB
+daemon RSS observed during rebuilds, and no amount of batching upstream can
+bound them.
+
+The store already has the shape needed to fix this: `commit_batch` takes an
+`expected_checkpoint` and tracks `completed_batches`, so bounded incremental
+commits are supported by the contract — they are simply not used (production
+performs exactly one whole-corpus commit). The fix is row-per-vector storage
+plus a bounded, evictable byte pool, which is a store lane, not a projector
+change.

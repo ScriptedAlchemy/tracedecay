@@ -201,10 +201,9 @@ pub use retrieval::{
     RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest,
     SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
     SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult, TemporalRetrievalPort,
-    TestRetrievalPort, UNPINNED_LATEST_GENERATION_SENTINEL,
-    callable_code_catalog_contribution, callable_code_handler_descriptors,
-    callable_code_operation, callable_code_operations, callable_code_request_schema,
-    callable_code_result_schema,
+    TestRetrievalPort, UNPINNED_LATEST_GENERATION_SENTINEL, callable_code_catalog_contribution,
+    callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
+    callable_code_request_schema, callable_code_result_schema,
 };
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
