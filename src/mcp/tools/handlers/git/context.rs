@@ -377,6 +377,8 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         }
     };
     let GitPrComparison {
+        base_oid,
+        head_oid,
         merge_base,
         changes,
         commits,
@@ -476,6 +478,8 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let output = json!({
         "base": base,
         "head": head,
+        "base_oid": base_oid,
+        "head_oid": head_oid,
         "merge_base": merge_base,
         "commits": commits,
         "files_changed": changed_files.len(),

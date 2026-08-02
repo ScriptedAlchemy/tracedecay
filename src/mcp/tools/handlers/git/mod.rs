@@ -36,7 +36,10 @@ struct GitFileChange {
     status: &'static str,
 }
 
+#[derive(Debug)]
 struct GitPrComparison {
+    base_oid: String,
+    head_oid: String,
     merge_base: String,
     changes: Vec<GitFileChange>,
     commits: Vec<Value>,
