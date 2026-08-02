@@ -848,6 +848,11 @@ where
     }
 }
 
+/// One stripe's encoded groups plus the units it completed, or the reason it
+/// stopped. Stripes are joined in input order, so the first `Err` here is the
+/// lowest-index failure.
+type EncodedStripeResultV1 = Result<(Vec<Vec<Vec<f32>>>, u64), String>;
+
 /// Encode one already-composed group against one checked-out session.
 ///
 /// Free-standing so the sequential and concurrent paths run byte-identical
@@ -1002,7 +1007,7 @@ where
         let stripe_len = groups.len().div_ceil(sessions);
         let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
         let progress = Arc::clone(&self.progress);
-        let mut stripe_results: Vec<Result<(Vec<Vec<Vec<f32>>>, u64), String>> =
+        let mut stripe_results: Vec<EncodedStripeResultV1> =
             embedding_parallelism::install(|| {
                 use rayon::prelude::*;
                 stripes
