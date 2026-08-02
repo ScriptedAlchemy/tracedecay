@@ -4862,7 +4862,6 @@ dependencies = [
  "ast-grep-core",
  "axum 0.8.9",
  "bincode",
- "cc",
  "clap",
  "criterion",
  "crossterm",
@@ -4896,20 +4895,41 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tiktoken-rs",
- "tokensave-large-treesitters",
- "tokensave-medium-treesitters",
  "tokio",
  "toml",
  "tower 0.5.3",
+ "tracedecay-code-extraction",
+ "tracedecay-domain",
  "tracing",
  "tree-sitter",
- "tree-sitter-hlsl",
  "tree-sitter-language",
  "ureq",
  "url",
  "walkdir",
  "webpki-roots 1.0.7",
  "zip",
+]
+
+[[package]]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tracedecay-domain"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

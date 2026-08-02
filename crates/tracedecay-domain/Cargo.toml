@@ -1,0 +1,15 @@
+[package]
+name = "tracedecay-domain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Domain contracts for TraceDecay code intelligence"
+
+[features]
+default = []
+lang-protobuf = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+hex = "0.4"
