@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tracedecay_store::StoreShardScopeV1;
+
+use crate::db::engine::{Connection, Error as EngineError};
 
 const GRAPH_MEMORY_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDG2");
 const REGISTERED_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDR2");
@@ -187,6 +190,79 @@ impl ExactStoreSchemaV2 {
     }
 }
 
+pub async fn observe_store_schema(
+    connection: &Connection,
+) -> Result<ObservedStoreSchemaV2, EngineError> {
+    let application_id = read_pragma_u32(connection, "PRAGMA application_id").await?;
+    let user_version = read_pragma_u32(connection, "PRAGMA user_version").await?;
+    let mut rows = connection
+        .query(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name, tbl_name, sql",
+            (),
+        )
+        .await?;
+    let mut hasher = Sha256::new();
+    let mut object_count = 0_u64;
+    while let Some(row) = rows.next().await? {
+        for column in 0..4 {
+            let value = row.get::<String>(column)?;
+            hash_field(&mut hasher, &value)?;
+        }
+        object_count = object_count
+            .checked_add(1)
+            .ok_or_else(|| EngineError::invalid_operation("SQLite schema object count overflow"))?;
+    }
+    let catalog_fingerprint = (object_count != 0).then(|| hex::encode(hasher.finalize()));
+    Ok(ObservedStoreSchemaV2 {
+        application_id,
+        user_version,
+        catalog_fingerprint,
+    })
+}
+
+pub async fn validate_quick_check(connection: &Connection) -> Result<(), EngineError> {
+    let mut rows = connection.query("PRAGMA quick_check(1)", ()).await?;
+    let Some(row) = rows.next().await? else {
+        return Err(EngineError::invalid_operation(
+            "SQLite quick_check returned no result",
+        ));
+    };
+    if row.get::<String>(0)? != "ok" {
+        return Err(EngineError::invalid_operation(
+            "SQLite quick_check rejected the store",
+        ));
+    }
+    if rows.next().await?.is_some() {
+        return Err(EngineError::invalid_operation(
+            "SQLite quick_check returned an incompatible result",
+        ));
+    }
+    Ok(())
+}
+
+async fn read_pragma_u32(connection: &Connection, sql: &str) -> Result<u32, EngineError> {
+    let mut rows = connection.query(sql, ()).await?;
+    let Some(row) = rows.next().await? else {
+        return Err(EngineError::invalid_operation(
+            "SQLite schema pragma returned no result",
+        ));
+    };
+    let value = row.get::<i64>(0)?;
+    u32::try_from(value)
+        .map_err(|_| EngineError::invalid_operation("SQLite schema pragma is outside u32"))
+}
+
+fn hash_field(hasher: &mut Sha256, value: &str) -> Result<(), EngineError> {
+    let length = u64::try_from(value.len())
+        .map_err(|_| EngineError::invalid_operation("SQLite schema field is too large"))?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(value.as_bytes());
+    Ok(())
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
@@ -197,6 +273,9 @@ fn is_sha256_hex(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    use crate::db::engine::TestConnection;
 
     const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -289,5 +368,42 @@ mod tests {
             StoreSchemaContractV2::new(StoreSchemaKindV2::Registered, "ABC"),
             Err(StoreSchemaContractErrorV2::InvalidCatalogFingerprint)
         );
+    }
+
+    #[tokio::test]
+    async fn observation_is_read_only_and_catalog_sensitive() {
+        let directory = TempDir::new().unwrap();
+        let empty_connection = TestConnection::open(&directory.path().join("empty.db"));
+        let empty = observe_store_schema(&empty_connection).await.unwrap();
+        assert_eq!(empty, ObservedStoreSchemaV2::empty());
+        drop(empty_connection);
+
+        let path = directory.path().join("schema.db");
+        let setup = rusqlite::Connection::open(&path).unwrap();
+        setup
+            .execute_batch(
+                "PRAGMA application_id = 1413763634;
+                 PRAGMA user_version = 1;
+                 CREATE TABLE final_table(id INTEGER PRIMARY KEY) STRICT;",
+            )
+            .unwrap();
+        drop(setup);
+        let connection = TestConnection::open(&path);
+        let exact = observe_store_schema(&connection).await.unwrap();
+        assert_eq!(
+            exact.application_id,
+            StoreSchemaKindV2::Registered.application_id()
+        );
+        assert_eq!(exact.user_version, 1);
+        assert!(exact.catalog_fingerprint.is_some());
+        let second = observe_store_schema(&connection).await.unwrap();
+        assert_eq!(second, exact);
+    }
+
+    #[tokio::test]
+    async fn quick_check_accepts_a_healthy_store() {
+        let directory = TempDir::new().unwrap();
+        let connection = TestConnection::open(&directory.path().join("schema.db"));
+        validate_quick_check(&connection).await.unwrap();
     }
 }
