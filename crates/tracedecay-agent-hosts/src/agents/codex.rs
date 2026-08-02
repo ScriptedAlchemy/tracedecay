@@ -359,6 +359,18 @@ impl AgentIntegration for CodexIntegration {
     ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
         use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
 
+        // Registration state is decided by the registration surface alone. The
+        // deployed plugin *source* bundle is an artifact-layer deployment that
+        // `deactivate_deployed_host_registration` deliberately leaves behind for
+        // the artifact layer to remove, so it must not keep this reporting a
+        // non-`Missing` state after deactivation — the uninstall verify demands
+        // `Missing` and would otherwise roll a correct uninstall back.
+        match codex_registration_residue(&ctx.home) {
+            Ok(false) => return State::Missing,
+            Ok(true) => {}
+            Err(()) => return State::Corrupt,
+        }
+
         let candidates = [
             ctx.home.join(".codex/plugins/tracedecay"),
             codex_plugin_install_dir(&ctx.home),
@@ -1416,6 +1428,53 @@ fn codex_unwritable_activation_reason(home: &Path) -> Option<String> {
                 config_path.display()
             )
         })
+}
+
+/// Whether any TraceDecay-owned *registration* record survives in the Codex
+/// host surface — precisely the set [`uninstall_codex_config`] and
+/// [`remove_codex_marketplace_entry`] clear: the `[hooks.state]` trust keys, the
+/// `[mcp_servers.tracedecay]` entry, the `[plugins."tracedecay@…"]` activation
+/// records, and the personal marketplace entry.
+///
+/// The deployed plugin source bundle and its cached install directories are
+/// deliberately excluded: those are artifact-layer deployments, not registration,
+/// and they outlive deactivation. `Err(())` marks a host surface TraceDecay
+/// cannot read, which callers report as corrupt rather than merely repairable.
+fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
+    let config = load_toml_file(&codex_config_path(home)).map_err(|_| ())?;
+    let hook_trust_residue = config
+        .get("hooks")
+        .and_then(toml::Value::as_table)
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|state| {
+            state
+                .keys()
+                .any(|key| key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX))
+        });
+    let mcp_residue = config
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|servers| servers.contains_key("tracedecay"));
+    let activation_residue = config
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|plugins| {
+            plugins
+                .keys()
+                .any(|key| key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX))
+        });
+    let marketplace =
+        load_json_file_strict(&codex_personal_marketplace_path(home)).map_err(|_| ())?;
+    let marketplace_residue = marketplace
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|plugins| {
+            plugins.iter().any(|entry| {
+                entry.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay")
+            })
+        });
+    Ok(hook_trust_residue || mcp_residue || activation_residue || marketplace_residue)
 }
 
 /// Whether Codex would load this plugin: some `tracedecay@<marketplace>` record

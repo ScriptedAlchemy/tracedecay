@@ -859,6 +859,49 @@ fn codex_activation_records_enabled_plugin_and_cached_bundle() {
     assert_eq!(config["plugins"].as_table().unwrap().len(), 1);
 }
 
+/// Deactivation clears the registration surface but deliberately leaves the
+/// deployed plugin *source* bundle for the artifact layer to remove. Registration
+/// state must then read `Missing`, not `Repairable`: the uninstall verify demands
+/// `Missing` from every component, so a `Repairable` here fails the whole
+/// transaction and rolls a correct `uninstall --agent codex` back.
+#[test]
+fn codex_registration_is_missing_once_deactivated_even_with_the_bundle_deployed() {
+    use super::super::host_bundle_v2::{
+        HostBundleComponentV1 as Component, HostBundleRegistrationStateV1 as State,
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    codex_activate_plugin(home.path(), TEST_BIN).unwrap();
+    let ctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: home.path().to_path_buf(),
+    };
+    assert_eq!(
+        CodexIntegration.host_component_registration(Component::Core, &ctx),
+        State::Current,
+    );
+
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+
+    assert!(
+        codex_plugin_current_cached_install_dir(home.path())
+            .join(".codex-plugin/plugin.json")
+            .is_file(),
+        "deactivation must not remove the deployed source bundle — that is the \
+         artifact layer's job, and this test is meaningless without it",
+    );
+    for component in [Component::Core, Component::ContextMcp] {
+        assert_eq!(
+            CodexIntegration.host_component_registration(component, &ctx),
+            State::Missing,
+            "{component:?} still reports a registration after deactivation",
+        );
+    }
+}
+
 /// Every other plugin's activation record and the user's own settings survive.
 #[test]
 fn codex_activation_preserves_foreign_plugin_records() {
