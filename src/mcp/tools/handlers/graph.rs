@@ -76,6 +76,9 @@ async fn execute_code_index_search(
                 semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                     reason: "code_index_unavailable",
                 },
+                coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                    "code_index_unavailable",
+                ),
             },
         ),
     }
@@ -99,6 +102,46 @@ fn semantic_status_value(
             "mode": mode,
             "reason": reason,
         }),
+    }
+}
+
+/// Renders the per-lane recall marker so a caller can tell a full-recall
+/// answer from one produced while a lane was down. Emitted on every search
+/// response, including the successful ones, because "no matches" and "the
+/// matching lane was not running" are otherwise indistinguishable.
+fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
+    fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
+        match status {
+            crate::mcp::server::CodeIndexLaneStatusV1::Complete => json!("complete"),
+            crate::mcp::server::CodeIndexLaneStatusV1::Stale { generation } => json!({
+                "status": "stale",
+                "generation": generation,
+            }),
+            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => json!({
+                "status": "unavailable",
+                "reason": reason,
+            }),
+        }
+    }
+
+    json!({
+        "exact": lane(&coverage.exact),
+        "lexical": lane(&coverage.lexical),
+        "graph": lane(&coverage.graph),
+        "semantic": lane(&coverage.semantic),
+        "recall": if coverage.is_degraded() { "partial" } else { "full" },
+    })
+}
+
+/// The lane reason to attribute a retained-store fallback to. The coverage
+/// marker carries the precise cause (a rebuilding generation is not the same
+/// failure as a revoked route); the outcome reason is the fallback.
+fn retained_fallback_reason(
+    unavailable: &crate::mcp::server::CodeIndexSearchUnavailableV1,
+) -> &'static str {
+    match unavailable.coverage.exact {
+        crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => reason,
+        _ => unavailable.reason.as_str(),
     }
 }
 
@@ -197,7 +240,7 @@ async fn legacy_search_fallback(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    semantic_reason: &str,
+    semantic_reason: &'static str,
 ) -> Result<ToolResult> {
     let mut legacy_results =
         filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
@@ -264,6 +307,12 @@ async fn legacy_search_fallback(
             "reason": semantic_reason,
         },
         "status": "lexical_fallback",
+        // The generation-bound lanes are down, but the retained store still
+        // answers lexically. Say so explicitly rather than returning a short
+        // list that reads like a complete one.
+        "coverage": coverage_value(
+            &crate::mcp::server::CodeIndexSearchCoverageV1::retained_lexical_only(semantic_reason),
+        ),
     });
     if let Some(scope) = scope_prefix {
         output["scope_prefix"] = json!(scope);
@@ -374,6 +423,7 @@ pub(super) async fn handle_search(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                "coverage": coverage_value(&complete.coverage),
             });
             if let Some(scope) = scope_prefix {
                 output["scope_prefix"] = json!(scope);
@@ -393,8 +443,20 @@ pub(super) async fn handle_search(
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
+            // Progressive degradation: the generation-bound lanes are down,
+            // but the retained lexical/graph store is a ready lane, so serve
+            // it instead of failing the whole query. Strict-semantic callers
+            // asked for a lane that cannot degrade, so they still fail fast.
             if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed {
-                return legacy_search_fallback(cg, &args, query, limit, scope_prefix, reason).await;
+                return legacy_search_fallback(
+                    cg,
+                    &args,
+                    query,
+                    limit,
+                    scope_prefix,
+                    retained_fallback_reason(&unavailable),
+                )
+                .await;
             }
             let output = json!({
                 "results": [],
@@ -403,6 +465,7 @@ pub(super) async fn handle_search(
                 "semantic": semantic_status_value(semantic_mode, &unavailable.semantic),
                 "status": "unavailable",
                 "reason": reason,
+                "coverage": coverage_value(&unavailable.coverage),
             });
             let failure = format!("code-index search unavailable: {reason}");
             let mut result =
@@ -413,6 +476,51 @@ pub(super) async fn handle_search(
             }
             Ok(result)
         }
+    }
+}
+
+/// Warns, in the human-facing body, that a result list is short because a lane
+/// was missing. A degraded page is otherwise indistinguishable from a thorough
+/// one, which is exactly how a partial answer gets trusted as a complete one.
+fn append_coverage_md(md: &mut Md, value: &Value) {
+    let Some(coverage) = value.get("coverage") else {
+        return;
+    };
+    if coverage.get("recall").and_then(Value::as_str) != Some("partial") {
+        return;
+    }
+    let mut notes = Vec::new();
+    for lane in ["exact", "lexical", "graph", "semantic"] {
+        let status = coverage.get(lane);
+        match status
+            .and_then(|status| status.get("status"))
+            .and_then(Value::as_str)
+        {
+            Some("stale") => {
+                let generation = status
+                    .and_then(|status| status.get("generation"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("previous");
+                notes.push(format!("{lane}: stale (generation `{generation}`)"));
+            }
+            Some("unavailable") => {
+                let reason = status
+                    .and_then(|status| status.get("reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unavailable");
+                notes.push(format!("{lane}: unavailable ({reason})"));
+            }
+            _ => {}
+        }
+    }
+    if notes.is_empty() {
+        return;
+    }
+    md.blank()
+        .heading(3, "Coverage")
+        .line("Partial recall — some retrieval lanes did not answer:");
+    for note in notes {
+        md.bullet(&note);
     }
 }
 
@@ -480,6 +588,7 @@ fn render_search_md(value: &Value) -> String {
             .heading(3, "Availability")
             .line(&format!("Search unavailable: {reason}."));
     }
+    append_coverage_md(&mut md, value);
     if let Some(semantic) = value.get("semantic")
         && semantic.get("status").and_then(Value::as_str) == Some("unavailable")
         && let Some(reason) = semantic.get("reason").and_then(Value::as_str)
@@ -1836,6 +1945,80 @@ mod tests {
     use super::*;
     use crate::memory::types::{FactRecord, FactSearchResult, MemoryCategory};
 
+    /// A warm response must render exactly as it did before coverage existed:
+    /// every lane complete, no coverage section, no added lines.
+    #[test]
+    fn warm_coverage_leaves_the_rendered_body_unchanged() {
+        let coverage = coverage_value(&crate::mcp::server::CodeIndexSearchCoverageV1::warm());
+        assert_eq!(coverage["recall"], json!("full"));
+        assert_eq!(coverage["exact"], json!("complete"));
+
+        let without = json!({
+            "results": [{
+                "candidate": {
+                    "anchor_id": "code-symbol:symbol.v1",
+                    "exact_class": "exact_message",
+                    "utility_micros": 4_000_000
+                },
+                "final_ordinal": 0,
+            }],
+            "code_generation": "generation.warm",
+        });
+        let mut with = without.clone();
+        with["coverage"] = coverage;
+
+        assert_eq!(
+            render_search_md(&with),
+            render_search_md(&without),
+            "warm coverage must be additive metadata, never rendered output"
+        );
+    }
+
+    #[test]
+    fn degraded_coverage_is_visible_in_the_rendered_body() {
+        let output = json!({
+            "results": [],
+            "status": "lexical_fallback",
+            "coverage": coverage_value(
+                &crate::mcp::server::CodeIndexSearchCoverageV1::retained_lexical_only(
+                    crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+                ),
+            ),
+        });
+
+        let rendered = render_search_md(&output);
+        assert!(
+            rendered.contains("Partial recall"),
+            "a degraded page must say so: {rendered}"
+        );
+        assert!(
+            rendered.contains("generation_rebuilding"),
+            "the degraded page must name the cause: {rendered}"
+        );
+        assert_eq!(output["coverage"]["lexical"], json!("complete"));
+        assert_eq!(output["coverage"]["recall"], json!("partial"));
+    }
+
+    #[test]
+    fn a_rebuilding_generation_routes_to_the_retained_lane_with_its_own_reason() {
+        let unavailable = crate::mcp::server::CodeIndexSearchUnavailableV1 {
+            code_generation: None,
+            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            },
+            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            ),
+        };
+
+        assert_eq!(
+            retained_fallback_reason(&unavailable),
+            crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            "the fallback must report the rebuild, not a generic search failure"
+        );
+    }
+
     #[tokio::test]
     async fn installed_search_executor_owns_fallback_allowed_dispatch() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1856,6 +2039,9 @@ mod tests {
                             semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                                 reason: "calibration_unavailable",
                             },
+                            coverage: crate::mcp::server::CodeIndexSearchCoverageV1::unavailable(
+                                "calibration_unavailable",
+                            ),
                         },
                     )
                 })
