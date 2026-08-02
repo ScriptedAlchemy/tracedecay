@@ -32,10 +32,14 @@ impl RegisteredGlobalDb {
         // reader worker for the entire scan; page with short-held query leases
         // instead. The filesystem side of this health estimate is already read
         // live, so a per-page read boundary matches what the result means.
+        //
+        // Every page is also declared background: this walks the whole store
+        // and runs off maintenance, so it admits against the unreserved slice
+        // of the reader lane rather than competing with interactive queries.
+        let reader = self.read_connection().background();
         let mut after_path = String::new();
         loop {
-            let mut rows = self
-                .read_connection()
+            let mut rows = reader
                 .query(
                     "SELECT paths.transcript_path,
                             COALESCE(offsets.byte_offset, 0),

@@ -14,7 +14,9 @@ use std::{
 
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
 use tokio::sync::mpsc as tokio_mpsc;
-use tracedecay_store::{StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1};
+use tracedecay_store::{
+    OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
+};
 
 use crate::{
     PersistentWriter,
@@ -58,10 +60,17 @@ pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_comman
 use command::TransactionCommand;
 use guard::{AuthorizedDatabaseOperation, InsertTracker, with_migration_guard};
 
-type MigrationQuery = dyn Fn(MigrationSqlStatement, Duration) -> Result<MigrationSqlRows, MigrationSqlError>
+type MigrationQuery = dyn Fn(
+        MigrationSqlStatement,
+        OperationPriorityV1,
+        Duration,
+    ) -> Result<MigrationSqlRows, MigrationSqlError>
     + Send
     + Sync;
-type MigrationSnapshotFactory =
+type MigrationSnapshotFactory = dyn Fn(OperationPriorityV1, Duration) -> Result<MigrationSqlReadSnapshot, MigrationSqlError>
+    + Send
+    + Sync;
+type MigrationHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> + Send + Sync;
 type MigrationSnapshotQuery =
     dyn FnMut(MigrationSqlStatement) -> Result<MigrationSqlRows, MigrationSqlError> + Send;
@@ -85,7 +94,7 @@ pub struct MigrationSqlHandle {
     writer: Option<tokio_mpsc::Sender<WriterCommand>>,
     query: Arc<MigrationQuery>,
     snapshot: Arc<MigrationSnapshotFactory>,
-    health_snapshot: Arc<MigrationSnapshotFactory>,
+    health_snapshot: Arc<MigrationHealthSnapshotFactory>,
     store_size_telemetry: Arc<StoreSizeTelemetryRead>,
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
     last_insert_rowid: Arc<AtomicI64>,
@@ -145,7 +154,7 @@ impl MigrationSqlHandle {
             binding,
             locator,
             writer,
-            query: Arc::new(move |statement, max_wait| {
+            query: Arc::new(move |statement, priority, max_wait| {
                 query_readers
                     .upgrade()
                     .ok_or_else(|| {
@@ -153,9 +162,9 @@ impl MigrationSqlHandle {
                             "migration SQL reader pool is closed".to_owned(),
                         )
                     })?
-                    .execute_migration_query(statement, max_wait)
+                    .execute_migration_query(statement, priority, max_wait)
             }),
-            snapshot: Arc::new(move |max_wait| {
+            snapshot: Arc::new(move |priority, max_wait| {
                 snapshot_readers
                     .upgrade()
                     .ok_or_else(|| {
@@ -163,7 +172,7 @@ impl MigrationSqlHandle {
                             "migration SQL reader pool is closed".to_owned(),
                         )
                     })?
-                    .begin_migration_snapshot(max_wait)
+                    .begin_migration_snapshot(priority, max_wait)
             }),
             health_snapshot: Arc::new(move |max_wait| {
                 health_snapshot_readers
@@ -286,13 +295,28 @@ impl MigrationSqlHandle {
         }
     }
 
+    /// Interactive read. Admits against the whole general reader lane.
     pub fn query(
         &self,
         statement: MigrationSqlStatement,
         max_wait: Duration,
     ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        self.query_with_priority(statement, OperationPriorityV1::Foreground, max_wait)
+    }
+
+    /// Read under an explicit priority.
+    ///
+    /// Callers that know they are bulk or maintenance work pass `Background`
+    /// so the reader pool keeps a slice of the general lane free for
+    /// interactive reads.
+    pub fn query_with_priority(
+        &self,
+        statement: MigrationSqlStatement,
+        priority: OperationPriorityV1,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlRows, MigrationSqlError> {
         statement.validate()?;
-        (self.query)(statement, max_wait)
+        (self.query)(statement, priority, max_wait)
     }
 
     /// Checkpoints and truncates the WAL on the serialized writer connection.
@@ -335,11 +359,23 @@ impl MigrationSqlHandle {
             .map_err(|_| MigrationSqlError::WriterUnavailable)?
     }
 
+    /// Interactive read snapshot. Admits against the whole general lane.
     pub fn begin_read_snapshot(
         &self,
         max_wait: Duration,
     ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
-        (self.snapshot)(max_wait)
+        self.begin_read_snapshot_with_priority(OperationPriorityV1::Foreground, max_wait)
+    }
+
+    /// Read snapshot under an explicit priority. A pinned snapshot holds its
+    /// worker for its whole lifetime, so declaring bulk work `Background` here
+    /// matters more than for a one-shot query.
+    pub fn begin_read_snapshot_with_priority(
+        &self,
+        priority: OperationPriorityV1,
+        max_wait: Duration,
+    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+        (self.snapshot)(priority, max_wait)
     }
 
     pub fn begin_health_read_snapshot(

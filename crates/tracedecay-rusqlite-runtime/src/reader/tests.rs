@@ -24,6 +24,7 @@ use tracedecay_store::{
     StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
+use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
 use crate::SqliteStoreSizeTelemetryPort;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -906,8 +907,12 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
         .unwrap()
     };
 
-    pool.execute_migration_query(statement(), Duration::from_millis(200))
-        .unwrap();
+    pool.execute_migration_query(
+        statement(),
+        OperationPriorityV1::Foreground,
+        Duration::from_millis(200),
+    )
+    .unwrap();
     assert_eq!(
         pool.snapshot().leased_general,
         0,
@@ -915,20 +920,101 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
     );
 
     let first = pool
-        .begin_migration_snapshot(Duration::from_millis(200))
+        .begin_migration_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
         .unwrap();
     let second = pool
-        .begin_migration_snapshot(Duration::from_millis(200))
+        .begin_migration_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
         .unwrap();
     assert_eq!(pool.snapshot().leased_general, 2);
     assert!(
-        pool.execute_migration_query(statement(), Duration::from_millis(20))
-            .is_err(),
+        pool.execute_migration_query(
+            statement(),
+            OperationPriorityV1::Foreground,
+            Duration::from_millis(20)
+        )
+        .is_err(),
         "pinned snapshots starve concurrent short reads once they fill the lane"
     );
 
     drop(first);
     drop(second);
-    pool.execute_migration_query(statement(), Duration::from_secs(2))
-        .expect("releasing the pinned snapshots must restore short-read capacity");
+    pool.execute_migration_query(
+        statement(),
+        OperationPriorityV1::Foreground,
+        Duration::from_secs(2),
+    )
+    .expect("releasing the pinned snapshots must restore short-read capacity");
+}
+
+/// Foreground and background share the general lane, so without a reservation
+/// a bulk sweep that opens `max_per_hot_shard` concurrent reads leaves nothing
+/// for interactive queries. Background acquisitions must stop short.
+#[test]
+fn saturating_background_readers_never_block_a_foreground_read() {
+    let store = TestStore::new();
+    let budget = AdmissionConfigV1::default().readers;
+    let ceiling = budget.max_per_hot_shard - FOREGROUND_RESERVED_GENERAL_WORKERS;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+
+    let background = request(&store.binding, OperationPriorityV1::Background);
+    let background_probe = Probe::for_request(&background);
+    let held = (0..ceiling)
+        .map(|index| {
+            pool.acquire(&background, &background_probe, Duration::from_secs(2))
+                .unwrap_or_else(|error| panic!("background lease {index} must admit: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pool.snapshot().leased_general, ceiling);
+
+    // The lane has unspawned headroom left, but it belongs to the reservation.
+    assert!(
+        matches!(
+            pool.acquire(&background, &background_probe, Duration::from_millis(20)),
+            Err(ReaderAcquireError::Saturated { .. })
+        ),
+        "background must not admit past the reservation"
+    );
+
+    let foreground = request(&store.binding, OperationPriorityV1::Foreground);
+    let foreground_probe = Probe::for_request(&foreground);
+    let started = Instant::now();
+    let lease = pool
+        .acquire(&foreground, &foreground_probe, Duration::from_secs(2))
+        .expect("a foreground read must never queue behind saturating background readers");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the foreground read waited on background leases instead of the reservation"
+    );
+    assert_eq!(pool.snapshot().leased_general, ceiling + 1);
+
+    drop(lease);
+    drop(held);
+}
+
+/// The reservation is a share of the lane, never the whole lane: with the
+/// smallest legal budget background work must still admit.
+#[test]
+fn foreground_reservation_leaves_background_at_least_one_worker() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+
+    let background = request(&store.binding, OperationPriorityV1::Background);
+    let background_probe = Probe::for_request(&background);
+    let held = pool
+        .acquire(&background, &background_probe, Duration::from_secs(2))
+        .expect("a two-worker budget must still admit background work");
+
+    assert!(matches!(
+        pool.acquire(&background, &background_probe, Duration::from_millis(20)),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+
+    let foreground = request(&store.binding, OperationPriorityV1::Foreground);
+    let foreground_probe = Probe::for_request(&foreground);
+    let reserved = pool
+        .acquire(&foreground, &foreground_probe, Duration::from_secs(2))
+        .expect("the reserved worker must remain reachable by foreground reads");
+
+    drop(reserved);
+    drop(held);
 }
