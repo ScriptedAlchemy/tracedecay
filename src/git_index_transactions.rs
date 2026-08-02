@@ -1,10 +1,9 @@
 //! Fixed native Git mechanics for PR11 index transactions.
 //!
-//! The public surface names only stage, unstage, write-tree, and commit-index
-//! operations. It never accepts a generic Git subcommand, flags, ref, or
+//! The native surface only stages, unstages, and commits preview-bound index
+//! changes. It never accepts a generic Git subcommand, flags, ref, or
 //! working-tree path from a caller. Daemon code supplies already validated,
 //! preview-bound patch material and performs the journaled recovery protocol.
-#![allow(dead_code)] // PR11/Plan 36 git index transactions — staged ops
 
 use std::env;
 use std::ffi::OsStr;
@@ -413,14 +412,13 @@ impl FixedGitIndexRunner {
                 &["rev-parse", "--git-path", "info/sparse-checkout"],
             )?,
         )?;
-        let sparse_bytes = std::fs::read(sparse_path).unwrap_or_default();
+        let sparse_bytes = read_optional_file(&sparse_path)?;
         canonical_sha256(&sparse_bytes).map_err(Into::into)
     }
 
     pub(crate) fn submodule_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let output = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
-        let gitmodules =
-            std::fs::read(self.repository_root.join(".gitmodules")).unwrap_or_default();
+        let gitmodules = read_optional_file(&self.repository_root.join(".gitmodules"))?;
         canonical_sha256(&(output.stdout, gitmodules)).map_err(Into::into)
     }
 
@@ -471,6 +469,7 @@ impl FixedGitIndexRunner {
         self.apply_hunks(lock, preview, patches, HunkDirectionV1::IndexToHead, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn write_tree(&self) -> Result<GitOidV1, NativeGitIndexError> {
         self.ensure_index_unlocked()?;
         let output = self.run_git("write-tree", &["write-tree"])?;
@@ -479,6 +478,7 @@ impl FixedGitIndexRunner {
 
     /// Compute the candidate tree against an isolated index and object
     /// quarantine. Preview never writes the repository index or object store.
+    #[cfg(test)]
     pub(crate) fn preview_candidate_tree(
         &self,
         patches: &[ValidatedIndexPatch],
@@ -1120,6 +1120,14 @@ fn absolute_git_path(repository_root: &Path, value: &str) -> Result<PathBuf, Nat
     })
 }
 
+fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(NativeGitIndexError::Io(error.to_string())),
+    }
+}
+
 fn parse_git_oid(operation: &'static str, output: &[u8]) -> Result<GitOidV1, NativeGitIndexError> {
     let text = std::str::from_utf8(output)
         .map_err(|_| NativeGitIndexError::MalformedOutput { operation })?;
@@ -1247,6 +1255,24 @@ mod tests {
         assert!(matches!(
             runner.ensure_index_unlocked(),
             Err(NativeGitIndexError::IndexLocked)
+        ));
+    }
+
+    #[test]
+    fn unreadable_optional_git_metadata_is_not_treated_as_absent() {
+        let directory = tempdir().expect("temporary repository");
+        let initialized = Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts");
+        assert!(initialized.success());
+        fs::create_dir(directory.path().join(".gitmodules")).expect("metadata directory");
+
+        let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+        assert!(matches!(
+            runner.submodule_digest(),
+            Err(NativeGitIndexError::Io(_))
         ));
     }
 
