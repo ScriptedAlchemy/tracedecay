@@ -9,7 +9,7 @@ use tracedecay_application::{
     WorkflowActivationV1, WorkflowCoordinationError, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionService, WorkflowPlacementCandidateV1,
     WorkflowPlacementError, WorkflowPlacementPort, WorkflowPlacementRequestV1,
-    WorkflowPlacementService,
+    WorkflowPlacementService, work_executable_catalog_digest,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
@@ -35,6 +35,18 @@ fn definition(version: u64) -> WorkflowDefinitionV1 {
 }
 
 fn definition_with_operation(version: u64, operation: &str) -> WorkflowDefinitionV1 {
+    definition_with_operation_and_catalog(
+        version,
+        operation,
+        work_executable_catalog_digest().unwrap(),
+    )
+}
+
+fn definition_with_operation_and_catalog(
+    version: u64,
+    operation: &str,
+    catalog_digest: ManifestDigest,
+) -> WorkflowDefinitionV1 {
     WorkflowDefinitionV1::new(
         id("workflow.definition.coordination"),
         version,
@@ -49,7 +61,7 @@ fn definition_with_operation(version: u64, operation: &str) -> WorkflowDefinitio
         }],
         digest('a'),
         digest('b'),
-        digest('c'),
+        catalog_digest,
     )
     .unwrap()
 }
@@ -170,6 +182,26 @@ fn immutable_definition_versions_and_activation_use_compare_and_swap() {
             .unwrap()
             .active_version,
         2
+    );
+}
+
+#[test]
+fn activation_rejects_a_definition_pinned_to_another_catalog() {
+    let authority = FakeDefinitionAuthority::default();
+    let service = WorkflowDefinitionService::new(authority);
+    let definition =
+        definition_with_operation_and_catalog(1, WORKFLOW_CANONICAL_WORK_OPERATION_V1, digest('c'));
+    service.register(definition.clone()).unwrap();
+
+    assert_eq!(
+        service
+            .activate(
+                definition.definition_id(),
+                None,
+                definition.definition_version(),
+            )
+            .unwrap_err(),
+        WorkflowCoordinationError::CatalogDigestMismatch
     );
 }
 
