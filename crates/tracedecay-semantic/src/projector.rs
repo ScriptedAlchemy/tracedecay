@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
-    ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest, ProjectionBatchReceiptV1,
-    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    ProjectionReplayReasonV1, canonical_sha256,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkV1, CodeGenerationId, CodeSearchChunkId,
+    CodeSearchChunkV1, ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
 };
 
 use tracedecay_code_index::projection::{
@@ -23,7 +23,23 @@ use tracedecay_code_index::projection::{
 };
 
 const VECTOR_OUTPUT_DIGEST_DOMAIN: &str = "tracedecay.semantic-vector-output.v1";
+
+/// Chunks packed into one encoder invocation.
+///
+/// This is the tensor shape the model sees, so it is *semantics*, not sizing:
+/// regrouping changes padding and therefore can change vector bytes. It is a
+/// constant for that reason, and width is scaled by dispatching more of these
+/// groups concurrently rather than by making any one of them larger.
 const VECTOR_ENCODING_BATCH_SIZE: usize = 8;
+
+/// How many encoder groups the projector keeps in flight at once, per unit of
+/// encoder concurrency.
+///
+/// Bounds two things at the same time: the number of chunk texts handed to the
+/// encoder before any result comes back, and the number of encoded vectors
+/// held outside `vectors` at any moment. Deeper windows buy nothing once every
+/// session is busy; they only raise peak RSS.
+const ENCODING_WINDOW_GROUPS_PER_WORKER: usize = 4;
 
 /// The only projector dependency that may produce vector values.
 pub trait CanonicalChunkVectorEncoderV1 {
@@ -39,6 +55,29 @@ pub trait CanonicalChunkVectorEncoderV1 {
         chunks: &[&CodeSearchChunkV1],
     ) -> Result<Vec<Vec<f32>>, String> {
         chunks.iter().map(|chunk| self.encode(key, chunk)).collect()
+    }
+
+    /// Encode several already-composed groups.
+    ///
+    /// Group composition and output order are fixed by the caller, so an
+    /// implementation that runs the groups concurrently produces byte-identical
+    /// vectors to this sequential default. That equivalence is what makes
+    /// [`Self::encode_concurrency`] pure sizing policy.
+    fn encode_batches(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        groups: &[&[&CodeSearchChunkV1]],
+    ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        groups
+            .iter()
+            .map(|group| self.encode_batch(key, group))
+            .collect()
+    }
+
+    /// How many groups this encoder can usefully run at once. The default is
+    /// a single in-order worker.
+    fn encode_concurrency(&self) -> usize {
+        1
     }
 }
 
@@ -239,34 +278,13 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
             + request.changes.deleted.len()
             + request.changes.reused.len(),
     );
-    for changes in request
-        .changes
-        .added_or_changed
-        .chunks(VECTOR_ENCODING_BATCH_SIZE)
-    {
-        let batch = changes
-            .iter()
-            .map(|change| {
-                chunks.get(&change.chunk_id).copied().ok_or_else(|| {
-                    SemanticProjectionErrorV1::CanonicalChunkSetMismatch(change.chunk_id.clone())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded = encoder
-            .encode_batch(embedding_key, &batch)
-            .map_err(|reason| SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch
-                    .first()
-                    .map_or_else(|| changes[0].chunk_id.clone(), |chunk| chunk.id.clone()),
-                reason,
-            })?;
-        if encoded.len() != batch.len() {
-            return Err(SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch[0].id.clone(),
-                reason: "semantic projector returned an unexpected vector batch size".to_owned(),
-            });
-        }
-        for ((change, chunk), values) in changes.iter().zip(batch).zip(encoded) {
+    encode_changes_windowed(
+        encoder,
+        embedding_key,
+        &request.changes.added_or_changed,
+        &chunks,
+        |chunk_id| SemanticProjectionErrorV1::CanonicalChunkSetMismatch(chunk_id.clone()),
+        |change, chunk, values| {
             let vector = ProjectedChunkVectorV1::new(
                 target_key.clone(),
                 request.changes.to_generation.clone(),
@@ -288,8 +306,9 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
                 output_digest: Some(vector.output_digest.clone()),
             });
             vectors.push(vector);
-        }
-    }
+            Ok(())
+        },
+    )?;
 
     let mut tombstones = Vec::with_capacity(request.changes.deleted.len());
     for change in &request.changes.deleted {
@@ -324,31 +343,13 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
             output_digest: None,
         });
     }
-    for changes in reembedded_changes.chunks(VECTOR_ENCODING_BATCH_SIZE) {
-        let batch = changes
-            .iter()
-            .map(|change| {
-                chunks
-                    .get(&change.chunk_id)
-                    .copied()
-                    .ok_or(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let encoded = encoder
-            .encode_batch(embedding_key, &batch)
-            .map_err(|reason| SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch
-                    .first()
-                    .map_or_else(|| changes[0].chunk_id.clone(), |chunk| chunk.id.clone()),
-                reason,
-            })?;
-        if encoded.len() != batch.len() {
-            return Err(SemanticProjectionErrorV1::Encoder {
-                chunk_id: batch[0].id.clone(),
-                reason: "semantic projector returned an unexpected vector batch size".to_owned(),
-            });
-        }
-        for ((change, chunk), values) in changes.iter().zip(batch).zip(encoded) {
+    encode_changes_windowed(
+        encoder,
+        embedding_key,
+        reembedded_changes,
+        &chunks,
+        |_chunk_id| SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds,
+        |change, chunk, values| {
             let vector = ProjectedChunkVectorV1::new(
                 target_key.clone(),
                 request.changes.to_generation.clone(),
@@ -366,8 +367,9 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
                 output_digest: Some(vector.output_digest.clone()),
             });
             vectors.push(vector);
-        }
-    }
+            Ok(())
+        },
+    )?;
 
     let receipt = build_batch_receipt(&request, &decisions)?;
     verify_batch_receipt(&request, &receipt)?;
@@ -378,6 +380,92 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         vectors,
         tombstones,
     })
+}
+
+/// Encode `changes` group by group, dispatching a bounded window of groups to
+/// the encoder at a time and draining each window in input order.
+///
+/// Two invariants make this safe to widen:
+///
+/// - Groups are always `VECTOR_ENCODING_BATCH_SIZE` consecutive changes, so
+///   the tensor shape the model sees never depends on the window or on the
+///   encoder's concurrency.
+/// - Results are drained in input order, so vectors, decisions, and the
+///   lowest-index failure are identical at any width.
+fn encode_changes_windowed<E, Missing, Sink>(
+    encoder: &mut E,
+    embedding_key: &EmbeddingProjectionKeyV1,
+    changes: &[ChangedCodeChunkV1],
+    chunks: &BTreeMap<CodeSearchChunkId, &CodeSearchChunkV1>,
+    missing: Missing,
+    mut sink: Sink,
+) -> Result<(), SemanticProjectionErrorV1>
+where
+    E: CanonicalChunkVectorEncoderV1 + ?Sized,
+    Missing: Fn(&CodeSearchChunkId) -> SemanticProjectionErrorV1,
+    Sink: FnMut(
+        &ChangedCodeChunkV1,
+        &CodeSearchChunkV1,
+        Vec<f32>,
+    ) -> Result<(), SemanticProjectionErrorV1>,
+{
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let window_changes = VECTOR_ENCODING_BATCH_SIZE
+        .saturating_mul(ENCODING_WINDOW_GROUPS_PER_WORKER)
+        .saturating_mul(encoder.encode_concurrency().max(1))
+        .max(VECTOR_ENCODING_BATCH_SIZE);
+
+    for window in changes.chunks(window_changes) {
+        let groups = window
+            .chunks(VECTOR_ENCODING_BATCH_SIZE)
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|change| {
+                        chunks
+                            .get(&change.chunk_id)
+                            .copied()
+                            .ok_or_else(|| missing(&change.chunk_id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let group_refs = groups
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<&[&CodeSearchChunkV1]>>();
+        let encoded = encoder
+            .encode_batches(embedding_key, &group_refs)
+            .map_err(|reason| SemanticProjectionErrorV1::Encoder {
+                chunk_id: window[0].chunk_id.clone(),
+                reason,
+            })?;
+        if encoded.len() != groups.len() {
+            return Err(SemanticProjectionErrorV1::Encoder {
+                chunk_id: window[0].chunk_id.clone(),
+                reason: "semantic projector returned an unexpected vector group count".to_owned(),
+            });
+        }
+        for ((group, group_chunks), values) in window
+            .chunks(VECTOR_ENCODING_BATCH_SIZE)
+            .zip(groups)
+            .zip(encoded)
+        {
+            if values.len() != group.len() {
+                return Err(SemanticProjectionErrorV1::Encoder {
+                    chunk_id: group[0].chunk_id.clone(),
+                    reason: "semantic projector returned an unexpected vector batch size"
+                        .to_owned(),
+                });
+            }
+            for ((change, chunk), vector) in group.iter().zip(group_chunks).zip(values) {
+                sink(change, chunk, vector)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Run one bounded projection batch on the blocking worker pool.
