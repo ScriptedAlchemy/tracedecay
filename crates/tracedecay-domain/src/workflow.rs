@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use petgraph::algo::is_cyclic_directed;
+use petgraph::graph::DiGraph;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -265,32 +267,26 @@ impl WorkflowDefinitionV1 {
         &self,
         steps: &BTreeMap<WorkflowStepId, &WorkflowStepV1>,
     ) -> Result<(), WorkflowDefinitionError> {
-        let mut remaining_predecessors = steps
-            .iter()
-            .map(|(step_id, step)| (step_id.clone(), step.predecessors.len()))
+        let mut graph = DiGraph::<&WorkflowStepId, ()>::new();
+        let nodes = steps
+            .keys()
+            .map(|step_id| (step_id, graph.add_node(step_id)))
             .collect::<BTreeMap<_, _>>();
-        let mut ready = remaining_predecessors
-            .iter()
-            .filter_map(|(step_id, count)| (*count == 0).then_some(step_id.clone()))
-            .collect::<BTreeSet<_>>();
-        let mut visited = 0;
-
-        while let Some(step_id) = ready.pop_first() {
-            visited += 1;
-            for (candidate_id, candidate) in steps {
-                if candidate.predecessors.contains(&step_id) {
-                    let count = remaining_predecessors
-                        .get_mut(candidate_id)
-                        .expect("all workflow steps have an indegree");
-                    *count -= 1;
-                    if *count == 0 {
-                        ready.insert(candidate_id.clone());
-                    }
-                }
+        for (step_id, step) in steps {
+            let Some(&target) = nodes.get(step_id) else {
+                return Err(WorkflowDefinitionError::PredecessorCycle);
+            };
+            for predecessor in &step.predecessors {
+                let Some(&source) = nodes.get(predecessor) else {
+                    return Err(WorkflowDefinitionError::DanglingPredecessor {
+                        step_id: step_id.clone(),
+                        predecessor: predecessor.clone(),
+                    });
+                };
+                graph.add_edge(source, target, ());
             }
         }
-
-        if visited != steps.len() {
+        if is_cyclic_directed(&graph) {
             return Err(WorkflowDefinitionError::PredecessorCycle);
         }
         Ok(())
