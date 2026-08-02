@@ -51,7 +51,7 @@ use super::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
         IncrementalVacuumCommand,
     },
-    transaction::process_batch,
+    transaction::{BatchExecutionContext, process_batch},
 };
 
 mod ingress;
@@ -455,13 +455,15 @@ impl Worker {
                 );
                 process_execution_batch(
                     checkpoint.connection_mut(),
-                    &self.binding,
                     batch,
                     self.persistence.as_mut(),
-                    &self.telemetry,
-                    &self.state,
-                    &self.watermark_publisher,
-                    self.family_guard.as_deref(),
+                    BatchExecutionContext {
+                        binding: &self.binding,
+                        telemetry: &self.telemetry,
+                        state: &self.state,
+                        watermark_publisher: &self.watermark_publisher,
+                        family_guard: self.family_guard.as_deref(),
+                    },
                 );
                 if self.state.load(Ordering::Acquire) != WriterState::Faulted as u8 {
                     self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
@@ -584,27 +586,14 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
 
 pub(super) fn process_execution_batch(
     connection: &mut rusqlite::Connection,
-    binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
-    family_guard: Option<&SqliteFamilyGuard>,
+    context: BatchExecutionContext<'_>,
 ) {
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.
-    process_batch(
-        connection,
-        binding,
-        batch,
-        persistence,
-        telemetry,
-        state,
-        watermark_publisher,
-        family_guard,
-    );
+    process_batch(connection, batch, persistence, context);
 }
 
 fn run_incremental_vacuum(

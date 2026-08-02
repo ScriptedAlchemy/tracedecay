@@ -48,14 +48,17 @@ struct Processed {
 
 pub(super) fn process_batch(
     connection: &mut Connection,
-    binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
-    family_guard: Option<&SqliteFamilyGuard>,
+    context: BatchExecutionContext<'_>,
 ) {
+    let BatchExecutionContext {
+        binding,
+        telemetry,
+        state,
+        watermark_publisher,
+        family_guard,
+    } = context;
     let started = Instant::now();
     if probe_family(family_guard).is_err() {
         state.store(WriterState::Faulted as u8, Ordering::Release);
@@ -151,6 +154,14 @@ pub(super) fn process_batch(
         },
     };
     settle_prepared(prepared, commit_failure, started, telemetry);
+}
+
+pub(super) struct BatchExecutionContext<'a> {
+    pub(super) binding: &'a StoreRuntimeBindingV1,
+    pub(super) telemetry: &'a WriterTelemetry,
+    pub(super) state: &'a AtomicU8,
+    pub(super) watermark_publisher: &'a CommittedWatermarkPublisher,
+    pub(super) family_guard: Option<&'a SqliteFamilyGuard>,
 }
 
 fn probe_family(
