@@ -12,6 +12,24 @@ Deadlines are the last resort, not the design: agents saturate the daemon with
 hundreds of concurrent calls, and the system must stay fast without dropping
 or killing requests.
 
+## Operating assumption: continuous churn
+
+Agents edit the codebase continuously — commits, branch switches, and
+transient worktrees arrive at all times. There is no quiescent window to
+finish indexing in. Three consequences are load-bearing:
+
+- **Serving never couples to indexing recency.** Reads always serve the last
+  complete generation (stale-while-revalidate); a new generation swaps in
+  atomically when ready. Blocking a query on an in-progress rebuild is
+  disqualifying — under continuous churn that read would block forever.
+- **Reindexing is incremental at file granularity.** A commit touching three
+  files costs three files, not a generation rebuild. Full rebuilds can never
+  keep up with continuous edits; they are reserved for bootstrap and
+  corruption recovery.
+- **Edits coalesce.** Bursts of commits collapse into batched reindex windows
+  (debounced), and transient agent worktrees are indexed lazily on first
+  query — never eagerly on registration — and deregistered on deletion.
+
 ## The invariant
 
 **A serving-path operation performs O(result) work, never O(store).**
