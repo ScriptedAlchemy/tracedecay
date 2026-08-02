@@ -40,7 +40,7 @@ surface by exactly the set the root crate already depended on.
 | `agents::cursor::cursor_plugin_install_dir` | `src/hooks/memory_inject.rs` (4 sites) |
 | `agents::hermes::read_config_pinned_project_root` (+ its `hermes/profile_config.rs` definition) | `src/migrate/hermes.rs`, `src/migrate/hermes/resolution.rs`, `src/sessions/hermes/ingest.rs` |
 | `automation::config_error` | `src/mcp/tools/handlers/hook_runtime.rs:8` |
-| `automation::run_ledger::read_published_artifact_manifest` | `src/dashboard/automation_run_api.rs:19` |
+| `automation::run_ledger::read_published_artifact_chain` | `src/dashboard/automation_run_api.rs:19` |
 | `automation::runner::registered_project_automation_retrieval` (+ its `runner/retrieval.rs` definition) | `src/daemon/scheduler.rs:1260,1475` |
 | `automation::runner::run_user_session_automation_with_backend` | `src/mcp/tools/handlers/hook_runtime.rs:2020` |
 | `automation::scheduler::load_session_activity` | `src/dashboard/automation_scheduler_api.rs:15`, `src/application/host_admission.rs:2578` |

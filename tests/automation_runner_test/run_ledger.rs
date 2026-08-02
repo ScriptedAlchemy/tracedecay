@@ -302,10 +302,7 @@ async fn run_artifacts_read_only_from_matching_run_directory() {
     let err = read_run_artifact_payload(&dashboard_root, "artifact_run_1", &wrong_run_artifact)
         .await
         .unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("does not match run 'artifact_run_1'")
-    );
+    assert!(err.to_string().contains("canonical path"));
 }
 
 #[tokio::test]

@@ -504,8 +504,8 @@ async fn interrupted_manifest_commit_recovers_on_retry() {
     skill.support_files[0].bytes = b"updated checklist\n".to_vec();
 
     let dir = scope.skills_dir().join("code-slop-cleanup");
-    let manifest = dir.join(".tracedecay-materialization.json");
-    let blocked_staging = PathBuf::from(format!("{}.new", manifest.display()));
+    let pending = dir.join(".tracedecay-materialization.pending.json");
+    let blocked_staging = PathBuf::from(format!("{}.new", pending.display()));
     std::fs::create_dir(&blocked_staging).unwrap();
     assert!(materialize_skill(&scope, &skill, INSTALL).is_err());
     std::fs::remove_dir(blocked_staging).unwrap();
