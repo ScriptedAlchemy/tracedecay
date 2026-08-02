@@ -1355,58 +1355,117 @@ impl Database {
         Ok(items)
     }
 
-    /// Per-file health aggregates folded in one `GROUP BY` scan: the weighted
+    /// Per-file health aggregates folded per page in one `GROUP BY` scan: the weighted
     /// complexity sum (`branches*2 + loops*2 + max_nesting*3 + line_span`), the
-    /// function/method count, and the count of function/method nodes carrying a
-    /// `skip-test-coverage` docstring marker. Replaces a whole-table
-    /// `get_all_nodes` fold plus a separate skip-marker scan in the health
-    /// snapshot. One row per file holding at least one node.
+    /// function/method count, the count of function/method nodes carrying a
+    /// `skip-test-coverage` docstring marker, and the dead function/method
+    /// count. Replaces whole-table node folds in the health snapshot. Results
+    /// are keyset-paged by file path so large repositories stay below the
+    /// runtime's query materialization limit while retaining one reserved
+    /// health-reader snapshot for the complete scan.
     pub async fn health_file_aggregates(&self) -> Result<Vec<HealthFileAggregate>> {
-        let sql = "SELECT file_path, \
-                   CAST(SUM(branches * 2 + loops * 2 + max_nesting * 3 \
-                            + (MAX(end_line - start_line, 0) + 1)) AS INTEGER) AS complexity, \
-                   SUM(CASE WHEN kind IN ('function', 'method') THEN 1 ELSE 0 END) AS fns, \
-                   SUM(CASE WHEN kind IN ('function', 'method') \
-                             AND docstring LIKE '%skip-test-coverage%' \
-                            THEN 1 ELSE 0 END) AS skipped \
-                   FROM nodes GROUP BY file_path";
+        const PAGE_ROWS: i64 = 2_000;
+        let sql = "WITH \
+                   test_marker_ids(id) AS MATERIALIZED ( \
+                       SELECT id FROM nodes \
+                       WHERE kind = 'annotation_usage' \
+                         AND ( \
+                             name = 'test' \
+                             OR name LIKE '%::test' \
+                             OR name = 'wasm_bindgen_test' \
+                             OR name LIKE '%::wasm_bindgen_test' \
+                         ) \
+                   ), \
+                   test_annotated_targets(target) AS MATERIALIZED ( \
+                       SELECT DISTINCT e.target \
+                       FROM edges e \
+                       JOIN test_marker_ids m ON m.id = e.source \
+                       WHERE e.kind = 'annotates' \
+                   ) \
+                   SELECT n.file_path, \
+                   CAST(SUM(n.branches * 2 + n.loops * 2 + n.max_nesting * 3 \
+                            + (MAX(n.end_line - n.start_line, 0) + 1)) AS INTEGER) AS complexity, \
+                   SUM(CASE WHEN n.kind IN ('function', 'method') THEN 1 ELSE 0 END) AS fns, \
+                   SUM(CASE WHEN n.kind IN ('function', 'method') \
+                             AND n.docstring LIKE '%skip-test-coverage%' \
+                            THEN 1 ELSE 0 END) AS skipped, \
+                   SUM(CASE WHEN n.kind IN ('function', 'method') \
+                             AND n.name != 'main' \
+                             AND n.name NOT LIKE 'test%' \
+                             AND n.visibility != 'public' \
+                             AND NOT EXISTS ( \
+                                 SELECT 1 FROM edges e \
+                                 WHERE e.target = n.id \
+                                   AND e.kind IN ( \
+                                       'calls', 'implements', 'extends', 'type_of', \
+                                       'returns', 'receives', 'uses' \
+                                   ) \
+                             ) \
+                             AND NOT EXISTS ( \
+                                 SELECT 1 FROM test_annotated_targets t \
+                                 WHERE t.target = n.id \
+                             ) \
+                            THEN 1 ELSE 0 END) AS dead \
+                   FROM nodes n ";
+        let sql_suffix = "GROUP BY n.file_path ORDER BY n.file_path LIMIT ?2";
+        let sql_first = format!("{sql}{sql_suffix}");
+        let sql_next = format!("{sql}WHERE n.file_path > ?1 {sql_suffix}");
         let op = "health_file_aggregates";
-        let mut rows =
-            self.engine_conn()
-                .query(sql, ())
+        let snapshot = self.begin_engine_health_read_snapshot(op).await?;
+        let mut items = Vec::new();
+        let mut cursor = String::new();
+        let mut first_page = true;
+        loop {
+            let query_sql = if first_page { &sql_first } else { &sql_next };
+            let mut rows = snapshot
+                .query(query_sql, (cursor.clone(), PAGE_ROWS))
                 .await
                 .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to query health file aggregates: {e}"),
                     operation: op.to_string(),
                 })?;
-        let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read health aggregate row: {e}"),
-            operation: op.to_string(),
-        })? {
-            let file_path: String = row.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read file_path: {e}"),
+            let mut page_rows = 0_i64;
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read health aggregate row: {e}"),
                 operation: op.to_string(),
-            })?;
-            let complexity: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read complexity sum: {e}"),
-                operation: op.to_string(),
-            })?;
-            let fns: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read function/method count: {e}"),
-                operation: op.to_string(),
-            })?;
-            let skipped: i64 = row.get(3).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read skip-coverage count: {e}"),
-                operation: op.to_string(),
-            })?;
-            items.push(HealthFileAggregate {
-                file_path,
-                complexity: complexity as f64,
-                function_methods: fns.max(0) as usize,
-                skipped_function_methods: skipped.max(0) as usize,
-            });
+            })? {
+                let file_path: String = row.get(0).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read file_path: {e}"),
+                    operation: op.to_string(),
+                })?;
+                let complexity: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read complexity sum: {e}"),
+                    operation: op.to_string(),
+                })?;
+                let fns: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read function/method count: {e}"),
+                    operation: op.to_string(),
+                })?;
+                let skipped: i64 = row.get(3).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read skip-coverage count: {e}"),
+                    operation: op.to_string(),
+                })?;
+                let dead: i64 = row.get(4).map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read dead function/method count: {e}"),
+                    operation: op.to_string(),
+                })?;
+                cursor = file_path.clone();
+                page_rows += 1;
+                items.push(HealthFileAggregate {
+                    file_path,
+                    complexity: complexity as f64,
+                    function_methods: fns.max(0) as usize,
+                    skipped_function_methods: skipped.max(0) as usize,
+                    dead_function_methods: dead.max(0) as usize,
+                });
+            }
+            drop(rows);
+            first_page = false;
+            if page_rows < PAGE_ROWS {
+                break;
+            }
         }
+        super::tx::commit(snapshot, op).await?;
         Ok(items)
     }
 }
@@ -1423,4 +1482,7 @@ pub struct HealthFileAggregate {
     /// Number of `function`/`method` nodes whose docstring carries the
     /// `skip-test-coverage` marker.
     pub skipped_function_methods: usize,
+    /// Number of dead function/method nodes after the same exclusions as
+    /// interactive `find_dead_code`.
+    pub dead_function_methods: usize,
 }
