@@ -828,3 +828,107 @@ fn acquire_drives_burst_worker_retirement_on_entry() {
     assert_eq!(state.leased_general, 1);
     drop(lease);
 }
+
+#[test]
+fn saturated_general_lane_recovers_when_long_held_leases_release() {
+    // Live defect probe: under store-scale load every general worker is held by
+    // a long-lived snapshot and concurrent acquirers report
+    // `Saturated { ReaderPool }`. Recovery must not depend on the acquisition
+    // loop retiring idle burst workers on every poll tick — retirement is gated
+    // to entry and notified wakes, and a waiter parked on a timed-out poll must
+    // still be woken and served the moment a lease is returned.
+    let store = TestStore::new();
+    let mut budget = two_reader_budget();
+    // An aggressive idle window makes the gated retirement path run on the
+    // notified wake that hands the released worker over.
+    budget.idle_burst_retire_ms = 1;
+    let pool = ReaderPool::start(store.locator(), budget, CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+
+    let held = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::ZERO).unwrap())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        pool.acquire(&read, &probe, Duration::ZERO),
+        Err(ReaderAcquireError::Saturated {
+            scope: tracedecay_store::SaturationScopeV1::ReaderPool
+        })
+    ));
+
+    let waiting = Arc::new(std::sync::Barrier::new(2));
+    let waiter_ready = Arc::clone(&waiting);
+    let waiter_pool = pool.clone();
+    let waiter_binding = store.binding.clone();
+    let waiter = std::thread::spawn(move || {
+        let read = request(&waiter_binding, OperationPriorityV1::Foreground);
+        let probe = Probe::for_request(&read);
+        waiter_ready.wait();
+        let started = Instant::now();
+        let lease = waiter_pool.acquire(&read, &probe, Duration::from_secs(5));
+        (lease.is_ok(), started.elapsed())
+    });
+
+    waiting.wait();
+    // Park the waiter across several timed-out poll quanta so recovery has to
+    // come from the release notification rather than from an entry scan.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(pool.snapshot().leased_general, 2);
+    drop(held);
+
+    let (acquired, waited) = waiter.join().unwrap();
+    assert!(acquired, "released capacity must wake the parked acquirer");
+    assert!(
+        waited < Duration::from_secs(5),
+        "recovery must not depend on the acquisition deadline expiring: {waited:?}"
+    );
+    // The waiter dropped its lease as it returned, so the lane must be idle and
+    // immediately re-admitting rather than stuck reporting saturation.
+    let _after = pool
+        .acquire(&read, &probe, Duration::ZERO)
+        .expect("lane must admit immediately once the burst has drained");
+    assert_eq!(pool.snapshot().leased_general, 1);
+}
+
+#[test]
+fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() {
+    // The live saturation came from point lookups on the shared registered store
+    // opening a *pinned* read snapshot for one statement. A pinned snapshot owns
+    // its general worker for its whole life; a one-shot query must hand the
+    // worker straight back. This locks the difference the callers depend on.
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let statement = || {
+        crate::migration_sql::MigrationSqlStatement::new(
+            "SELECT count(*) FROM markers".to_owned(),
+            Vec::new(),
+        )
+        .unwrap()
+    };
+
+    pool.execute_migration_query(statement(), Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(
+        pool.snapshot().leased_general,
+        0,
+        "a one-shot query must not retain its general worker"
+    );
+
+    let first = pool
+        .begin_migration_snapshot(Duration::from_millis(200))
+        .unwrap();
+    let second = pool
+        .begin_migration_snapshot(Duration::from_millis(200))
+        .unwrap();
+    assert_eq!(pool.snapshot().leased_general, 2);
+    assert!(
+        pool.execute_migration_query(statement(), Duration::from_millis(20))
+            .is_err(),
+        "pinned snapshots starve concurrent short reads once they fill the lane"
+    );
+
+    drop(first);
+    drop(second);
+    pool.execute_migration_query(statement(), Duration::from_secs(2))
+        .expect("releasing the pinned snapshots must restore short-read capacity");
+}
