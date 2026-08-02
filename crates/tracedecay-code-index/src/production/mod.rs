@@ -30,7 +30,8 @@ use super::{
     capabilities::{BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter},
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,
-        DeterministicCodeChunker, ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1,
+        DeterministicCodeChunker, ExactExtractionAuthorityV1,
+        ExtractionAdmittedCodeSearchChunkSetV1, ExtractionAdmittedCodeSearchChunkV1,
         content_digest,
     },
     extract::{
@@ -463,7 +464,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     chunks: GenerationChunkManifestV1,
     symbols: GenerationSymbolIndexV1,
     lineage: Vec<SymbolLineageCandidateV1>,
-    edges: Vec<CanonicalRelationEdgeV1>,
+    edges: Arc<Vec<CanonicalRelationEdgeV1>>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     coverage: CoverageSummaryV1,
     capability: CodeIndexCapabilityManifestV1,
@@ -539,6 +540,10 @@ impl CodeIndexPublishedGenerationV1 {
 
     pub fn edges(&self) -> &[CanonicalRelationEdgeV1] {
         &self.edges
+    }
+
+    pub fn shared_edges(&self) -> Arc<Vec<CanonicalRelationEdgeV1>> {
+        Arc::clone(&self.edges)
     }
 
     pub fn edge_abstentions(&self) -> &[CodeIndexEdgeAbstentionV1] {
@@ -670,7 +675,7 @@ impl CodeIndexPublishedGenerationV1 {
             })
             .collect::<Vec<_>>();
         let mut outgoing: BTreeMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>> = BTreeMap::new();
-        for edge in &self.edges {
+        for edge in self.edges.iter() {
             if occurrence_files.contains_key(&edge.from_occurrence)
                 && occurrence_files.contains_key(&edge.to_occurrence)
             {
@@ -813,6 +818,21 @@ impl CodeIndexPublishedGenerationV1 {
         Ok(chunks)
     }
 
+    /// Re-admit the canonical generation allocation without cloning its chunks.
+    pub fn admitted_shared_chunks(
+        &self,
+    ) -> Result<ExtractionAdmittedCodeSearchChunkSetV1, ChunkingFailureV1> {
+        for file in &self.files {
+            file.exact_authority
+                .validate_all(&file.artifacts.chunks.chunks)?;
+        }
+        Ok(
+            ExtractionAdmittedCodeSearchChunkSetV1::from_validated_generation(
+                self.chunks.shared_chunks(),
+            ),
+        )
+    }
+
     /// Encode the complete sealed generation for immutable store publication.
     ///
     /// Exact-admission authority internals are deliberately omitted. They are
@@ -913,7 +933,7 @@ impl CodeIndexPublishedGenerationV1 {
             chunks,
             symbols,
             lineage: envelope.generation.lineage,
-            edges,
+            edges: Arc::new(edges),
             edge_abstentions,
             coverage: envelope.generation.coverage,
             capability: envelope.generation.capability,
@@ -1065,7 +1085,7 @@ impl CodeIndexPublishedGenerationV1 {
         let edges_match = edges.len() == self.edges.len()
             && edges
                 .iter()
-                .zip(&self.edges)
+                .zip(self.edges.iter())
                 .all(|(left, right)| *left == right);
         let mut edge_abstentions = files
             .iter()
@@ -1356,7 +1376,7 @@ where
             chunks: staged.chunks,
             symbols: staged.symbols,
             lineage: staged.lineage,
-            edges,
+            edges: Arc::new(edges),
             edge_abstentions,
             coverage,
             capability,

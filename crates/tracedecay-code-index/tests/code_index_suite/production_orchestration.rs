@@ -18,8 +18,9 @@ use tracedecay_code_index::{
     provider::GenerationTestAttributionJoinReadPort,
 };
 use tracedecay_domain::{
-    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
-    ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId,
+    ExtractionAdmittedChunkCollectionV1, FileOccurrenceId, LanguageId, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryId, SanitizationReceiptId,
     SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
@@ -437,6 +438,15 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
             .zip(second_admitted.iter())
             .all(|(first, second)| first.chunk() == second.chunk()),
         "amortized admission must return the same chunks as the first admission"
+    );
+    let canonical = restored.chunks().shared_chunks();
+    let shared_admitted = restored
+        .admitted_shared_chunks()
+        .expect("generation-shared parser admission")
+        .into_shared_chunks();
+    assert!(
+        Arc::ptr_eq(&canonical, &shared_admitted),
+        "production admission must retain the canonical generation allocation"
     );
 
     // Repeat attribution reads are memoized and must stay identical.

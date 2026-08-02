@@ -1129,12 +1129,9 @@ impl LatestCompleteCodeIndexV1 {
         };
         let admitted = self
             .generation
-            .admitted_chunks()
+            .admitted_shared_chunks()
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        // One materializing copy per generation build; every query thereafter
-        // shares the Arc'd owners without touching the chunk set again.
-        let lexical_projection =
-            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted.as_ref().clone())?;
+        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
@@ -1146,12 +1143,12 @@ impl LatestCompleteCodeIndexV1 {
             lexical_projection.exact_adapter(authority),
         );
         let lexical = LexicalLane::new(lexical_projection);
-        let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new(
+        let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new_shared(
             generation_id,
             Some(self.generation.snapshot().repository.clone()),
             freshness,
-            self.generation.edges(),
-            self.generation.chunks().chunks(),
+            self.generation.shared_edges(),
+            self.generation.chunks().shared_chunks(),
         )?);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
             exact,

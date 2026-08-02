@@ -47,8 +47,8 @@ pub struct ExtractionAdmittedCodeSearchChunkSetV1 {
     chunks: Arc<Vec<CodeSearchChunkV1>>,
 }
 
-// SAFETY: construction is private to `ExactExtractionAuthorityV1::admit_shared`,
-// which validates the complete collection before retaining its allocation.
+// SAFETY: construction stays inside code-index authorities that validate every
+// chunk before retaining the complete collection's allocation.
 unsafe impl ExtractionAdmittedChunkCollectionV1 for ExtractionAdmittedCodeSearchChunkSetV1 {
     fn into_shared_chunks(self) -> Arc<Vec<CodeSearchChunkV1>> {
         self.chunks
@@ -62,6 +62,12 @@ impl ExactExtractionAuthorityV1 {
     ) -> Result<ExtractionAdmittedCodeSearchChunkSetV1, ChunkingFailureV1> {
         self.validate_all(chunks.as_slice())?;
         Ok(ExtractionAdmittedCodeSearchChunkSetV1 { chunks })
+    }
+}
+
+impl ExtractionAdmittedCodeSearchChunkSetV1 {
+    pub(crate) fn from_validated_generation(chunks: Arc<Vec<CodeSearchChunkV1>>) -> Self {
+        Self { chunks }
     }
 }
 

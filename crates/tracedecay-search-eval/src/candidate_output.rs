@@ -677,7 +677,7 @@ fn build_query_projections(
                 .get(file_occurrence_id)
                 .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
         };
-        let scoped_admitted = admitted
+        let scoped_admitted: Vec<_> = admitted
             .iter()
             .filter(|chunk| scope_contains(chunk.chunk().anchor.file_occurrence_id.as_str()))
             .cloned()
