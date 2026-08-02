@@ -6,6 +6,7 @@
 //! writer or source registry.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -53,6 +54,56 @@ pub enum SourceStoreErrorV1 {
 
 pub type SourceStoreResult<T> = Result<T, SourceStoreErrorV1>;
 
+/// Records that one in-memory value already passed its own integrity checks.
+///
+/// External-source records are content-addressed and immutable: every field is
+/// private, no accessor hands out a mutable borrow, and the only in-module
+/// assembly path rebuilds a value and re-verifies it through
+/// [`SourceStoreStateV1::validated`]. Re-canonicalizing and re-hashing the same
+/// bytes therefore cannot change a verdict, and a single external-source write
+/// used to do exactly that four times over the whole store: the executor
+/// validates the loaded state, `apply_source_commit` validates it again, the
+/// assembled successor validates once, and the persist path validates it a
+/// fourth time — each sweep re-hashing every historical receipt, every stored
+/// mutation, and every projection.
+///
+/// The memo keeps the fail-closed gate intact. It is never serialized, so a
+/// value decoded from durable bytes always starts unverified and is fully
+/// validated on first contact; it is only carried across a `clone`, where the
+/// clone is by construction the same value that was verified.
+#[derive(Debug, Default)]
+struct ValidationMemoV1(AtomicBool);
+
+impl ValidationMemoV1 {
+    fn is_verified(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn mark_verified(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn clear(&mut self) {
+        *self.0.get_mut() = false;
+    }
+}
+
+impl Clone for ValidationMemoV1 {
+    fn clone(&self) -> Self {
+        Self(AtomicBool::new(self.is_verified()))
+    }
+}
+
+/// The memo is provenance, never content: two records with equal fields are
+/// equal whether or not either has been verified yet.
+impl PartialEq for ValidationMemoV1 {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ValidationMemoV1 {}
+
 /// Required proof references for one sanitized external-source revision.
 ///
 /// The binding and observation coordinates are repeated deliberately: durable
@@ -73,6 +124,8 @@ pub struct SourceObservationEvidenceV1 {
     source_authorization_digest: ManifestDigest,
     snapshot_completion_digest: Option<ManifestDigest>,
     evidence_digest: ManifestDigest,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceObservationEvidenceV1 {
@@ -133,6 +186,7 @@ impl SourceObservationEvidenceV1 {
             source_authorization_digest,
             snapshot_completion_digest,
             evidence_digest,
+            verified: ValidationMemoV1::default(),
         };
         evidence.validate_against(&evidence.binding, &evidence.partition, observation)?;
         Ok(evidence)
@@ -176,6 +230,30 @@ impl SourceObservationEvidenceV1 {
         partition: &SourcePartitionIdV1,
         observation: &SourceObjectObservationV1,
     ) -> SourceStoreResult<()> {
+        self.validate_self()?;
+        if &self.binding != binding
+            || &self.partition != partition
+            || &self.native_object != observation.native_object()
+            || &self.revision != observation.revision()
+            || &self.sanitized_digest != observation.sanitized_digest()
+            || self.authorization.privacy_domain_id != binding.privacy_domain
+        {
+            return Err(SourceStoreErrorV1::EvidenceConflict);
+        }
+        Ok(())
+    }
+
+    /// Argument-independent half of [`Self::validate_against`].
+    ///
+    /// The cross-checks above compare against a caller-supplied binding,
+    /// partition and observation, so they run on every call. Everything here
+    /// reads only this record's own immutable fields, so it is verified once
+    /// per value; a digest mismatch is still `EvidenceConflict`, exactly as
+    /// when the recompute trailed the comparisons.
+    fn validate_self(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.binding.validate()?;
         self.partition.validate()?;
         self.native_object.validate()?;
@@ -189,15 +267,6 @@ impl SourceObservationEvidenceV1 {
             .as_ref()
             .map_or(Ok(()), ManifestDigest::validate)?;
         self.evidence_digest.validate()?;
-        if &self.binding != binding
-            || &self.partition != partition
-            || &self.native_object != observation.native_object()
-            || &self.revision != observation.revision()
-            || &self.sanitized_digest != observation.sanitized_digest()
-            || self.authorization.privacy_domain_id != binding.privacy_domain
-        {
-            return Err(SourceStoreErrorV1::EvidenceConflict);
-        }
         let expected = canonical_sha256(&(
             "tracedecay.external-source.observation-evidence.v1",
             &self.binding,
@@ -214,6 +283,7 @@ impl SourceObservationEvidenceV1 {
         if expected != self.evidence_digest {
             return Err(SourceStoreErrorV1::EvidenceConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -238,6 +308,8 @@ pub struct SourceObjectMutationV1 {
     transition: SourceObjectTransitionV1,
     evidence: SourceObservationEvidenceV1,
     mutation_digest: ManifestDigest,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceObjectMutationV1 {
@@ -260,6 +332,7 @@ impl SourceObjectMutationV1 {
             transition,
             evidence,
             mutation_digest,
+            verified: ValidationMemoV1::default(),
         };
         mutation.validate_shape()?;
         Ok(mutation)
@@ -286,6 +359,9 @@ impl SourceObjectMutationV1 {
     }
 
     fn validate_shape(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.observation.validate()?;
         self.evidence.validate_against(
             self.evidence.binding(),
@@ -319,6 +395,7 @@ impl SourceObjectMutationV1 {
         if expected != self.mutation_digest {
             return Err(SourceStoreErrorV1::RevisionConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 
@@ -342,6 +419,8 @@ pub struct SourceObjectLineageV1 {
     successor: SourceObjectRevisionV1,
     transition: SourceObjectTransitionV1,
     lineage_digest: ManifestDigest,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceObjectLineageV1 {
@@ -374,6 +453,7 @@ impl SourceObjectLineageV1 {
             successor,
             transition,
             lineage_digest,
+            verified: ValidationMemoV1::default(),
         })
     }
 
@@ -402,6 +482,9 @@ impl SourceObjectLineageV1 {
     }
 
     fn validate(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.native_object.validate()?;
         self.partition.validate()?;
         self.predecessor.validate()?;
@@ -423,6 +506,7 @@ impl SourceObjectLineageV1 {
         if expected != self.lineage_digest {
             return Err(SourceStoreErrorV1::LineageConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -443,6 +527,8 @@ pub struct SourceCommitV1 {
     next_frontier: SourceAggregateFrontierV1,
     mutations: Vec<SourceObjectMutationV1>,
     snapshot_completion: Option<SourceSnapshotCompletionV1>,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceCommitV1 {
@@ -470,6 +556,7 @@ impl SourceCommitV1 {
             next_frontier,
             mutations,
             snapshot_completion,
+            verified: ValidationMemoV1::default(),
         };
         commit.validate()?;
         Ok(commit)
@@ -516,6 +603,9 @@ impl SourceCommitV1 {
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
         self.partition.validate()?;
@@ -610,6 +700,7 @@ impl SourceCommitV1 {
         } else if self.next_frontier.partitions().len() != 1 {
             return Err(SourceStoreErrorV1::FrontierConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -639,6 +730,8 @@ pub struct SourceProjectionCommitV1 {
     effects: Vec<SourceProjectionEffectV1>,
     lineage: Vec<SourceObjectLineageV1>,
     receipt_digest: ManifestDigest,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceProjectionCommitV1 {
@@ -660,6 +753,11 @@ impl SourceProjectionCommitV1 {
             &effects,
             &lineage,
         ))?;
+        // Every check `validate` performs just ran, and `receipt_digest` was
+        // computed from these exact fields, so the equality it re-derives holds
+        // by construction.
+        let verified = ValidationMemoV1::default();
+        verified.mark_verified();
         Ok(Self {
             projector,
             source_frontier,
@@ -667,6 +765,7 @@ impl SourceProjectionCommitV1 {
             effects,
             lineage,
             receipt_digest,
+            verified,
         })
     }
 
@@ -695,6 +794,9 @@ impl SourceProjectionCommitV1 {
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.projector.validate()?;
         self.source_frontier.validate()?;
         validate_projection_payload(
@@ -714,6 +816,7 @@ impl SourceProjectionCommitV1 {
         if expected != self.receipt_digest {
             return Err(SourceStoreErrorV1::Domain(DomainError::DigestMismatch));
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -763,6 +866,8 @@ pub struct SourceCommitReceiptV1 {
     request_digest: ManifestDigest,
     source_frontier: SourceAggregateFrontierV1,
     projection: SourceProjectionCommitV1,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceCommitReceiptV1 {
@@ -777,6 +882,7 @@ impl SourceCommitReceiptV1 {
             request_digest,
             source_frontier,
             projection,
+            verified: ValidationMemoV1::default(),
         };
         receipt.validate()?;
         Ok(receipt)
@@ -799,6 +905,9 @@ impl SourceCommitReceiptV1 {
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.idempotency_key.validate()?;
         self.request_digest.validate()?;
         self.source_frontier.validate()?;
@@ -806,6 +915,7 @@ impl SourceCommitReceiptV1 {
         if self.projection.source_frontier() != &self.source_frontier {
             return Err(SourceStoreErrorV1::FrontierConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -920,10 +1030,20 @@ pub struct SourceStoreStateV1 {
     lineage: Vec<SourceObjectLineageV1>,
     receipt_history: BTreeMap<ManifestDigest, SourceCommitReceiptV1>,
     receipt: SourceCommitReceiptV1,
+    #[serde(skip)]
+    verified: ValidationMemoV1,
 }
 
 impl SourceStoreStateV1 {
-    fn validated(self) -> SourceStoreResult<Self> {
+    /// Verify a freshly assembled successor state.
+    ///
+    /// The assembly paths start from a clone of an already-verified state and
+    /// then replace fields, so the inherited memo describes the predecessor,
+    /// not this value. Clearing it first makes this the successor's first
+    /// contact and forces the full sweep; the components it carries over keep
+    /// their own memos, so the sweep costs O(new records), not O(store).
+    fn validated(mut self) -> SourceStoreResult<Self> {
+        self.verified.clear();
         self.validate()?;
         Ok(self)
     }
@@ -994,6 +1114,9 @@ impl SourceStoreStateV1 {
     }
 
     pub fn validate(&self) -> SourceStoreResult<()> {
+        if self.verified.is_verified() {
+            return Ok(());
+        }
         self.definition.validate()?;
         self.binding.validate_against(&self.definition)?;
         if self.definition_history.get(&self.definition.revision) != Some(&self.definition)
@@ -1153,6 +1276,7 @@ impl SourceStoreStateV1 {
         {
             return Err(SourceStoreErrorV1::LineageConflict);
         }
+        self.verified.mark_verified();
         Ok(())
     }
 }
@@ -1357,6 +1481,7 @@ pub fn apply_source_commit(
             lineage,
             receipt_history,
             receipt,
+            verified: ValidationMemoV1::default(),
         }
         .validated()?,
     )))

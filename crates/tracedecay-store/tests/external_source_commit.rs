@@ -779,3 +779,205 @@ fn sequential_definition_and_binding_revisions_preserve_immutable_history() {
     assert_eq!(revised.definition(), &definition_v2);
     assert_eq!(revised.binding(), &binding_v2);
 }
+
+/// Build a state whose validation touches every memoized record kind: a
+/// multi-revision object with explicit lineage, two commit receipts, and a
+/// projection carrying mutations, effects, and lineage edges.
+fn layered_state() -> SourceStoreStateV1 {
+    let definition = definition();
+    let binding = binding(&definition);
+    let partition = partition();
+    let initial = object();
+    let state = committed(
+        apply_source_commit(
+            None,
+            commit(
+                &definition,
+                &binding,
+                None,
+                SourceCoverageV1::Partial,
+                vec![mutation(
+                    &binding,
+                    &partition,
+                    initial.clone(),
+                    None,
+                    SourceObjectTransitionV1::Initial,
+                    '2',
+                )],
+                None,
+                '2',
+            ),
+        )
+        .unwrap(),
+    );
+    let correction = object_with('c', '6', '7', SourceContentStateV1::Live);
+    committed(
+        apply_source_commit(
+            Some(&state),
+            commit(
+                &definition,
+                &binding,
+                Some(state.source_frontier().clone()),
+                SourceCoverageV1::Partial,
+                vec![mutation(
+                    &binding,
+                    &partition,
+                    correction,
+                    Some(initial.revision().clone()),
+                    SourceObjectTransitionV1::Correction,
+                    '3',
+                )],
+                None,
+                '3',
+            ),
+        )
+        .unwrap(),
+    )
+}
+
+/// Replace the first string leaf stored under `key`, anywhere in a document.
+fn overwrite_first(value: &mut serde_json::Value, key: &str, replacement: &str) -> bool {
+    match value {
+        serde_json::Value::Object(entries) => {
+            if let Some(slot) = entries.get_mut(key)
+                && slot.is_string()
+            {
+                *slot = serde_json::Value::String(replacement.to_owned());
+                return true;
+            }
+            entries
+                .values_mut()
+                .any(|nested| overwrite_first(nested, key, replacement))
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .any(|nested| overwrite_first(nested, key, replacement)),
+        _ => false,
+    }
+}
+
+/// Verification memoization is provenance, never content and never a verdict.
+///
+/// The durable encoding must not gain a field, a decoded state must always
+/// start unverified and re-derive its own verdict, and every tampered digest
+/// must still be rejected even though an identical untampered record was
+/// verified earlier in this process.
+#[test]
+fn validation_memoization_preserves_encoding_and_verdicts() {
+    let state = layered_state();
+    let encoded = serde_json::to_string(&state).unwrap();
+
+    // The memo is never serialized, so durable bytes — and every digest taken
+    // over these records — are unchanged.
+    assert!(!encoded.contains("verified"));
+    assert!(state.validate().is_ok());
+    assert_eq!(serde_json::to_string(&state).unwrap(), encoded);
+
+    // A decoded copy carries no memo: it is fully validated on first contact
+    // and agrees with the value that was verified at construction.
+    let decoded: SourceStoreStateV1 = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, state);
+    assert!(decoded.validate().is_ok());
+    assert_eq!(serde_json::to_string(&decoded).unwrap(), encoded);
+
+    // Repeat validation is stable for a memoized and for a decoded value.
+    for _ in 0..3 {
+        assert!(state.validate().is_ok());
+        assert!(decoded.validate().is_ok());
+    }
+
+    // Every digest a memo could have skipped is still checked on decode.
+    let foreign = format!("sha256:{}", "9".repeat(64));
+    for key in [
+        "evidence_digest",
+        "mutation_digest",
+        "lineage_digest",
+        "receipt_digest",
+        "sanitized_digest",
+        "source_authorization_digest",
+    ] {
+        let mut document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(
+            overwrite_first(&mut document, key, &foreign),
+            "fixture must contain {key}"
+        );
+        let tampered: SourceStoreStateV1 = serde_json::from_value(document).unwrap();
+        assert!(
+            tampered.validate().is_err(),
+            "tampered {key} must not be admitted"
+        );
+    }
+}
+
+/// A memoized state must not smuggle its verdict into a mutated successor.
+///
+/// `apply_source_authority_publication` clones an already-verified state and
+/// then replaces its authority fields, so the successor has to be re-verified
+/// from scratch rather than inheriting the predecessor's memo.
+#[test]
+fn authority_publication_revalidates_the_mutated_successor() {
+    let definition_v1 = definition();
+    let binding_v1 = binding(&definition_v1);
+    let state = layered_state();
+    assert!(state.validate().is_ok());
+
+    // A publication that skips a revision must still be refused even though
+    // the state it clones was verified moments ago.
+    let skipped = revised_definition(3, 4);
+    let skipped_binding = SourceBindingV1::new(
+        &skipped,
+        binding_v1.owner.clone(),
+        binding_v1.privacy_domain.clone(),
+        binding_v1.native_root.clone(),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(
+        apply_source_authority_publication(
+            &state,
+            SourceAuthorityPublicationV1::new(
+                &skipped,
+                &skipped_binding,
+                definition_v1.definition_digest.clone(),
+                binding_v1.binding_digest.clone(),
+                digest('7'),
+                digest('8'),
+            )
+            .unwrap(),
+        ),
+        Err(SourceStoreErrorV1::AuthorityRevisionConflict)
+    ));
+
+    let definition_v2 = revised_definition(2, 4);
+    let binding_v2 = SourceBindingV1::new(
+        &definition_v2,
+        binding_v1.owner.clone(),
+        binding_v1.privacy_domain.clone(),
+        binding_v1.native_root.clone(),
+        2,
+    )
+    .unwrap();
+    let revised = apply_source_authority_publication(
+        &state,
+        SourceAuthorityPublicationV1::new(
+            &definition_v2,
+            &binding_v2,
+            definition_v1.definition_digest.clone(),
+            binding_v1.binding_digest.clone(),
+            digest('7'),
+            digest('8'),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(revised.definition(), &definition_v2);
+    assert_eq!(revised.binding(), &binding_v2);
+    assert!(revised.validate().is_ok());
+
+    // The successor is a genuinely different record, not the memoized parent.
+    let revised_encoded = serde_json::to_string(&revised).unwrap();
+    assert_ne!(revised_encoded, serde_json::to_string(&state).unwrap());
+    let round_tripped: SourceStoreStateV1 = serde_json::from_str(&revised_encoded).unwrap();
+    assert_eq!(round_tripped, revised);
+    assert!(round_tripped.validate().is_ok());
+}
