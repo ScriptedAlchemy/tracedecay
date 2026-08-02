@@ -355,7 +355,7 @@ pub async fn install_final_graph_memory_schema(
     connection: &Connection,
 ) -> crate::errors::Result<()> {
     crate::db::migrations::create_schema_connection(connection).await?;
-    let transaction = connection.schema_migration_transaction().await?;
+    let transaction = connection.authorized_long_lease_transaction().await?;
     transaction
         .execute_schema_batch_step(
             "PRAGMA application_id = 1413760818;

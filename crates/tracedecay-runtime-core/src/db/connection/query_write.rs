@@ -245,7 +245,7 @@ impl Database {
     /// A full index can contain more than a million rows. Unlike an ordinary
     /// mutation, it can legitimately remain active beyond the fixed
     /// transaction lease while continuously making progress. The runtime's
-    /// migration policy renews that lease only after successful commands;
+    /// long-lease policy renews that lease only after successful commands;
     /// idle transactions, revoked authority, and shutdown still cancel it.
     pub async fn begin_bulk_write_transaction(
         &self,
@@ -253,12 +253,13 @@ impl Database {
     ) -> Result<DatabaseWriteTransaction<'_>> {
         let guard = self.writer().await;
         let conn = self.open_writer_connection_unguarded(operation).await?;
-        let transaction = conn.schema_migration_transaction().await.map_err(|error| {
-            TraceDecayError::Database {
+        let transaction = conn
+            .authorized_long_lease_transaction()
+            .await
+            .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to begin bulk writer transaction: {error}"),
                 operation: operation.to_string(),
-            }
-        })?;
+            })?;
         Ok(DatabaseWriteTransaction { transaction, guard })
     }
 

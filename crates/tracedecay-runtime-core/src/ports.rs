@@ -141,7 +141,7 @@ pub mod registered_schema {
     /// `test-transport` deliberately do not reach it.
     #[cfg(test)]
     async fn unregistered_outcome(connection: &Connection) -> Result<()> {
-        let transaction = connection.schema_migration_transaction().await?;
+        let transaction = connection.authorized_long_lease_transaction().await?;
         transaction
             .execute_schema_batch_step(
                 "CREATE TABLE runtime_core_registered_fixture(id INTEGER PRIMARY KEY) STRICT;
