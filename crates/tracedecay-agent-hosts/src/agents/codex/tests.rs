@@ -820,8 +820,10 @@ fn codex_activation_records_enabled_plugin_and_cached_bundle() {
         project_path: home.path().to_path_buf(),
     };
     assert_eq!(
-        CodexIntegration
-            .host_component_registration(super::super::host_bundle_v2::HostBundleComponentV1::Core, &ctx),
+        CodexIntegration.host_component_registration(
+            super::super::host_bundle_v2::HostBundleComponentV1::Core,
+            &ctx
+        ),
         super::super::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
         "a staged-but-unactivated bundle is not a current registration"
     );
@@ -844,8 +846,10 @@ fn codex_activation_records_enabled_plugin_and_cached_bundle() {
         "Codex only loads a plugin whose cached version bundle exists"
     );
     assert_eq!(
-        CodexIntegration
-            .host_component_registration(super::super::host_bundle_v2::HostBundleComponentV1::Core, &ctx),
+        CodexIntegration.host_component_registration(
+            super::super::host_bundle_v2::HostBundleComponentV1::Core,
+            &ctx
+        ),
         super::super::host_bundle_v2::HostBundleRegistrationStateV1::Current,
     );
 
