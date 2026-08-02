@@ -1007,25 +1007,24 @@ where
         let stripe_len = groups.len().div_ceil(sessions);
         let stripes = groups.chunks(stripe_len).collect::<Vec<_>>();
         let progress = Arc::clone(&self.progress);
-        let mut stripe_results: Vec<EncodedStripeResultV1> =
-            embedding_parallelism::install(|| {
-                use rayon::prelude::*;
-                stripes
-                    .par_iter()
-                    .zip(self.sessions.par_iter_mut())
-                    .map(|(stripe, session)| {
-                        let mut encoded = Vec::with_capacity(stripe.len());
-                        let mut units = 0u64;
-                        for group in stripe.iter() {
-                            let (vectors, group_units) =
-                                encode_group_with_session(session, key, group, progress.as_ref())?;
-                            units = units.saturating_add(group_units);
-                            encoded.push(vectors);
-                        }
-                        Ok((encoded, units))
-                    })
-                    .collect()
-            });
+        let mut stripe_results: Vec<EncodedStripeResultV1> = embedding_parallelism::install(|| {
+            use rayon::prelude::*;
+            stripes
+                .par_iter()
+                .zip(self.sessions.par_iter_mut())
+                .map(|(stripe, session)| {
+                    let mut encoded = Vec::with_capacity(stripe.len());
+                    let mut units = 0u64;
+                    for group in stripe.iter() {
+                        let (vectors, group_units) =
+                            encode_group_with_session(session, key, group, progress.as_ref())?;
+                        units = units.saturating_add(group_units);
+                        encoded.push(vectors);
+                    }
+                    Ok((encoded, units))
+                })
+                .collect()
+        });
 
         let mut encoded = Vec::with_capacity(groups.len());
         let mut units = 0u64;
