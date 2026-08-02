@@ -19,8 +19,8 @@ use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use crate::common::isolated_lcm_db_path;
@@ -355,52 +355,6 @@ async fn search_session_messages(
         .unwrap()
 }
 
-async fn reinstall_projection_provenance_schema(tmp: &TempDir, extra_column: &str) {
-    reinstall_projection_provenance_schema_with_options(tmp, extra_column, "").await;
-}
-
-async fn reinstall_projection_provenance_schema_with_options(
-    tmp: &TempDir,
-    extra_column: &str,
-    table_options: &str,
-) {
-    let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
-    conn.execute_batch(&format!(
-        "BEGIN IMMEDIATE;
-         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_update_v1;
-         DROP TRIGGER IF EXISTS projection_output_audit_invalidate_delete_v1;
-         CREATE TABLE observation_projection_provenance_legacy (
-            projector_version TEXT NOT NULL,
-            observation_id TEXT NOT NULL,
-            receipt_id TEXT NOT NULL,
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            output_digest TEXT NOT NULL,
-            message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
-            {extra_column}
-            PRIMARY KEY(projector_version, observation_id),
-            UNIQUE(projector_version, output_provider, output_message_id),
-            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
-            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
-         ) {table_options};
-         INSERT INTO observation_projection_provenance_legacy
-            (projector_version, observation_id, receipt_id, output_provider,
-             output_message_id, output_digest, message_created)
-         SELECT projector_version, observation_id, receipt_id, output_provider,
-                output_message_id, output_digest, message_created
-         FROM observation_projection_provenance;
-         DROP TABLE observation_projection_provenance;
-         ALTER TABLE observation_projection_provenance_legacy
-            RENAME TO observation_projection_provenance;
-         COMMIT;"
-    ))
-    .unwrap();
-}
-
-async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
-    reinstall_projection_provenance_schema(tmp, "").await;
-}
-
 async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObservationIdV1) {
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     raw_conn
@@ -544,6 +498,5 @@ fn projection_output_ids(
 mod adoption;
 mod failure_audit;
 mod message_ids;
-mod provenance_schema;
 mod queue;
 mod rebuild;
