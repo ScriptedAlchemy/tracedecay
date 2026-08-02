@@ -3,11 +3,12 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS, MAX_WORKFLOW_PREDECESSORS,
-    MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros, WorkArtifactId,
-    WorkArtifactRefV1, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkflowDefinitionError, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowFanOutV1, WorkflowOperationRef, WorkflowOutputName, WorkflowOutputReferenceV1,
+    AttemptId, MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS,
+    MAX_WORKFLOW_PREDECESSORS, MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId,
+    TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
+    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionError,
+    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowFanOutV1, WorkflowOperationRef,
+    WorkflowOutputArtifactV1, WorkflowOutputName, WorkflowOutputReferenceV1,
     WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
     WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError, WorkflowRunStatusV1,
     WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1,
@@ -383,10 +384,71 @@ fn placement(
     .unwrap()
 }
 
+fn attempt(child: &str) -> WorkAttemptIdentityV1 {
+    WorkAttemptIdentityV1::new(
+        id::<TaskId>(&format!("task.workflow.{child}")),
+        id::<RunId>(&format!("run.work.{child}")),
+        id::<AttemptId>(&format!("attempt.workflow.{child}")),
+    )
+    .unwrap()
+}
+
+fn step_output(
+    output_name: &str,
+    child: &str,
+    artifact: WorkArtifactRefV1,
+) -> WorkflowStepOutputV1 {
+    WorkflowStepOutputV1::new(
+        id(output_name),
+        vec![WorkflowOutputArtifactV1::new(attempt(child), artifact)],
+    )
+    .unwrap()
+}
+
+#[test]
+fn named_output_artifact_sets_are_non_empty_unique_and_canonical() {
+    let artifact = |child: &str, byte: char| {
+        WorkflowOutputArtifactV1::new(
+            attempt(child),
+            WorkArtifactRefV1::new(
+                id::<WorkArtifactId>(&format!("artifact.workflow.{child}")),
+                digest(byte),
+                1,
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        WorkflowStepOutputV1::new(id("finding"), Vec::new()).unwrap_err(),
+        WorkflowRunStateError::InvalidStepOutputs
+    );
+    let duplicate = artifact("duplicate", '1');
+    assert_eq!(
+        WorkflowStepOutputV1::new(id("finding"), vec![duplicate.clone(), duplicate]).unwrap_err(),
+        WorkflowRunStateError::InvalidStepOutputs
+    );
+    let output = WorkflowStepOutputV1::new(
+        id("finding"),
+        vec![artifact("zeta", '2'), artifact("alpha", '3')],
+    )
+    .unwrap();
+
+    assert_eq!(
+        output
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.attempt_identity().task_id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["task.workflow.alpha", "task.workflow.zeta"]
+    );
+}
+
 #[test]
 fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
+    let mut prepare = step("prepare", &[], vec![], &["context"]);
+    prepare.fan_out = Some(WorkflowFanOutV1 { max_width: 2 });
     let definition = definition(vec![
-        step("prepare", &[], vec![], &["context"]),
+        prepare,
         step(
             "review",
             &["prepare"],
@@ -419,14 +481,25 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
 
     let artifact =
         WorkArtifactRefV1::new(id::<WorkArtifactId>("artifact.context"), digest('1'), 42).unwrap();
+    let second_artifact = WorkArtifactRefV1::new(
+        id::<WorkArtifactId>("artifact.context.second"),
+        digest('2'),
+        7,
+    )
+    .unwrap();
+    let completed_output = WorkflowStepOutputV1::new(
+        id("context"),
+        vec![
+            WorkflowOutputArtifactV1::new(attempt("prepare-b"), second_artifact.clone()),
+            WorkflowOutputArtifactV1::new(attempt("prepare-a"), artifact.clone()),
+        ],
+    )
+    .unwrap();
     let completed = run
         .next_event(
             WorkflowRunCommandV1::CompleteStep {
                 step_id: id("prepare"),
-                outputs: vec![WorkflowStepOutputV1 {
-                    output_name: id("context"),
-                    artifact: artifact.clone(),
-                }],
+                outputs: vec![completed_output.clone()],
                 effect_receipt: WorkflowStepEffectReceiptV1::new(
                     id::<RunId>("run.workflow.dataflow"),
                     id::<WorkflowStepId>("prepare"),
@@ -435,10 +508,7 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
                         .clone(),
                     WorkflowStepEffectOutcomeV1::Completed,
                     digest('9'),
-                    &[WorkflowStepOutputV1 {
-                        output_name: id("context"),
-                        artifact: artifact.clone(),
-                    }],
+                    &[completed_output],
                 )
                 .unwrap(),
             },
@@ -448,7 +518,11 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
     run = run.apply(&completed).unwrap();
 
     assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("review")]);
-    assert_eq!(run.resolved_inputs(&id("review")).unwrap(), vec![artifact]);
+    let inputs = run.resolved_inputs(&id("review")).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].reference(), &output("prepare", "context"));
+    assert_eq!(inputs[0].artifacts()[0].artifact(), &artifact);
+    assert_eq!(inputs[0].artifacts()[1].artifact(), &second_artifact);
     assert_eq!(run.status(), WorkflowRunStatusV1::Running);
 }
 
@@ -487,15 +561,13 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
         .unwrap();
     let wrong =
         WorkArtifactRefV1::new(id::<WorkArtifactId>("artifact.wrong"), digest('5'), 1).unwrap();
+    let wrong_output = step_output("undeclared", "prepare", wrong);
 
     let error = run
         .next_event(
             WorkflowRunCommandV1::CompleteStep {
                 step_id: id("prepare"),
-                outputs: vec![WorkflowStepOutputV1 {
-                    output_name: id("undeclared"),
-                    artifact: wrong.clone(),
-                }],
+                outputs: vec![wrong_output.clone()],
                 effect_receipt: WorkflowStepEffectReceiptV1::new(
                     id::<RunId>("run.workflow.invalid-output"),
                     id::<WorkflowStepId>("prepare"),
@@ -504,10 +576,7 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
                         .clone(),
                     WorkflowStepEffectOutcomeV1::Completed,
                     digest('9'),
-                    &[WorkflowStepOutputV1 {
-                        output_name: id("undeclared"),
-                        artifact: wrong,
-                    }],
+                    &[wrong_output],
                 )
                 .unwrap(),
             },
@@ -563,15 +632,16 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
         )
         .unwrap();
     let run = run.apply(&started).unwrap();
-    let outputs = vec![WorkflowStepOutputV1 {
-        output_name: id("context"),
-        artifact: WorkArtifactRefV1::new(
+    let outputs = vec![step_output(
+        "context",
+        "receipt",
+        WorkArtifactRefV1::new(
             id::<WorkArtifactId>("artifact.workflow.receipts"),
             digest('1'),
             42,
         )
         .unwrap(),
-    }];
+    )];
     let effect = WorkflowStepEffectReceiptV1::new(
         run_id,
         step_id.clone(),
@@ -639,5 +709,82 @@ fn run_projection_rejects_receipts_bound_to_other_runtime_state() {
         )
         .unwrap_err(),
         WorkflowRunStateError::InvalidPlacementReceipt
+    );
+}
+
+#[test]
+fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
+    let run_id = id::<RunId>("run.workflow.missing-child-output");
+    let step_id = id::<WorkflowStepId>("prepare");
+    let mut fan_out_step = step("prepare", &[], vec![], &["analysis", "evidence"]);
+    fan_out_step.fan_out = Some(WorkflowFanOutV1 { max_width: 2 });
+    let admitted = WorkflowRunEventV1::admitted(
+        run_id.clone(),
+        definition(vec![fan_out_step]).unwrap(),
+        digest('d'),
+        digest('8'),
+        run_context("workflow.missing-child.admit", 'e', 1),
+    )
+    .unwrap();
+    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let placement = placement(
+        "run.workflow.missing-child-output",
+        "prepare",
+        'b',
+        'd',
+        '8',
+    );
+    let started = run
+        .next_event(
+            WorkflowRunCommandV1::StartStep {
+                step_id: step_id.clone(),
+                placement: placement.clone(),
+            },
+            run_context("workflow.missing-child.start", 'f', 2),
+        )
+        .unwrap();
+    let run = run.apply(&started).unwrap();
+    let child_artifact = |child: &str, artifact_name: &str, byte: char| {
+        WorkflowOutputArtifactV1::new(
+            attempt(child),
+            WorkArtifactRefV1::new(id::<WorkArtifactId>(artifact_name), digest(byte), 1).unwrap(),
+        )
+    };
+    let outputs = vec![
+        WorkflowStepOutputV1::new(
+            id("analysis"),
+            vec![
+                child_artifact("alpha", "artifact.analysis.alpha", '1'),
+                child_artifact("beta", "artifact.analysis.beta", '2'),
+            ],
+        )
+        .unwrap(),
+        WorkflowStepOutputV1::new(
+            id("evidence"),
+            vec![child_artifact("alpha", "artifact.evidence.alpha", '3')],
+        )
+        .unwrap(),
+    ];
+    let effect = WorkflowStepEffectReceiptV1::new(
+        run_id,
+        step_id.clone(),
+        placement.placement_digest().clone(),
+        WorkflowStepEffectOutcomeV1::Completed,
+        digest('4'),
+        &outputs,
+    )
+    .unwrap();
+
+    assert_eq!(
+        run.next_event(
+            WorkflowRunCommandV1::CompleteStep {
+                step_id,
+                outputs,
+                effect_receipt: effect,
+            },
+            run_context("workflow.missing-child.complete", '5', 3),
+        )
+        .unwrap_err(),
+        WorkflowRunStateError::InvalidStepOutputs
     );
 }
