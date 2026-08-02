@@ -406,7 +406,11 @@ pub(super) async fn portable_project_server_for_request(
             // released for the wait's duration so a tool that needs no project
             // owner is never shed by a queue of warming clients. The wait stays
             // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-            park_admission(wait_for_project_open_publication(&canonical_project_path, publication)).await
+            park_admission(wait_for_project_open_publication(
+                &canonical_project_path,
+                publication,
+            ))
+            .await
         }
         ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
         ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
