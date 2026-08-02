@@ -17,7 +17,8 @@ async fn semantic_scheduler_is_daemon_private_retained_state_not_a_wire_operatio
         .expect("mount semantic scheduler");
     assert_eq!(
         service
-            .semantic_runtime(Some(&project_root))
+            .project_runtimes
+            .get::<crate::semantic_code::DaemonSemanticRuntimeHandleV1>(&project_root)
             .await
             .expect("retained semantic scheduler")
             .status(),

@@ -31,6 +31,7 @@ mod bootstrap;
 mod code_index_hydration;
 mod compatibility;
 mod handshake;
+mod invocation_ownership;
 mod lifecycle;
 mod logging;
 mod multi_root_journey;

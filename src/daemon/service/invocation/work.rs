@@ -875,7 +875,6 @@ where
     )?))
 }
 
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(super) async fn work_runtime(
         &self,
