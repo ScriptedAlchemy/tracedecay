@@ -17,7 +17,9 @@ use tracedecay_store::{RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReques
 
 use super::super::{ReaderQueryExecutor, ReaderWorkerError, unavailable_read, worker};
 use super::outcome::{ReaderAcquireError, interruption, map_worker_error, validate_probe};
-use super::{AvailableWorker, PoolInner, ReaderLane, SNAPSHOT_END_GRACE};
+use super::{
+    AvailableWorker, DEFERRED_SNAPSHOT_END_LIMIT, PoolInner, ReaderLane, SNAPSHOT_END_GRACE,
+};
 use crate::migration_sql::{MigrationSqlError, MigrationSqlRows, MigrationSqlStatement};
 
 struct Checkout<E: ReaderQueryExecutor> {
@@ -48,6 +50,18 @@ impl<E: ReaderQueryExecutor> Drop for Checkout<E> {
         match self.lane {
             ReaderLane::General => state.leased_general -= 1,
             ReaderLane::ReservedHealth => state.leased_health -= 1,
+        }
+        // The lease is over but the worker has not confirmed its rollback.
+        // Move it from leased to limbo rather than dropping it out of the
+        // accounting: it is still a live thread holding a record, and the pool
+        // must be able to see it, replace it, and refuse to call itself
+        // quiescent while it is outstanding.
+        //
+        // A retired worker is not in limbo. Its record has already left the
+        // pool and is shut down below, so nothing is waiting to come back.
+        let deferred_end = deferred_end.filter(|_| retired.is_none());
+        if deferred_end.is_some() {
+            *state.limbo_mut(self.lane) += 1;
         }
         drop(state);
         self.inner.capacity_changed.notify_all();
@@ -312,31 +326,40 @@ fn finish_deferred_return<E: ReaderQueryExecutor>(
     mut worker: AvailableWorker,
     receive: Receiver<Result<(), ReaderWorkerError>>,
 ) {
-    if matches!(receive.recv(), Ok(Ok(()))) {
-        worker.idle_since = Instant::now();
-        inner
+    // Bounded, not open-ended. An unbounded `recv()` here parks this thread
+    // for the life of the process against a worker that never answers, and the
+    // limbo slot it holds never clears — so the lane runs one worker short and
+    // shutdown cannot converge. Past the bound the worker is written off.
+    let returned = matches!(
+        receive.recv_timeout(DEFERRED_SNAPSHOT_END_LIMIT),
+        Ok(Ok(()))
+    );
+    let discarded = {
+        let mut state = inner
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .available(lane)
-            .push_back(worker);
-        inner.capacity_changed.notify_all();
-        return;
-    }
-
-    let record = inner
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .records
-        .remove(&worker.id);
-    if let Some(mut record) = record {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state.limbo_mut(lane) = state.limbo(lane).saturating_sub(1);
+        if returned {
+            worker.idle_since = Instant::now();
+            state.available(lane).push_back(worker);
+            None
+        } else {
+            state.records.remove(&worker.id)
+        }
+    };
+    inner.capacity_changed.notify_all();
+    // Release the pool before the join below. Shutting down a worker that
+    // already missed its deadline can itself block, and `is_quiescent` counts
+    // strong references: holding one here would make a wedged worker stall
+    // shutdown all over again, just one level further down.
+    drop(inner);
+    if let Some(mut record) = discarded {
         record.client.shutdown();
         if let Some(join) = record.join.take() {
             let _ = join.join();
         }
     }
-    inner.capacity_changed.notify_all();
 }
 
 type DeferredReturnTask = Box<dyn FnOnce() + Send + 'static>;
