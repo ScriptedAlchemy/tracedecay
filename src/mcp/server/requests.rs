@@ -1308,25 +1308,29 @@ impl McpServer {
             }
         };
         let handler_started = Instant::now();
-        let outcome = dispatch_control
-            .run(
-                McpToolDispatchStage::Handler,
-                self.execute_tool_dispatch(
-                    &cg,
-                    tool_name,
-                    routed.arguments,
-                    project_reader_preselected,
-                    server_stats,
-                    implicit_project_path,
-                    application_invocation_executor,
-                    application_invocation_target,
-                    application_request_id,
-                    Some(dispatch_control.deadline()),
-                    Some(dispatch_control.cancellation()),
-                    Some(dispatch_control.clone()),
-                ),
-            )
-            .await;
+        let execution = self.execute_tool_dispatch(
+            &cg,
+            tool_name,
+            routed.arguments,
+            project_reader_preselected,
+            server_stats,
+            implicit_project_path,
+            application_invocation_executor,
+            application_invocation_target,
+            application_request_id,
+            Some(dispatch_control.deadline()),
+            Some(dispatch_control.cancellation()),
+            Some(dispatch_control.clone()),
+        );
+        let outcome = if tool_name == "tracedecay_pr_context" {
+            dispatch_control
+                .run_cooperatively(McpToolDispatchStage::Handler, execution)
+                .await
+        } else {
+            dispatch_control
+                .run(McpToolDispatchStage::Handler, execution)
+                .await
+        };
         DispatchedToolCall {
             cg,
             selected_owner,

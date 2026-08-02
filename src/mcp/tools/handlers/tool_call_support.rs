@@ -226,6 +226,39 @@ impl McpToolDispatchControl {
         }
     }
 
+    /// Run a handler which owns a cooperative worker. Unlike [`Self::run`],
+    /// a terminal control event waits for the handler to observe the shared
+    /// cancellation and join that worker before the response is released.
+    pub(crate) async fn run_cooperatively<T, F>(
+        &self,
+        stage: McpToolDispatchStage,
+        future: F,
+    ) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.check(stage)?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        tokio::pin!(deadline);
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => result,
+            () = &mut deadline => {
+                self.cancel(tracedecay_application::clock::now_micros());
+                let _ = future.await;
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
+                Err(self.deadline_error(stage))
+            }
+            () = self.cancellation.cancelled() => {
+                let _ = future.await;
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            },
+        }
+    }
+
     /// Run a lifecycle operation whose successful value is not itself a
     /// TraceDecay result (for example a completed JSON-RPC response).
     pub(crate) async fn run_value<T, F>(&self, stage: McpToolDispatchStage, future: F) -> Result<T>
@@ -510,7 +543,7 @@ mod dispatch_control_tests {
     use tracedecay_application::CancellationSignal;
     use tracedecay_domain::UtcMicros;
 
-    use super::{McpToolDispatchControl, McpToolDispatchStage};
+    use super::{McpToolDispatchControl, McpToolDispatchStage, McpToolWorkerSettlement};
     use crate::mcp::tools::execution::McpToolExecutionPolicyV1;
 
     #[tokio::test]
@@ -611,6 +644,54 @@ mod dispatch_control_tests {
         assert!(
             stopped.load(Ordering::Acquire),
             "owned worker must be aborted and joined before dispatch returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancellation_waits_for_handler_cleanup() {
+        let cancellation = CancellationSignal::active("cancel.dispatch.cooperative").unwrap();
+        let control = McpToolDispatchControl::new(
+            "tracedecay_cooperative_fixture",
+            McpToolExecutionPolicyV1::interactive_read(1_000),
+            cancellation,
+        )
+        .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let handler_started = Arc::clone(&started);
+        let handler_cleaned = Arc::clone(&cleaned);
+        let handler_cancellation = control.cancellation();
+        let dispatch_control = control.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_control
+                .run_cooperatively(McpToolDispatchStage::Handler, async move {
+                    handler_started.notify_one();
+                    handler_cancellation.cancelled().await;
+                    handler_cleaned.store(true, Ordering::Release);
+                    Ok::<(), crate::errors::TraceDecayError>(())
+                })
+                .await
+        });
+        started.notified().await;
+        control.cancel(UtcMicros(73));
+
+        let error = tokio::time::timeout(Duration::from_millis(100), dispatch)
+            .await
+            .expect("cooperative cancellation must settle")
+            .expect("dispatch task must not panic")
+            .unwrap_err();
+        assert_eq!(
+            error.mcp_tool_dispatch_context().map(|context| context.0),
+            Some("tool_dispatch_cancelled")
+        );
+        assert!(
+            cleaned.load(Ordering::Acquire),
+            "cooperative handler cleanup must finish before dispatch returns"
+        );
+        assert_eq!(
+            control.worker_settlement(),
+            McpToolWorkerSettlement::Joined,
+            "a completed cooperative cleanup must not be reported as indeterminate"
         );
     }
 }
