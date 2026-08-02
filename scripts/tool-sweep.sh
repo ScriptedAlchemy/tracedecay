@@ -25,6 +25,10 @@
 #                         mutate   - persists state; OFF by default
 #   --bin PATH            tracedecay binary (default: first on PATH)
 #   --json                also emit results.json
+#   --validate-args       do not call anything; check every catalog entry's
+#                         arguments against each tool's published parameter
+#                         list and exit. Runs with no daemon load, and is the
+#                         only coverage the mutate class gets by default.
 #
 # Exit status: 0 if no FAIL rows, 1 otherwise.
 
@@ -42,6 +46,7 @@ ONLY=""
 SKIP=""
 CLASSES="read,preview"
 EMIT_JSON=0
+VALIDATE_ARGS=0
 ENV_RETRIES="${TRACEDECAY_SWEEP_ENV_RETRIES:-6}"
 
 while [[ $# -gt 0 ]]; do
@@ -55,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --classes) CLASSES="$2"; shift 2 ;;
     --bin) BIN="$2"; shift 2 ;;
     --json) EMIT_JSON=1; shift ;;
+    --validate-args) VALIDATE_ARGS=1; shift ;;
     -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -504,6 +510,63 @@ run_tool() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tool" "$class" "$verdict" "$ms" "$rc" "${note//$'\t'/ }" >> "$TSV"
   printf '%-34s %-8s %-11s %8sms  %s\n' "$tool" "$class" "$verdict" "$ms" "$note"
 }
+
+# Offline contract check: every key a catalog entry sends must be a published
+# parameter of that tool, and every required parameter must be sent. This is
+# pure `--help` parsing, so it costs the daemon nothing, runs while the daemon
+# is saturated or down, and is the only coverage the mutate class gets without
+# actually mutating anything.
+validate_catalog_args() {
+  local failures=0 checked=0
+  while IFS='|' read -r tool class args; do
+    [[ -z "$tool" || "$tool" == \#* ]] && continue
+    if [[ -n "$ONLY" ]] && ! in_list "$tool" "$ONLY"; then continue; fi
+    in_list "$tool" "$SKIP" && continue
+
+    local help sent declared required missing unknown
+    help="$("$BIN" tool "$tool" --help 2>&1)"
+    declared="$(printf '%s' "$help" | grep -oE '^  --[a-z0-9-]+' | sed 's/^  --//' | tr '-' '_' | sort -u)"
+    required="$(printf '%s' "$help" | grep -E '^  --[a-z0-9-]+ ' | awk '$3=="required"{print $1}' | sed 's/^--//' | tr '-' '_' | sort -u)"
+    # Placeholders are substituted first so the entry is checked in the exact
+    # shape it is sent. Fixture values are empty here (no daemon), but they
+    # only ever appear inside strings, so the JSON stays well formed.
+    local expanded
+    expanded="$(expand_args "$args")"
+    # Top-level keys only; nested object contents are the daemon's to validate.
+    sent="$(printf '%s' "$expanded" | python3 -c 'import json,sys; print("\n".join(sorted(json.load(sys.stdin))))' 2>/dev/null)"
+
+    if [[ -z "$sent" && "$expanded" != "{}" ]]; then
+      echo "BAD-JSON   $tool: $expanded"
+      failures=$((failures+1))
+      continue
+    fi
+
+    unknown="$(comm -23 <(printf '%s\n' "$sent" | grep -v '^$' | sort -u) <(printf '%s\n' "$declared" | grep -v '^$') | tr '\n' ' ')"
+    missing="$(comm -23 <(printf '%s\n' "$required" | grep -v '^$') <(printf '%s\n' "$sent" | grep -v '^$' | sort -u) | tr '\n' ' ')"
+
+    if [[ -n "${unknown// /}" ]]; then
+      echo "UNKNOWN    $tool: $unknown"
+      failures=$((failures+1))
+    fi
+    if [[ -n "${missing// /}" ]]; then
+      echo "MISSING    $tool: $missing"
+      failures=$((failures+1))
+    fi
+    checked=$((checked+1))
+  done < <(catalog)
+
+  echo
+  echo "validated $checked catalog entries, $failures problem(s)"
+  [[ $failures -eq 0 ]]
+}
+
+if [[ $VALIDATE_ARGS -eq 1 ]]; then
+  echo "== tracedecay tool sweep: argument validation =="
+  echo "binary: $($BIN --version 2>/dev/null || echo "$BIN")"
+  echo
+  validate_catalog_args
+  exit $?
+fi
 
 echo "== tracedecay tool sweep =="
 echo "binary:    $($BIN --version 2>/dev/null || echo "$BIN")"
