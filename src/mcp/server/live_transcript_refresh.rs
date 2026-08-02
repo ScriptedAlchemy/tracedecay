@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,6 +16,32 @@ pub(crate) enum LiveTranscriptRefreshRoute<'a> {
 pub(crate) enum LiveTranscriptRefreshJoin {
     NotRequired,
     PublicationJoined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshWaitOutcome {
+    Joined,
+    Unpublished,
+    Cancelled,
+}
+
+async fn wait_for_refresh_publication(
+    publication: impl Future<Output = bool>,
+    cancellation: &tracedecay_application::CancellationSignal,
+) -> RefreshWaitOutcome {
+    tokio::pin!(publication);
+    tokio::select! {
+        joined = &mut publication => {
+            if joined {
+                RefreshWaitOutcome::Joined
+            } else {
+                RefreshWaitOutcome::Unpublished
+            }
+        }
+        () = crate::daemon_client::wait_for_cancellation(cancellation.clone()) => {
+            RefreshWaitOutcome::Cancelled
+        }
+    }
 }
 
 fn live_transcript_refresh_required(tool_name: &str, arguments: &Value) -> bool {
@@ -104,15 +131,15 @@ pub(crate) async fn join_required_live_transcript_refresh(
         )
     })?;
     let remaining = remaining_request_budget(tool_name, deadline)?;
-    let joined = wake.wake_and_wait_until_idle(remaining).await;
-    if cancellation.is_cancelled() {
-        return Err(refresh_failure(
+    let outcome =
+        wait_for_refresh_publication(wake.wake_and_wait_until_idle(remaining), cancellation).await;
+    if outcome == RefreshWaitOutcome::Cancelled {
+        Err(refresh_failure(
             tool_name,
             "temporal_refresh_cancelled",
             "session temporal refresh request was cancelled",
-        ));
-    }
-    if joined {
+        ))
+    } else if outcome == RefreshWaitOutcome::Joined {
         Ok(LiveTranscriptRefreshJoin::PublicationJoined)
     } else if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
         Err(refresh_failure(
@@ -287,5 +314,23 @@ mod tests {
             error.session_refresh_context().map(|context| context.0),
             Some("temporal_refresh_cancelled")
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_join_stops_when_cancellation_arrives_during_the_wait() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("live-refresh-inflight").unwrap();
+        let cancel = cancellation.clone();
+        let cancellation_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            assert!(cancel.cancel(tracedecay_application::clock::now_micros()));
+        });
+
+        let outcome =
+            super::wait_for_refresh_publication(std::future::pending::<bool>(), &cancellation)
+                .await;
+        cancellation_task.await.unwrap();
+
+        assert_eq!(outcome, super::RefreshWaitOutcome::Cancelled);
     }
 }
