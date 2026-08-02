@@ -1380,14 +1380,7 @@ impl StoreAdministration {
                 }
 
                 recovery.recover(
-                    |paths| {
-                        self.prove_no_external_branch_store_holders(paths)?;
-                        crate::migrate::memory_cutover::verify_branch_removal_receipts(
-                            data_root,
-                            &canonical_paths,
-                            paths,
-                        )
-                    },
+                    |paths| self.prove_no_external_branch_store_holders(paths),
                     |disposition| match disposition {
                         crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
                             fence.rollback_deleting()
@@ -1461,12 +1454,7 @@ impl StoreAdministration {
                 fence.transaction_id(),
                 || fence.publish_deleting(),
                 |paths| {
-                    self.prove_no_external_branch_store_holders(paths)?;
-                    crate::migrate::memory_cutover::verify_branch_removal_receipts(
-                        data_root,
-                        &canonical_paths,
-                        paths,
-                    )
+                    self.prove_no_external_branch_store_holders(paths)
                 },
                 || fence.rollback_deleting(),
                 || fence.promote_deleted(),

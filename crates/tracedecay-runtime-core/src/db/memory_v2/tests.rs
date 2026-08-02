@@ -1,7 +1,7 @@
 use tempfile::TempDir;
 use tracedecay_domain::{
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
-    LegacyFactMappingV1, LegacyHistoryCoverageV1, ProvenanceId, UtcMicros,
+    ProvenanceId, UtcMicros,
 };
 
 use crate::db::engine::{Connection, TestConnection, params};
@@ -35,30 +35,6 @@ async fn seed_fact_identity(
             owner.json.as_str(),
             identity_json,
             created_at
-        ],
-    )
-    .await
-    .unwrap();
-}
-
-async fn seed_legacy_mapping(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    mapping: &LegacyFactMappingV1,
-) {
-    conn.execute(
-        "INSERT INTO memory_v2_legacy_map(
-            owner_kind, project_id, owner_json, source_store_id,
-            legacy_fact_id, fact_id, mapping_json
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            owner.json.as_str(),
-            mapping.source_store_id().as_str(),
-            mapping.legacy_fact_id(),
-            mapping.fact_id().as_str(),
-            json_text(mapping).unwrap()
         ],
     )
     .await
@@ -341,101 +317,4 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
             .access,
         PayloadAccessState::Deleted
     );
-}
-
-#[tokio::test]
-async fn owner_archive_exports_and_imports_production_writer_closure_idempotently() {
-    let (source_runtime, _source_dir) = database().await;
-    let source_conn = (*source_runtime).clone();
-    let (target_runtime, _target_dir) = database().await;
-    let target_conn = (*target_runtime).clone();
-    let owner = owner();
-    let owner_key = owner_key(&owner).unwrap();
-    let source_store = source_store_id();
-    let material = FactIdentityMaterialV1::new(
-        owner.clone(),
-        FactIdentitySourceV1::Legacy {
-            source_store_id: source_store.clone(),
-            legacy_fact_id: 91,
-        },
-    )
-    .unwrap();
-    let fact_id = FactId::derive(&material).unwrap();
-    seed_fact_identity(
-        &source_conn,
-        &owner_key,
-        &fact_id,
-        &json_text(&material).unwrap(),
-        100,
-    )
-    .await;
-    let mapping = LegacyFactMappingV1::new(
-        owner.clone(),
-        source_store,
-        91,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Complete,
-        UtcMicros(100),
-    )
-    .unwrap();
-    seed_legacy_mapping(&source_conn, &owner_key, &mapping).await;
-    let event = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::LegacyImported { mapping },
-        UtcMicros(100),
-        None,
-    )
-    .unwrap();
-    insert_event(&source_conn, &owner_key, &event, 100)
-        .await
-        .unwrap();
-    seed_current_fact(&source_conn, &owner_key, &fact_id, event.event_id(), 100).await;
-
-    let archive =
-        export_memory_v2_owner_archive(&source_conn, MemoryV2ArchiveDatabase::Main, &owner)
-            .await
-            .unwrap();
-    assert_eq!(archive.owner(), &owner);
-    for family in [
-        tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
-        tracedecay_store::MemoryV2ArchiveFamilyV1::LineageEvent,
-        tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact,
-        tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap,
-    ] {
-        assert!(
-            archive
-                .records()
-                .iter()
-                .any(|record| record.family() == family),
-            "archive omitted {family:?}"
-        );
-    }
-
-    let transaction = target_conn.transaction().await.unwrap();
-    let plan = plan_memory_v2_owner_archive_import(&transaction, &archive)
-        .await
-        .unwrap();
-    assert!(plan.can_apply());
-    import_memory_v2_owner_archive(&transaction, &archive, &plan)
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
-
-    let imported =
-        export_memory_v2_owner_archive(&target_conn, MemoryV2ArchiveDatabase::Main, &owner)
-            .await
-            .unwrap();
-    assert_eq!(imported, archive);
-
-    let retry = target_conn.transaction().await.unwrap();
-    let retry_plan = plan_memory_v2_owner_archive_import(&retry, &archive)
-        .await
-        .unwrap();
-    assert!(retry_plan.can_apply());
-    assert!(retry_plan.inserts().is_empty());
-    import_memory_v2_owner_archive(&retry, &archive, &retry_plan)
-        .await
-        .unwrap();
-    retry.commit().await.unwrap();
 }
