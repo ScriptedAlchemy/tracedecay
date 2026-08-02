@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
@@ -131,24 +131,51 @@ where
 {
     let mut pending = db_paths.into_iter();
     let mut checks = tokio::task::JoinSet::new();
+    let mut task_paths = HashMap::new();
     for _ in 0..MAX_CONCURRENT_BRANCH_CHECKS {
         let Some(path) = pending.next() else {
             break;
         };
+        let task_path = path.clone();
         let outcome = check(path.clone());
-        checks.spawn(async move { (path, outcome.await) });
+        let task = checks.spawn(async move { (path, outcome.await) });
+        task_paths.insert(task.id(), task_path);
     }
 
     let mut outcomes = Vec::new();
-    while let Some(result) = checks.join_next().await {
-        if let Ok(result) = result {
-            outcomes.push(result);
+    while let Some(result) = checks.join_next_with_id().await {
+        match result {
+            Ok((task_id, result)) => {
+                task_paths.remove(&task_id);
+                outcomes.push(result);
+            }
+            Err(error) => {
+                let task_id = error.id();
+                if let Some(path) = task_paths.remove(&task_id) {
+                    outcomes.push((
+                        path,
+                        SqliteIntegrityOutcome::Unavailable {
+                            reason: format!("branch database integrity task failed: {error}"),
+                        },
+                    ));
+                }
+            }
         }
         if let Some(path) = pending.next() {
+            let task_path = path.clone();
             let outcome = check(path.clone());
-            checks.spawn(async move { (path, outcome.await) });
+            let task = checks.spawn(async move { (path, outcome.await) });
+            task_paths.insert(task.id(), task_path);
         }
     }
+    outcomes.extend(task_paths.into_values().map(|path| {
+        (
+            path,
+            SqliteIntegrityOutcome::Unavailable {
+                reason: "branch database integrity task ended without an outcome".to_owned(),
+            },
+        )
+    }));
     outcomes.sort_by(|left, right| left.0.cmp(&right.0));
     outcomes
 }
@@ -272,5 +299,36 @@ mod tests {
         );
         assert_eq!(checked.load(Ordering::SeqCst), 512);
         assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_BRANCH_CHECKS);
+    }
+
+    #[tokio::test]
+    async fn branch_database_task_failure_preserves_the_database_outcome() {
+        let failed_path = PathBuf::from("branch-failed.db");
+        let verified_path = PathBuf::from("branch-verified.db");
+
+        let outcomes =
+            check_branch_databases(vec![failed_path.clone(), verified_path.clone()], |path| {
+                let failed_path = failed_path.clone();
+                async move {
+                    assert_ne!(path, failed_path, "injected integrity-check panic");
+                    SqliteIntegrityOutcome::Verified
+                }
+            })
+            .await;
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes[0].0, failed_path,
+            "the failed task must remain attributed to its database"
+        );
+        let SqliteIntegrityOutcome::Unavailable { reason } = &outcomes[0].1 else {
+            panic!("failed task must produce an unavailable integrity outcome");
+        };
+        assert!(reason.contains("branch database integrity task failed:"));
+        assert!(reason.contains("injected integrity-check panic"));
+        assert_eq!(
+            outcomes[1],
+            (verified_path, SqliteIntegrityOutcome::Verified)
+        );
     }
 }
