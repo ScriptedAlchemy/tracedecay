@@ -121,6 +121,7 @@ impl McpServer {
                     arguments,
                     self.registry_db.as_deref(),
                     self.retained_project_graph_resolver.clone(),
+                    None,
                 )
                 .await
                 {

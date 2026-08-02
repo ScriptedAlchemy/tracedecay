@@ -5,11 +5,14 @@ use super::*;
 use crate::mcp::ToolResult;
 use tracedecay_sessions::WorkflowIndexReadPort;
 
-struct PreparedToolCall {
+struct PreparedToolCall<'a> {
     tool_name: String,
     arguments: Value,
     analytics_arguments: Value,
     analytics_session_id: Option<String>,
+    dispatch_control: McpToolDispatchControl,
+    application_request_id: Option<tracedecay_application::RequestId>,
+    _cancellation_registration: ApplicationCancellationRegistration<'a>,
 }
 
 struct DispatchedToolCall {
@@ -82,79 +85,10 @@ impl Drop for ApplicationCancellationRegistration<'_> {
     }
 }
 
-/// Application-surface plumbing prepared once per dispatch: the typed request
-/// id, deadline, cancellation signal, daemon invocation client, and the RAII
-/// cancellation registration that must outlive the dispatch await.
-struct ApplicationSurfaceDispatch<'a> {
-    request_id: Option<tracedecay_application::RequestId>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-    invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
-    _registration: ApplicationCancellationRegistration<'a>,
-}
-
 /// Retained name for this module's call sites; the saturating clamp is the one
 /// shared definition so MCP cannot stamp "now" differently from the daemon.
 pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     tracedecay_application::clock::now_micros()
-}
-
-fn is_source_edit_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_str_replace"
-            | "tracedecay_multi_str_replace"
-            | "tracedecay_insert_at"
-            | "tracedecay_ast_grep_rewrite"
-            | "tracedecay_replace_symbol"
-            | "tracedecay_insert_at_symbol"
-            | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_apply"
-            | "tracedecay_source_edit_reconcile"
-    )
-}
-
-/// Reads that walk a git tree or the whole code graph, and so must not run
-/// without a horizon.
-///
-/// The catalog-owned git reads are recognised by their surface operation; every
-/// other git-walking tool is recognised through the canonical MCP binding table
-/// rather than a second hand-maintained name list, so a newly bound git tool
-/// inherits the bound instead of silently running unbounded.
-fn is_controlled_read_tool(tool_name: &str) -> bool {
-    matches!(
-        crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name),
-        Some(
-            crate::application_surface::ApplicationSurfaceOperation::GitStatus
-                | crate::application_surface::ApplicationSurfaceOperation::GitDiff
-                | crate::application_surface::ApplicationSurfaceOperation::GitHistory
-                | crate::application_surface::ApplicationSurfaceOperation::GitBlame
-                | crate::application_surface::ApplicationSurfaceOperation::GitHunks
-        )
-    ) || crate::mcp::tools::handlers::tool_dispatches_git_reads(tool_name)
-        || tool_name == "tracedecay_search"
-}
-
-pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
-    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
-        || is_source_edit_tool(tool_name)
-        || matches!(
-            tool_name,
-            "tracedecay_search" | "tracedecay_run_affected_tests"
-        )
-}
-
-fn dispatch_deadline_horizon_micros(
-    application_surface: bool,
-    thirty_second_operation: bool,
-) -> Option<i64> {
-    if thirty_second_operation {
-        Some(30_000_000)
-    } else if application_surface {
-        Some(10_000_000)
-    } else {
-        None
-    }
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
@@ -812,10 +746,13 @@ impl McpServer {
     }
 
     #[allow(clippy::result_large_err)]
-    fn prepare_tool_call(
+    fn prepare_tool_call<'a>(
+        &'a self,
         id: &Value,
         params: Option<&Value>,
-    ) -> std::result::Result<PreparedToolCall, JsonRpcResponse> {
+        memory_request_scope: &str,
+        pre_cancelled: bool,
+    ) -> std::result::Result<PreparedToolCall<'a>, JsonRpcResponse> {
         let Some(params) = params else {
             return Err(JsonRpcResponse::error(
                 id.clone(),
@@ -832,6 +769,52 @@ impl McpServer {
             ));
         };
 
+        let policy = execution_policy_for_tool(tool_name).ok_or_else(|| {
+            tool_error_response(
+                id.clone(),
+                tool_name,
+                &TraceDecayError::Config {
+                    message: format!("unknown tool: {tool_name}"),
+                },
+            )
+        })?;
+        let application_request_id = application_surface_request_id(id, memory_request_scope)
+            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+        let cancellation_identity = application_request_id.as_ref().map_or_else(
+            || format!("cancellation.mcp.unidentified.{tool_name}"),
+            |request_id| format!("cancellation.{}", request_id.as_str()),
+        );
+        let cancellation = tracedecay_application::CancellationSignal::active(
+            cancellation_identity,
+        )
+        .map_err(|error| {
+            tool_error_response(
+                id.clone(),
+                tool_name,
+                &TraceDecayError::Config {
+                    message: format!("could not create MCP cancellation signal: {error}"),
+                },
+            )
+        })?;
+        if pre_cancelled {
+            cancellation.cancel(mcp_now_micros());
+        }
+        if let Some(request_id) = application_request_id.as_ref() {
+            recover_lock(&self.application_surface_cancellations)
+                .insert(request_id.as_str().to_owned(), cancellation.clone());
+        }
+        let registration = ApplicationCancellationRegistration {
+            registry: &self.application_surface_cancellations,
+            request_id: application_request_id
+                .as_ref()
+                .map(|request_id| request_id.as_str().to_owned()),
+        };
+        let dispatch_control = McpToolDispatchControl::new(tool_name, policy, cancellation)
+            .map_err(|error| tool_error_response(id.clone(), tool_name, &error))?;
+        dispatch_control
+            .check(McpToolDispatchStage::SchemaValidation)
+            .map_err(|error| tool_error_response(id.clone(), tool_name, &error))?;
+
         let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
         if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
             return Err(JsonRpcResponse::error(
@@ -840,12 +823,18 @@ impl McpServer {
                 "invalid structural identifier".to_string(),
             ));
         }
+        dispatch_control
+            .check(McpToolDispatchStage::SchemaValidation)
+            .map_err(|error| tool_error_response(id.clone(), tool_name, &error))?;
 
         Ok(PreparedToolCall {
             tool_name: tool_name.to_string(),
             analytics_arguments: arguments.clone(),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
+            dispatch_control,
+            application_request_id,
+            _cancellation_registration: registration,
         })
     }
 
@@ -855,8 +844,10 @@ impl McpServer {
         tool_name: &str,
         arguments: Value,
         route_cache: &HookProjectRouteCache,
-        memory_request_scope: &str,
+        application_request_id: Option<&tracedecay_application::RequestId>,
+        dispatch_control: &McpToolDispatchControl,
     ) -> Result<RoutedToolCall> {
+        dispatch_control.check(McpToolDispatchStage::ProjectSelection)?;
         let (mut handler_arguments, routed_project) =
             route_cache.route_tool_arguments(tool_name, arguments)?;
         if crate::analytics::is_skill_view_tool(tool_name)
@@ -865,12 +856,13 @@ impl McpServer {
         {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
-        if tool_supports_live_cancellation(tool_name)
+        if crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
+            .is_some()
             && let Some(map) = handler_arguments.as_object_mut()
         {
             map.remove("__mcp_request_id");
-            if let Some(request_id) = application_surface_request_id(id, memory_request_scope) {
-                map.insert("__mcp_request_id".to_owned(), json!(request_id));
+            if let Some(request_id) = application_request_id {
+                map.insert("__mcp_request_id".to_owned(), json!(request_id.as_str()));
             }
         }
         let selected_project = match routed_project {
@@ -881,6 +873,7 @@ impl McpServer {
                     handler_arguments.clone(),
                     self.registry_db.as_deref(),
                     self.retained_project_graph_resolver.clone(),
+                    Some(dispatch_control),
                 )
                 .await?
             }
@@ -906,6 +899,7 @@ impl McpServer {
         application_request_id: Option<tracedecay_application::RequestId>,
         application_deadline: Option<tracedecay_application::Deadline>,
         application_cancellation: Option<tracedecay_application::CancellationSignal>,
+        dispatch_control: Option<McpToolDispatchControl>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
         let workflow_index_reads = self
@@ -964,6 +958,7 @@ impl McpServer {
                     .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
+                dispatch_control,
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
@@ -1020,6 +1015,7 @@ impl McpServer {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1030,20 +1026,44 @@ impl McpServer {
         id: &Value,
         tool_name: &str,
         arguments: Value,
+        dispatch_control: McpToolDispatchControl,
+        application_request_id: Option<tracedecay_application::RequestId>,
         timings_enabled: bool,
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
-        memory_request_scope: &str,
-        pre_cancelled: bool,
         publish_activity: bool,
     ) -> DispatchedToolCall {
         // Branch-drift hot-swap: if the working tree switched branches since
         // the served instance opened, reopen onto the live branch's DB so
         // this call reads the right index. Cheap no-op check when no drift.
-        let (active_cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
         let handler_start = timings_enabled.then(std::time::Instant::now);
+        let (active_cg, live_branch) = match dispatch_control
+            .run(
+                McpToolDispatchStage::WarmOpen,
+                self.reopen_if_branch_drifted_memoized(),
+            )
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) => {
+                return DispatchedToolCall {
+                    cg: self.cg_snapshot().await,
+                    selected_owner: None,
+                    selected_scope: None,
+                    outcome: Err(error),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                };
+            }
+        };
         let routed = match self
-            .route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope)
+            .route_tool_arguments(
+                id,
+                tool_name,
+                arguments,
+                route_cache,
+                application_request_id.as_ref(),
+                &dispatch_control,
+            )
             .await
         {
             Ok(routed) => routed,
@@ -1073,52 +1093,88 @@ impl McpServer {
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
-        self.begin_tool_dispatch(
-            tool_name,
-            &cg,
-            &live_branch,
-            project_reader_preselected,
-            publish_activity,
-        )
-        .await;
+        if let Err(error) = dispatch_control
+            .run(McpToolDispatchStage::Handler, async {
+                self.begin_tool_dispatch(
+                    tool_name,
+                    &cg,
+                    &live_branch,
+                    project_reader_preselected,
+                    publish_activity,
+                )
+                .await;
+                Ok(())
+            })
+            .await
+        {
+            return DispatchedToolCall {
+                cg,
+                selected_owner,
+                selected_scope,
+                outcome: Err(error),
+                elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+            };
+        }
 
         let server_stats = if tool_name == "tracedecay_status" {
-            Some(self.server_stats_json().await)
+            match dispatch_control
+                .run(McpToolDispatchStage::Handler, async {
+                    Ok(self.server_stats_json().await)
+                })
+                .await
+            {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    return DispatchedToolCall {
+                        cg,
+                        selected_owner,
+                        selected_scope,
+                        outcome: Err(error),
+                        elapsed_us: handler_start
+                            .map(|started| started.elapsed().as_micros() as u64),
+                    };
+                }
+            }
         } else {
             None
         };
 
-        // `timings_enabled` was initialized from the server's pinned resolved
-        // snapshot (or an explicit transport override). Do not synchronously
-        // re-read legacy configuration for every tool call.
-        let ApplicationSurfaceDispatch {
-            request_id: application_request_id,
-            deadline: application_deadline,
-            cancellation: application_cancellation,
-            invocation_executor: application_invocation_executor,
-            _registration,
-        } = self
-            .prepare_application_surface_dispatch(
-                &cg,
-                id,
-                tool_name,
-                memory_request_scope,
-                pre_cancelled,
-            )
-            .await;
-        let outcome = self
-            .execute_tool_dispatch(
-                &cg,
-                tool_name,
-                routed.arguments,
-                project_reader_preselected,
-                server_stats,
-                implicit_project_path,
-                application_invocation_executor,
-                application_invocation_target,
-                application_request_id.clone(),
-                application_deadline,
-                application_cancellation,
+        let application_invocation_executor = match dispatch_control
+            .run(McpToolDispatchStage::ApplicationRoute, async {
+                Ok(self
+                    .application_surface_invocation_executor(&cg, tool_name)
+                    .await)
+            })
+            .await
+        {
+            Ok(executor) => executor,
+            Err(error) => {
+                return DispatchedToolCall {
+                    cg,
+                    selected_owner,
+                    selected_scope,
+                    outcome: Err(error),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                };
+            }
+        };
+        let outcome = dispatch_control
+            .run(
+                McpToolDispatchStage::Handler,
+                self.execute_tool_dispatch(
+                    &cg,
+                    tool_name,
+                    routed.arguments,
+                    project_reader_preselected,
+                    server_stats,
+                    implicit_project_path,
+                    application_invocation_executor,
+                    application_invocation_target,
+                    application_request_id,
+                    Some(dispatch_control.deadline()),
+                    Some(dispatch_control.cancellation()),
+                    Some(dispatch_control.clone()),
+                ),
             )
             .await;
         DispatchedToolCall {
@@ -1167,59 +1223,17 @@ impl McpServer {
         }
     }
 
-    /// Prepare the application-surface plumbing for a single dispatch. Returns
-    /// the typed request id, deadline, cancellation, and daemon invocation
-    /// executor, plus the RAII registration guard that must outlive the dispatch.
-    async fn prepare_application_surface_dispatch<'a>(
+    /// Resolve the daemon invocation executor only for catalog-owned
+    /// application operations. Request identity, cancellation, and deadline
+    /// were already fixed at tool-name lookup and are never recreated here.
+    async fn application_surface_invocation_executor<'a>(
         &'a self,
         cg: &TraceDecay,
-        id: &Value,
         tool_name: &str,
-        memory_request_scope: &str,
-        pre_cancelled: bool,
-    ) -> ApplicationSurfaceDispatch<'a> {
+    ) -> Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let source_edit = is_source_edit_tool(tool_name);
-        let controlled_read = is_controlled_read_tool(tool_name);
-        let request_id = tool_supports_live_cancellation(tool_name)
-            .then(|| application_surface_request_id(id, memory_request_scope))
-            .flatten()
-            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
-        let cancellation = request_id.as_ref().and_then(|request_id| {
-            // The signal is built before the lock is taken: nothing fallible
-            // runs inside the critical section, so an unwind can never leave
-            // the registry half-updated.
-            let cancellation = tracedecay_application::CancellationSignal::active(format!(
-                "cancellation.{}",
-                request_id.as_str()
-            ))
-            .ok()?;
-            if pre_cancelled {
-                cancellation.cancel(mcp_now_micros());
-            }
-            recover_lock(&self.application_surface_cancellations)
-                .insert(request_id.as_str().to_owned(), cancellation.clone());
-            Some(cancellation)
-        });
-        let registration = ApplicationCancellationRegistration {
-            registry: &self.application_surface_cancellations,
-            request_id: request_id
-                .as_ref()
-                .map(|request_id| request_id.as_str().to_owned()),
-        };
-        let deadline = dispatch_deadline_horizon_micros(
-            application_surface.is_some() || source_edit,
-            controlled_read || source_edit,
-        )
-        .and_then(|horizon| {
-            let now = mcp_now_micros().0;
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                now.saturating_add(horizon),
-            ))
-            .ok()
-        });
-        let invocation_executor = if application_surface.is_some() {
+        if application_surface.is_some() {
             match self.application_invocation_executor.as_deref() {
                 Some(executor) => Some(executor),
                 None => self
@@ -1239,13 +1253,6 @@ impl McpServer {
             }
         } else {
             None
-        };
-        ApplicationSurfaceDispatch {
-            request_id,
-            deadline,
-            cancellation,
-            invocation_executor,
-            _registration: registration,
         }
     }
 
@@ -1789,7 +1796,10 @@ impl McpServer {
             arguments,
             analytics_arguments,
             analytics_session_id,
-        } = match Self::prepare_tool_call(&id, params) {
+            dispatch_control,
+            application_request_id,
+            _cancellation_registration,
+        } = match self.prepare_tool_call(&id, params, memory_request_scope, pre_cancelled) {
             Ok(call) => call,
             Err(response) => return response,
         };
@@ -1803,11 +1813,11 @@ impl McpServer {
                 &id,
                 &tool_name,
                 arguments,
+                dispatch_control.clone(),
+                application_request_id,
                 timings_enabled,
                 route_cache,
                 implicit_project_path,
-                memory_request_scope,
-                pre_cancelled,
                 !fast_unavailable,
             )
             .await;
@@ -1815,17 +1825,36 @@ impl McpServer {
             return response;
         }
         if fast_unavailable {
-            return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
+            return match dispatch_control
+                .run(McpToolDispatchStage::Serialization, async {
+                    Ok(Self::finish_unavailable_tool_call(
+                        id.clone(),
+                        &tool_name,
+                        dispatch,
+                    ))
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => tool_error_response(id, &tool_name, &error),
+            };
         }
-        let response = self
-            .complete_tool_call(
-                id.clone(),
-                tool_name.clone(),
-                analytics_arguments,
-                analytics_session_id,
-                dispatch,
+        let response = match dispatch_control
+            .run(
+                McpToolDispatchStage::Serialization,
+                self.complete_tool_call(
+                    id.clone(),
+                    tool_name.clone(),
+                    analytics_arguments,
+                    analytics_session_id,
+                    dispatch,
+                ),
             )
-            .await;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => tool_error_response(id.clone(), &tool_name, &error),
+        };
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
             return response;
         }
@@ -1834,59 +1863,44 @@ impl McpServer {
 }
 
 #[cfg(test)]
-mod git_read_control_tests {
+mod execution_control_tests {
     use super::*;
+    use crate::mcp::tools::get_tool_definitions;
 
     #[test]
-    fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
-        assert!(tool_supports_live_cancellation("tracedecay_search"));
-        assert!(tool_supports_live_cancellation(
-            "tracedecay_run_affected_tests"
-        ));
-        assert!(!tool_supports_live_cancellation("tracedecay_outline"));
-        for tool_name in [
-            "tracedecay_git_status",
-            "tracedecay_git_diff",
-            "tracedecay_git_history",
-            "tracedecay_git_blame",
-            "tracedecay_git_hunks",
-        ] {
-            assert!(tool_supports_live_cancellation(tool_name));
-            let application_surface =
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+    fn every_advertised_tool_has_one_available_execution_contract() {
+        for definition in get_tool_definitions() {
+            let execution = definition
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("tracedecay/execution"))
+                .unwrap_or_else(|| panic!("{} has no execution contract", definition.name));
+            assert_eq!(execution["version"], 1, "{}", definition.name);
+            assert_eq!(
+                execution["availability"]["state"], "available",
+                "{}",
+                definition.name
+            );
             assert!(
-                application_surface.is_some(),
-                "Git reads must enter the catalog-owned application surface",
+                execution["deadline_ms"]
+                    .as_u64()
+                    .is_some_and(|milliseconds| milliseconds > 0),
+                "{} has no positive deadline",
+                definition.name,
             );
-            let controlled_read = is_controlled_read_tool(tool_name);
-            assert!(controlled_read);
-            assert_eq!(
-                dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
-                Some(30_000_000)
-            );
-        }
-        for tool_name in [
-            "tracedecay_str_replace",
-            "tracedecay_multi_str_replace",
-            "tracedecay_insert_at",
-            "tracedecay_ast_grep_rewrite",
-            "tracedecay_replace_symbol",
-            "tracedecay_insert_at_symbol",
-            "tracedecay_move_symbol",
-            "tracedecay_api_migration_apply",
-            "tracedecay_source_edit_reconcile",
-        ] {
-            assert!(is_source_edit_tool(tool_name));
-            assert!(tool_supports_live_cancellation(tool_name));
-            assert_eq!(
-                dispatch_deadline_horizon_micros(true, true),
-                Some(30_000_000)
+            assert!(
+                execution["required_features"].as_array().is_some(),
+                "{} does not declare feature requirements",
+                definition.name,
             );
         }
+    }
 
-        let request_id = "request.git-read-controls".to_owned();
+    #[test]
+    fn every_request_registration_is_removed_when_its_dispatch_ends() {
+        let request_id = "request.dispatch-control".to_owned();
         let signal = tracedecay_application::CancellationSignal::active(
-            "cancellation.request.git-read-controls",
+            "cancellation.request.dispatch-control",
         )
         .expect("signal");
         let registry = std::sync::Mutex::new(HashMap::from([(request_id.clone(), signal.clone())]));
@@ -1899,63 +1913,5 @@ mod git_read_control_tests {
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }
         assert!(!registry.lock().expect("registry").contains_key(&request_id));
-    }
-
-    /// These tools walk git trees but are not application-surface operations
-    /// and are not source edits, so the horizon predicate used to return `None`
-    /// for them: they dispatched with no deadline at all while the cheaper
-    /// `tracedecay_git_status` was bounded at thirty seconds.
-    #[test]
-    fn git_reading_tools_receive_a_bounded_deadline() {
-        for tool_name in [
-            "tracedecay_admin_branch_add",
-            "tracedecay_affected",
-            "tracedecay_diff_context",
-            "tracedecay_changelog",
-            "tracedecay_commit_context",
-            "tracedecay_pr_context",
-            "tracedecay_branch_search",
-            "tracedecay_branch_diff",
-            "tracedecay_branch_list",
-        ] {
-            assert!(
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-                    .is_none(),
-                "{tool_name} is not an application-surface operation, so only the \
-                 git-dispatch predicate can bound it",
-            );
-            assert!(!is_source_edit_tool(tool_name));
-            assert!(
-                is_controlled_read_tool(tool_name),
-                "{tool_name} walks a git tree and must be a controlled read",
-            );
-            assert_eq!(
-                dispatch_deadline_horizon_micros(
-                    false,
-                    is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
-                ),
-                Some(30_000_000),
-                "{tool_name} must dispatch with a bounded horizon",
-            );
-        }
-    }
-
-    /// The horizon predicate reads the canonical binding table, so it must not
-    /// sweep in reads from other dispatch families.
-    #[test]
-    fn non_git_reads_stay_outside_the_controlled_read_horizon() {
-        for tool_name in [
-            "tracedecay_outline",
-            "tracedecay_body",
-            "tracedecay_dead_code",
-            "tracedecay_health",
-            "tracedecay_context",
-        ] {
-            assert!(
-                !is_controlled_read_tool(tool_name),
-                "{tool_name} is not a git-walking read",
-            );
-        }
-        assert!(is_controlled_read_tool("tracedecay_search"));
     }
 }

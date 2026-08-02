@@ -32,6 +32,7 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         arguments.clone(),
         server.registry_db.as_deref(),
         server.retained_project_graph_resolver.clone(),
+        None,
     )
     .await
     .expect("exact-root reader resolves")
@@ -41,6 +42,7 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         arguments,
         server.registry_db.as_deref(),
         server.retained_project_graph_resolver.clone(),
+        None,
     )
     .await
     .expect("exact-root reader resolves again")
@@ -111,6 +113,7 @@ async fn unregistered_selector_still_fails_closed_without_substitution() {
         json!({ "project_selector": { "path": sibling.to_string_lossy() } }),
         server.registry_db.as_deref(),
         server.retained_project_graph_resolver.clone(),
+        None,
     )
     .await
     .expect_err("an unregistered path must fail closed");
@@ -156,6 +159,7 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
         json!({ "project_selector": { "path": phantom_root.to_string_lossy() } }),
         server.registry_db.as_deref(),
         server.retained_project_graph_resolver.clone(),
+        None,
     )
     .await
     .expect_err("an unmounted registered project must fail closed");

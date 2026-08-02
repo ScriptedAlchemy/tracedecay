@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+use tokio::sync::Notify;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
     canonical_sha256,
@@ -237,6 +238,7 @@ const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
 pub struct CancellationSignal {
     token_id: CancellationTokenId,
     requested_at: Arc<AtomicI64>,
+    cancelled: Arc<Notify>,
 }
 
 impl CancellationSignal {
@@ -244,6 +246,7 @@ impl CancellationSignal {
         Ok(Self {
             token_id: CancellationTokenId::new(token_id)?,
             requested_at: Arc::new(AtomicI64::new(ACTIVE_CANCELLATION_SIGNAL)),
+            cancelled: Arc::new(Notify::new()),
         })
     }
 
@@ -260,6 +263,7 @@ impl CancellationSignal {
         {
             return false;
         }
+        self.cancelled.notify_waiters();
         true
     }
 
@@ -284,6 +288,24 @@ impl CancellationSignal {
     pub fn cancelled_at(&self) -> Option<UtcMicros> {
         let requested_at = self.requested_at.load(Ordering::Acquire);
         (requested_at != ACTIVE_CANCELLATION_SIGNAL).then_some(UtcMicros(requested_at))
+    }
+
+    /// Wait until a clone observes transport cancellation.
+    ///
+    /// The second state check closes the gap between the first observation and
+    /// registering with [`Notify`], whose wakeups are intentionally not stored
+    /// for future waiters.
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.cancelled.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -410,5 +432,21 @@ mod tests {
                 requested_at: UtcMicros(41)
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_signal_wakes_live_waiters_without_polling() {
+        let signal = CancellationSignal::active("cancel.transport.wake").unwrap();
+        let waiter = signal.clone();
+        let wait = tokio::spawn(async move {
+            waiter.cancelled().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(signal.cancel(UtcMicros(42)));
+        tokio::time::timeout(std::time::Duration::from_millis(100), wait)
+            .await
+            .expect("cancellation must wake its waiter")
+            .expect("wait task must not panic");
     }
 }

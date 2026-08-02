@@ -99,6 +99,25 @@ pub(crate) fn tool_error_response(
     tool_name: &str,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
+    if let Some((reason_code, stage, retryable, detail)) = error.mcp_tool_dispatch_context() {
+        let code = if retryable {
+            ErrorCode::InternalError
+        } else {
+            ErrorCode::InvalidParams
+        };
+        return JsonRpcResponse::error_with_data(
+            id,
+            code,
+            format!("tool dispatch failed at {stage}: {detail}"),
+            Some(json!({
+                "tool": tool_name,
+                "reason_code": reason_code,
+                "stage": stage,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         let code = if retryable {
             ErrorCode::InternalError
@@ -240,5 +259,32 @@ pub(crate) fn serialize_response_line(resp: &JsonRpcResponse) -> String {
                 hardcoded_internal_error_response(&resp.id, &fallback_err.to_string())
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::tool_error_response;
+    use crate::errors::TraceDecayError;
+
+    #[test]
+    fn dispatch_deadlines_return_a_typed_stage() {
+        let error = TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_deadline_exceeded",
+            "project_selection",
+            true,
+            "selector did not settle before the absolute deadline",
+        );
+        let response = tool_error_response(json!(7), "tracedecay_context", &error);
+        let data = response
+            .error
+            .as_ref()
+            .and_then(|error| error.data.as_ref())
+            .expect("typed MCP dispatch error data");
+        assert_eq!(data["reason_code"], "tool_dispatch_deadline_exceeded");
+        assert_eq!(data["stage"], "project_selection");
+        assert_eq!(data["retryable"], true);
     }
 }

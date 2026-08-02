@@ -2444,6 +2444,32 @@ pub(crate) fn application_surface_catalog_ref()
     }
 }
 
+/// Resolve the callable MCP capability that owns one public tool spelling.
+///
+/// This is metadata-only: it reuses the process-immutable catalog and the
+/// same profile, protocol revision, and negotiated features as invocation.
+/// The diagnostic compatibility spelling remains mapped to its canonical
+/// application operation before lookup.
+pub(crate) fn mcp_catalog_capability_for_tool(
+    tool_name: &str,
+) -> Result<
+    Option<&'static tracedecay_tool_catalog::CapabilityManifestV1>,
+    ApplicationSurfaceAdapterError,
+> {
+    let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .map(ApplicationSurfaceOperation::as_str)
+        .unwrap_or_else(|| tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name));
+    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?;
+    let operation = SurfaceOperationName::new(operation)?;
+    Ok(application_surface_catalog_ref()?.resolve_binding(
+        &profile_id,
+        BindingSurface::Mcp,
+        &operation,
+        APPLICATION_PROTOCOL_REVISION,
+        &application_negotiated_features(),
+    ))
+}
+
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
     application_surface_catalog_ref().cloned()
 }

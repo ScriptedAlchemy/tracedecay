@@ -8,7 +8,9 @@ use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationOperation, RetainedSurfaceOperation,
     retained_surface_application_operation,
 };
-use tracedecay_tool_catalog::{BindingSurface, ProfileId, SurfaceOperationName};
+use tracedecay_tool_catalog::{
+    BindingSurface, CapabilityManifestV1, ProfileId, SurfaceOperationName,
+};
 
 use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::errors::{Result, TraceDecayError};
@@ -125,6 +127,30 @@ pub(super) fn retained_mcp_composition() -> Result<&'static ApplicationCatalogCo
         .get_or_init(|| compose_application_catalog(()).map_err(|error| error.to_string()))
         .as_ref()
         .map_err(retained_catalog_error)
+}
+
+/// Resolve catalog-owned execution metadata for one retained MCP spelling.
+///
+/// The retained composition is the authority for these operations; callers
+/// must not reconstruct an alternate catalog merely to learn a deadline.
+pub(crate) fn retained_mcp_capability_for_tool(
+    tool_name: &str,
+) -> Result<Option<&'static CapabilityManifestV1>> {
+    let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) else {
+        return Ok(None);
+    };
+    let composition = retained_mcp_composition()?;
+    let profile_id =
+        ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(retained_catalog_error)?;
+    let operation_name =
+        SurfaceOperationName::new(operation.as_str()).map_err(retained_catalog_error)?;
+    Ok(composition.snapshot().resolve_binding(
+        &profile_id,
+        BindingSurface::Mcp,
+        &operation_name,
+        1,
+        &BTreeSet::new(),
+    ))
 }
 
 pub(super) async fn invoke_retained_mcp_request(

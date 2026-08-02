@@ -912,9 +912,7 @@ pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
 }
 
 pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
-    while !cancellation.is_cancelled() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    cancellation.cancelled().await;
 }
 
 /// Typed client for one daemon-owned LSP session. Every method maps to a

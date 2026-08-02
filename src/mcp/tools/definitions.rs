@@ -621,6 +621,7 @@ fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
+    super::execution::attach_execution_metadata(&mut definitions);
     definitions
 }
 

@@ -1,4 +1,7 @@
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde_json::{Value, json};
 
@@ -10,6 +13,7 @@ use crate::tracedecay::current_timestamp;
 
 use super::super::ToolResult;
 use super::super::binding::tool_dispatches_registered_project_reader;
+use super::super::execution::{McpToolExecutionAvailabilityV1, McpToolExecutionPolicyV1};
 use super::super::render;
 use super::support;
 use super::support::{project_registry_context, project_selector_present};
@@ -29,6 +33,210 @@ where
     F: std::future::Future<Output = T> + Send + 'a,
 {
     Box::pin(future)
+}
+
+/// The current lifecycle segment under the one absolute MCP dispatch deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum McpToolDispatchStage {
+    SchemaValidation,
+    ProjectSelection,
+    WarmOpen,
+    ApplicationRoute,
+    Handler,
+    Serialization,
+}
+
+impl McpToolDispatchStage {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::SchemaValidation => 0,
+            Self::ProjectSelection => 1,
+            Self::WarmOpen => 2,
+            Self::ApplicationRoute => 3,
+            Self::Handler => 4,
+            Self::Serialization => 5,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SchemaValidation => "schema_validation",
+            Self::ProjectSelection => "project_selection",
+            Self::WarmOpen => "warm_open",
+            Self::ApplicationRoute => "application_route",
+            Self::Handler => "handler",
+            Self::Serialization => "serialization",
+        }
+    }
+}
+
+/// Immutable request control created immediately after MCP tool-name lookup.
+///
+/// Every stage shares `deadline_at`; no nested layer gets to refresh a full
+/// timeout. Cancellation is one live signal, so transport cancel, expiry, and
+/// application invocation observe the same request state.
+#[derive(Clone)]
+pub(crate) struct McpToolDispatchControl {
+    tool_name: Arc<str>,
+    policy: McpToolExecutionPolicyV1,
+    deadline: tracedecay_application::Deadline,
+    deadline_at: tokio::time::Instant,
+    cancellation: tracedecay_application::CancellationSignal,
+    stage: Arc<AtomicU8>,
+}
+
+impl McpToolDispatchControl {
+    pub(crate) fn new(
+        tool_name: impl Into<Arc<str>>,
+        policy: McpToolExecutionPolicyV1,
+        cancellation: tracedecay_application::CancellationSignal,
+    ) -> Result<Self> {
+        let tool_name = tool_name.into();
+        if let McpToolExecutionAvailabilityV1::Unavailable { reason_code } = policy.availability() {
+            return Err(TraceDecayError::mcp_tool_dispatch(
+                "tool_unavailable",
+                McpToolDispatchStage::SchemaValidation.as_str(),
+                true,
+                format!("tool '{tool_name}' is unavailable: {reason_code}"),
+            ));
+        }
+        let horizon = std::time::Duration::from_millis(policy.deadline_millis());
+        let now = tracedecay_application::clock::now_micros();
+        let horizon_micros = i64::try_from(horizon.as_micros()).unwrap_or(i64::MAX);
+        let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            now.0.saturating_add(horizon_micros),
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid MCP dispatch deadline: {error}"),
+        })?;
+        let deadline_at = tokio::time::Instant::now()
+            .checked_add(horizon)
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "MCP dispatch deadline cannot be represented by the runtime clock"
+                    .to_owned(),
+            })?;
+        Ok(Self {
+            tool_name,
+            policy,
+            deadline,
+            deadline_at,
+            cancellation,
+            stage: Arc::new(AtomicU8::new(
+                McpToolDispatchStage::SchemaValidation.as_u8(),
+            )),
+        })
+    }
+
+    pub(crate) fn deadline(&self) -> tracedecay_application::Deadline {
+        self.deadline.clone()
+    }
+
+    pub(crate) fn cancellation(&self) -> tracedecay_application::CancellationSignal {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn policy(&self) -> &McpToolExecutionPolicyV1 {
+        &self.policy
+    }
+
+    pub(crate) fn cancel(&self, requested_at: tracedecay_domain::UtcMicros) -> bool {
+        self.cancellation.cancel(requested_at)
+    }
+
+    pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
+        self.stage.store(stage.as_u8(), Ordering::Release);
+        if self.cancellation.is_cancelled() {
+            return Err(self.cancelled_error(stage));
+        }
+        if tokio::time::Instant::now() >= self.deadline_at {
+            self.cancel(tracedecay_application::clock::now_micros());
+            return Err(self.deadline_error(stage));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn run<T, F>(&self, stage: McpToolDispatchStage, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        self.check(stage)?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        tokio::pin!(deadline);
+        tokio::pin!(future);
+        tokio::select! {
+            result = &mut future => result,
+            () = &mut deadline => {
+                self.cancel(tracedecay_application::clock::now_micros());
+                Err(self.deadline_error(stage))
+            }
+            () = self.cancellation.cancelled() => Err(self.cancelled_error(stage)),
+        }
+    }
+
+    /// Wait for an owned worker under the same absolute deadline. A terminal
+    /// control event aborts *and joins* it before returning, so a cancelled
+    /// request cannot retain detached work behind the caller's response.
+    pub(crate) async fn run_owned<T>(
+        &self,
+        stage: McpToolDispatchStage,
+        mut worker: tokio::task::JoinHandle<Result<T>>,
+    ) -> Result<T> {
+        if let Err(error) = self.check(stage) {
+            worker.abort();
+            let _ = worker.await;
+            return Err(error);
+        }
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        tokio::pin!(deadline);
+        tokio::select! {
+            result = &mut worker => match result {
+                Ok(result) => result,
+                Err(error) => Err(TraceDecayError::mcp_tool_dispatch(
+                    "tool_dispatch_worker_failed",
+                    stage.as_str(),
+                    true,
+                    format!("tool '{}' worker did not complete: {error}", self.tool_name),
+                )),
+            },
+            () = &mut deadline => {
+                self.cancel(tracedecay_application::clock::now_micros());
+                worker.abort();
+                let _ = worker.await;
+                Err(self.deadline_error(stage))
+            }
+            () = self.cancellation.cancelled() => {
+                worker.abort();
+                let _ = worker.await;
+                Err(self.cancelled_error(stage))
+            }
+        }
+    }
+
+    fn deadline_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
+        TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_deadline_exceeded",
+            stage.as_str(),
+            true,
+            format!(
+                "tool '{}' exceeded its {}ms absolute dispatch deadline",
+                self.tool_name,
+                self.policy.deadline_millis(),
+            ),
+        )
+    }
+
+    fn cancelled_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
+        TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_cancelled",
+            stage.as_str(),
+            true,
+            format!(
+                "tool '{}' was cancelled during {}",
+                self.tool_name,
+                stage.as_str()
+            ),
+        )
+    }
 }
 
 pub(super) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
@@ -53,6 +261,7 @@ pub(crate) async fn selected_registered_project_reader(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    dispatch_control: Option<&McpToolDispatchControl>,
 ) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
     if !tool_dispatches_registered_project_reader(&tool_name) {
         return Ok(None);
@@ -62,10 +271,21 @@ pub(crate) async fn selected_registered_project_reader(
         &["project_path", "project_root"],
         global_db,
     ));
-    let Some(context) = context.await.map_err(|error| {
-        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error).into_error()
-    })?
-    else {
+    let selection = async {
+        context.await.map_err(|error| {
+            crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error)
+                .into_error()
+        })
+    };
+    let context = match dispatch_control {
+        Some(control) => {
+            control
+                .run(McpToolDispatchStage::ProjectSelection, selection)
+                .await
+        }
+        None => selection.await,
+    };
+    let Some(context) = context? else {
         return Ok(None);
     };
 
@@ -96,7 +316,15 @@ pub(crate) async fn selected_registered_project_reader(
         context.clone(),
         requested_path.clone(),
     );
-    let graph = resolver(request.clone()).await?.ok_or_else(|| {
+    let graph = match dispatch_control {
+        Some(control) => {
+            control
+                .run(McpToolDispatchStage::WarmOpen, resolver(request.clone()))
+                .await
+        }
+        None => resolver(request.clone()).await,
+    }?
+    .ok_or_else(|| {
         TraceDecayError::project_route(
             "project_route_unavailable",
             true,
@@ -183,4 +411,92 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
         }),
     };
     Ok(support::tool_json(Some(cg.project_root()), args, &payload))
+}
+
+#[cfg(test)]
+mod dispatch_control_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_application::CancellationSignal;
+    use tracedecay_domain::UtcMicros;
+
+    use super::{McpToolDispatchControl, McpToolDispatchStage};
+    use crate::mcp::tools::execution::McpToolExecutionPolicyV1;
+
+    #[tokio::test]
+    async fn one_absolute_deadline_covers_the_entire_current_stage() {
+        let cancellation = CancellationSignal::active("cancel.dispatch.deadline").unwrap();
+        let control = McpToolDispatchControl::new(
+            "tracedecay_deadline_fixture",
+            McpToolExecutionPolicyV1::interactive_read(20),
+            cancellation,
+        )
+        .unwrap();
+
+        let error = control
+            .run(McpToolDispatchStage::ProjectSelection, async {
+                std::future::pending::<crate::errors::Result<()>>().await
+            })
+            .await
+            .unwrap_err();
+        let (reason_code, stage, retryable, _) = error
+            .mcp_tool_dispatch_context()
+            .expect("deadline must retain structured MCP dispatch context");
+        assert_eq!(reason_code, "tool_dispatch_deadline_exceeded");
+        assert_eq!(stage, "project_selection");
+        assert!(retryable);
+    }
+
+    #[tokio::test]
+    async fn cancellation_aborts_and_joins_an_owned_worker() {
+        let cancellation = CancellationSignal::active("cancel.dispatch.worker").unwrap();
+        let control = McpToolDispatchControl::new(
+            "tracedecay_worker_fixture",
+            McpToolExecutionPolicyV1::interactive_read(1_000),
+            cancellation,
+        )
+        .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(tokio::sync::Notify::new());
+        let worker_started = Arc::clone(&started);
+        let worker_stopped = Arc::clone(&stopped);
+        let worker = tokio::spawn(async move {
+            struct Stop(Arc<tokio::sync::Notify>);
+            impl Drop for Stop {
+                fn drop(&mut self) {
+                    self.0.notify_waiters();
+                }
+            }
+            let _stop = Stop(worker_stopped);
+            worker_started.notify_waiters();
+            std::future::pending::<()>().await;
+            Ok::<(), crate::errors::TraceDecayError>(())
+        });
+        started.notified().await;
+
+        let cancellation_control = control.clone();
+        let dispatch = tokio::spawn(async move {
+            cancellation_control
+                .run_owned(McpToolDispatchStage::Handler, worker)
+                .await
+        });
+        tokio::task::yield_now().await;
+        control.cancel(UtcMicros(73));
+
+        let error = tokio::time::timeout(Duration::from_millis(100), dispatch)
+            .await
+            .expect("dispatch cancellation must settle")
+            .expect("dispatch task must not panic")
+            .unwrap_err();
+        let (reason_code, stage, retryable, _) = error
+            .mcp_tool_dispatch_context()
+            .expect("cancellation must retain structured MCP dispatch context");
+        assert_eq!(reason_code, "tool_dispatch_cancelled");
+        assert_eq!(stage, "handler");
+        assert!(retryable);
+        tokio::time::timeout(Duration::from_millis(100), stopped.notified())
+            .await
+            .expect("owned worker must be aborted and joined before dispatch returns");
+    }
 }

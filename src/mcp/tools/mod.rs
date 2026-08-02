@@ -7,6 +7,7 @@
 mod binding;
 mod definitions;
 pub mod dispatch;
+mod execution;
 pub(crate) mod handlers;
 pub(crate) mod render;
 pub(crate) mod renderers;
@@ -27,6 +28,7 @@ pub use definitions::{
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
     internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
+pub(crate) use execution::{McpToolExecutionPolicyV1, execution_policy_for_tool};
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub(crate) use handlers::memory::handle_user_memory_tool;
@@ -48,6 +50,7 @@ pub(crate) use handlers::{
     handle_projectless_admin_cli, handle_projectless_hook_runtime,
     replay_projectless_hermes_host_admission, utc_micros_value,
 };
+pub(crate) use handlers::{McpToolDispatchControl, McpToolDispatchStage};
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
