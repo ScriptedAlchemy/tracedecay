@@ -26,6 +26,7 @@ pub mod work;
 pub mod work_read;
 pub mod work_runtime;
 pub mod workflow;
+pub mod workflow_run;
 
 pub use code_intelligence::*;
 pub use configuration::*;
@@ -49,3 +50,4 @@ pub use work::*;
 pub use work_read::*;
 pub use work_runtime::*;
 pub use workflow::*;
+pub use workflow_run::*;
