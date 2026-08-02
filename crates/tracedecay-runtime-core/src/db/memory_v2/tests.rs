@@ -6,9 +6,88 @@ use tracedecay_domain::{
 
 use crate::db::engine::{Connection, TestConnection, params};
 
-use super::schema::{proposal_schema_is_v22, table_exists, table_has_column};
-use super::writers::{ensure_current, insert_event, insert_fact_identity, insert_mapping};
+use super::schema::{table_exists, table_has_column};
+use super::writers::insert_event;
 use super::*;
+
+// Identity, legacy-mapping, and current-projection rows used to be written by
+// the V1→V2 backfill writer layer. That layer had no production writer left
+// after the fresh-store cutover and was removed, so these tests seed the same
+// rows directly. `insert_event` is *not* duplicated here: it is still a live
+// production writer (the legacy-payload purge path appends through it), so the
+// tests keep exercising the real function.
+
+async fn seed_fact_identity(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    identity_json: &str,
+    created_at: i64,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            identity_json,
+            created_at
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_legacy_mapping(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    mapping: &LegacyFactMappingV1,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_legacy_map(
+            owner_kind, project_id, owner_json, source_store_id,
+            legacy_fact_id, fact_id, mapping_json
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            mapping.source_store_id().as_str(),
+            mapping.legacy_fact_id(),
+            mapping.fact_id().as_str(),
+            json_text(mapping).unwrap()
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_current_fact(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    event_id: &tracedecay_domain::FactEventId,
+    updated_at: i64,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_current_facts(
+            fact_id, owner_kind, project_id, payload_access, trust_score,
+            active_assertion_id, last_event_id, updated_at
+         ) VALUES(?1, ?2, ?3, 'unavailable', NULL, NULL, ?4, ?5)",
+        params![
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            event_id.as_str(),
+            updated_at
+        ],
+    )
+    .await
+    .unwrap();
+}
 
 async fn database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -18,25 +97,6 @@ async fn database() -> (TestConnection, TempDir) {
         .await
         .unwrap();
     crate::db::migrations::create_schema_connection(&conn)
-        .await
-        .unwrap();
-    (conn, dir)
-}
-
-async fn pre_v22_database() -> (TestConnection, TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("memory-v2-pre-v22.db");
-    let conn = TestConnection::open(&path);
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
-        .await
-        .unwrap();
-    create_schema(&*conn, "memory_v2_pre_v22_test")
-        .await
-        .unwrap();
-    upgrade_v20_schema(&*conn, "memory_v2_pre_v22_test")
-        .await
-        .unwrap();
-    upgrade_v21_schema(&*conn, "memory_v2_pre_v22_test")
         .await
         .unwrap();
     (conn, dir)
@@ -80,209 +140,9 @@ async fn schema_install_does_not_start_unowned_backfill() {
 }
 
 #[tokio::test]
-async fn v20_and_v21_installers_do_not_leak_v22_or_v23_schema() {
-    let (runtime, _dir) = pre_v22_database().await;
+async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
+    let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_operation_receipts")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_feedback_history_repair_progress")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_fact_relations")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(!proposal_schema_is_v22(&conn).await.unwrap());
-
-    install_v22_fresh_schema(&conn, "memory_v2_v22_fresh_test")
-        .await
-        .unwrap();
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_operation_receipts")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_feedback_history_repair_progress")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_fact_relations")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_has_column(
-            &conn,
-            "memory_v2_fact_relations",
-            "provenance_json",
-            "memory_v2_v22_fresh_test",
-        )
-        .await
-        .unwrap()
-    );
-    assert!(proposal_schema_is_v22(&conn).await.unwrap());
-
-    install_v23_fresh_schema(&conn, "memory_v2_v23_fresh_test")
-        .await
-        .unwrap();
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_has_column(
-            &conn,
-            "memory_v2_fact_relations",
-            "provenance_json",
-            "memory_v2_v23_fresh_test",
-        )
-        .await
-        .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn v20_scrubs_more_assertion_headers_than_the_engine_row_limit() {
-    const ASSERTION_COUNT: i64 = 10_001;
-    const SEED_BATCH_SIZE: i64 = 1_000;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("memory-v2-v20-large-scrub.db");
-    let runtime = TestConnection::open(&path);
-    let conn = (*runtime).clone();
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
-        .await
-        .unwrap();
-    create_schema(&conn, "memory_v2_v20_large_scrub_test")
-        .await
-        .unwrap();
-    let owner = owner_key(&owner()).unwrap();
-    let mut first = 1_i64;
-    while first <= ASSERTION_COUNT {
-        let last = (first + SEED_BATCH_SIZE - 1).min(ASSERTION_COUNT);
-        conn.execute(
-            "WITH RECURSIVE sequence(value) AS (
-                SELECT ?1
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < ?2
-             )
-             INSERT INTO memory_v2_facts(
-                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
-             )
-             SELECT printf('large-scrub.fact.%05d', value), ?3, ?4, ?5, '{}', value
-             FROM sequence",
-            params![
-                first,
-                last,
-                owner.kind,
-                owner.project_id.as_str(),
-                owner.json.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "WITH RECURSIVE sequence(value) AS (
-                SELECT ?1
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < ?2
-             )
-             INSERT INTO memory_v2_assertions(
-                assertion_id, fact_id, owner_kind, project_id, owner_json,
-                assertion_header_json, kind_json, payload_reference_json,
-                receipt_json, asserted_at, actor_id
-             )
-             SELECT printf('large-scrub.assertion.%05d', value),
-                    printf('large-scrub.fact.%05d', value),
-                    ?3, ?4, ?5,
-                    json_object(
-                        'assertion_id', printf('large-scrub.assertion.%05d', value),
-                        'payload', 'must-be-removed'
-                    ),
-                    '{}', '{}', '{}', value, NULL
-             FROM sequence",
-            params![
-                first,
-                last,
-                owner.kind,
-                owner.project_id.as_str(),
-                owner.json.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-        first = last + 1;
-    }
-
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertions
-             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL",
-        )
-        .await,
-        ASSERTION_COUNT
-    );
-    upgrade_v20_schema(&conn, "memory_v2_v20_large_scrub_test")
-        .await
-        .unwrap();
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertions
-             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL
-                OR json_type(assertion_header_json, '$.content') IS NOT NULL",
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertions").await,
-        ASSERTION_COUNT
-    );
-}
-
-#[tokio::test]
-async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
-    let (runtime, _dir) = pre_v22_database().await;
-    let conn = (*runtime).clone();
-    install_v22_fresh_schema(&conn, "memory_v2_v23_relation_upgrade_test")
-        .await
-        .unwrap();
     let owner = owner_key(&owner()).unwrap();
     conn.execute_batch(&format!(
         "INSERT INTO memory_v2_facts(
@@ -293,10 +153,11 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
             ('v23.relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
          INSERT INTO memory_v2_fact_relations(
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
-            confidence, source_label, evidence_fact_ids_json, occurred_at, updated_at
+            confidence, source_label, provenance_json, evidence_fact_ids_json,
+            occurred_at, updated_at
          ) VALUES(
             '{kind}', '{project_id}', 'v23.relation.source', 'v23.relation.target',
-            'supports', 0.8, 'fixture', '[\"v23.relation.evidence\"]', 1, 1
+            'supports', 0.8, 'fixture', '{{}}', '[\"v23.relation.evidence\"]', 1, 1
          );",
         kind = owner.kind,
         project_id = owner.project_id,
@@ -305,17 +166,11 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
     .await
     .unwrap();
 
-    conn.execute("PRAGMA user_version = 22", ()).await.unwrap();
-    assert!(
-        super::super::migrations::migrate_connection(&conn)
-            .await
-            .expect("V22 relation fixture must migrate to V23")
-    );
     assert_eq!(
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(i64::from(super::super::migrations::LATEST_VERSION))
+        Some(i64::from(super::super::migrations::SCHEMA_VERSION))
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")
@@ -386,9 +241,7 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
     .unwrap();
     let fact_id = FactId::derive(&material).unwrap();
     let identity_json = json_text(&material).unwrap();
-    insert_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10)
-        .await
-        .unwrap();
+    seed_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10).await;
     let initial = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -401,9 +254,7 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
     )
     .unwrap();
     insert_event(&conn, &owner_key, &initial, 10).await.unwrap();
-    ensure_current(&conn, &owner_key, &fact_id, initial.event_id(), 10)
-        .await
-        .unwrap();
+    seed_current_fact(&conn, &owner_key, &fact_id, initial.event_id(), 10).await;
     conn.execute(
         "INSERT INTO memory_v2_assertions(
             assertion_id, fact_id, owner_kind, project_id, owner_json,
@@ -510,15 +361,14 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
     )
     .unwrap();
     let fact_id = FactId::derive(&material).unwrap();
-    insert_fact_identity(
+    seed_fact_identity(
         &source_conn,
         &owner_key,
         &fact_id,
         &json_text(&material).unwrap(),
         100,
     )
-    .await
-    .unwrap();
+    .await;
     let mapping = LegacyFactMappingV1::new(
         owner.clone(),
         source_store,
@@ -528,9 +378,7 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
         UtcMicros(100),
     )
     .unwrap();
-    insert_mapping(&source_conn, &owner_key, &mapping)
-        .await
-        .unwrap();
+    seed_legacy_mapping(&source_conn, &owner_key, &mapping).await;
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -542,9 +390,7 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
     insert_event(&source_conn, &owner_key, &event, 100)
         .await
         .unwrap();
-    ensure_current(&source_conn, &owner_key, &fact_id, event.event_id(), 100)
-        .await
-        .unwrap();
+    seed_current_fact(&source_conn, &owner_key, &fact_id, event.event_id(), 100).await;
 
     let archive =
         export_memory_v2_owner_archive(&source_conn, MemoryV2ArchiveDatabase::Main, &owner)
