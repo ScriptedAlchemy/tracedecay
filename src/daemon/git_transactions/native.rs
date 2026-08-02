@@ -1242,7 +1242,7 @@ fn commit_intent_matches_preview(
         .args([
             "show",
             "-s",
-            "--format=%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",
+            "--format=format:%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",
             head.as_str(),
         ])
         .stdout(Stdio::piped())
