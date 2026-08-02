@@ -74,15 +74,23 @@ fn elapsed_micros(duration: Duration) -> u64 {
 }
 
 fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal {
-    let reason_code = response
+    let error_data = response
         .error
         .as_ref()
-        .and_then(|error| error.data.as_ref())
+        .and_then(|error| error.data.as_ref());
+    let reason_code = error_data
         .and_then(|data| data.get("reason_code"))
         .and_then(Value::as_str);
+    if error_data
+        .and_then(|data| data.get("status"))
+        .and_then(Value::as_str)
+        == Some("unavailable")
+    {
+        return McpToolCallTerminal::Unavailable;
+    }
     match reason_code {
         Some("tool_dispatch_deadline_exceeded") => McpToolCallTerminal::DeadlineExceeded,
-        Some("tool_dispatch_cancelled") => McpToolCallTerminal::Cancelled,
+        Some("tool_dispatch_cancelled" | "request_cancelled") => McpToolCallTerminal::Cancelled,
         Some(reason) if reason == "tool_unavailable" || reason.ends_with("_unavailable") => {
             McpToolCallTerminal::Unavailable
         }
@@ -131,11 +139,21 @@ fn finish_tool_call_response(
     terminal: Option<McpToolCallTerminal>,
 ) -> JsonRpcResponse {
     let terminal = terminal.unwrap_or_else(|| terminal_for_tool_response(&response));
-    let worker_settlement = dispatch_control.map_or("indeterminate", |control| {
-        control.worker_settlement().as_str()
-    });
+    let worker_settlement =
+        dispatch_control.map_or("joined", |control| control.worker_settlement().as_str());
     attach_execution_receipt(&mut response, timing.receipt(terminal, worker_settlement));
     response
+}
+
+/// Adds the common receipt to a `tools/call` response rejected before a
+/// dispatch controller exists (for example, transport admission or malformed
+/// tool parameters). No request-owned worker was started on this path.
+pub(super) fn finish_early_tool_call_response(
+    response: JsonRpcResponse,
+    enqueued_at: Instant,
+) -> JsonRpcResponse {
+    let timing = McpToolCallTiming::new(enqueued_at);
+    finish_tool_call_response(response, &timing, None, None)
 }
 
 struct PreparedToolCall<'a> {
@@ -383,11 +401,16 @@ impl McpServer {
         // absent-scope special case.
         let Ok(mut connection) = self.new_connection_route_state() else {
             return request.id.clone().map(|id| {
-                JsonRpcResponse::error(
+                let response = JsonRpcResponse::error(
                     id,
                     ErrorCode::InternalError,
                     "MCP connection identity is unavailable".to_owned(),
-                )
+                );
+                if matches!(classify_mcp_method(&request.method), McpMethod::ToolsCall) {
+                    finish_early_tool_call_response(response, Instant::now())
+                } else {
+                    response
+                }
             });
         };
         Box::pin(self.handle_request_for_connection(

@@ -455,27 +455,47 @@ impl McpServer {
             let response = if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
                     request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
+                        let response = JsonRpcResponse::error(
                             id,
                             ErrorCode::InternalError,
                             "TraceDecay daemon is draining for upgrade; retry the request"
                                 .to_string(),
-                        )
+                        );
+                        if request.method == "tools/call" {
+                            crate::mcp::server::requests::finish_early_tool_call_response(
+                                response,
+                                enqueued_at,
+                            )
+                        } else {
+                            response
+                        }
                     })
                 })
             } else if !project_request_admitted {
-                revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    JsonRpcResponse::error_with_data(
-                        id.clone(),
-                        ErrorCode::InternalError,
-                        "tool project route failed: project server was retired".to_owned(),
-                        Some(serde_json::json!({
-                            "tool": tool_name,
-                            "reason_code": "project_server_retired",
-                            "retryable": true,
-                            "detail": "the retained project server was replaced or revoked; retry against the current owner",
-                        })),
-                    )
+                parsed.as_ref().ok().and_then(|request| {
+                    (request.method == "tools/call").then_some(())?;
+                    request.id.clone().map(|id| {
+                        let tool_name = request
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get("name"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<unresolved>");
+                        crate::mcp::server::requests::finish_early_tool_call_response(
+                            JsonRpcResponse::error_with_data(
+                                id,
+                                ErrorCode::InternalError,
+                                "tool project route failed: project server was retired".to_owned(),
+                                Some(serde_json::json!({
+                                    "tool": tool_name,
+                                    "reason_code": "project_server_retired",
+                                    "retryable": true,
+                                    "detail": "the retained project server was replaced or revoked; retry against the current owner",
+                                })),
+                            ),
+                            enqueued_at,
+                        )
+                    })
                 })
             } else {
                 match parsed {
