@@ -16,6 +16,5 @@ mod graph_metadata;
 pub mod profile_paths;
 pub mod registry;
 pub mod resolver;
-pub mod rusqlite_parity;
 pub mod shard;
 pub mod telemetry;
