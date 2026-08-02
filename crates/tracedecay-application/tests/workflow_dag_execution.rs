@@ -10,11 +10,12 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
-    WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowOutputReferenceV1, WorkflowPlacementReceiptV1, WorkflowRunEventContextV1,
-    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
+    AttemptId, ManifestDigest, ProjectId, ProviderId, RunId, TaskId, UtcMicros, WorkArtifactId,
+    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
+    WorkflowOperationRef, WorkflowOutputArtifactV1, WorkflowOutputName, WorkflowOutputReferenceV1,
+    WorkflowPlacementReceiptV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
+    WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
     WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1, WorkflowStepV1,
 };
 
@@ -158,17 +159,24 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
         request: &WorkflowStepExecutionRequestV1,
     ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError> {
         self.requests.lock().unwrap().push(request.clone());
-        let output = if request.step_id.as_str() == "prepare" {
-            WorkflowStepOutputV1 {
-                output_name: id::<WorkflowOutputName>("context"),
-                artifact: self.prepared.clone(),
-            }
+        let (output_name, artifact) = if request.step_id.as_str() == "prepare" {
+            ("context", self.prepared.clone())
         } else {
-            WorkflowStepOutputV1 {
-                output_name: id::<WorkflowOutputName>("report"),
-                artifact: self.report.clone(),
-            }
+            ("report", self.report.clone())
         };
+        let output = WorkflowStepOutputV1::new(
+            id::<WorkflowOutputName>(output_name),
+            vec![WorkflowOutputArtifactV1::new(
+                WorkAttemptIdentityV1::new(
+                    id::<TaskId>(&format!("task.workflow.{}", request.step_id.as_str())),
+                    request.run_id.clone(),
+                    id::<AttemptId>(&format!("attempt.workflow.{}", request.step_id.as_str())),
+                )
+                .unwrap(),
+                artifact,
+            )],
+        )
+        .unwrap();
         let outputs = vec![output];
         Ok(WorkflowStepExecutionResultV1 {
             effect_receipt: WorkflowStepEffectReceiptV1::new(
@@ -254,7 +262,8 @@ fn dag_passes_exact_artifact_refs_between_steps() {
     assert_eq!(final_state.status(), WorkflowRunStatusV1::Completed);
     let requests = requests.lock().unwrap();
     assert!(requests[0].inputs.is_empty());
-    assert_eq!(requests[1].inputs, vec![prepared]);
+    assert_eq!(requests[1].inputs.len(), 1);
+    assert_eq!(requests[1].inputs[0].artifacts()[0].artifact(), &prepared);
 }
 
 #[test]
