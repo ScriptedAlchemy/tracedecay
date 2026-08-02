@@ -215,18 +215,19 @@ impl McpToolDispatchControl {
         tokio::pin!(deadline);
         tokio::pin!(future);
         tokio::select! {
-            result = &mut future => result,
+            biased;
+            () = self.cancellation.cancelled() => {
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            },
             () = &mut deadline => {
                 self.cancel(tracedecay_application::clock::now_micros());
                 self.worker_settlement
                     .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
                 Err(self.deadline_error(stage))
             }
-            () = self.cancellation.cancelled() => {
-                self.worker_settlement
-                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
-                Err(self.cancelled_error(stage))
-            },
+            result = &mut future => result,
         }
     }
 
@@ -246,7 +247,13 @@ impl McpToolDispatchControl {
         tokio::pin!(deadline);
         tokio::pin!(future);
         tokio::select! {
-            result = &mut future => result,
+            biased;
+            () = self.cancellation.cancelled() => {
+                let _ = future.await;
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            }
             () = &mut deadline => {
                 self.cancel(tracedecay_application::clock::now_micros());
                 let _ = future.await;
@@ -254,12 +261,7 @@ impl McpToolDispatchControl {
                     .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
                 Err(self.deadline_error(stage))
             }
-            () = self.cancellation.cancelled() => {
-                let _ = future.await;
-                self.worker_settlement
-                    .store(McpToolWorkerSettlement::Joined as u8, Ordering::Release);
-                Err(self.cancelled_error(stage))
-            },
+            result = &mut future => result,
         }
     }
 
@@ -274,18 +276,19 @@ impl McpToolDispatchControl {
         tokio::pin!(deadline);
         tokio::pin!(future);
         tokio::select! {
-            value = &mut future => Ok(value),
+            biased;
+            () = self.cancellation.cancelled() => {
+                self.worker_settlement
+                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
+                Err(self.cancelled_error(stage))
+            },
             () = &mut deadline => {
                 self.cancel(tracedecay_application::clock::now_micros());
                 self.worker_settlement
                     .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
                 Err(self.deadline_error(stage))
             }
-            () = self.cancellation.cancelled() => {
-                self.worker_settlement
-                    .store(McpToolWorkerSettlement::Indeterminate as u8, Ordering::Release);
-                Err(self.cancelled_error(stage))
-            },
+            value = &mut future => Ok(value),
         }
     }
 
@@ -308,6 +311,18 @@ impl McpToolDispatchControl {
                 let deadline = tokio::time::sleep_until(self.deadline_at);
                 tokio::pin!(deadline);
                 tokio::select! {
+                    biased;
+                    () = self.cancellation.cancelled() => {
+                        worker.abort();
+                        let _ = worker.await;
+                        Err(self.cancelled_error(stage))
+                    }
+                    () = &mut deadline => {
+                        self.cancel(tracedecay_application::clock::now_micros());
+                        worker.abort();
+                        let _ = worker.await;
+                        Err(self.deadline_error(stage))
+                    }
                     result = &mut worker => match result {
                         Ok(result) => result,
                         Err(error) => Err(TraceDecayError::mcp_tool_dispatch(
@@ -317,17 +332,6 @@ impl McpToolDispatchControl {
                             format!("tool '{}' worker did not complete: {error}", self.tool_name),
                         )),
                     },
-                    () = &mut deadline => {
-                        self.cancel(tracedecay_application::clock::now_micros());
-                        worker.abort();
-                        let _ = worker.await;
-                        Err(self.deadline_error(stage))
-                    }
-                    () = self.cancellation.cancelled() => {
-                        worker.abort();
-                        let _ = worker.await;
-                        Err(self.cancelled_error(stage))
-                    }
                 }
             }
         };
@@ -572,6 +576,38 @@ mod dispatch_control_tests {
         assert_eq!(reason_code, "tool_dispatch_deadline_exceeded");
         assert_eq!(stage, "project_selection");
         assert!(retryable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_wins_when_handler_becomes_ready_on_the_same_tick() {
+        let cancellation = CancellationSignal::active("cancel.dispatch.race").unwrap();
+        let control = McpToolDispatchControl::new(
+            "tracedecay_deadline_race_fixture",
+            McpToolExecutionPolicyV1::interactive_read(20),
+            cancellation,
+        )
+        .unwrap();
+        let handler_deadline = control.deadline_at;
+        let dispatch_control = control.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_control
+                .run(McpToolDispatchStage::Handler, async move {
+                    tokio::time::sleep_until(handler_deadline).await;
+                    Ok::<(), crate::errors::TraceDecayError>(())
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(20)).await;
+
+        let error = dispatch
+            .await
+            .expect("dispatch task must not panic")
+            .expect_err("deadline must win over same-tick handler completion");
+        assert_eq!(
+            error.mcp_tool_dispatch_context().map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded")
+        );
     }
 
     #[tokio::test]
