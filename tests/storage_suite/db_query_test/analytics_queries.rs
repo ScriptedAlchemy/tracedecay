@@ -1388,6 +1388,129 @@ async fn health_file_aggregates_match_rust_fold() {
 }
 
 #[tokio::test]
+async fn health_file_aggregates_match_writer_query_without_writer_lane() {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    let db = setup_db().await;
+    let mut dead_fn = sample_node("health-dead-fn", "dead_fn", "src/a.rs");
+    dead_fn.visibility = Visibility::Private;
+    let mut dead_method = sample_node("health-dead-method", "dead_method", "src/a.rs");
+    dead_method.kind = NodeKind::Method;
+    dead_method.visibility = Visibility::Private;
+    let mut public_fn = sample_node("health-public", "public_fn", "src/a.rs");
+    public_fn.visibility = Visibility::Pub;
+    let mut main_fn = sample_node("health-main", "main", "src/a.rs");
+    main_fn.visibility = Visibility::Private;
+    let mut live_fn = sample_node("health-live", "live_fn", "src/a.rs");
+    live_fn.visibility = Visibility::Private;
+    let mut test_fn = sample_node("health-test", "test_helper", "src/a.rs");
+    test_fn.visibility = Visibility::Private;
+    let mut annotated_fn = sample_node("health-annotated", "annotated_fn", "src/b.rs");
+    annotated_fn.visibility = Visibility::Private;
+    let mut test_marker = sample_node("health-marker", "tokio::test", "src/b.rs");
+    test_marker.kind = NodeKind::AnnotationUsage;
+    test_marker.visibility = Visibility::Private;
+    let mut scoped_dead = sample_node("health-scoped-dead", "scoped_dead", "tests/b.rs");
+    scoped_dead.visibility = Visibility::Private;
+    db.insert_nodes(&[
+        dead_fn,
+        dead_method,
+        public_fn,
+        main_fn,
+        live_fn,
+        test_fn,
+        annotated_fn,
+        test_marker,
+        scoped_dead,
+    ])
+    .await
+    .expect("insert health dead-code fixture nodes");
+    db.insert_edges(&[
+        Edge {
+            source: "health-marker".to_string(),
+            target: "health-annotated".to_string(),
+            kind: EdgeKind::Annotates,
+            line: Some(1),
+        },
+        Edge {
+            source: "health-main".to_string(),
+            target: "health-live".to_string(),
+            kind: EdgeKind::Uses,
+            line: Some(1),
+        },
+    ])
+    .await
+    .expect("insert health dead-code fixture edge");
+
+    let expected: HashMap<String, usize> = tracedecay::graph::GraphQueryManager::new(&db)
+        .find_dead_code(&[NodeKind::Function, NodeKind::Method], false, None)
+        .await
+        .expect("find_dead_code parity query")
+        .into_iter()
+        .fold(HashMap::new(), |mut counts, node| {
+            *counts.entry(node.file_path).or_insert(0) += 1;
+            counts
+        });
+
+    // Holding the writer lane proves the health aggregate never requests it.
+    let _writer_lane = db.writer().await;
+    let actual: HashMap<String, usize> =
+        tokio::time::timeout(Duration::from_secs(2), db.health_file_aggregates())
+            .await
+            .expect("health aggregate must not wait for the writer lane")
+            .expect("health dead-code reader query")
+            .into_iter()
+            .filter(|aggregate| aggregate.dead_function_methods > 0)
+            .map(|aggregate| (aggregate.file_path, aggregate.dead_function_methods))
+            .collect();
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn health_file_aggregates_page_across_internal_boundary() {
+    const FILES: usize = 2_001;
+
+    let db = setup_db().await;
+    let nodes: Vec<Node> = (0..FILES)
+        .map(|index| {
+            let mut node = sample_node(
+                &format!("health-page-node-{index}"),
+                &format!("health_page_fn_{index}"),
+                &format!("src/health_page_{index:04}.rs"),
+            );
+            node.visibility = Visibility::Private;
+            node
+        })
+        .collect();
+    db.insert_nodes(&nodes)
+        .await
+        .expect("insert health pagination fixture");
+
+    let aggregates = db
+        .health_file_aggregates()
+        .await
+        .expect("health_file_aggregates pagination");
+    assert_eq!(aggregates.len(), FILES);
+    assert_eq!(
+        aggregates.iter().map(|a| a.function_methods).sum::<usize>(),
+        FILES
+    );
+    assert_eq!(
+        aggregates
+            .iter()
+            .map(|a| a.dead_function_methods)
+            .sum::<usize>(),
+        FILES
+    );
+    assert!(
+        aggregates
+            .windows(2)
+            .all(|pair| pair[0].file_path < pair[1].file_path)
+    );
+}
+
+#[tokio::test]
 async fn cross_file_fan_matches_rust_fold() {
     let (_dir, db) = fresh_graph_db().await;
     let nodes = metric_fixture_nodes();

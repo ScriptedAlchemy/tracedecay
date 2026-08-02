@@ -229,16 +229,29 @@ impl DaemonEngine {
     /// capability are eligible. `initialize` and `tools/list` mark the client
     /// current without emitting because those requests already fetch the new
     /// generation's catalog.
+    ///
+    /// `catalog_is_provisional` marks a discovery answer served from the
+    /// warming bootstrap route, before the project graph is open. That catalog
+    /// is not the published one — its `tracedecay_context` budget is the
+    /// conservative warming budget rather than the node-count budget — so it
+    /// must not mark the client current. Leaving such a client unmarked is
+    /// exactly what arms its notification for the first request after warm-up
+    /// completes; marking it would strand the provisional catalog for the rest
+    /// of the daemon's life, because this set is never otherwise cleared.
     pub(super) async fn claim_catalog_refresh(
         &self,
         handshake: &DaemonHandshake,
         request_line: &str,
+        catalog_is_provisional: bool,
     ) -> Option<CatalogRefreshClientKey> {
         if !valid_client_instance_id(&handshake.client_instance_id) {
             return None;
         }
         let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
         if request.method == HOOK_EVENT_METHOD {
+            return None;
+        }
+        if catalog_is_provisional {
             return None;
         }
         let catalog_is_current = matches!(request.method.as_str(), "initialize" | "tools/list");
@@ -414,9 +427,9 @@ impl DaemonEngine {
             return Ok(server);
         }
         let (project_path, _) = Self::project_route(handshake)?;
-        // Bound only the wait behind an unrelated writer. An uncontended open
-        // is this request's own work and must run to completion.
-        let contended = self.store_administration.writer_is_busy();
+        // Foreground requests must never pin a connection while a cold project
+        // warm-up runs. The open task remains tracked and continues in the
+        // background after this bounded wait expires.
         let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
         match claim {
             ProjectOpenTaskClaim::InFlight(mut state) => {
@@ -453,13 +466,7 @@ impl DaemonEngine {
                         }
                     }
                 };
-                if contended {
-                    timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication)
-                        .await
-                        .map_err(|_| project_warming_error(&project_path))?
-                } else {
-                    publication.await
-                }
+                wait_for_project_open_publication(&project_path, publication).await
             }
             ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
             ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
