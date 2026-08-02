@@ -1762,7 +1762,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Occupy this worktree's active-generation decode barrier, reproducing the
     /// window in which a new generation is being decoded/activated.
     #[cfg(test)]
-    pub(super) fn hold_active_decode(&self) -> HeldActiveDecodeV1 {
+    fn hold_active_decode(&self) -> HeldActiveDecodeV1 {
         self.publication.hold_active_decode()
     }
 

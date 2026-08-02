@@ -1535,12 +1535,12 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     );
     let same_generation = scheduler.latest_complete().expect("same latest generation");
     assert!(
-        Arc::ptr_eq(&latest.query_owners, &same_generation.query_owners),
-        "repeated queries must reuse generation-bound query projections"
+        Arc::ptr_eq(&latest.serving, &same_generation.serving),
+        "repeated queries must reuse generation-bound serving authority"
     );
     assert!(
-        same_generation.query_owners.get().is_some(),
-        "the shared query projection cache must remain populated"
+        same_generation.serving.get().is_some(),
+        "the shared serving authority must remain populated"
     );
 }
 
