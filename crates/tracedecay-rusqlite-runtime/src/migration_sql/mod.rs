@@ -21,8 +21,8 @@ use tracedecay_store::{
 use crate::{
     PersistentWriter,
     reader::{
-        ReaderAcquireError, ReaderPool, ReaderQueryExecutor, StoreSizeTelemetrySample,
-        TableSizeTelemetrySample,
+        ReaderAcquireError, ReaderPool, ReaderPoolSnapshot, ReaderQueryExecutor,
+        StoreSizeTelemetrySample, TableSizeTelemetrySample,
     },
 };
 
@@ -72,6 +72,7 @@ type MigrationSnapshotFactory = dyn Fn(OperationPriorityV1, Duration) -> Result<
     + Sync;
 type MigrationHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> + Send + Sync;
+type ReaderPoolOccupancyRead = dyn Fn() -> Option<ReaderPoolSnapshot> + Send + Sync;
 type MigrationSnapshotQuery =
     dyn FnMut(MigrationSqlStatement) -> Result<MigrationSqlRows, MigrationSqlError> + Send;
 type StoreSizeTelemetryRead = dyn Fn(
@@ -97,6 +98,7 @@ pub struct MigrationSqlHandle {
     health_snapshot: Arc<MigrationHealthSnapshotFactory>,
     store_size_telemetry: Arc<StoreSizeTelemetryRead>,
     table_size_telemetry: Arc<TableSizeTelemetryRead>,
+    reader_pool_occupancy: Arc<ReaderPoolOccupancyRead>,
     last_insert_rowid: Arc<AtomicI64>,
     write_authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
 }
@@ -150,6 +152,7 @@ impl MigrationSqlHandle {
         let health_snapshot_readers = readers.downgrade();
         let store_size_readers = readers.downgrade();
         let table_size_readers = readers.downgrade();
+        let occupancy_readers = readers.downgrade();
         Self {
             binding,
             locator,
@@ -200,6 +203,9 @@ impl MigrationSqlHandle {
                     })?
                     .read_table_sizes(max_wait, interrupted)
             }),
+            reader_pool_occupancy: Arc::new(move || {
+                occupancy_readers.upgrade().map(|pool| pool.snapshot())
+            }),
             last_insert_rowid: Arc::new(AtomicI64::new(0)),
             write_authority: None,
         }
@@ -223,6 +229,7 @@ impl MigrationSqlHandle {
             health_snapshot: Arc::clone(&self.health_snapshot),
             store_size_telemetry: Arc::clone(&self.store_size_telemetry),
             table_size_telemetry: Arc::clone(&self.table_size_telemetry),
+            reader_pool_occupancy: Arc::clone(&self.reader_pool_occupancy),
             last_insert_rowid: Arc::clone(&self.last_insert_rowid),
             write_authority: None,
         }
@@ -241,6 +248,14 @@ impl MigrationSqlHandle {
 
     pub fn last_insert_rowid(&self) -> i64 {
         self.last_insert_rowid.load(Ordering::Acquire)
+    }
+
+    /// Live reader-pool occupancy, or `None` once the pool has been closed.
+    ///
+    /// This takes no lease and runs no query: saturation has to stay
+    /// observable precisely when no reader is available to answer with.
+    pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
+        (self.reader_pool_occupancy)()
     }
 
     pub fn store_size_telemetry<F>(

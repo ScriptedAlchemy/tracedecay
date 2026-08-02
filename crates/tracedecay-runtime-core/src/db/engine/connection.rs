@@ -7,6 +7,7 @@ use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
     MigrationSqlTransaction as RuntimeTransaction,
 };
+pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
@@ -33,6 +34,7 @@ pub(super) trait Runtime: Send + Sync {
         priority: OperationPriorityV1,
     ) -> Result<MigrationSqlReadSnapshot>;
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
+    fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
     fn begin_immediate(&self) -> Result<RuntimeTransaction>;
@@ -86,6 +88,10 @@ impl Runtime for MigrationSqlHandle {
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
         self.begin_health_read_snapshot(READER_WAIT)
             .map_err(Into::into)
+    }
+
+    fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
+        self.reader_pool_occupancy()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -239,6 +245,15 @@ impl Connection {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn last_insert_rowid(&self) -> i64 {
         self.runtime.last_insert_rowid()
+    }
+
+    /// Live reader-pool occupancy for the store behind this connection.
+    ///
+    /// Lock-free and lease-free, so it still answers while the pool is
+    /// saturated — which is the only moment the numbers matter.
+    #[must_use]
+    pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
+        self.runtime.reader_pool_occupancy()
     }
 
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
