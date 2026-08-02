@@ -9,7 +9,12 @@ use super::super::lcm_args::{
     parse_message_search_provider_scope, parse_message_search_scope, parse_session_message_type,
 };
 use super::super::sessions_for::render_message_search_md;
-use super::contract::*;
+use super::contract::{
+    SessionRetrievalCommand, SessionRetrievalFilters, SessionRetrievalPageView,
+    SessionRetrievalProjectSelector, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
+    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass, SessionTemporalMetadataView,
+};
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
@@ -19,7 +24,8 @@ use crate::mcp::tools::ToolResult;
 use crate::mcp::tools::handlers::support::{argument_error, tool_json_with_md};
 use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::{
-    ProviderScope, SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
+    ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchScope,
+    SessionSearchTimeRange,
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ranking::DiversityLimits;
@@ -149,7 +155,7 @@ fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Value {
     {
         map.insert(
             "git_filter".to_string(),
-            serde_json::to_value(&request.git_filter).unwrap_or(Value::Null),
+            git_filter_value(&request.git_filter),
         );
         map.insert("git_filter_applied".to_string(), Value::Bool(true));
     }
@@ -172,6 +178,20 @@ fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Value {
         map.insert("workflow_run_parent_session".to_string(), Value::Null);
     }
     payload
+}
+
+fn git_filter_value(git_filter: &GitScopeFilter) -> Value {
+    let mut value = serde_json::Map::new();
+    if let Some(branch) = &git_filter.branch {
+        value.insert("branch".to_string(), Value::String(branch.clone()));
+    }
+    if let Some(worktree) = &git_filter.worktree {
+        value.insert("worktree".to_string(), Value::String(worktree.clone()));
+    }
+    if let Some(commit) = &git_filter.commit {
+        value.insert("commit".to_string(), Value::String(commit.clone()));
+    }
+    Value::Object(value)
 }
 
 fn temporal_value(
@@ -204,24 +224,33 @@ fn temporal_value(
     value
 }
 
-const fn refresh_next_action() -> SessionRetrievalNextActionView {
-    SessionRetrievalNextActionView {
-        kind: "session_refresh",
-        tool: "tracedecay_session_refresh",
-        action: "begin",
-        reason: "the authorized session-temporal store does not satisfy the requested freshness precondition",
+fn message_search_results_value(results: Vec<SessionMessageSearchResult>) -> Result<Value> {
+    let mut values = Vec::with_capacity(results.len());
+    for result in results {
+        let score =
+            serde_json::Number::from_f64(result.score).ok_or_else(|| TraceDecayError::Config {
+                message: "session retrieval result score must be finite".to_string(),
+            })?;
+        let mut value = serde_json::Map::new();
+        value.insert("session".to_string(), serde_json::to_value(result.session)?);
+        value.insert("message".to_string(), serde_json::to_value(result.message)?);
+        value.insert("score".to_string(), Value::Number(score));
+        values.push(Value::Object(value));
     }
+    Ok(Value::Array(values))
 }
 
 fn apply_page(
     payload: &mut Value,
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
-) {
+) -> Result<()> {
     let SessionRetrievalPageView { results, temporal } = page;
-    let Some(map) = payload.as_object_mut() else {
-        return;
-    };
+    let map = payload
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "message search payload must be an object".to_string(),
+        })?;
     if let Some(root) = &temporal.authorized_root {
         map.insert(
             "selected_project_root".to_string(),
@@ -231,9 +260,10 @@ fn apply_page(
     map.insert("count".to_string(), json!(results.len()));
     map.insert(
         "results".to_string(),
-        serde_json::to_value(results).unwrap_or_else(|_| json!([])),
+        message_search_results_value(results)?,
     );
     map.insert("temporal".to_string(), temporal_value(&temporal, freshness));
+    Ok(())
 }
 
 fn apply_temporal(
@@ -261,7 +291,12 @@ fn apply_refresh_guidance(payload: &mut Value, required: bool) {
     map.insert(
         "next_action".to_string(),
         if required {
-            serde_json::to_value(refresh_next_action()).unwrap_or(Value::Null)
+            json!({
+                "kind": "session_refresh",
+                "tool": "tracedecay_session_refresh",
+                "action": "begin",
+                "reason": "the authorized session-temporal store does not satisfy the requested freshness precondition",
+            })
         } else {
             Value::Null
         },
@@ -307,12 +342,12 @@ fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailab
 fn render_service_outcome(
     request: &MessageSearchRequest<'_>,
     outcome: SessionRetrievalServiceOutcome,
-) -> Value {
+) -> Result<Value> {
     let mut payload = base_message_search_payload(request);
     match outcome {
         SessionRetrievalServiceOutcome::Complete { page, freshness } => {
             payload["outcome"] = json!("complete");
-            apply_page(&mut payload, page, freshness);
+            apply_page(&mut payload, page, freshness)?;
         }
         SessionRetrievalServiceOutcome::CompleteZero {
             temporal,
@@ -342,7 +377,7 @@ fn render_service_outcome(
                     freshness,
                     SessionDataFreshness::Stored { .. } | SessionDataFreshness::Partial { .. }
                 );
-            apply_page(&mut payload, page, freshness);
+            apply_page(&mut payload, page, freshness)?;
             apply_refresh_guidance(&mut payload, refresh_required);
         }
         SessionRetrievalServiceOutcome::WrongScope => apply_typed_error(
@@ -406,7 +441,7 @@ fn render_service_outcome(
             "session retrieval was cancelled",
         ),
     }
-    payload
+    Ok(payload)
 }
 
 fn optional_owned_string(value: Option<&Value>, name: &str) -> Result<Option<String>> {
@@ -611,7 +646,7 @@ pub(crate) async fn handle_message_search_with_service(
             SessionRetrievalUnavailable::service_not_configured(),
         ),
     };
-    let mut payload = render_service_outcome(&request, outcome);
+    let mut payload = render_service_outcome(&request, outcome)?;
     payload["store_scope"] = json!(store_scope.as_str());
     if matches!(store_scope, SessionRetrievalStoreScope::Project)
         && project_root.is_some()

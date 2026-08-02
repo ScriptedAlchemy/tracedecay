@@ -18,6 +18,8 @@ use super::{
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
 };
+use crate::errors::TraceDecayError;
+use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 use tracedecay_temporal_query::ports::{TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1};
 
 #[derive(Default)]
@@ -458,6 +460,64 @@ async fn partial_outcome_preserves_results_temporal_metadata_and_omissions() {
     assert_eq!(
         payload["temporal"]["explanations"][0]["summary"],
         "exact phrase and current evidence"
+    );
+}
+
+#[tokio::test]
+async fn non_finite_result_score_is_rejected_instead_of_rendered_as_null() {
+    let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Complete {
+        page: SessionRetrievalPageView {
+            results: vec![SessionMessageSearchResult {
+                session: SessionRecord {
+                    provider: "claude".to_string(),
+                    session_id: "session-non-finite".to_string(),
+                    project_key: "project".to_string(),
+                    project_path: "/project".to_string(),
+                    title: None,
+                    started_at: Some(10),
+                    ended_at: None,
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+                message: SessionMessageRecord {
+                    provider: "claude".to_string(),
+                    message_id: "message-non-finite".to_string(),
+                    session_id: "session-non-finite".to_string(),
+                    role: "assistant".to_string(),
+                    timestamp: Some(20),
+                    ordinal: 1,
+                    text: "result must not disappear".to_string(),
+                    kind: None,
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: None,
+                },
+                score: f64::NAN,
+            }],
+            temporal: temporal(),
+        },
+        freshness: SessionDataFreshness::Fresh,
+    });
+
+    let error = handle_message_search_with_service(
+        Some(Path::new("/repo")),
+        SessionRetrievalStoreScope::Project,
+        json_args(),
+        Some(&service),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, TraceDecayError::Config { .. }), "{error}");
+    assert!(
+        error.to_string().contains("score must be finite"),
+        "{error}"
     );
 }
 
