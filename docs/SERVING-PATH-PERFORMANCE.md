@@ -56,16 +56,43 @@ as a rebuild ran, while callers/callees/grep answered from a published
 generation within seconds.
 
 `execute_query_search` now closes that gap: when the ready gate abstains it
-falls back to `latest_complete_serving_for_scope` and marks the
-exact/lexical/graph lanes `stale` against the generation that answered. The
-fallback is O(1) and never blocks — the last complete generation is already
-held in the per-worktree `serving_generation` `RwLock`, seeded at mount and
-rewritten by every publication, so it needs no re-read, no gix status, and no
-scheduler lock. Fail-closed behavior is unchanged in both directions: the
-fallback still requires an exact scope match, and when no complete generation
-exists at all the typed `GenerationUnavailable` fail-fast is preserved rather
-than degraded into an empty answer. When a ready generation does exist the
-fresh path is untouched, so a warm response is byte-identical.
+serves `latest_complete_serving_for_scope` and marks the exact/lexical/graph
+lanes `stale` against the generation that answered. The fallback is O(1) and
+never blocks — the last complete generation is already held in the per-worktree
+`serving_generation` `RwLock`, seeded at mount and rewritten by every
+publication, so it needs no re-read, no gix status, and no scheduler lock.
+Fail-closed behavior is unchanged in both directions: the fallback still
+requires an exact scope match, and when no complete generation exists at all the
+typed `GenerationUnavailable` fail-fast is preserved rather than degraded into
+an empty answer. When a ready generation does exist the fresh path is untouched,
+so a warm response is byte-identical.
+
+### Await-new never preempts serve-old
+
+Having a fallback is not enough; the **order** in which resolution reaches it
+is itself load-bearing. Asking the ready gate first — as the original fallback
+did — meant a query entered the single-flight sealed-generation decode
+(`DecodedGenerationCacheV1`) before it could discover it already had a servable
+generation. Whenever a new generation was being decoded/activated, every query
+parked on that O(store) sweep and the fallback was unreachable for its whole
+duration. Measured live: search served 190–220ms right after restart, then
+blocked 45s+ during the next full rebuild.
+
+Resolution therefore checks the O(1) `serving_generation` **first**. When it
+holds a complete generation, freshness is decided by
+`latest_complete_ready_decoded_for_scope` — the same ready gate under
+`GenerationDecodeAdmissionV1::AlreadyDecoded`, which serves the active
+generation only if it is already decoded and *abstains* rather than claiming a
+lease or parking. Abstention means stale, not failure, so the query answers
+from the generation it already had. Only a query with nothing servable resolves
+under `AwaitDecode`, where joining the in-flight decode is the correct and
+still-single-flight behavior, and where absence remains the typed fail-fast.
+
+The same rule governs `latest_complete_fresh` (the grep/context/callers ladder):
+a reconcile installs the generation it publishes directly, so the decode-free
+read normally hits; when it abstains the path serves the retained generation and
+awaits the decode only when nothing is servable. Activation still owns the
+decode — queries simply stop queuing on it while something can answer.
 
 ## The invariant
 
