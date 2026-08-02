@@ -2697,9 +2697,9 @@ fn host_bundle_error_for_agent(
         && error == tracedecay::agents::host_bundle_v2::HostBundleError::UnsupportedCapability
     {
         return tracedecay::errors::TraceDecayError::Config {
-            message: "Codex plugin activation is unavailable through a supported non-interactive \
-                      host surface. The source bundle was not treated as installed; activate \
-                      tracedecay from Codex's plugin UI, then re-run doctor."
+            message: "Codex plugin activation could not be completed through a supported host \
+                      surface. The source bundle was staged but not recorded as enabled; run \
+                      `codex plugin add tracedecay@personal`, then re-run doctor."
                 .to_string(),
         };
     }

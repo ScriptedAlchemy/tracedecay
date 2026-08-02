@@ -1525,19 +1525,15 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
     fn preflight(
         &mut self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-        request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
+        _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         self.refuse_ambiguous_opencode_analyzer(component_set)?;
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             self.should_apply = false;
             return Ok(());
         }
-        if (self.project_path.is_none()
-            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
-            && request.lifecycle.operation
-                != crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall)
-            || (self.project_path.is_some()
-                && component_set.host == crate::agents::host_bundle_v2::HostKindV1::CursorDesktop)
+        if self.project_path.is_some()
+            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::CursorDesktop
         {
             return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
         }
