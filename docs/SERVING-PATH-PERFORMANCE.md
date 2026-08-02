@@ -240,24 +240,62 @@ of Principle 5 that this measurement did not introduce.
 
 ## Open breach: the vector-generation store violates Principle 5
 
-`DatabaseVectorGenerationStoreV1` persists its entire state — every staged and
-published generation, including every `Vec<f32>` — as one JSON blob in a single
-SQLite row. Every `commit_batch` and `publish_generation` deserializes that
-blob, clones the staged generation, mutates, and re-serializes it. At 150K
-chunks × 768 dimensions the float payload alone is ~460MB in memory and over a
-gigabyte rendered as JSON decimal text, and several copies are live at once.
+`DatabaseVectorGenerationStoreV1` persists its entire state as one JSON blob in
+a single SQLite row. Every `commit_batch` and `publish_generation` deserializes
+that blob, clones the staged generation, mutates, and re-serializes it.
 
-Compounding it, `PhysicalVectorBytePoolV1` — the interning pool the published
-state resolves vector bytes through — is a **process-global
-`OnceLock<Arc<Mutex<BTreeMap<…>>>>` with an `intern` path and no eviction
-path**. It is shared by every project in the daemon and grows for the lifetime
-of the process. Together these are the most likely explanation for the 14–37GB
-daemon RSS observed during rebuilds, and no amount of batching upstream can
-bound them.
+### What has landed
 
-The store already has the shape needed to fix this: `commit_batch` takes an
-`expected_checkpoint` and tracks `completed_batches`, so bounded incremental
-commits are supported by the contract — they are simply not used (production
-performs exactly one whole-corpus commit). The fix is row-per-vector storage
-plus a bounded, evictable byte pool, which is a store lane, not a projector
-change.
+The float payload no longer travels in that blob. Projected vectors are stored
+row-per-vector in `semantic_vector_payload_v1`, content-addressed by the
+projector's `output_digest`, written in bounded statement groups inside the same
+transaction as the state swap, and resolved back through bounded `IN (...)`
+reads. `PhysicalVectorBytePoolV1` now sweeps dead weak handles on a fixed intern
+cadence and caps its key set, so retiring a generation releases both its bytes
+and its keys. Three whole-corpus deep copies are gone: the reuse-index rebuild
+no longer clones every published generation, the persistent `commit_batch` no
+longer clones the prepared batch to satisfy a retryable closure, and
+publish/activate/deactivate mutate the published state in place instead of
+cloning it.
+
+Nothing about identity moved. Every digest — `output_digest`, the generation
+manifest digest, batch publication digests — is derived by the projector from
+domain values, never from the store's encoding, and
+`ProjectedChunkVectorV1::validate` re-derives `output_digest` from the hydrated
+floats on every load, so a mis-bound payload fails closed rather than serving.
+A pre-migration document is still readable and is migrated forward on open
+under the existing revision CAS, so a crash leaves the original blob intact.
+
+Measured A/B on identical code with only the encoding differing (2,000 chunks ×
+768 dimensions, debug build): peak process RSS 227MB inline versus 125MB
+row-per-vector, for the *same* published generation digest. Above the ~66MB
+process floor that is 161MB versus 59MB — a 6MB float corpus was costing 155MB
+to persist.
+
+### What remains
+
+The state document is still **O(store) in metadata**, and that is now the
+binding constraint. Per-vector row metadata, the per-chunk projection receipts
+(`ProjectionBatchReceiptV1::receipts`), `plan.expected_chunk_ids`,
+`committed_chunk_effects`, and the batch's changed-chunk set all scale with the
+corpus and are all still rendered into one JSON value bound as a single SQL
+parameter. The runtime caps a request at 64MB (`MAX_REQUEST_BYTES`), so a
+whole-corpus commit fails outright past a corpus-size ceiling:
+
+| encoding | 2,000 chunks | 5,000 | 10,000 | 20,000 |
+|---|---|---|---|---|
+| inline floats | ok | `RequestLimitExceeded` | — | — |
+| row-per-vector | ok | ok | ok | `RequestLimitExceeded` |
+
+A 150K-chunk generation therefore still cannot be persisted at all. Two things
+close it, and they are independent:
+
+- Move per-vector row metadata and per-chunk receipts into their own tables,
+  leaving the state document with generation-level identity only. The serde
+  adapters that elide the float payload today are the pattern: serde elides,
+  and a separate context-carrying walk does the row I/O.
+- Use the incremental commit path production already has available.
+  `commit_batch` takes an `expected_checkpoint` and tracks `completed_batches`,
+  so bounded incremental commits are supported by the contract — production
+  simply performs exactly one whole-corpus commit. Splitting it bounds both the
+  document and the live float set per commit.
