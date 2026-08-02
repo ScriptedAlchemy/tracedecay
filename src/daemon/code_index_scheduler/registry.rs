@@ -1202,8 +1202,47 @@ impl CodeIndexSchedulerRegistryV1 {
                             .map(|latest| (latest, None));
                     }
                 };
-                // Dequeue instant for the query-admission path: the scheduler lock
-                // is held and reconcile work starts on the next line.
+                // Serve-old-first, continued: winning the scheduler lock must not
+                // mean paying for the rebuild. `ensure_fresh_for_query` reconciles
+                // inline, and that reconcile is O(store) with no bound of its own —
+                // a live `tracedecay_context` call sat on this exact line for 900
+                // seconds while the daemon ground a failing semantic publish loop,
+                // and only the client's own timeout ended it. The ladder's checks
+                // are cheap; its remedy belongs to the background worker.
+                //
+                // The git authority is still proven inline, because serving
+                // retained bytes under an identity nothing can confirm is the one
+                // thing the old inline reconcile fail-closed on.
+                if !scheduler.git_authority_available() {
+                    return None;
+                }
+                let servable = serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .or_else(|| scheduler.latest_complete_already_decoded());
+                if let Some(latest) = servable {
+                    // Something is servable, so freshness is a background concern.
+                    // Only record an arrival when the ladder actually asked for a
+                    // reconcile; a quiet repository must not turn every read into
+                    // a wake, and an unattributed arrival would fabricate a
+                    // cadence sample for work that never ran.
+                    if scheduler.request_fresh_for_query_background() {
+                        Self::note_wake(
+                            &pending_wake_micros,
+                            &pending_wake_trigger,
+                            &wake,
+                            CodeIndexCadenceTriggerV1::QueryAdmission,
+                        );
+                    }
+                    *serving_generation
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+                    return Some((latest, None));
+                }
+                // Nothing is servable at all: this is cold open, the one
+                // sanctioned slow path in Principle 6, and the inline ladder is
+                // what converges it. Dequeue instant for that path below.
                 let started_micros = now_micros().0;
                 let outcome = scheduler.ensure_fresh_for_query().ok()?;
                 // Await-new must never preempt serve-old. A reconcile installs
