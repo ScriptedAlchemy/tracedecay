@@ -916,6 +916,23 @@ async fn retained_project_graph(
     Some(server.cg().await)
 }
 
+/// Consecutive project-open failures after which the scheduler loop exits.
+///
+/// The loop is respawned by the next scheduler reconcile, so this bounds one
+/// futile retry streak rather than retiring the automation lane.
+const SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION: u32 = 6;
+
+/// Longest gap between project-open retries.
+const SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING: Duration = Duration::from_mins(5);
+
+/// Exponential backoff for repeated project-open failures, from one tick.
+fn scheduler_project_open_backoff(consecutive_failures: u32) -> Duration {
+    let base = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
+    let steps = consecutive_failures.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32.checked_shl(steps).unwrap_or(u32::MAX))
+        .min(SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_automation_scheduler_loop(
     project_path: PathBuf,
@@ -928,11 +945,15 @@ async fn run_automation_scheduler_loop(
     generation: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)] exit_barrier: Option<Arc<AutomationSchedulerExitBarrier>>,
 ) {
+    let mut consecutive_open_failures: u32 = 0;
     loop {
         let observed_generation = generation.load(std::sync::atomic::Ordering::Acquire);
         match automation_scheduler_has_work_for_project(&cg, &handshake).await {
-            Ok(true) => {}
+            Ok(true) => {
+                consecutive_open_failures = 0;
+            }
             Ok(false) => {
+                consecutive_open_failures = 0;
                 #[cfg(test)]
                 if let Some(barrier) = &exit_barrier {
                     barrier.pause_after_disabled_read().await;
@@ -971,19 +992,52 @@ async fn run_automation_scheduler_loop(
                 // A transient failure (e.g. a momentarily corrupt jobs file or
                 // a project that cannot be opened this instant) must not
                 // permanently kill the scheduler loop. Surface the cause and
-                // retry on the next tick instead of exiting for good.
+                // retry instead of exiting for good.
+                //
+                // But retrying at a fixed tick forever is its own defect: a
+                // project that can never be opened re-attempts every tick for
+                // the daemon's life and logs identically every time. Back the
+                // retries off, and escalate to a terminal exit once the failure
+                // is clearly not transient. A finished scheduler is dropped
+                // from the registry, so the next reconcile respawns this loop —
+                // the exit costs a retry, not the lane.
+                consecutive_open_failures = consecutive_open_failures.saturating_add(1);
                 log_daemon_event(
                     "scheduler_project_open",
                     &[
                         ("project", project_path.display().to_string()),
                         ("outcome", "error".to_string()),
                         ("error", e.to_string()),
+                        (
+                            "consecutive_failures",
+                            consecutive_open_failures.to_string(),
+                        ),
                     ],
                 );
-                tokio::time::sleep(Duration::from_secs(
-                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-                ))
-                .await;
+                if consecutive_open_failures >= SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION {
+                    tracing::warn!(
+                        event = "scheduler_project_open",
+                        outcome = "escalated",
+                        project = %project_path.display(),
+                        consecutive_failures = consecutive_open_failures,
+                        error = %e,
+                        "automation scheduler could not open its project repeatedly; \
+                         exiting this loop, the next reconcile respawns it"
+                    );
+                    log_daemon_event(
+                        "scheduler_exit",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("reason", "project_open_failed".to_string()),
+                        ],
+                    );
+                    break;
+                }
+                let backoff = scheduler_project_open_backoff(consecutive_open_failures);
+                tokio::select! {
+                    () = tokio::time::sleep(backoff) => {}
+                    () = wake.notified() => {}
+                }
                 continue;
             }
         }
@@ -1735,5 +1789,56 @@ async fn run_user_jobs_scheduler_pass(
                 first_error.get_or_insert(e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduler_project_open_backoff_tests {
+    use super::{
+        SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING, SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION,
+        scheduler_project_open_backoff,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn backoff_starts_at_one_tick_and_grows() {
+        let tick = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert_eq!(scheduler_project_open_backoff(1), tick);
+        assert_eq!(scheduler_project_open_backoff(2), tick * 2);
+        assert_eq!(scheduler_project_open_backoff(3), tick * 4);
+    }
+
+    #[test]
+    fn backoff_is_capped_and_never_regresses() {
+        let mut previous = Duration::ZERO;
+        for attempt in 1..=64 {
+            let backoff = scheduler_project_open_backoff(attempt);
+            assert!(backoff >= previous, "backoff must be monotonic");
+            assert!(
+                backoff <= SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING,
+                "backoff must stay under its ceiling"
+            );
+            previous = backoff;
+        }
+        assert_eq!(
+            scheduler_project_open_backoff(64),
+            SCHEDULER_PROJECT_OPEN_BACKOFF_CEILING
+        );
+    }
+
+    #[test]
+    fn escalation_bounds_the_total_futile_retry_window() {
+        let total: Duration = (1..=SCHEDULER_PROJECT_OPEN_FAILURE_ESCALATION)
+            .map(scheduler_project_open_backoff)
+            .sum();
+        let tick = Duration::from_secs(crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS);
+        assert!(
+            total > tick,
+            "escalation must allow more than one retry before exiting"
+        );
+        assert!(
+            total <= Duration::from_hours(1),
+            "a futile streak must not run for hours before escalating"
+        );
     }
 }
