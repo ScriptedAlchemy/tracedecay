@@ -20,8 +20,8 @@ callable behavior or direct regression evidence.
 - PR14 has a substantial implemented checkpoint but remains open on the direct
   Plan 11 performance, renderer, browser, accessibility, and usability
   journeys and on stable production integration.
-- The delivery band was not green when this history was recorded: dogfood
-  authority reporting, semantic activation, incremental-index freshness, and
+- The delivery band was not green when this history was recorded: authority
+  reporting, semantic activation, incremental-index freshness, and
   ordinary repository verification remained unresolved.
 - Plan 32's minimal real provider/runtime and Work projection belong to PR14;
   residual advanced workflow behavior belongs to PR17.
@@ -36,14 +36,15 @@ Do not reconstruct older scaffolding to re-prove these closures:
 
 - cooperative daemon shutdown reaches startup ingest and code-index
   reconciliation and suppresses cancelled finalization;
-- configuration startup forward-repairs older snapshots, while exact-project
-  mutations republish the pinned snapshot and record runtime activation;
-- dogfood health distinguishes terminal authority/corruption failures from
+- configuration startup admits only the final snapshot; older persisted
+  snapshots return `ResetRequired`, while exact-project mutations republish
+  the pinned final snapshot and record runtime activation;
+- startup health distinguishes terminal authority/corruption failures from
   retryable convergence and scopes convergence to the active project;
 - code search serves the prior complete immutable generation while refresh is
   active, and bundled-SQLite FTS corruption has a direct self-heal path;
-- Memory V2 owner archives retain adapter parity, referential closure,
-  digest-bound migration receipts, idempotent import, and public-read coverage;
+- Memory facts are project-wide; branch retirement neither moves nor merges
+  them;
 - the daemon-hosted dashboard retains the production invocation executor and
   commits Settings through the daemon control plane; and
 - code-read continuation is spendable through shipped CLI, MCP, and HTTP
@@ -64,9 +65,8 @@ blockers.
 - Plan 11's dashboard and embedded asset path are reachable. Abandoned
   projection names are not missing product work; the live application evidence
   type remains protected.
-- Plan 12's migration behavior retains physical adapter parity, referential
-  closure, idempotent cutover receipts, and direct production maintenance
-  callers. A schema label alone is not migration evidence.
+- Plan 12 enforces exact final-schema admission and typed `ResetRequired` for
+  every other persisted shape. A schema label alone is not release evidence.
 - Plan 13's core anchors are delivered; dedicated GitHub-stack targets remain
   with the owning later product journey.
 - Plan 16 collapses linked worktrees to primary-checkout project/store identity

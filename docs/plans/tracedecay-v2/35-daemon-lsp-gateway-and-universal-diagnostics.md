@@ -13,13 +13,14 @@ and protocol fixture inventories are not milestones.
 Standard LSP 3.17 compatibility and explicit negotiation with independently
 deployed clients remain real external protocol obligations. The TraceDecay
 context-extension's request/response schemas are absent from `origin/master`
-and a published release, but packaged hosts or independently deployed dogfood
-clients may retain prior revisions. Keep negotiation and prior-revision
-decoding until a separately authorized installed-client/host census proves
-absence; experimental version tags and fixtures alone do not require a version
-bump. Durable diagnostic snapshots,
-cursors, journals, checkpoints, and receipts remain backward-readable until a
-separately authorized registered-store/profile census proves absence.
+and a published release, so branch-local V2 extension revisions and durable
+diagnostic state change in place. Durable diagnostics accept only their exact
+final persisted shape; any other database, store, spool, file, or projection
+returns typed `ResetRequired` and requires explicit reset or recreation. No
+storage reader, migration, backfill, dual write, or census path exists. An
+actually independently released context-extension revision may retain separate
+protocol negotiation; experimental version tags and fixtures alone do not
+require a version bump.
 
 The daemon gateway/session/broker and the application LSP runtime are the
 canonical implementation path. Existing structs, files, protocol fixtures, and
@@ -272,17 +273,14 @@ review, CI, proximity, or evidence data.
 ## Replacement and deletion
 
 - Delete bypass LSP implementations after parity; any bounded compatibility
-  name with `origin/master` or published-release evidence delegates to the
-  daemon gateway or returns an actionable negotiated upgrade until the
-  authorized installed-client/host census proves absence. Pure source-only
-  names are replaced in place; branch-era callable names follow the same census
-  gate.
+  name with actual independent public release evidence delegates to the daemon
+  gateway or returns an actionable negotiated upgrade. Pure source-only and
+  branch-era callable names are replaced in place.
 - Remove reserved future fields and predeclared PR17/PR18 variants from PR13
-  writer schemas while retained decoders continue to accept potentially
-  installed prior revisions. Later callable features revise the current writer
-  shape, while responses emit each client's negotiated retained revision until
-  the installed-client/host census gates reader/writer retirement. Persisted
-  diagnostics remain governed by the registered-store census rule above.
+  writer schemas. Later callable features revise the current writer shape.
+  An actually independently released public protocol may negotiate its
+  documented revision at the transport boundary; persisted diagnostics never
+  gain an old reader and return `ResetRequired` when their shape is non-final.
 - Remove duplicate architecture/ownership prose, exact source-file and
   fixture inventories, standalone worktree milestone gates, generated protocol
   matrices that restate negotiation code, and placeholder benchmark packets.

@@ -37,16 +37,14 @@ schema registry or file inventory.
 
 The published `tracedecay_rename_preview` surface above is release evidence and
 keeps its compatibility obligation. Pure source-only/internal Plan 34
-plan/apply request helpers change in place. Wire-visible request revisions
-retain negotiation until an authorized installed-client/host census proves
-absence. Any migration-plan file, staged mutation, journal, checkpoint,
-rollback artifact, or receipt potentially written by dogfood remains
-backward-readable/recoverable until the registered-store/profile census proves
-absence. An API alias, deprecation, or wrapper is retained for a predecessor
-proven on `origin/master`, in a published package/release, an independently
-deployed client, or a live host installation.
-A branch-era callable name remains until an authorized installed-client/host
-census proves absence; source moves, PR sequencing, tests, and branch history
+plan/apply request helpers, wire-visible V2 request revisions, and branch-local
+V2 migration-plan files, staged mutations, journals, checkpoints, rollback
+artifacts, and receipts change in place. Persisted state accepts only its exact
+final shape; any other database, store, spool, file, or projection returns typed
+`ResetRequired` and requires explicit reset or recreation. No storage reader,
+migration, backfill, dual write, or census path exists. An API alias,
+deprecation, or wrapper is retained only for an actually independently released
+public predecessor. Source moves, PR sequencing, tests, and branch history
 alone are not release evidence.
 
 ## User outcome
@@ -97,10 +95,10 @@ history, tags, or remotes.
    values. It does not infer an untyped rewrite language.
 2. Every compatibility alias/wrapper declares
    `stable_public_contract | temporary`, external consumer, owner, deprecation
-   policy, evidence/census status, and—when source-only temporary—the exact
-   PR19 deletion condition. A pure source-only predecessor is replaced directly
-   and is not an alias disposition; a branch-era callable predecessor remains
-   census-gated. Missing required disposition blocks apply.
+   policy, actual release evidence, and—when source-only temporary—the exact
+   PR19 deletion condition. A pure source-only or branch-era predecessor is
+   replaced directly and is not an alias disposition. Missing required
+   disposition blocks apply.
 3. Primary production consumers move before old names are restricted to
    approved compatibility boundaries. Type aliases are used only when language
    semantics preserve compatibility; otherwise an explicit wrapper/conversion
@@ -112,11 +110,10 @@ history, tags, or remotes.
    invalidated and issues a new preview/digest. It never silently rebases stale
    evidence. Each deliberately sliced apply is atomic for its declared scope.
 6. PR19 removes unreleased source-only aliases directly after their internal
-   consumers migrate. Branch-era callable aliases remain until the authorized
-   installed-client/host census proves absence. Evidence-backed released
-   aliases retain their declared compatibility/semantic-equivalence journey,
-   and stable public aliases remain thin delegates to the primary
-   implementation.
+   consumers migrate. Branch-era callable aliases change in place.
+   Evidence-backed released aliases retain their declared
+   compatibility/semantic-equivalence journey, and stable public aliases remain
+   thin delegates to the primary implementation.
 
 ## Required behavior
 
@@ -183,8 +180,8 @@ An intentional protected-value change must select exact site IDs and expected
 bytes, name the protected category, acknowledge the change, and run its own
 verification. Normal provider-neutral source promotion uses
 `assert_stable_value` and rolls back on any protected-byte change. Database row
-or schema migration belongs to Plan 12; this workflow never substitutes source
-edits for forward store migration.
+or schema mismatch returns `ResetRequired` under Plan 12; this workflow never
+substitutes source edits for stored-data conversion.
 
 ### Atomicity, recovery, and Git separation
 
@@ -231,9 +228,8 @@ edits for forward store migration.
   function, projection, session-message projection, and projector-version
   source names together while preserving the projector's persisted value.
 - PR19 uses this journey to remove unapproved source-only V1/delivery names and
-  internal consumers in place while preserving callable branch-era names until
-  the authorized installed-client/host census and preserving published
-  compatibility contracts.
+  internal consumers in place, changing branch-era names in place, and
+  preserving only independently released public compatibility contracts.
 
 ### Supported adoption
 
@@ -249,9 +245,9 @@ edits for forward store migration.
 The working journeys replace manual multi-call edits and any copied resolver,
 text replacement, transaction, diagnostics, formatter, catalog, or Git writer.
 PR19 deletes unreleased source-only migration wrappers after named internal
-consumer migration. Branch-era callable wrappers remain until the authorized
-installed-client/host census; direct equivalence tests do not establish
-publication. Evidence-backed stable public aliases remain. There is no general
+consumer migration. Branch-era callable wrappers are removed in place; direct
+equivalence tests do not establish publication. Evidence-backed independently
+released public aliases remain. There is no general
 patch language, autonomous rewrite framework, language-independent regex
 fallback, generated-output editor, LSP `workspace/applyEdit` authority, or
 source-level dual-write/shadow/lazy store migration.
@@ -285,8 +281,9 @@ source-level dual-write/shadow/lazy store migration.
 
 ## Not in this plan
 
-- Database/schema migration, reverse cutover, dual write, shadow read, or lazy
-  migration; Plan 12 owns forward data migration and bounded recovery.
+- Database/schema conversion, reverse cutover, dual write, shadow read, lazy
+  migration, or recovery reader. V2 rejects every non-final persisted shape
+  with `ResetRequired`; explicit reset or recreation is the only transition.
 - A permanent compatibility inventory, migration execution ledger,
   declaration-only scorecard, scaffold-only capability milestone, or
   planning-artifact acceptance gate.
