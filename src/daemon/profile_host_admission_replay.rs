@@ -46,7 +46,7 @@ pub(super) struct ProfileHostAdmissionReplayRegistry {
     workers: Arc<tokio::sync::Mutex<HashMap<PathBuf, ReplayWorkerEntry>>>,
     bootstrap_workers:
         Arc<tokio::sync::Mutex<HashMap<PathBuf, ProfileHostAdmissionBootstrapEntry>>>,
-    bootstrap_cancellation: Arc<ProfileHostAdmissionBootstrapCancellation>,
+    cancellation: Arc<ProfileHostAdmissionCancellation>,
     shutting_down: AtomicBool,
     idle_eviction_after: Duration,
     bootstrap_ready_cache_for: Duration,
@@ -69,10 +69,10 @@ struct ProfileHostAdmissionBootstrapWorker {
     backoff_count: AtomicUsize,
     completed_at: std::sync::Mutex<Option<Instant>>,
     completed: Notify,
-    cancellation: Arc<ProfileHostAdmissionBootstrapCancellation>,
+    cancellation: Arc<ProfileHostAdmissionCancellation>,
 }
 
-struct ProfileHostAdmissionBootstrapCancellation {
+struct ProfileHostAdmissionCancellation {
     cancelled: AtomicBool,
     notification: Notify,
 }
@@ -86,8 +86,7 @@ struct ProfileHostAdmissionReplayWorker {
     backoff_count: AtomicUsize,
     idle: Notify,
     wake: Notify,
-    cancelled: AtomicBool,
-    cancellation: Notify,
+    cancellation: Arc<ProfileHostAdmissionCancellation>,
     #[cfg(test)]
     pass_override: Option<ReplayPassOverride>,
 }
@@ -97,7 +96,7 @@ impl Default for ProfileHostAdmissionReplayRegistry {
         Self {
             workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             bootstrap_workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            bootstrap_cancellation: Arc::new(ProfileHostAdmissionBootstrapCancellation::new()),
+            cancellation: Arc::new(ProfileHostAdmissionCancellation::new()),
             shutting_down: AtomicBool::new(false),
             idle_eviction_after: IDLE_EVICTION_AFTER,
             bootstrap_ready_cache_for: BOOTSTRAP_READY_CACHE_FOR,
@@ -109,12 +108,7 @@ impl Default for ProfileHostAdmissionReplayRegistry {
 impl Drop for ProfileHostAdmissionReplayRegistry {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
-        self.bootstrap_cancellation.cancel();
-        if let Ok(workers) = self.workers.try_lock() {
-            for entry in workers.values() {
-                entry.worker.cancel();
-            }
-        }
+        self.cancellation.cancel();
     }
 }
 
@@ -150,7 +144,7 @@ impl ProfileHostAdmissionReplayRegistry {
         }
 
         let worker = Arc::new(ProfileHostAdmissionBootstrapWorker::new(Arc::clone(
-            &self.bootstrap_cancellation,
+            &self.cancellation,
         )));
         let task_worker = Arc::clone(&worker);
         let task = tokio::spawn(async move {
@@ -171,6 +165,7 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
             broker,
             profile_root,
+            Arc::clone(&self.cancellation),
             #[cfg(test)]
             None,
         ));
@@ -188,6 +183,7 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
             broker,
             profile_root,
+            Arc::clone(&self.cancellation),
             Some(pass_override),
         ));
         self.ensure_worker(broker_path, worker).await;
@@ -249,10 +245,7 @@ impl ProfileHostAdmissionReplayRegistry {
             let mut workers = self.bootstrap_workers.lock().await;
             workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
-        self.bootstrap_cancellation.cancel();
-        for entry in &replay_entries {
-            entry.worker.cancel();
-        }
+        self.cancellation.cancel();
         for entry in replay_entries {
             let _ = entry.task.await;
         }
@@ -261,7 +254,6 @@ impl ProfileHostAdmissionReplayRegistry {
         }
     }
 
-    #[cfg(test)]
     pub(super) async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
         let worker = {
             let workers = self.workers.lock().await;
@@ -385,7 +377,7 @@ impl ProfileHostAdmissionReplayRegistry {
 }
 
 impl ProfileHostAdmissionBootstrapWorker {
-    fn new(cancellation: Arc<ProfileHostAdmissionBootstrapCancellation>) -> Self {
+    fn new(cancellation: Arc<ProfileHostAdmissionCancellation>) -> Self {
         Self {
             state: AtomicU8::new(BOOTSTRAP_RUNNING),
             attempt_count: AtomicUsize::new(0),
@@ -472,7 +464,7 @@ impl ProfileHostAdmissionBootstrapWorker {
     }
 }
 
-impl ProfileHostAdmissionBootstrapCancellation {
+impl ProfileHostAdmissionCancellation {
     fn new() -> Self {
         Self {
             cancelled: AtomicBool::new(false),
@@ -501,6 +493,7 @@ impl ProfileHostAdmissionReplayWorker {
     fn new(
         broker: &SharedHostAdmissionBroker,
         profile_root: &Path,
+        cancellation: Arc<ProfileHostAdmissionCancellation>,
         #[cfg(test)] pass_override: Option<ReplayPassOverride>,
     ) -> Self {
         Self {
@@ -512,8 +505,7 @@ impl ProfileHostAdmissionReplayWorker {
             backoff_count: AtomicUsize::new(0),
             idle: Notify::new(),
             wake: Notify::new(),
-            cancelled: AtomicBool::new(false),
-            cancellation: Notify::new(),
+            cancellation,
             #[cfg(test)]
             pass_override,
         }
@@ -524,13 +516,6 @@ impl ProfileHostAdmissionReplayWorker {
         self.wake.notify_one();
     }
 
-    fn cancel(&self) {
-        if !self.cancelled.swap(true, Ordering::AcqRel) {
-            self.cancellation.notify_waiters();
-        }
-    }
-
-    #[cfg(test)]
     async fn is_idle(&self) -> bool {
         !self.busy.load(Ordering::Acquire)
             && !self.dirty.load(Ordering::Acquire)
@@ -538,19 +523,13 @@ impl ProfileHostAdmissionReplayWorker {
     }
 
     async fn wait_for_cancellation(&self) {
-        loop {
-            let notified = self.cancellation.notified();
-            if self.cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        self.cancellation.wait().await;
     }
 
     async fn run(&self, idle_eviction_after: Duration) {
         let mut consecutive_retryable = 0u32;
         loop {
-            if self.cancelled.load(Ordering::Acquire) {
+            if self.cancellation.cancelled.load(Ordering::Acquire) {
                 return;
             }
             // Drain work that arrived before this wait (broker create / admit kicks).

@@ -177,20 +177,41 @@ pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
         .await
 }
 
-#[cfg(test)]
-pub(super) async fn replay_user_profile_host_admission_for_identity(
+const PROFILE_HOST_ADMISSION_REPLAY_READ_GRACE: Duration = Duration::from_secs(5);
+
+pub(super) async fn await_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
     ensure_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
         .await?;
-    let Ok(broker_path) = authority::canonical_identity_path(
-        &crate::sessions::user_sessions_db_path(&client_identity.profile_root),
-    ) else {
-        return Ok(());
-    };
-    let _ = store_administration
-        .wait_user_profile_host_admission_replay_idle(&broker_path, Duration::from_secs(5))
-        .await;
+    let broker_path = authority::canonical_identity_path(&crate::sessions::user_sessions_db_path(
+        &client_identity.profile_root,
+    ))
+    .map_err(|error| {
+        TraceDecayError::project_route("host_admission_broker_unavailable", true, error.to_string())
+    })?;
+    if !store_administration
+        .wait_user_profile_host_admission_replay_idle(
+            &broker_path,
+            PROFILE_HOST_ADMISSION_REPLAY_READ_GRACE,
+        )
+        .await
+    {
+        return Err(TraceDecayError::project_route(
+            "profile_host_admission_replay_warming",
+            true,
+            "retained profile events are still replaying",
+        ));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) async fn replay_user_profile_host_admission_for_identity(
+    store_administration: &StoreAdministration,
+    client_identity: &DaemonClientIdentity,
+) -> Result<()> {
+    await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
+        .await
 }
