@@ -148,6 +148,28 @@ struct RecordingExecutor {
     requests: Arc<Mutex<Vec<WorkflowStepExecutionRequestV1>>>,
 }
 
+struct MalformedExecutor;
+
+impl WorkflowStepExecutionPort for MalformedExecutor {
+    fn execute(
+        &self,
+        request: &WorkflowStepExecutionRequestV1,
+    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError> {
+        Ok(WorkflowStepExecutionResultV1 {
+            outputs: Vec::new(),
+            effect_receipt: WorkflowStepEffectReceiptV1::new(
+                request.run_id.clone(),
+                request.step_id.clone(),
+                request.placement.placement_digest().clone(),
+                WorkflowStepEffectOutcomeV1::Completed,
+                digest('9'),
+                &[],
+            )
+            .unwrap(),
+        })
+    }
+}
+
 impl WorkflowStepExecutionPort for RecordingExecutor {
     fn execute(
         &self,
@@ -394,4 +416,41 @@ fn failed_step_journals_successful_artifact_evidence() {
         outputs
     );
     assert_eq!(failed.status(), WorkflowRunStatusV1::Failed);
+}
+
+#[test]
+fn malformed_provider_outputs_restart_as_failed_not_running() {
+    let storage = MemoryRunStorage::default();
+    let run_id = id::<RunId>("run.workflow.dag.malformed");
+    let admitted = WorkflowRunService::new(storage.clone())
+        .admit(
+            run_id.clone(),
+            definition(),
+            WorkflowAdmissionSnapshotV1 {
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                catalog_digest: work_executable_catalog_digest().unwrap(),
+                topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
+            },
+            context("command.workflow.malformed.admit", '1', 1),
+        )
+        .unwrap();
+    let outcome = WorkflowStepExecutionService::new(storage.clone(), MalformedExecutor)
+        .execute_ready_step(
+            &run_id,
+            admitted.sequence(),
+            &id::<WorkflowStepId>("prepare"),
+            placement(&run_id, "prepare"),
+            WorkflowStepEventContextsV1 {
+                started: context("command.workflow.malformed.start", '2', 2),
+                completed: context("command.workflow.malformed.complete", '3', 3),
+                failed: context("command.workflow.malformed.fail", '4', 3),
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, WorkflowStepExecutionOutcomeV1::Failed(_)));
+
+    let restarted = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
+    assert_eq!(restarted.status(), WorkflowRunStatusV1::Failed);
 }
