@@ -24,7 +24,6 @@ use super::{
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
@@ -207,13 +206,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         &self,
         request: CompatibilityMemoryRepairCommandV1,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>> + Send;
-
-    /// Advances at most one persisted, daemon-owned raw V1 cutover batch.
-    /// Read and curation paths must not use this as a fallback.
-    fn advance_compatibility_legacy_memory_cutover(
-        &self,
-        request: CompatibilityLegacyMemoryCutoverCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1>> + Send;
 
     /// Bounded dashboard summary. Implementations return safe typed projections,
     /// never arbitrary SQL rows or raw payloads for unavailable records.
