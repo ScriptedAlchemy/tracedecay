@@ -7,6 +7,9 @@
 pub mod anchor;
 pub mod branch_stack;
 pub mod canonical;
+mod canonical_serializer;
+mod canonical_sink;
+mod canonical_value;
 pub mod coverage;
 pub mod error;
 pub mod evidence;
