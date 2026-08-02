@@ -508,10 +508,8 @@ impl GraphRuntimePhysicalAttachment {
             .submit_authorized(request, probe, authority)
             .await
             .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
-        family_guard
-            .probe()
-            .map_err(GraphDispatchError::SqliteFamily)?;
-        Ok(outcome)
+        crate::finalize_guarded_submit_outcome(outcome, &family_guard)
+            .map_err(GraphDispatchError::SqliteFamily)
     }
 
     pub async fn run_bounded_incremental_compaction(

@@ -396,7 +396,7 @@ fn run<E: ReaderQueryExecutor>(
                         }
                     }
                     Err(error) => {
-                        let _ = reply.send(Err(error));
+                        let _ = reply.send(finish_reader_result(Err(error), family_guard));
                     }
                 }
                 *published

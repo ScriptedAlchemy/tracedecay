@@ -432,10 +432,8 @@ impl RepositoryRuntimePhysicalAttachment {
             .submit_authorized(request, probe, authority)
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
-        family_guard
-            .probe()
-            .map_err(RepositoryDispatchError::SqliteFamily)?;
-        Ok(outcome)
+        crate::finalize_guarded_submit_outcome(outcome, &family_guard)
+            .map_err(RepositoryDispatchError::SqliteFamily)
     }
 
     pub async fn run_bounded_incremental_compaction(

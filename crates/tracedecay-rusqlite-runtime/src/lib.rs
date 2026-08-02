@@ -52,3 +52,32 @@ pub use writer::{
     ExistingWriterLocator, MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter,
     WriterActorError, WriterOnlineBackupError, WriterStartError, WriterState,
 };
+
+pub(crate) fn finalize_guarded_submit_outcome(
+    outcome: tracedecay_store::RuntimeSubmitOutcomeV1,
+    family_guard: &connection::file_family::SqliteFamilyGuard,
+) -> Result<tracedecay_store::RuntimeSubmitOutcomeV1, SqliteFamilyIntegrityError> {
+    if matches!(
+        outcome,
+        tracedecay_store::RuntimeSubmitOutcomeV1::CommitRecoveryRequired { .. }
+    ) {
+        return Ok(outcome);
+    }
+    match family_guard.probe() {
+        Ok(()) => Ok(outcome),
+        Err(_)
+            if matches!(
+                outcome,
+                tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+                    | tracedecay_store::RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            ) =>
+        {
+            Ok(
+                tracedecay_store::RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+                    reason: tracedecay_store::RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+                },
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
