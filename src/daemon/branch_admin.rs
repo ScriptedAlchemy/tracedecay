@@ -20,9 +20,84 @@ use super::profile_host_admission_replay::{
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
+use super::store_writer_gate::StoreWriterGates;
+pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
+
+/// How long a *request-side* caller queues for writer administration before it
+/// gives up and answers with a typed retryable busy error.
+///
+/// The gate is per store now, so the only thing a request can queue behind is
+/// another writer on the store it asked for. Ten seconds is long enough to
+/// absorb ordinary owner bookkeeping and short enough that a stuck writer
+/// surfaces as a retryable error rather than a 900-second hang.
+pub(super) const REQUEST_WRITER_ADMISSION_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+/// Outcome of one attempt to run an operation under writer administration.
+pub(super) enum WriterAdmission<Output> {
+    /// Admitted; the operation ran to completion.
+    Completed(Output),
+    /// The caller's cancellation token fired while queued.
+    Cancelled,
+    /// The wait outlived the caller's deadline. Retryable.
+    Busy,
+}
+
+/// Typed, retryable error for a request that could not be admitted to a store's
+/// writer lane inside its deadline.
+pub(super) fn store_writer_busy(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("store_writer_busy", true, detail)
+}
+
+/// Resolves the writer scope for one store family.
+///
+/// The key is the canonical `data_root` — the exact value
+/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries — so every lane
+/// naming the same store lands on the same gate. A path that cannot be
+/// canonicalized degrades to daemon-wide, which is strictly *more* exclusive and
+/// therefore can never split one store's gate into two.
+pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> WriterScope {
+    match authority::canonical_identity_path(data_root) {
+        Ok(canonical) => WriterScope::store(canonical, class),
+        Err(_) => WriterScope::Daemon,
+    }
+}
+
+/// Owner-lane scope for one registered database owner.
+///
+/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) is already the
+/// canonicalized `data_root`, so this agrees by construction with
+/// [`store_writer_scope`] and [`graph_writer_scope`] for the same store.
+#[cfg(any(unix, test))]
+pub(super) fn owner_writer_scope(key: &ProjectServerKey) -> WriterScope {
+    WriterScope::store(key.owner.store_root.clone(), StoreWriterClass::Owner)
+}
+
+/// Owner-lane scope for a project that is about to be opened.
+///
+/// A project already enrolled in this profile resolves to its persisted
+/// `data_root`, so its open contends only with writers on its own store — the
+/// case that used to park the first request after a daemon start behind an
+/// unrelated project's sync. A project with no persisted layout yet (first
+/// `init`) names no store, so it falls back to the daemon-wide lane, which is
+/// exactly what the single gate always did.
+pub(super) fn project_open_writer_scope(project_root: &Path, profile_root: &Path) -> WriterScope {
+    match crate::storage::resolve_persisted_layout(project_root, profile_root) {
+        Ok(Some(layout)) => store_writer_scope(&layout.data_root, StoreWriterClass::Owner),
+        Ok(None) | Err(_) => WriterScope::Daemon,
+    }
+}
+
+/// [`store_writer_scope`] for the store an open graph is serving.
+pub(super) fn graph_writer_scope(
+    cg: &crate::tracedecay::TraceDecay,
+    class: StoreWriterClass,
+) -> WriterScope {
+    store_writer_scope(&cg.store_layout().data_root, class)
+}
 
 #[derive(Clone)]
 pub(super) enum HostAdmissionBrokerState {
@@ -390,14 +465,20 @@ impl ProfileHostAdmissionBootstrapContext {
 }
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
-/// database owner. There is intentionally one gate and one copy of each shared
-/// registry so branch administration cannot prove ownership against stale
-/// daemon state.
+/// database owner. There is one copy of each shared registry so branch
+/// administration cannot prove ownership against stale daemon state.
+///
+/// Writer admission itself is *per store* — see
+/// [`store_writer_gate`](super::store_writer_gate) for the hierarchy and the
+/// exclusivity argument. The proof branch administration performs is computed
+/// from one store family's database paths, so a writer on another store can
+/// never invalidate it; a single daemon-wide gate only meant a sync of project
+/// A parked the first request for project B behind it, unbounded.
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
-    gate: Arc<tokio::sync::Mutex<()>>,
+    gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     project_server_retirements: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
@@ -427,7 +508,7 @@ impl Default for StoreAdministration {
         Self {
             profile_identity: None,
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            gate: Arc::new(tokio::sync::Mutex::new(())),
+            gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
@@ -1036,8 +1117,11 @@ impl StoreAdministration {
         ensure_no_external_branch_store_holders(database_paths)
     }
 
-    /// Acquires writer administration before constructing the supplied future
-    /// and holds it until that future completes.
+    /// Acquires daemon-wide writer administration before constructing the
+    /// supplied future and holds it until that future completes.
+    ///
+    /// Prefer [`Self::with_writer_in`] with a store scope. This lane excludes
+    /// every store and is reserved for operations that sweep all of them.
     pub(super) async fn with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1046,16 +1130,30 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
+        self.with_writer_in(WriterScope::Daemon, operation).await
+    }
+
+    /// Acquires writer administration for `scope` before constructing the
+    /// supplied future and holds it until that future completes.
+    pub(super) async fn with_writer_in<Operation, OperationFuture, Output>(
+        &self,
+        scope: WriterScope,
+        operation: Operation,
+    ) -> Output
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
         // Queueing for the writer is a park, not work: a background refresh or a
-        // generation rebuild can hold this gate for minutes. Surrender the
+        // generation rebuild can hold a store's gate for minutes. Surrender the
         // admission slot while queued and take it back before running.
-        let _writer = super::park_admission(self.gate.lock()).await;
+        let _writer = super::park_admission(self.gate.acquire(&scope)).await;
         operation().await
     }
 
-    /// Runs an operator-facing writer operation only when it can acquire the
-    /// administration lane immediately. Destructive commands must report busy
-    /// instead of silently queuing behind project warm-up.
+    /// Runs an operator-facing daemon-wide writer operation only when it can
+    /// acquire the administration lane immediately. Destructive commands must
+    /// report busy instead of silently queuing behind project warm-up.
     pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1064,14 +1162,31 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let writer = self.gate.try_lock().ok()?;
+        self.try_with_writer_in(WriterScope::Daemon, operation)
+            .await
+    }
+
+    /// [`Self::try_with_writer`] scoped to one store.
+    pub(super) async fn try_with_writer_in<Operation, OperationFuture, Output>(
+        &self,
+        scope: WriterScope,
+        operation: Operation,
+    ) -> Option<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let writer = self.gate.try_acquire(&scope)?;
         let output = operation().await;
         drop(writer);
         Some(output)
     }
 
-    /// Cancels while queued for writer administration, then lets an admitted
-    /// operation finish its transactionally safe unit before releasing it.
+    /// Cancels while queued for daemon-wide writer administration, then lets an
+    /// admitted operation finish its transactionally safe unit before releasing
+    /// it. Production request paths use [`Self::with_writer_admission`] with a
+    /// store scope and a deadline instead.
+    #[cfg(test)]
     pub(super) async fn with_writer_until_cancelled<Operation, OperationFuture, Output>(
         &self,
         cancellation: &CancellationToken,
@@ -1081,15 +1196,62 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let _writer = super::park_admission(async {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => None,
-                writer = self.gate.lock() => Some(writer),
+        match self
+            .with_writer_admission(WriterScope::Daemon, cancellation, None, operation)
+            .await
+        {
+            WriterAdmission::Completed(output) => Some(output),
+            WriterAdmission::Cancelled | WriterAdmission::Busy => None,
+        }
+    }
+
+    /// Queues for writer administration on `scope` under both a cancellation
+    /// token and an optional deadline.
+    ///
+    /// A request-side caller passes `Some(deadline)`: a gate wait that outlives
+    /// it reports [`WriterAdmission::Busy`] so the request answers with a typed
+    /// retryable error instead of parking without bound. The deadline bounds
+    /// only the *wait*; an admitted operation always runs to completion so no
+    /// transactional unit is torn.
+    pub(super) async fn with_writer_admission<Operation, OperationFuture, Output>(
+        &self,
+        scope: WriterScope,
+        cancellation: &CancellationToken,
+        deadline: Option<std::time::Duration>,
+        operation: Operation,
+    ) -> WriterAdmission<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let admitted = super::park_admission(async {
+            let acquire = self.gate.acquire(&scope);
+            let cancellable = async {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => None,
+                    writer = acquire => Some(writer),
+                }
+            };
+            match deadline {
+                Some(deadline) => match tokio::time::timeout(deadline, cancellable).await {
+                    Ok(Some(writer)) => WriterAdmission::Completed(writer),
+                    Ok(None) => WriterAdmission::Cancelled,
+                    Err(_) => WriterAdmission::Busy,
+                },
+                None => match cancellable.await {
+                    Some(writer) => WriterAdmission::Completed(writer),
+                    None => WriterAdmission::Cancelled,
+                },
             }
         })
-        .await?;
-        Some(operation().await)
+        .await;
+        let _writer = match admitted {
+            WriterAdmission::Completed(writer) => writer,
+            WriterAdmission::Cancelled => return WriterAdmission::Cancelled,
+            WriterAdmission::Busy => return WriterAdmission::Busy,
+        };
+        WriterAdmission::Completed(operation().await)
     }
 
     /// Resolves the authenticated client's project layout and runs destructive
@@ -1150,8 +1312,15 @@ impl StoreAdministration {
     }
 
     /// Prepares, proves, and commits one destructive branch-store mutation while
-    /// excluding every daemon writer. Cached owners fail closed and are left
-    /// completely untouched; operators must restart the daemon to release them.
+    /// excluding every writer on *this* store. Cached owners fail closed and are
+    /// left completely untouched; operators must restart the daemon to release
+    /// them.
+    ///
+    /// The destructive lane is store-scoped, not daemon-wide, because the holder
+    /// proof below is computed entirely from this `data_root`'s database paths:
+    /// a writer on another store cannot invalidate it. Within this store the
+    /// lane is still totally exclusive — see
+    /// [`store_writer_gate`](super::store_writer_gate).
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
         project_root: &Path,
@@ -1160,7 +1329,8 @@ impl StoreAdministration {
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
     ) -> Result<crate::branch::BranchAdminReport> {
-        self.try_with_writer(|| async {
+        let scope = store_writer_scope(data_root, StoreWriterClass::Destructive);
+        self.try_with_writer_in(scope, || async {
             if let Some(recovery) =
                 crate::branch::prepare_pending_branch_admin_recovery(data_root)?
             {
@@ -1527,13 +1697,121 @@ mod tests {
     #[tokio::test]
     async fn destructive_writer_operation_fails_fast_while_lane_is_busy() {
         let administration = StoreAdministration::default();
-        let _writer = administration.gate.lock().await;
+        let _writer = administration.gate.acquire(&WriterScope::Daemon).await;
 
         let outcome = administration
             .try_with_writer(|| async { "unexpected admission" })
             .await;
 
         assert!(outcome.is_none());
+    }
+
+    /// The store-scoped lane must keep the same fail-closed answer for a
+    /// destructive command whose own store already has a writer, while leaving
+    /// a *different* store admissible.
+    #[tokio::test]
+    async fn destructive_writer_is_refused_only_on_the_busy_store() {
+        let administration = StoreAdministration::default();
+        let busy = PathBuf::from("/stores/busy");
+        let idle = PathBuf::from("/stores/idle");
+        let _writer = administration
+            .gate
+            .acquire(&WriterScope::store(&busy, StoreWriterClass::Content))
+            .await;
+
+        assert!(
+            administration
+                .try_with_writer_in(
+                    WriterScope::store(&busy, StoreWriterClass::Destructive),
+                    || async { "unexpected admission" },
+                )
+                .await
+                .is_none(),
+            "destructive administration must not select a store a writer owns"
+        );
+        assert!(
+            administration
+                .try_with_writer_in(
+                    WriterScope::store(&idle, StoreWriterClass::Destructive),
+                    || async { "admitted" },
+                )
+                .await
+                .is_some(),
+            "an unrelated store must stay admissible"
+        );
+    }
+
+    /// Rank 1 regression: a git-watch sync of project A used to hold the one
+    /// daemon-wide gate across a full `cg.sync()`, so the first request for
+    /// project B parked behind it for as long as the sync ran.
+    #[tokio::test]
+    async fn one_projects_sync_does_not_delay_another_projects_open() {
+        let administration = StoreAdministration::default();
+        let syncing = PathBuf::from("/stores/project-a");
+        let opening = PathBuf::from("/stores/project-b");
+        let (holding_tx, holding_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let sync_administration = administration.clone();
+        let sync = tokio::spawn(async move {
+            sync_administration
+                .with_writer_in(
+                    WriterScope::store(&syncing, StoreWriterClass::Content),
+                    || async {
+                        holding_tx.send(()).expect("publish sync gate acquisition");
+                        release_rx.await.expect("release the sync");
+                    },
+                )
+                .await;
+        });
+        holding_rx.await.expect("project A's sync holds its lane");
+
+        let started = std::time::Instant::now();
+        administration
+            .with_writer_in(
+                WriterScope::store(&opening, StoreWriterClass::Owner),
+                || async {},
+            )
+            .await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_millis(500),
+            "project B's open waited {waited:?} on project A's sync"
+        );
+        release_tx.send(()).expect("release project A's sync");
+        sync.await.expect("sync task joins");
+    }
+
+    #[tokio::test]
+    async fn request_side_gate_wait_reports_typed_busy_at_its_deadline() {
+        let administration = StoreAdministration::default();
+        let store = PathBuf::from("/stores/held");
+        let _held = administration
+            .gate
+            .acquire(&WriterScope::store(&store, StoreWriterClass::Owner))
+            .await;
+
+        let cancellation = CancellationToken::new();
+        let outcome = administration
+            .with_writer_admission(
+                WriterScope::store(&store, StoreWriterClass::Owner),
+                &cancellation,
+                Some(std::time::Duration::from_millis(50)),
+                || async { "unexpected admission" },
+            )
+            .await;
+
+        assert!(matches!(outcome, WriterAdmission::Busy));
+        let error = store_writer_busy("project open could not acquire the store writer lane");
+        assert_eq!(
+            error.project_route_context(),
+            Some((
+                "store_writer_busy",
+                true,
+                "project open could not acquire the store writer lane",
+            ))
+        );
     }
 
     #[tokio::test]

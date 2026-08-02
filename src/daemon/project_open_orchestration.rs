@@ -253,28 +253,47 @@ async fn begin_portable_project_open(
         canonical_project_path,
         initialize_request,
         move |cancellation| async move {
-            store_administration
-                .with_writer_until_cancelled(&cancellation, || async {
-                    production_project_server(
-                        &store_administration,
-                        open_gates.as_ref(),
-                        &invocation,
-                        &http_application_registry,
-                        &open_project_path,
-                        &handshake,
-                        ProductionProjectCompositionRuntime::Portable {
-                            semantic_auto_download: true,
-                            startup_catch_up: true,
-                        },
-                        &cancellation,
-                        #[cfg(test)]
-                        project_open_attempts.as_ref(),
-                    )
-                    .await
-                    .map(|composition| composition.server)
-                })
+            // A request is waiting on this open. The writer wait is therefore
+            // bounded: an enrolled project takes only its own store's owner
+            // lane, and a wait that still outlives the deadline answers with a
+            // typed retryable busy error instead of parking without bound.
+            let scope = branch_admin::project_open_writer_scope(
+                &open_project_path,
+                &handshake.client_identity.profile_root,
+            );
+            match store_administration
+                .with_writer_admission(
+                    scope,
+                    &cancellation,
+                    Some(branch_admin::REQUEST_WRITER_ADMISSION_DEADLINE),
+                    || async {
+                        production_project_server(
+                            &store_administration,
+                            open_gates.as_ref(),
+                            &invocation,
+                            &http_application_registry,
+                            &open_project_path,
+                            &handshake,
+                            ProductionProjectCompositionRuntime::Portable {
+                                semantic_auto_download: true,
+                                startup_catch_up: true,
+                            },
+                            &cancellation,
+                            #[cfg(test)]
+                            project_open_attempts.as_ref(),
+                        )
+                        .await
+                        .map(|composition| composition.server)
+                    },
+                )
                 .await
-                .ok_or_else(project_open_cancellation_error)?
+            {
+                branch_admin::WriterAdmission::Completed(result) => result,
+                branch_admin::WriterAdmission::Cancelled => Err(project_open_cancellation_error()),
+                branch_admin::WriterAdmission::Busy => {
+                    Err(project_open_writer_busy_error(&open_project_path))
+                }
+            }
         },
     ))
     .await

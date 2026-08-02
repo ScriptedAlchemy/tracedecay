@@ -22,6 +22,10 @@ pub use super::receipts::{
     batch_proves_zero_work, build_batch_receipt, changeset_is_noop, decisions_for_noop,
     expected_publication_digest, expected_request_digest, verify_batch_receipt,
 };
+use super::receipts::{
+    ProjectionRequestEvidenceV1, PublicationDigestTrustV1, build_batch_receipt_verified,
+    verify_batch_receipt_verified,
+};
 
 /// A projection adapter failure before a complete receipt is available.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -106,26 +110,47 @@ impl ProjectionPublicationHandoffV1 {
 /// receipts. A projection-key change replays even an otherwise unchanged
 /// chunk set, so every other request invokes the sink exactly once. In either
 /// case the full receipt is verified before activation eligibility is checked.
+///
+/// The request digest and changed-chunk validation are O(chunk set) canonical
+/// hashes, so they run once here and the evidence is threaded into receipt
+/// construction and verification. What crosses a trust boundary still gets
+/// recomputed: a receipt from `sink` is external, so its publication digest is
+/// always recomputed, and every receipt's self-declared request digest is
+/// always compared against the recomputed expectation.
 pub fn project_for_publication<S: CodeChunkProjectionSink>(
     sink: &mut S,
     request: ProjectionBatchRequestV1,
 ) -> Result<ProjectionPublicationHandoffV1, ProjectionPublicationErrorV1> {
-    let request = expand_projection_key_replay(request)?;
-    let receipt = if request_is_true_noop(&request) {
-        build_batch_receipt(&request, &decisions_for_noop(&request.changes))?
+    let (request, request_digest) = expand_projection_key_replay(request)?;
+    let evidence = ProjectionRequestEvidenceV1::recorded(request_digest, &request.changes);
+    let (receipt, publication) = if request_is_true_noop(&request) {
+        (
+            build_batch_receipt_verified(
+                &request,
+                &evidence,
+                &decisions_for_noop(&request.changes),
+            )?,
+            // Sealed one statement ago from these exact fields.
+            PublicationDigestTrustV1::SealedInThisChain,
+        )
     } else {
-        sink.project_changed_chunks(request.clone())?
+        (
+            sink.project_changed_chunks(request.clone())?,
+            PublicationDigestTrustV1::Unverified,
+        )
     };
-    verify_batch_receipt(&request, &receipt)?;
+    verify_batch_receipt_verified(&request, &evidence, &receipt, publication)?;
     if !batch_can_activate(&receipt) {
         return Err(ProjectionPublicationErrorV1::NotActivatable);
     }
     Ok(ProjectionPublicationHandoffV1 { request, receipt })
 }
 
+/// Verify the incoming request and expand a projection-key replay, returning
+/// the request alongside its recomputed canonical digest.
 fn expand_projection_key_replay(
     mut request: ProjectionBatchRequestV1,
-) -> Result<ProjectionBatchRequestV1, ProjectionReceiptErrorV1> {
+) -> Result<(ProjectionBatchRequestV1, ManifestDigest), ProjectionReceiptErrorV1> {
     let expected_request = expected_request_digest(&request)
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
     if request.request_digest != expected_request {
@@ -142,10 +167,10 @@ fn expand_projection_key_replay(
                     .to_owned(),
             ));
         }
-        return Ok(request);
+        return Ok((request, expected_request));
     }
     if request.previous_projection_key.as_ref() == Some(&request.target_projection_key) {
-        return Ok(request);
+        return Ok((request, expected_request));
     }
     if request.replay_reason != ProjectionReplayReasonV1::ProjectionProfileChange {
         return Err(ProjectionReceiptErrorV1::Contract(
@@ -185,9 +210,10 @@ fn expand_projection_key_replay(
         .validate()
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
     request.changes = changes;
-    request.request_digest = expected_request_digest(&request)
+    let expanded_request_digest = expected_request_digest(&request)
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    Ok(request)
+    request.request_digest = expanded_request_digest.clone();
+    Ok((request, expanded_request_digest))
 }
 
 fn request_is_true_noop(request: &ProjectionBatchRequestV1) -> bool {

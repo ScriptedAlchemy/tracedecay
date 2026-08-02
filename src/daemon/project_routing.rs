@@ -32,6 +32,18 @@ pub(super) fn project_open_cancellation_error() -> TraceDecayError {
     }
 }
 
+/// A project open that could not be admitted to its store's writer lane inside
+/// [`REQUEST_WRITER_ADMISSION_DEADLINE`](super::branch_admin::REQUEST_WRITER_ADMISSION_DEADLINE).
+/// Retryable: the store has another writer, and the next attempt may find it
+/// free.
+pub(super) fn project_open_writer_busy_error(project_path: &Path) -> TraceDecayError {
+    super::branch_admin::store_writer_busy(format!(
+        "project '{}' could not acquire its store writer lane: another writer is active on the \
+         same store; retry shortly",
+        project_path.display()
+    ))
+}
+
 pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationToken) -> Result<()> {
     if cancellation.is_cancelled() {
         return Err(project_open_cancellation_error());
@@ -143,8 +155,12 @@ pub(super) fn portable_database_owner_reconciler(
         let route_registered = Arc::clone(&route_registered);
         let handshake = handshake.clone();
         Box::pin(async move {
+            let scope = crate::daemon::branch_admin::graph_writer_scope(
+                &fresh,
+                crate::daemon::branch_admin::StoreWriterClass::Owner,
+            );
             let transition = store_administration
-                .with_writer(|| async {
+                .with_writer_in(scope, || async {
                     if !route_registered.load(Ordering::Acquire) {
                         return None;
                     }
