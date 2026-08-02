@@ -63,43 +63,63 @@ pub(crate) async fn handle_constructors(
 
     let project_root = cg.project_root();
     let files = cg.get_all_files().await?;
-    let mut sites: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
 
-    'outer: for file in &files {
-        if !path_matches_optional_scope(&file.path, scope_prefix) {
-            continue;
-        }
-        let abs = project_root.join(&file.path);
-        let Ok(source) = crate::sync::read_source_file(&abs) else {
-            continue;
-        };
+    // Reading and parsing every source file in the project is a long CPU and
+    // I/O slice with no await points. Running it inline pinned a request
+    // runtime worker for the whole scan — tens of seconds on a large
+    // repository — which is exactly what starves other interactive calls. The
+    // scan is self-contained, so it belongs on a blocking thread.
+    let scan_paths: Vec<String> = files
+        .iter()
+        .filter(|file| path_matches_optional_scope(&file.path, scope_prefix))
+        .map(|file| file.path.clone())
+        .collect();
+    let scan_root = project_root.to_path_buf();
+    let scan_struct = struct_name.to_string();
+    let scan_fields = expected_fields.clone();
 
-        for site in find_struct_literals(&source, struct_name) {
-            let field_list = parse_literal_fields(&source, site.brace_open_byte);
-            let missing: Vec<String> = if expected_fields.is_empty() {
-                Vec::new()
-            } else {
-                expected_fields
-                    .iter()
-                    .filter(|f| !field_list.contains(f))
-                    .cloned()
-                    .collect()
+    let (sites, touched) = tokio::task::spawn_blocking(move || {
+        let mut sites: Vec<Value> = Vec::new();
+        let mut touched: Vec<String> = Vec::new();
+
+        'outer: for path in &scan_paths {
+            let abs = scan_root.join(path);
+            let Ok(source) = crate::sync::read_source_file(&abs) else {
+                continue;
             };
-            if !touched.contains(&file.path) {
-                touched.push(file.path.clone());
-            }
-            sites.push(json!({
-                "file": file.path,
-                "line": site.line,
-                "fields": field_list,
-                "missing_fields": missing,
-            }));
-            if sites.len() >= limit {
-                break 'outer;
+
+            for site in find_struct_literals(&source, &scan_struct) {
+                let field_list = parse_literal_fields(&source, site.brace_open_byte);
+                let missing: Vec<String> = if scan_fields.is_empty() {
+                    Vec::new()
+                } else {
+                    scan_fields
+                        .iter()
+                        .filter(|f| !field_list.contains(f))
+                        .cloned()
+                        .collect()
+                };
+                if !touched.contains(path) {
+                    touched.push(path.clone());
+                }
+                sites.push(json!({
+                    "file": path,
+                    "line": site.line,
+                    "fields": field_list,
+                    "missing_fields": missing,
+                }));
+                if sites.len() >= limit {
+                    break 'outer;
+                }
             }
         }
-    }
+
+        (sites, touched)
+    })
+    .await
+    .map_err(|e| TraceDecayError::Config {
+        message: format!("tracedecay_constructors scan failed to join: {e}"),
+    })?;
 
     let payload = json!({
         "struct": struct_name,
