@@ -4900,6 +4900,7 @@ dependencies = [
  "tower 0.5.3",
  "tracedecay-code-extraction",
  "tracedecay-domain",
+ "tracedecay-jsonrpc",
  "tracing",
  "tree-sitter",
  "tree-sitter-language",
@@ -4930,6 +4931,14 @@ dependencies = [
  "hex",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "tracedecay-jsonrpc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

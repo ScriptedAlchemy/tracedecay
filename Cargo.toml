@@ -2,6 +2,7 @@
 members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-code-extraction",
+    "crates/tracedecay-jsonrpc",
 ]
 resolver = "3"
 
@@ -124,6 +125,7 @@ tree-sitter-language = "0.1"
 ast-grep-core = "0.44"
 tracedecay-domain = { path = "crates/tracedecay-domain" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", default-features = false }
+tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
