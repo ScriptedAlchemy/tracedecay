@@ -9,7 +9,7 @@ use tracedecay_domain::{
     GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RepositoryId,
-    UtcMicros, WorktreeId,
+    UtcMicros, WorktreeId, git_commit_timestamp_micros,
 };
 
 fn id<T>(value: &str) -> T
