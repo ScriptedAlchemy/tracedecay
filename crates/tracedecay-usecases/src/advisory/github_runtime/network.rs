@@ -2991,6 +2991,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("github-owner-bound.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(&path, "github owner-bound CAS").unwrap();
         let (database, _) =
             Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)

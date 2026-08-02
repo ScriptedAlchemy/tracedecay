@@ -45,7 +45,23 @@ mod schema;
 mod session_merge;
 mod temporal;
 
+/// Installs the registered global/session schema into the kernel's fail-closed
+/// port for this test process.
+///
+/// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard,
+/// which the kernel initialises through
+/// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
+/// until the real schema — owned by `tracedecay-global-db` — is registered;
+/// production wires it from the daemon composition root, and test processes
+/// reuse the identical installer through this crate's `test-helpers`
+/// dev-dependency. The port keeps the first registration, so calling this from
+/// every fixture entry point is idempotent.
+fn register_test_schema_installer() {
+    tracedecay_global_db::register_test_schema_installer();
+}
+
 async fn test_initialize(path: &Path) -> (Database, bool) {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test initialize").unwrap();
     Database::publish_test_runtime(
         path,
@@ -57,6 +73,7 @@ async fn test_initialize(path: &Path) -> (Database, bool) {
 }
 
 async fn test_open(path: &Path) -> (Database, bool) {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test open").unwrap();
     Database::publish_test_runtime(
         path,
@@ -68,6 +85,7 @@ async fn test_open(path: &Path) -> (Database, bool) {
 }
 
 async fn test_open_read_only(path: &Path) -> (Database, bool) {
+    register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(path, "consolidation test read").unwrap();
     Database::publish_test_runtime(
         path,

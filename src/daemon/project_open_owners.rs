@@ -3076,6 +3076,7 @@ mod tests {
         name: &str,
     ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
         let database_path = temporary.path().join(format!("{name}.db"));
+        crate::daemon::store_runtime::register_registered_schema_installer();
         let database_authority = crate::db::DatabaseAuthority::acquire_test(&database_path, name)
             .expect("database authority");
         let database = crate::db::Database::publish_test_runtime(
@@ -3410,6 +3411,7 @@ mod tests {
         )
         .expect("configured-model pin");
         let database_path = temporary.path().join("scout.db");
+        crate::daemon::store_runtime::register_registered_schema_installer();
         let database_authority =
             crate::db::DatabaseAuthority::acquire_test(&database_path, "project-open Scout model")
                 .expect("database authority");

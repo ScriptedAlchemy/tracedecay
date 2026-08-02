@@ -102,6 +102,36 @@ pub mod registered_schema {
         }
     }
 
+    /// What an unregistered port does.
+    ///
+    /// Production, and every dependent crate's test build, fails closed: an
+    /// uninitialised profile or session store must never be published.
+    #[cfg(not(test))]
+    fn unregistered_outcome() -> Result<()> {
+        Err(missing_installer_error())
+    }
+
+    /// What an unregistered port does inside *this crate's own* unit tests.
+    ///
+    /// The kernel sits **below** `tracedecay-global-db`, which owns the real
+    /// schema, so `cargo test -p tracedecay-runtime-core` cannot install it
+    /// without a Cargo cycle. Every kernel fixture that reaches this port does
+    /// so incidentally: `Database::publish_test_runtime` materialises a
+    /// *profile* sidecar beside the graph shard the test actually exercises,
+    /// and no kernel test reads a registered-schema table out of that sidecar.
+    /// An empty sidecar is therefore the honest fixture, and it spares ~40
+    /// kernel tests from hand-registering a schema they never query.
+    ///
+    /// This arm is compiled **only** for this crate's own test binary.
+    /// Dependent crates build the kernel without `cfg(test)`, so they keep the
+    /// fail-closed error until they register the real installer, and no
+    /// production or `--all-features` binary is affected — `test-helpers` and
+    /// `test-transport` deliberately do not reach it.
+    #[cfg(test)]
+    fn unregistered_outcome() -> Result<()> {
+        Ok(())
+    }
+
     /// Installs the registered global/session schema through `connection`.
     ///
     /// # Errors
@@ -110,7 +140,7 @@ pub mod registered_schema {
     pub async fn ensure_registered_schema(connection: &Connection) -> Result<()> {
         match INSTALLER.get() {
             Some(installer) => installer(connection).await,
-            None => Err(missing_installer_error()),
+            None => unregistered_outcome(),
         }
     }
 

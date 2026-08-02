@@ -33,6 +33,26 @@ pub use application_surface::{
 };
 pub use tracedecay::DashboardProjectRuntime;
 
+/// Installs the registered global/session schema into the kernel's fail-closed
+/// port for this crate's test process.
+///
+/// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard
+/// that the kernel initialises through
+/// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
+/// until the real schema — owned by `tracedecay-global-db` — is registered.
+/// Production wires it from the daemon composition root; this crate's test
+/// target reuses the identical installer through its `test-helpers`
+/// dev-dependency. Idempotent: the port keeps the first registration, so every
+/// fixture entry point can call it unconditionally.
+///
+/// Fixtures built on `tracedecay_global_db::tests::harness` register the
+/// installer themselves; only fixtures that reach `publish_test_runtime`
+/// directly need this call.
+#[cfg(test)]
+pub(crate) fn register_test_schema_installer() {
+    tracedecay_global_db::register_test_schema_installer();
+}
+
 mod accounting;
 pub mod analytics_api;
 pub mod application_surface;
@@ -1750,6 +1770,7 @@ mod authority_tests {
                     .expect("dashboard database parent"),
             )
             .expect("dashboard database parent");
+            crate::register_test_schema_installer();
             let database_authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
                 &layout.graph_db_path,
                 "dashboard state fixture",

@@ -4449,6 +4449,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         "diagnostics identity admission test",
     )
     .expect("database authority");
+    crate::daemon::store_runtime::register_registered_schema_installer();
     let (database, _guard) = crate::db::Database::publish_test_runtime(
         &database_path,
         &authority,
@@ -4694,6 +4695,7 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let database_root = TempDir::new().expect("database root");
     let database_path = database_root.path().join("diagnostics.db");
+    crate::daemon::store_runtime::register_registered_schema_installer();
     let authority =
         crate::db::DatabaseAuthority::acquire_test(&database_path, "diagnostics absent resolver")
             .expect("database authority");

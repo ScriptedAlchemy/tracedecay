@@ -845,6 +845,7 @@ pub(crate) async fn dashboard_state_fixture(
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
     let database_path = project.path().join("dashboard.db");
+    crate::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(&database_path, "dashboard API state fixture")
         .expect("fixture database authority");
     let (database, _) = Database::publish_test_runtime(
@@ -914,15 +915,25 @@ mod tests {
     ) -> std::sync::Arc<tracedecay_global_db::RegisteredGlobalDb> {
         use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(path, "dashboard registry fixture")
             .expect("registry authority");
         let (database, _) =
             Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
                 .await
                 .expect("registry database");
-        tracedecay_global_db::ensure_registered_schema(database.conn())
-            .await
-            .expect("registered schema");
+        // `Database::conn()` is the retained reader; schema DDL has to run on
+        // the serialized writer lane or the migration SQL channel reports
+        // `WriterUnavailable`.
+        {
+            let writer = database
+                .writer_connection("initialize dashboard registry fixture schema")
+                .await
+                .expect("registry writer lane");
+            tracedecay_global_db::ensure_registered_schema(writer.engine_connection())
+                .await
+                .expect("registered schema");
+        }
         let runtime = database.retained_runtime().clone();
         let binding = runtime.binding().clone();
         let locator = runtime.locator().verified().clone();

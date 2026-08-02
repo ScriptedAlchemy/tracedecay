@@ -7,6 +7,7 @@ use super::*;
 async fn context_scout_registry_remounts_same_project_database_after_daemon_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let database_path = temporary.path().join("graph.db");
+    crate::daemon::store_runtime::register_registered_schema_installer();
     let authority =
         crate::db::DatabaseAuthority::acquire_test(&database_path, "daemon Context Scout registry")
             .unwrap();
