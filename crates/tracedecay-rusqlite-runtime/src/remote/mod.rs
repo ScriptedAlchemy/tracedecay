@@ -46,6 +46,7 @@ const READ_WAIT: Duration = Duration::from_secs(5);
 mod crypto;
 mod enrollment;
 mod schema;
+mod transaction;
 
 pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
 use enrollment::{

@@ -834,6 +834,7 @@ pub trait RemoteReplayTransactionPortV1: Send + Sync {
         &self,
         frame: &RemoteReplayFrameV1,
         current_writer: &RemoteWriterAuthorityV1,
+        committed_at: UtcMicros,
     ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>;
 }
 
@@ -1038,8 +1039,9 @@ fn replay_remote_capture_attempt(
         RemoteReplayPolicyDecisionV1::Admit => {}
     }
 
+    let committed_at = remote_clock_now(clock)?;
     let (disposition, receipt, finding) = match transaction
-        .commit(frame, current_writer)
+        .commit(frame, current_writer, committed_at)
         .map_err(RemoteReplayApplicationErrorV1::Transaction)?
     {
         RemoteReplayTransactionOutcomeV1::Admitted(receipt) => {
