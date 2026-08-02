@@ -79,7 +79,10 @@ impl AgentIntegration for CodexIntegration {
                 eprintln!("  2. Start a new Codex session — tracedecay tools are now available");
             }
             Some(marketplace_name) => {
-                eprintln!("  2. Run: {}", codex_manual_activation_step(&marketplace_name));
+                eprintln!(
+                    "  2. Run: {}",
+                    codex_manual_activation_step(&marketplace_name)
+                );
                 eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
             }
         }
