@@ -650,7 +650,6 @@ impl GraphRuntimePhysicalAttachment {
             return Ok(());
         }
         state.admission_open = false;
-        state.family_guard.disarm();
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
@@ -705,6 +704,7 @@ impl GraphRuntimePhysicalAttachment {
             state.close_failure = Some(message.clone());
             return Err(message);
         }
+        state.family_guard.disarm();
         state.drained = true;
         Ok(())
     }

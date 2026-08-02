@@ -8,8 +8,8 @@ use std::{
 
 use rusqlite::{Connection, Savepoint, Transaction, TransactionBehavior};
 use tracedecay_store::{
-    RuntimeCancellationStageV1, RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1,
-    StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
+    RuntimeCancellationStageV1, RuntimeCommitRecoveryReasonV1, RuntimeSubmitOutcomeV1,
+    StorageRuntimeErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
 };
 
 use crate::{
@@ -138,7 +138,7 @@ pub(super) fn process_batch(
 
     let commit_failure = match transaction.commit() {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
-        Ok(()) if probe_family(family_guard).is_err() => {
+        Ok(()) if probe_family_after_write(family_guard).is_err() => {
             state.store(WriterState::Faulted as u8, Ordering::Release);
             settle_postcommit_quarantine(prepared, telemetry);
             return;
@@ -170,6 +170,12 @@ fn probe_family(
     family_guard.map_or(Ok(()), SqliteFamilyGuard::probe)
 }
 
+fn probe_family_after_write(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), crate::SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe_after_write)
+}
+
 fn settle_quarantined(items: Vec<AcceptedRequest>, telemetry: &WriterTelemetry) {
     telemetry.error();
     for item in items {
@@ -198,10 +204,19 @@ fn settle_precommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &Write
 }
 
 fn settle_postcommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
-    // The SQLite commit returned success, but the retained file family changed
-    // before durability could be verified. Do not fabricate a commit receipt;
-    // exact replay against a fresh incarnation resolves the request.
-    settle_precommit_quarantine(prepared, telemetry);
+    telemetry.error();
+    for prepared in prepared {
+        let result = match prepared.result {
+            PreparedResult::Final(result) => result,
+            PreparedResult::AwaitingTransactionCommit(_) => {
+                Ok(RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+                    reason: RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+                })
+            }
+        };
+        telemetry.completed(&result);
+        prepared.item.settle(result);
+    }
 }
 
 fn publish_committed(

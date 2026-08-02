@@ -86,11 +86,12 @@ pub(crate) fn run_writer_command(
             last_insert_rowid,
             authority,
         } => {
+            let intent = request.intent();
             if let Err(error) = verify_family(family_guard) {
                 let _ = reply.send(Err(error));
                 return;
             }
-            if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
+            if let Err(error) = verify_write_authority(authority.as_deref(), intent) {
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -109,8 +110,13 @@ pub(crate) fn run_writer_command(
                 connection.last_insert_rowid(),
                 &last_insert_rowid,
             );
+            let postcondition = if is_write_intent(intent) {
+                verify_family_after_write(family_guard)
+            } else {
+                verify_family(family_guard)
+            };
             if result.is_ok()
-                && let Err(error) = verify_family(family_guard)
+                && let Err(error) = postcondition
             {
                 result = Err(error);
             }
@@ -301,6 +307,7 @@ fn run_transaction(
 ) -> TransactionCompletion {
     let mut attachments = Vec::new();
     let mut previous_attachment_limit = None;
+    let mut wrote = false;
     let mut idle_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
     let mut transaction_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_LIMIT;
     loop {
@@ -516,6 +523,7 @@ fn run_transaction(
                 let succeeded = result.is_ok();
                 let _ = reply.send(result);
                 if succeeded {
+                    wrote |= is_write_intent(intent);
                     let renewed_at = Instant::now();
                     idle_deadline = renewed_at + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
                     if policy == MigrationSqlTransactionPolicy::SchemaMigration {
@@ -548,7 +556,12 @@ fn run_transaction(
                     .commit()
                     .map(|()| MigrationSqlCommitReceipt { changed_rows })
                     .map_err(|error| sqlite_error("commit immediate transaction", error));
-                let result = match (result, verify_family(family_guard)) {
+                let family_result = if wrote {
+                    verify_family_after_write(family_guard)
+                } else {
+                    verify_family(family_guard)
+                };
+                let result = match (result, family_result) {
                     (Ok(_), Err(error)) => Err(error),
                     (result, _) => result,
                 };
@@ -580,6 +593,21 @@ fn verify_family(family_guard: Option<&SqliteFamilyGuard>) -> Result<(), Migrati
     family_guard
         .map_or(Ok(()), SqliteFamilyGuard::probe)
         .map_err(MigrationSqlError::SqliteFamily)
+}
+
+fn verify_family_after_write(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), MigrationSqlError> {
+    family_guard
+        .map_or(Ok(()), SqliteFamilyGuard::probe_after_write)
+        .map_err(MigrationSqlError::CommitRecoveryRequired)
+}
+
+const fn is_write_intent(intent: MigrationSqlWriteIntent) -> bool {
+    matches!(
+        intent,
+        MigrationSqlWriteIntent::Execute | MigrationSqlWriteIntent::ExecuteBatch
+    )
 }
 
 fn reject_transaction_command(command: TransactionCommand, error: MigrationSqlError) {

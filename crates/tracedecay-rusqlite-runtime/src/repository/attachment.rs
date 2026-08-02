@@ -583,7 +583,6 @@ impl RepositoryRuntimePhysicalAttachment {
             return Ok(());
         }
         state.admission_open = false;
-        state.family_guard.disarm();
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
@@ -638,6 +637,7 @@ impl RepositoryRuntimePhysicalAttachment {
             state.close_failure = Some(message.clone());
             return Err(message);
         }
+        state.family_guard.disarm();
         state.drained = true;
         Ok(())
     }
@@ -947,6 +947,76 @@ mod tests {
 
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_keeps_family_guard_armed_until_an_inflight_snapshot_exits() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("repository.sqlite3");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let attachment = Arc::new(
+            RepositoryPhysicalAttachmentFactory
+                .attach(
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                )
+                .unwrap(),
+        );
+        let handle = attachment.migration_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE drain_family_probe(value INTEGER)".to_owned())
+            .unwrap();
+        let keeper = rusqlite::Connection::open(&path).unwrap();
+        keeper.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let snapshot = handle.begin_read_snapshot(Duration::ZERO).unwrap();
+        snapshot
+            .query(statement(
+                "SELECT COUNT(*) FROM drain_family_probe",
+                Vec::new(),
+            ))
+            .unwrap();
+        let draining = Arc::clone(&attachment);
+        let drain = thread::spawn(move || draining.drain());
+        let admission_closed_at = Instant::now() + Duration::from_secs(1);
+        while attachment.migration_sql_handle().is_ok() {
+            assert!(
+                Instant::now() < admission_closed_at,
+                "drain did not close admission"
+            );
+            thread::yield_now();
+        }
+
+        fs::remove_file(format!("{}-wal", path.display())).unwrap();
+        assert!(matches!(
+            snapshot.query(statement(
+                "SELECT COUNT(*) FROM drain_family_probe",
+                Vec::new(),
+            )),
+            Err(MigrationSqlError::SqliteFamily(
+                crate::SqliteFamilyIntegrityError::Quarantined {
+                    component: crate::SqliteFamilyComponent::Wal,
+                    ..
+                }
+            ))
+        ));
+        drop(snapshot);
+        drop(handle);
+        drain.join().unwrap().unwrap();
+
+        assert!(matches!(
+            attachment.snapshot().quarantine,
+            Some(crate::SqliteFamilyIntegrityError::Quarantined {
+                component: crate::SqliteFamilyComponent::Wal,
+                ..
+            })
+        ));
+        attachment.close_and_join().unwrap();
+        drop(keeper);
     }
 
     #[test]

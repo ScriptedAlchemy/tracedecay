@@ -246,6 +246,7 @@ pub enum MigrationSqlError {
     TransactionClosed,
     TransactionExpired,
     SqliteFamily(crate::SqliteFamilyIntegrityError),
+    CommitRecoveryRequired(crate::SqliteFamilyIntegrityError),
     Sqlite {
         operation: &'static str,
         code: Option<i32>,
@@ -291,6 +292,12 @@ impl fmt::Display for MigrationSqlError {
                     "migration SQL database family is quarantined: {error}"
                 )
             }
+            Self::CommitRecoveryRequired(error) => {
+                write!(
+                    formatter,
+                    "migration SQL commit requires recovery before retry: {error}"
+                )
+            }
             Self::Sqlite {
                 operation, message, ..
             } => {
@@ -303,7 +310,7 @@ impl fmt::Display for MigrationSqlError {
 impl Error for MigrationSqlError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::SqliteFamily(error) => Some(error),
+            Self::SqliteFamily(error) | Self::CommitRecoveryRequired(error) => Some(error),
             _ => None,
         }
     }

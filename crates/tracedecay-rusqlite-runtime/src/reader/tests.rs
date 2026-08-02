@@ -62,6 +62,29 @@ struct SlowExecutor {
     delay: Duration,
 }
 
+#[cfg(unix)]
+#[derive(Clone)]
+struct UnlinkWalDuringReadExecutor {
+    wal_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl ReaderQueryExecutor for UnlinkWalDuringReadExecutor {
+    fn execute_read(
+        &mut self,
+        snapshot: &Transaction<'_>,
+        request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        let outcome = CountExecutor.execute_read(snapshot, request)?;
+        std::fs::remove_file(&self.wal_path).map_err(|error| {
+            StorageRuntimeErrorV1::Infrastructure {
+                operation: format!("inject WAL unlink during read: {error}"),
+            }
+        })?;
+        Ok(outcome)
+    }
+}
+
 impl ReaderQueryExecutor for SlowExecutor {
     fn execute_read(
         &mut self,
@@ -325,6 +348,43 @@ fn pinned_reader_quarantines_after_an_observed_wal_is_unlinked() {
         ))
     ));
     drop(writer);
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_reader_never_publishes_a_result_after_wal_unlink_during_query() {
+    let store = TestStore::new();
+    let opened = OpenedDatabaseFile::pin(&store.path).unwrap();
+    let locator = store.locator().with_opened_database(opened);
+    let wal_path = PathBuf::from(format!("{}-wal", store.path.display()));
+    let pool = ReaderPool::start(
+        locator,
+        two_reader_budget(),
+        UnlinkWalDuringReadExecutor {
+            wal_path: wal_path.clone(),
+        },
+    )
+    .unwrap();
+    let writer = Connection::open(&store.path).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute("INSERT INTO markers(value) VALUES (1)", [])
+        .unwrap();
+    assert!(wal_path.exists());
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let mut lease = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let mut snapshot = lease.begin_snapshot().unwrap();
+
+    assert!(matches!(
+        snapshot.execute(read, &probe),
+        Err(ReaderAcquireError::Worker(ReaderWorkerError::SqliteFamily(
+            crate::SqliteFamilyIntegrityError::Quarantined {
+                component: crate::SqliteFamilyComponent::Wal,
+                ..
+            }
+        )))
+    ));
 }
 
 #[test]

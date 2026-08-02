@@ -114,6 +114,17 @@ impl SqliteFamilyGuard {
     }
 
     pub(crate) fn probe(&self) -> Result<(), SqliteFamilyIntegrityError> {
+        self.probe_with_sidecar_policy(false)
+    }
+
+    pub(crate) fn probe_after_write(&self) -> Result<(), SqliteFamilyIntegrityError> {
+        self.probe_with_sidecar_policy(true)
+    }
+
+    fn probe_with_sidecar_policy(
+        &self,
+        require_live_sidecars: bool,
+    ) -> Result<(), SqliteFamilyIntegrityError> {
         let mut state = self.lock_state();
         if let Some(error) = state.quarantine {
             return Err(error);
@@ -133,7 +144,18 @@ impl SqliteFamilyGuard {
                 SqliteFamilyComponent::Main => unreachable!("main is always pinned"),
             };
             if slot.is_none() {
-                observe_component(&self.path, component, slot)?;
+                if let Err(error) = observe_component(&self.path, component, slot) {
+                    return quarantine_if_definitive(&mut state, error);
+                }
+                if require_live_sidecars && slot.is_none() {
+                    return quarantine_if_definitive(
+                        &mut state,
+                        SqliteFamilyIntegrityError::Quarantined {
+                            component,
+                            violation: SqliteFamilyViolation::Missing,
+                        },
+                    );
+                }
             }
             if let Some(pinned) = slot.as_ref()
                 && let Err(error) = probe_pinned(&path, component, pinned)
@@ -346,7 +368,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        SqliteFamilyComponent, SqliteFamilyGuard, SqliteFamilyIntegrityError, SqliteFamilyViolation,
+        SqliteFamilyComponent, SqliteFamilyGuard, SqliteFamilyIntegrityError,
+        SqliteFamilyViolation, component_path,
     };
 
     fn create_file(path: &std::path::Path) -> File {
@@ -396,6 +419,74 @@ mod tests {
         File::create(&wal).unwrap().write_all(b"frame").unwrap();
         guard.observe_visible_sidecars().unwrap();
         guard.probe().unwrap();
+    }
+
+    #[test]
+    fn committed_write_requires_the_previously_unobserved_wal_family() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("store.sqlite3");
+        let main = create_file(&database);
+        let guard = SqliteFamilyGuard::new(database, main).unwrap();
+
+        assert_eq!(
+            guard.probe_after_write(),
+            Err(SqliteFamilyIntegrityError::Quarantined {
+                component: SqliteFamilyComponent::Wal,
+                violation: SqliteFamilyViolation::Missing,
+            })
+        );
+        assert_eq!(
+            guard.quarantine(),
+            Some(SqliteFamilyIntegrityError::Quarantined {
+                component: SqliteFamilyComponent::Wal,
+                violation: SqliteFamilyViolation::Missing,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_wal_unlink_during_commit_is_not_accepted_as_an_absent_pending_sidecar() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("store.sqlite3");
+        {
+            let connection = rusqlite::Connection::open(&database).unwrap();
+            connection
+                .execute_batch("CREATE TABLE markers(value INTEGER NOT NULL)")
+                .unwrap();
+        }
+        let main = File::open(&database).unwrap();
+        let guard = SqliteFamilyGuard::new(database.clone(), main).unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        let wal = component_path(&database, SqliteFamilyComponent::Wal);
+        let removed = Arc::new(AtomicBool::new(false));
+        let hook_removed = Arc::clone(&removed);
+        connection
+            .commit_hook(Some(move || {
+                hook_removed.store(std::fs::remove_file(&wal).is_ok(), Ordering::SeqCst);
+                false
+            }))
+            .unwrap();
+
+        connection
+            .execute("INSERT INTO markers(value) VALUES (1)", [])
+            .unwrap();
+        assert!(removed.load(Ordering::SeqCst));
+        assert_eq!(
+            guard.probe_after_write(),
+            Err(SqliteFamilyIntegrityError::Quarantined {
+                component: SqliteFamilyComponent::Wal,
+                violation: SqliteFamilyViolation::Missing,
+            })
+        );
     }
 
     #[test]
