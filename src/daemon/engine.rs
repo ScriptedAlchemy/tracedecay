@@ -427,9 +427,9 @@ impl DaemonEngine {
             return Ok(server);
         }
         let (project_path, _) = Self::project_route(handshake)?;
-        // Bound only the wait behind an unrelated writer. An uncontended open
-        // is this request's own work and must run to completion.
-        let contended = self.store_administration.writer_is_busy();
+        // Foreground requests must never pin a connection while a cold project
+        // warm-up runs. The open task remains tracked and continues in the
+        // background after this bounded wait expires.
         let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
         match claim {
             ProjectOpenTaskClaim::InFlight(mut state) => {
@@ -466,13 +466,7 @@ impl DaemonEngine {
                         }
                     }
                 };
-                if contended {
-                    timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication)
-                        .await
-                        .map_err(|_| project_warming_error(&project_path))?
-                } else {
-                    publication.await
-                }
+                wait_for_project_open_publication(&project_path, publication).await
             }
             ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
             ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),

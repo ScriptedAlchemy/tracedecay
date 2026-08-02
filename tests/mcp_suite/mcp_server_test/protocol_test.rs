@@ -543,6 +543,116 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
     );
 }
 
+/// A full peer close is distinct from the write-half close above. Once the
+/// transport reports HUP, an in-flight handler is dropped without a response
+/// so its daemon admission permit cannot remain pinned.
+#[tokio::test]
+async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
+    struct FullClosedTransport {
+        requests: std::collections::VecDeque<String>,
+        written: Vec<String>,
+    }
+
+    impl tracedecay::mcp::transport::McpTransport for FullClosedTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            Ok(self.requests.pop_front())
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.written.push(line.to_string());
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn peer_fully_closed_after_eof(
+            &self,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            async {}
+        }
+    }
+
+    let (server, _dir) = setup_server().await;
+    let mut requests = std::collections::VecDeque::from([jsonrpc_request(
+        json!(44),
+        "tools/call",
+        json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+    )]);
+    // Keep the read side busy long enough for the in-flight search to reach
+    // its cancellation point before EOF reports the full close.
+    requests.extend((0..8).map(|_| jsonrpc_notification("notifications/progress")));
+    let mut transport = FullClosedTransport {
+        requests,
+        written: Vec::new(),
+    };
+
+    server
+        .run_connection(&mut transport)
+        .await
+        .expect("full peer close should end cleanly");
+    assert!(
+        transport.written.is_empty(),
+        "full peer close must drop the in-flight handler, got {:?}",
+        transport.written
+    );
+}
+
+/// The same full-close path must release a handler that is not in the live
+/// cancellation allow-list; this branch used to await it without observing
+/// the transport at all.
+#[tokio::test]
+async fn non_cancellable_tool_call_is_dropped_on_full_peer_close() {
+    struct FullClosedTransport {
+        requests: std::collections::VecDeque<String>,
+        written: Vec<String>,
+    }
+
+    impl tracedecay::mcp::transport::McpTransport for FullClosedTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            Ok(self.requests.pop_front())
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.written.push(line.to_string());
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn peer_fully_closed_after_eof(
+            &self,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            async {}
+        }
+    }
+
+    let (server, _dir) = setup_server().await;
+    let mut requests = std::collections::VecDeque::from([jsonrpc_request(
+        json!(45),
+        "tools/call",
+        json!({"name": "tracedecay_status", "arguments": {}}),
+    )]);
+    requests.extend((0..8).map(|_| jsonrpc_notification("notifications/progress")));
+    let mut transport = FullClosedTransport {
+        requests,
+        written: Vec::new(),
+    };
+
+    server
+        .run_connection(&mut transport)
+        .await
+        .expect("full peer close should end cleanly");
+    assert!(
+        transport.written.is_empty(),
+        "full peer close must drop the non-cancellable handler, got {:?}",
+        transport.written
+    );
+}
+
 /// A hard peer-loss read error during an in-flight cancellable `tools/call`
 /// must cancel the request and fail the connection without writing a response.
 #[tokio::test]
