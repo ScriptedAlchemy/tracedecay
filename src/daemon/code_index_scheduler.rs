@@ -804,6 +804,15 @@ impl PendingHintsV1 {
     }
 }
 
+/// One candidate path's capture result, produced independently per file so
+/// the read/sanitize/digest sweep can run at machine width.
+struct CapturedCandidateV1 {
+    file: SanitizedCodeFileV1,
+    captured: CodeIndexCapturedFileV1,
+    receipt_id: SanitizationReceiptId,
+    retained: Arc<[u8]>,
+}
+
 struct CapturedSnapshotV1 {
     snapshot: SanitizedCodeSnapshotV1,
     captured_files: Vec<CodeIndexCapturedFileV1>,
@@ -1702,6 +1711,74 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.publication.active_encoded_bytes()
     }
 
+    /// Read, sanitize, intern and identify one candidate path.
+    ///
+    /// `Ok(None)` means the path is not an indexable source file (vanished,
+    /// no extension, or no language descriptor) — the sequential loop's
+    /// `continue` arms. Pure with respect to the shared byte pool: the pool
+    /// is content-addressed under its own lock, so concurrent interning
+    /// yields the same digests and the same shared buffers.
+    fn capture_candidate(
+        &self,
+        registry: &StaticLanguageRegistry,
+        logical_path: &str,
+    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        let absolute = self.project_root.join(logical_path);
+        if !absolute.is_file() {
+            return Ok(None);
+        }
+        let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
+            return Ok(None);
+        };
+        let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
+            return Ok(None);
+        };
+        let raw_bytes = std::fs::read(&absolute)?;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
+        let sensitivity_level = match sanitized.receipt().disposition() {
+            SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
+            SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
+            SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
+                return Err(CodeIndexSchedulerErrorV1::Privacy(
+                    "durable code source carried a non-durable sanitizer disposition".to_owned(),
+                ));
+            }
+        };
+        let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
+        let (sanitized_bytes, _) = sanitized.into_parts();
+        let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
+        let occurrence = file_occurrence_id(
+            &self.repository_id,
+            &self.worktree_id,
+            logical_path,
+            &digest,
+            &receipt_id,
+        )?;
+        Ok(Some(CapturedCandidateV1 {
+            file: SanitizedCodeFileV1 {
+                file_occurrence_id: occurrence.clone(),
+                logical_path: logical_path.to_owned(),
+                language: Some(descriptor.language.clone()),
+                content_digest: digest,
+                disposition: SnapshotFileDispositionV1::Present,
+            },
+            captured: CodeIndexCapturedFileV1 {
+                file_occurrence_id: occurrence,
+                sanitized_bytes: shared.to_vec(),
+                sensitivity_level,
+            },
+            receipt_id,
+            retained: shared,
+        }))
+    }
+
     fn capture_authoritative_snapshot(
         &self,
     ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
@@ -1723,64 +1800,31 @@ impl CodeIndexWorktreeSchedulerV1 {
         let changed_paths = classification.changed_paths();
 
         let registry = StaticLanguageRegistry::new();
+        // Read + sanitize + digest is per-file pure work over independent
+        // paths, so it fans out across the reserved-width indexing pool. The
+        // candidate set is an ordered `BTreeSet`; results are collected in
+        // that same order and the lowest-index failure is the reported one,
+        // so the captured snapshot is byte-identical to the sequential sweep.
+        let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
+        let outcomes = crate::code_index::parallelism::install(|| {
+            use rayon::prelude::*;
+            candidates
+                .par_iter()
+                .map(|logical_path| self.capture_candidate(&registry, logical_path))
+                .collect::<Vec<_>>()
+        });
+
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
-        for logical_path in candidate_paths {
-            if self.shutting_down.load(Ordering::Acquire) {
-                return Err(cancelled_code_index_reconcile());
-            }
-            let absolute = self.project_root.join(&logical_path);
-            if !absolute.is_file() {
-                continue;
-            }
-            let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
+        for outcome in outcomes {
+            let Some(candidate) = outcome? else {
                 continue;
             };
-            let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase())
-            else {
-                continue;
-            };
-            let raw_bytes = std::fs::read(&absolute)?;
-            if self.shutting_down.load(Ordering::Acquire) {
-                return Err(cancelled_code_index_reconcile());
-            }
-            let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
-                .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
-            let sensitivity_level = match sanitized.receipt().disposition() {
-                SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
-                SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
-                SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
-                    return Err(CodeIndexSchedulerErrorV1::Privacy(
-                        "durable code source carried a non-durable sanitizer disposition"
-                            .to_owned(),
-                    ));
-                }
-            };
-            let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
-            sanitization_receipts.insert(receipt_id.clone());
-            let (sanitized_bytes, _) = sanitized.into_parts();
-            let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
-            retained_bytes.push(Arc::clone(&shared));
-            let occurrence = file_occurrence_id(
-                &self.repository_id,
-                &self.worktree_id,
-                &logical_path,
-                &digest,
-                &receipt_id,
-            )?;
-            files.push(SanitizedCodeFileV1 {
-                file_occurrence_id: occurrence.clone(),
-                logical_path: logical_path.clone(),
-                language: Some(descriptor.language.clone()),
-                content_digest: digest,
-                disposition: SnapshotFileDispositionV1::Present,
-            });
-            captured_files.push(CodeIndexCapturedFileV1 {
-                file_occurrence_id: occurrence,
-                sanitized_bytes: shared.to_vec(),
-                sensitivity_level,
-            });
+            sanitization_receipts.insert(candidate.receipt_id);
+            retained_bytes.push(candidate.retained);
+            files.push(candidate.file);
+            captured_files.push(candidate.captured);
         }
         files.sort_by(|left, right| {
             (&left.logical_path, &left.file_occurrence_id)
