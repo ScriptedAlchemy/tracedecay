@@ -12,12 +12,14 @@
 //! owns native read-only Git semantics. This module stores only typed
 //! references to those contracts.
 
+pub mod admission;
 pub mod graph;
 pub mod identity;
 pub mod index;
 pub mod language;
 pub mod search;
 
+pub use admission::*;
 pub use graph::*;
 pub use identity::*;
 pub use index::*;

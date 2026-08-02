@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
 use tracedecay_code_index::generations::{
@@ -147,6 +148,21 @@ fn manifest(
     files: Vec<CodeFileChunksV1>,
 ) -> GenerationChunkManifestV1 {
     GenerationChunkManifestV1::new(generation_id.clone(), files).expect("canonical manifest")
+}
+
+#[test]
+fn manifest_shares_one_canonical_chunk_allocation() {
+    let generation = generation(1);
+    let manifest = manifest(
+        &generation,
+        vec![baseline_file(&generation, "file.a.1", "src/lib.rs")],
+    );
+
+    let first = manifest.shared_chunks();
+    let second = manifest.shared_chunks();
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(first.as_slice(), manifest.chunks());
 }
 
 #[test]

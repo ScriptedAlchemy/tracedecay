@@ -9,6 +9,7 @@
 //! before a change manifest can cross the projection boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
@@ -66,7 +67,7 @@ pub struct GenerationIncrementMaterializationV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationChunkManifestV1 {
     generation_id: CodeGenerationId,
-    chunks: Vec<CodeSearchChunkV1>,
+    chunks: Arc<Vec<CodeSearchChunkV1>>,
 }
 
 impl GenerationChunkManifestV1 {
@@ -105,7 +106,7 @@ impl GenerationChunkManifestV1 {
 
         Ok(Self {
             generation_id,
-            chunks,
+            chunks: Arc::new(chunks),
         })
     }
 
@@ -117,6 +118,11 @@ impl GenerationChunkManifestV1 {
     /// Chunks in canonical typed-identity order.
     pub fn chunks(&self) -> &[CodeSearchChunkV1] {
         &self.chunks
+    }
+
+    /// Share the canonical allocation with immutable serving projections.
+    pub fn shared_chunks(&self) -> Arc<Vec<CodeSearchChunkV1>> {
+        Arc::clone(&self.chunks)
     }
 
     /// Look up one chunk by typed identity.

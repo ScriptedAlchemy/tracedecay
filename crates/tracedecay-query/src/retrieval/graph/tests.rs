@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
@@ -417,6 +418,45 @@ fn graph_projection_emits_one_canonical_occurrence_when_seeds_converge() {
         reversed.evidence_by_occurrence[&id("code-graph:symbol.target")].path,
         evidence.path
     );
+}
+
+#[test]
+fn graph_projection_retains_the_canonical_edge_allocation() {
+    let request = graph_request(8, 1);
+    let edges = Arc::new(vec![CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.target"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    }]);
+    let chunks = Arc::new(vec![
+        projection_chunk(&request, "chunk.seed", "symbol.seed"),
+        projection_chunk(&request, "chunk.target", "symbol.target"),
+    ]);
+    let prior_edge_owners = Arc::strong_count(&edges);
+    let prior_chunk_owners = Arc::strong_count(&chunks);
+
+    let adapter = CodeGraphEvidenceAdapterV1::new_shared(
+        request.generation.clone(),
+        None,
+        freshness(FreshnessCompatibilityV1::Current),
+        Arc::clone(&edges),
+        Arc::clone(&chunks),
+    )
+    .expect("projection is valid");
+
+    assert_eq!(Arc::strong_count(&edges), prior_edge_owners + 1);
+    assert_eq!(Arc::strong_count(&chunks), prior_chunk_owners + 1);
+    let batch = complete_batch(
+        adapter
+            .read_graph_evidence(&request)
+            .expect("graph read succeeds"),
+    );
+    assert_eq!(batch.candidates.len(), 1);
 }
 
 #[test]

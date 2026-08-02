@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -6,9 +5,10 @@ use roaring::RoaringBitmap;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
     ComponentRevision, EvidenceRole, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    ExtractionAdmittedChunkV1, FileOccurrenceId, FixedPointScore, FreshnessCompatibilityV1,
-    LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    ExtractionAdmittedChunkCollectionV1, FileOccurrenceId, FixedPointScore,
+    FreshnessCompatibilityV1, LogicalEvidenceId, RepositoryId, RetrievalAnchorId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceOccurrenceId,
 };
 
 use super::{
@@ -20,9 +20,15 @@ use crate::retrieval::ports::{
     RetrievalPortError, contract_error,
 };
 
+mod exact_rows;
 mod postings;
+mod rows;
 
+use exact_rows::{
+    canonical_projected_exact_term, collect_term_kinds, exact_field_for_kind, exact_matches,
+};
 use postings::{ByteNgramBudget, ByteNgramPostings, FuzzyTermIndex};
+use rows::{ProjectedChunkV1, normalize_lexical};
 
 const BM25_K1_MILLIS: u64 = 1_200;
 const BM25_B_MILLIS: u64 = 750;
@@ -79,79 +85,6 @@ impl CodeLexicalProjectionMetadataV1 {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ProjectedChunkV1 {
-    chunk: CodeSearchChunkV1,
-    logical_path: String,
-    fields: BTreeMap<LexicalFieldV1, Vec<String>>,
-    normalized_text: String,
-}
-
-impl ProjectedChunkV1 {
-    fn new(chunk: CodeSearchChunkV1, logical_path: String) -> Self {
-        let normalized_text = normalize_lexical(chunk.sanitized_text.as_str());
-        let mut fields: BTreeMap<LexicalFieldV1, Vec<String>> = BTreeMap::new();
-        let text_field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
-            LexicalFieldV1::PreambleText
-        } else {
-            LexicalFieldV1::BodyText
-        };
-        fields.insert(text_field, lexical_tokens(chunk.sanitized_text.as_str()));
-        fields.insert(LexicalFieldV1::Path, vec![normalize_lexical(&logical_path)]);
-        fields.insert(
-            LexicalFieldV1::Subtoken,
-            chunk
-                .subtokens
-                .iter()
-                .map(|term| normalize_lexical(term))
-                .collect(),
-        );
-        for term in &chunk.exact_terms {
-            let Ok(canonical) = std::str::from_utf8(term.canonical_bytes()) else {
-                continue;
-            };
-            let canonical = normalize_lexical(canonical);
-            fields
-                .entry(LexicalFieldV1::ExactTerm)
-                .or_default()
-                .push(canonical.clone());
-            match term.kind() {
-                ExactTechnicalTermKindV1::WholeSymbol
-                    if matches!(
-                        chunk.anchor.grain,
-                        CodeSearchChunkGrainV1::SymbolSignature
-                            | CodeSearchChunkGrainV1::SymbolMember
-                    ) =>
-                {
-                    fields
-                        .entry(LexicalFieldV1::SymbolName)
-                        .or_default()
-                        .push(canonical);
-                }
-                ExactTechnicalTermKindV1::QualifiedName => {
-                    fields
-                        .entry(LexicalFieldV1::QualifiedName)
-                        .or_default()
-                        .push(canonical);
-                }
-                ExactTechnicalTermKindV1::Path => {
-                    fields
-                        .entry(LexicalFieldV1::Path)
-                        .or_default()
-                        .push(canonical);
-                }
-                _ => {}
-            }
-        }
-        Self {
-            chunk,
-            logical_path,
-            fields,
-            normalized_text,
-        }
-    }
-}
-
 /// Immutable adapter over generation-bound code chunks.
 ///
 /// The value implements the lexical posting port directly. Exact retrieval is
@@ -161,6 +94,7 @@ impl ProjectedChunkV1 {
 #[derive(Clone, Debug)]
 pub struct CodeLexicalProjectionAdapterV1 {
     metadata: CodeLexicalProjectionMetadataV1,
+    chunks: Arc<Vec<CodeSearchChunkV1>>,
     rows: Arc<Vec<ProjectedChunkV1>>,
     postings: Arc<LexicalGenerationPostingsV1>,
 }
@@ -177,7 +111,10 @@ struct LexicalGenerationPostingsV1 {
 }
 
 impl LexicalGenerationPostingsV1 {
-    fn from_rows(rows: &[ProjectedChunkV1]) -> Result<Self, RetrievalPortError> {
+    fn from_rows(
+        rows: &[ProjectedChunkV1],
+        chunks: &[CodeSearchChunkV1],
+    ) -> Result<Self, RetrievalPortError> {
         let mut vocabulary = BTreeSet::new();
         let mut term_documents = BTreeMap::<LexicalFieldV1, BTreeMap<String, RoaringBitmap>>::new();
         let mut exact_documents = BTreeMap::<ExactFieldV1, BTreeMap<Vec<u8>, RoaringBitmap>>::new();
@@ -185,6 +122,7 @@ impl LexicalGenerationPostingsV1 {
         let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
         for (document, row) in rows.iter().enumerate() {
             let document = document as u32;
+            let chunk = &chunks[row.document];
             for (field, terms) in &row.fields {
                 *field_lengths.entry(*field).or_default() += terms.len();
                 let mut unique = BTreeSet::new();
@@ -214,7 +152,7 @@ impl LexicalGenerationPostingsV1 {
                 .entry(row.logical_path.as_bytes().to_vec())
                 .or_default()
                 .insert(document);
-            for term in &row.chunk.exact_terms {
+            for term in &chunk.exact_terms {
                 let canonical = canonical_projected_exact_term(term);
                 exact_documents
                     .entry(exact_field_for_kind(term.kind()))
@@ -238,7 +176,8 @@ impl LexicalGenerationPostingsV1 {
             .map_err(RetrievalPortError::Contract)?,
         );
         let raw_matches_normalized = rows.iter().all(|row| {
-            row.chunk.sanitized_text.as_str().as_bytes() == row.normalized_text.as_bytes()
+            chunks[row.document].sanitized_text.as_str().as_bytes()
+                == row.normalized_text.as_bytes()
         });
         let raw_text = if raw_matches_normalized {
             Arc::clone(&normalized_text)
@@ -246,7 +185,7 @@ impl LexicalGenerationPostingsV1 {
             Arc::new(
                 ByteNgramPostings::from_documents(
                     rows.iter()
-                        .map(|row| row.chunk.sanitized_text.as_str().as_bytes()),
+                        .map(|row| chunks[row.document].sanitized_text.as_str().as_bytes()),
                     &mut ngram_budget,
                 )
                 .map_err(RetrievalPortError::Contract)?,
@@ -369,29 +308,22 @@ impl CodeLexicalProjectionAdapterV1 {
         metadata: CodeLexicalProjectionMetadataV1,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Self, RetrievalPortError> {
-        Self::new_inner(metadata, chunks, false)
+        Self::new_inner(metadata, Arc::new(chunks), false)
     }
 
     pub fn new_admitted<C>(
         metadata: CodeLexicalProjectionMetadataV1,
-        chunks: Vec<C>,
+        chunks: C,
     ) -> Result<Self, RetrievalPortError>
     where
-        C: ExtractionAdmittedChunkV1,
+        C: ExtractionAdmittedChunkCollectionV1,
     {
-        Self::new_inner(
-            metadata,
-            chunks
-                .into_iter()
-                .map(ExtractionAdmittedChunkV1::into_admitted_chunk)
-                .collect(),
-            true,
-        )
+        Self::new_inner(metadata, chunks.into_shared_chunks(), true)
     }
 
     fn new_inner(
         metadata: CodeLexicalProjectionMetadataV1,
-        chunks: Vec<CodeSearchChunkV1>,
+        chunks: Arc<Vec<CodeSearchChunkV1>>,
         extraction_admitted: bool,
     ) -> Result<Self, RetrievalPortError> {
         metadata.validate()?;
@@ -402,7 +334,7 @@ impl CodeLexicalProjectionAdapterV1 {
         }
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
+        for (document, chunk) in chunks.iter().enumerate() {
             chunk.validate().map_err(contract_error)?;
             if !extraction_admitted
                 && chunk
@@ -432,12 +364,13 @@ impl CodeLexicalProjectionAdapterV1 {
                         chunk.anchor.file_occurrence_id
                     ))
                 })?;
-            rows.push(ProjectedChunkV1::new(chunk, logical_path));
+            rows.push(ProjectedChunkV1::new(document, chunk, logical_path));
         }
-        rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows)?);
+        rows.sort_by(|left, right| chunks[left.document].id.cmp(&chunks[right.document].id));
+        let postings = Arc::new(LexicalGenerationPostingsV1::from_rows(&rows, &chunks)?);
         Ok(Self {
             metadata,
+            chunks,
             rows: Arc::new(rows),
             postings,
         })
@@ -458,6 +391,10 @@ impl CodeLexicalProjectionAdapterV1 {
             return Err(RetrievalPortError::GenerationMismatch);
         }
         Ok(())
+    }
+
+    fn chunk<'a>(&'a self, row: &ProjectedChunkV1) -> &'a CodeSearchChunkV1 {
+        &self.chunks[row.document]
     }
 
     fn stale_outcome<T>(&self) -> Option<RetrieverOutcome<T>> {
@@ -623,6 +560,7 @@ impl CodeLexicalProjectionAdapterV1 {
         fuzzy: &FuzzyExpansionsV1,
         phrase_document_frequencies: &BTreeMap<String, usize>,
     ) -> LexicalRowScoreV1 {
+        let chunk = self.chunk(row);
         let mut field_scores: BTreeMap<LexicalFieldV1, u64> = BTreeMap::new();
         let mut matched_whole_terms = BTreeSet::new();
         let mut matched_subtokens = BTreeSet::new();
@@ -641,7 +579,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             self.term_score(*field, &normalized_query, exact_tf, row),
                         );
                         matched_whole_terms.insert(query_term.clone());
-                        collect_term_kinds(row, &normalized_query, &mut matched_kinds);
+                        collect_term_kinds(chunk, &normalized_query, &mut matched_kinds);
                     }
                     if let Some(expansions) = fuzzy.by_query.get(query_term) {
                         for expansion in expansions {
@@ -656,7 +594,7 @@ impl CodeLexicalProjectionAdapterV1 {
                             add_score(&mut field_scores, *field, score);
                             matched_whole_terms.insert(query_term.clone());
                             typo_recovery_applied = true;
-                            collect_term_kinds(row, expansion, &mut matched_kinds);
+                            collect_term_kinds(chunk, expansion, &mut matched_kinds);
                         }
                     }
                 }
@@ -682,7 +620,7 @@ impl CodeLexicalProjectionAdapterV1 {
             if tf == 0 {
                 continue;
             }
-            let field = if row.chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
+            let field = if chunk.anchor.grain == CodeSearchChunkGrainV1::FilePreamble {
                 LexicalFieldV1::PreambleText
             } else {
                 LexicalFieldV1::BodyText
@@ -767,10 +705,11 @@ impl CodeLexicalProjectionAdapterV1 {
         score_domain: ScoreDomainId,
         exact_admission_proof: Option<tracedecay_domain::ExactAdmissionProof>,
     ) -> Result<CompactCandidate, RetrievalPortError> {
+        let chunk = self.chunk(row);
         let lane = retriever.as_str();
-        let chunk_id = row.chunk.id.as_str();
-        let generation = row.chunk.anchor.generation_id.as_str();
-        let evidence_id = row.chunk.anchor.symbol_occurrence_id.as_ref().map_or_else(
+        let chunk_id = chunk.id.as_str();
+        let generation = chunk.anchor.generation_id.as_str();
+        let evidence_id = chunk.anchor.symbol_occurrence_id.as_ref().map_or_else(
             || format!("code-chunk:{chunk_id}"),
             |symbol| format!("code-symbol:{}", symbol.as_str()),
         );
@@ -781,7 +720,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 "code-chunk:{generation}:{chunk_id}"
             ))
             .map_err(contract_error)?,
-            file_occurrence_id: Some(row.chunk.anchor.file_occurrence_id.clone()),
+            file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
             source_namespace: self.metadata.freshness.source_namespace.clone(),
             repository_id: self.metadata.repository_id.clone(),
             session_or_thread_id: None,
@@ -805,15 +744,16 @@ impl CodeLexicalProjectionAdapterV1 {
         candidate: &CompactCandidate,
         matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
     ) -> CodeCandidateBindingV1 {
+        let chunk = self.chunk(row);
         CodeCandidateBindingV1 {
             candidate_anchor: candidate.anchor_id.clone(),
             occurrence: CodeOccurrenceRefV1 {
-                generation: row.chunk.anchor.generation_id.clone(),
-                file: row.chunk.anchor.file_occurrence_id.clone(),
-                symbol: row.chunk.anchor.symbol_occurrence_id.clone(),
-                chunk: Some(row.chunk.id.clone()),
+                generation: chunk.anchor.generation_id.clone(),
+                file: chunk.anchor.file_occurrence_id.clone(),
+                symbol: chunk.anchor.symbol_occurrence_id.clone(),
+                chunk: Some(chunk.id.clone()),
             },
-            language_descriptor_revision: row.chunk.language_descriptor_revision.clone(),
+            language_descriptor_revision: chunk.language_descriptor_revision.clone(),
             matched_term_kinds,
             source_occurrence: candidate.source_occurrence_id.clone(),
         }
@@ -860,7 +800,8 @@ where
         let mut excluded = self.projection.rows.len() as u64 - documents.len();
         for document in documents {
             let row = &self.projection.rows[document as usize];
-            let (matched_literals, matched_kinds) = exact_matches(row, request);
+            let chunk = self.projection.chunk(row);
+            let (matched_literals, matched_kinds) = exact_matches(row, chunk, request);
             if matched_literals.is_empty() {
                 excluded += 1;
                 continue;
@@ -945,120 +886,8 @@ struct LexicalRowScoreV1 {
     echo_penalty_applied: bool,
 }
 
-fn exact_matches(
-    row: &ProjectedChunkV1,
-    request: &ExactLaneRequest,
-) -> (
-    Vec<crate::retrieval::exact::ExactLiteralV1>,
-    Vec<ExactTechnicalTermKindV1>,
-) {
-    let mut matched_literals = Vec::new();
-    let mut matched_kinds = BTreeSet::new();
-    for literal in &request.literals {
-        let mut matched = false;
-        if matches!(
-            literal.field,
-            ExactFieldV1::QuotedPhrase
-                | ExactFieldV1::DiagnosticText
-                | ExactFieldV1::CompilerOrRuntimeError
-        ) {
-            matched = contains_bytes(
-                row.chunk.sanitized_text.as_str().as_bytes(),
-                &literal.original_bytes,
-            );
-        }
-        if literal.field == ExactFieldV1::Path
-            && row.logical_path.as_bytes() == literal.canonical_bytes.as_slice()
-        {
-            matched = true;
-            matched_kinds.insert(ExactTechnicalTermKindV1::Path);
-        }
-        for term in &row.chunk.exact_terms {
-            if exact_field_for_kind(term.kind()) == literal.field
-                && canonical_projected_exact_term(term).as_ref()
-                    == literal.canonical_bytes.as_slice()
-            {
-                matched = true;
-                matched_kinds.insert(term.kind());
-            }
-        }
-        if matched {
-            matched_literals.push(literal.clone());
-        }
-    }
-    (matched_literals, matched_kinds.into_iter().collect())
-}
-
-fn exact_field_for_kind(kind: ExactTechnicalTermKindV1) -> ExactFieldV1 {
-    match kind {
-        ExactTechnicalTermKindV1::WholeSymbol => ExactFieldV1::Identifier,
-        ExactTechnicalTermKindV1::QualifiedName => ExactFieldV1::QualifiedName,
-        ExactTechnicalTermKindV1::Path => ExactFieldV1::Path,
-        ExactTechnicalTermKindV1::CompilerErrorCode
-        | ExactTechnicalTermKindV1::RuntimeErrorCode => ExactFieldV1::DiagnosticCode,
-        ExactTechnicalTermKindV1::CompilerErrorText
-        | ExactTechnicalTermKindV1::RuntimeErrorText => ExactFieldV1::CompilerOrRuntimeError,
-        ExactTechnicalTermKindV1::CliFlag => ExactFieldV1::CliFlag,
-        ExactTechnicalTermKindV1::ToolName => ExactFieldV1::ToolName,
-        ExactTechnicalTermKindV1::ConfigurationKey => ExactFieldV1::ConfigurationKey,
-        ExactTechnicalTermKindV1::CommitIdentifier => ExactFieldV1::CommitIdentifier,
-    }
-}
-
-fn canonical_projected_exact_term(term: &ExactTechnicalTermV1) -> Cow<'_, [u8]> {
-    let bytes = term.canonical_bytes();
-    let Ok(value) = std::str::from_utf8(bytes) else {
-        return Cow::Borrowed(bytes);
-    };
-    let canonical = match term.kind() {
-        ExactTechnicalTermKindV1::CommitIdentifier => value
-            .strip_prefix("commit:")
-            .unwrap_or(value)
-            .to_ascii_lowercase(),
-        ExactTechnicalTermKindV1::CompilerErrorCode
-        | ExactTechnicalTermKindV1::RuntimeErrorCode => value.to_ascii_uppercase(),
-        ExactTechnicalTermKindV1::CliFlag
-        | ExactTechnicalTermKindV1::ToolName
-        | ExactTechnicalTermKindV1::ConfigurationKey => value.to_ascii_lowercase(),
-        _ => return Cow::Borrowed(bytes),
-    };
-    if canonical.as_bytes() == bytes {
-        Cow::Borrowed(bytes)
-    } else {
-        Cow::Owned(canonical.into_bytes())
-    }
-}
-
-fn collect_term_kinds(
-    row: &ProjectedChunkV1,
-    normalized_term: &str,
-    kinds: &mut BTreeSet<ExactTechnicalTermKindV1>,
-) {
-    for term in &row.chunk.exact_terms {
-        if std::str::from_utf8(term.canonical_bytes())
-            .is_ok_and(|value| normalize_lexical(value) == normalized_term)
-        {
-            kinds.insert(term.kind());
-        }
-    }
-}
-
 fn retrieval_anchor(value: String) -> Result<RetrievalAnchorId, RetrievalPortError> {
     RetrievalAnchorId::new(value).map_err(contract_error)
-}
-
-fn normalize_lexical(value: &str) -> String {
-    value.to_ascii_lowercase()
-}
-
-fn lexical_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|ch: char| {
-            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
-        })
-        .filter(|term| !term.is_empty())
-        .map(normalize_lexical)
-        .collect()
 }
 
 fn term_frequency(document_terms: &[String], term: &str) -> usize {
@@ -1073,13 +902,6 @@ fn substring_count(haystack: &str, needle: &str) -> usize {
         return 0;
     }
     haystack.match_indices(needle).count()
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
 }
 
 fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, score: u64) {

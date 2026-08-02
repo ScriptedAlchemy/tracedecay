@@ -20,11 +20,16 @@ use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
     CodeSearchChunkV1, CodeSearchDocumentV1, CodeSearchEligibilityV1, EdgeAuthorityV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1, ExtractionBatchV1,
-    FileIdentityDigest, FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES,
-    ParseOutcomeV1, PolicyRevisionId, RelationEdgeKindV1, RepositoryId, SanitizerRevision,
-    SensitivityDecision, SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
-    ValidatedCodeFileV1, canonical_sha256,
+    ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionBatchV1, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorV1, MAX_CHUNK_TEXT_BYTES, ParseOutcomeV1, PolicyRevisionId,
+    RelationEdgeKindV1, RepositoryId, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
+    SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId, ValidatedCodeFileV1, canonical_sha256,
+};
+
+mod admitted_set;
+
+pub use admitted_set::{
+    ExtractionAdmittedCodeSearchChunkSetV1, ExtractionAdmittedCodeSearchChunkV1,
 };
 
 use super::{
@@ -115,38 +120,6 @@ pub struct CodeIndexEdgeAbstentionV1 {
 #[derive(Clone, Debug)]
 pub struct ExactExtractionAuthorityV1 {
     chunk_digests: BTreeMap<CodeSearchChunkId, String>,
-}
-
-/// One chunk re-admitted through parser-backed extraction authority.
-///
-/// ```compile_fail
-/// use tracedecay_code_index::chunks::ExtractionAdmittedCodeSearchChunkV1;
-///
-/// let chunk = todo!();
-/// let _forged = ExtractionAdmittedCodeSearchChunkV1 { chunk };
-/// ```
-#[derive(Clone, Debug)]
-pub struct ExtractionAdmittedCodeSearchChunkV1 {
-    chunk: CodeSearchChunkV1,
-}
-
-impl ExtractionAdmittedCodeSearchChunkV1 {
-    pub fn chunk(&self) -> &CodeSearchChunkV1 {
-        &self.chunk
-    }
-
-    /// Consume the authority-bearing wrapper and return its admitted chunk.
-    pub fn into_chunk(self) -> CodeSearchChunkV1 {
-        self.chunk
-    }
-}
-
-// SAFETY: values are only created by `ExactExtractionAuthorityV1::admit`,
-// after the parser-backed chunk digest has been validated.
-unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
-    fn into_admitted_chunk(self) -> CodeSearchChunkV1 {
-        self.chunk
-    }
 }
 
 /// Chunk counts below this stay on the calling thread. One canonical chunk
@@ -2090,7 +2063,7 @@ mod tests {
         }
     }
 
-    fn file_chunks() -> CodeFileChunksV1 {
+    pub(super) fn file_chunks() -> CodeFileChunksV1 {
         let generation_id: CodeGenerationId = id("generation.fixture");
         let file_occurrence_id: FileOccurrenceId = id("file.fixture");
         let chunk_id: CodeSearchChunkId = id("chunk.fixture");
@@ -2145,16 +2118,6 @@ mod tests {
         let mut wrong_membership = file_chunks();
         wrong_membership.document.chunk_ids[0] = id("chunk.other");
         assert!(wrong_membership.validate().is_err());
-    }
-
-    #[test]
-    fn admitted_chunk_is_consumed_without_widening_mint_authority() {
-        let chunks = file_chunks();
-        let expected = chunks.chunks[0].clone();
-        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
-        let admitted = authority.admit(expected.clone()).expect("exact admission");
-
-        assert_eq!(admitted.into_chunk(), expected);
     }
 
     const RUST_SOURCE: &str = "//! Module documentation.\n\nuse std::collections::HashMap;\n\n/// Doc comment.\npub fn alpha(x: u32) -> u32 {\n    x + 1\n}\n\npub struct Holder {\n    map: HashMap<u32, u32>,\n}\n\nimpl Holder {\n    pub fn get(&self, key: u32) -> Option<u32> {\n        self.map.get(&key).copied()\n    }\n}\n\n// A trailing free-floating comment.\n";

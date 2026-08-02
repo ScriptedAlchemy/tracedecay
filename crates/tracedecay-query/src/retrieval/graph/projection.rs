@@ -8,12 +8,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
-    CompactCandidate, ComponentRevision, EdgeAuthorityV1, EvidenceRole, FileOccurrenceId,
-    FixedPointScore, FreshnessCompatibilityV1, LanguageDescriptorRevision, LogicalEvidenceId,
-    RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
-    SymbolOccurrenceId, UtcMicros,
+    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, CompactCandidate,
+    ComponentRevision, EdgeAuthorityV1, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1,
+    LogicalEvidenceId, RelationEdgeKindV1, RepositoryId, RetrievalAnchorId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceOccurrenceId, SymbolOccurrenceId, UtcMicros,
 };
 
 use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
@@ -21,13 +20,6 @@ use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
     contract_error,
 };
-
-#[derive(Clone, Debug)]
-struct SymbolBindingV1 {
-    file: FileOccurrenceId,
-    chunk: Option<CodeSearchChunkId>,
-    language_descriptor_revision: LanguageDescriptorRevision,
-}
 
 /// Immutable read port over one published generation's relation evidence.
 #[derive(Clone, Debug)]
@@ -37,8 +29,10 @@ pub struct CodeGraphEvidenceAdapterV1 {
     freshness: SourceFreshness,
     retriever_revision: ComponentRevision,
     score_domain: ScoreDomainId,
-    adjacency: Arc<BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>>,
-    symbols: Arc<BTreeMap<SymbolOccurrenceId, SymbolBindingV1>>,
+    edges: Arc<Vec<CanonicalRelationEdgeV1>>,
+    chunks: Arc<Vec<CodeSearchChunkV1>>,
+    adjacency: Arc<BTreeMap<SymbolOccurrenceId, Vec<usize>>>,
+    symbols: Arc<BTreeMap<SymbolOccurrenceId, usize>>,
 }
 
 impl CodeGraphEvidenceAdapterV1 {
@@ -50,6 +44,23 @@ impl CodeGraphEvidenceAdapterV1 {
         freshness: SourceFreshness,
         edges: &[CanonicalRelationEdgeV1],
         chunks: &[CodeSearchChunkV1],
+    ) -> Result<Self, RetrievalPortError> {
+        Self::new_shared(
+            generation,
+            repository_id,
+            freshness,
+            Arc::new(edges.to_vec()),
+            Arc::new(chunks.to_vec()),
+        )
+    }
+
+    /// Build a graph view over the generation's canonical allocations.
+    pub fn new_shared(
+        generation: CodeGenerationId,
+        repository_id: Option<RepositoryId>,
+        freshness: SourceFreshness,
+        edges: Arc<Vec<CanonicalRelationEdgeV1>>,
+        chunks: Arc<Vec<CodeSearchChunkV1>>,
     ) -> Result<Self, RetrievalPortError> {
         generation.validate().map_err(contract_error)?;
         if let Some(repository_id) = &repository_id {
@@ -69,43 +80,37 @@ impl CodeGraphEvidenceAdapterV1 {
             .map_err(contract_error)?;
 
         let mut symbols = BTreeMap::new();
-        for chunk in chunks {
+        for (position, chunk) in chunks.iter().enumerate() {
             if chunk.anchor.generation_id != generation {
                 return Err(RetrievalPortError::GenerationMismatch);
             }
             let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
                 continue;
             };
-            let candidate = SymbolBindingV1 {
-                file: chunk.anchor.file_occurrence_id.clone(),
-                chunk: Some(chunk.id.clone()),
-                language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-            };
             match symbols.entry(symbol) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(candidate);
+                    entry.insert(position);
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let current = entry.get_mut();
-                    if current.file != candidate.file
+                    let current = &chunks[*entry.get()];
+                    if current.anchor.file_occurrence_id != chunk.anchor.file_occurrence_id
                         || current.language_descriptor_revision
-                            != candidate.language_descriptor_revision
+                            != chunk.language_descriptor_revision
                     {
                         return Err(RetrievalPortError::Contract(
                             "one symbol occurrence has conflicting graph candidate bindings"
                                 .to_owned(),
                         ));
                     }
-                    if candidate.chunk < current.chunk {
-                        current.chunk = candidate.chunk;
+                    if chunk.id < current.id {
+                        entry.insert(position);
                     }
                 }
             }
         }
 
-        let mut adjacency: BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>> =
-            BTreeMap::new();
-        for edge in edges {
+        let mut adjacency: BTreeMap<SymbolOccurrenceId, Vec<usize>> = BTreeMap::new();
+        for (position, edge) in edges.iter().enumerate() {
             if !symbols.contains_key(&edge.from_occurrence) {
                 // An unbound source cannot be reached from an authorized
                 // seed. A bound source with an unbound target is retained so
@@ -115,10 +120,12 @@ impl CodeGraphEvidenceAdapterV1 {
             adjacency
                 .entry(edge.from_occurrence.clone())
                 .or_default()
-                .push(edge.clone());
+                .push(position);
         }
         for neighbors in adjacency.values_mut() {
             neighbors.sort_by(|left, right| {
+                let left = &edges[*left];
+                let right = &edges[*right];
                 (
                     &left.to_occurrence,
                     left.kind,
@@ -135,6 +142,8 @@ impl CodeGraphEvidenceAdapterV1 {
                     ))
             });
             neighbors.dedup_by(|left, right| {
+                let left = &edges[*left];
+                let right = &edges[*right];
                 left.to_occurrence == right.to_occurrence
                     && left.kind == right.kind
                     && left.authority == right.authority
@@ -152,6 +161,8 @@ impl CodeGraphEvidenceAdapterV1 {
             .map_err(contract_error)?,
             score_domain: ScoreDomainId::new(crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1)
                 .map_err(contract_error)?,
+            edges,
+            chunks,
             adjacency: Arc::new(adjacency),
             symbols: Arc::new(symbols),
         })
@@ -193,7 +204,8 @@ impl CodeGraphEvidenceAdapterV1 {
                 let Some(neighbors) = self.adjacency.get(&current) else {
                     continue;
                 };
-                for edge in neighbors {
+                for edge_position in neighbors {
+                    let edge = &self.edges[*edge_position];
                     examined = examined.saturating_add(1);
                     if !edge_kinds.contains(&edge.kind) {
                         excluded = excluded.saturating_add(1);
@@ -229,10 +241,11 @@ impl CodeGraphEvidenceAdapterV1 {
                         edge.to_occurrence.clone(),
                         (score_micros, next_path.clone()),
                     );
-                    let Some(binding_meta) = self.symbols.get(&edge.to_occurrence) else {
+                    let Some(binding_position) = self.symbols.get(&edge.to_occurrence) else {
                         unknown = unknown.saturating_add(1);
                         continue;
                     };
+                    let binding_chunk = &self.chunks[*binding_position];
                     let occurrence = format!("code-graph:{}", edge.to_occurrence.as_str());
                     let evidence_id = format!("code-symbol:{}", edge.to_occurrence.as_str());
                     let anchor_id = retrieval_anchor(evidence_id.clone())?;
@@ -243,7 +256,7 @@ impl CodeGraphEvidenceAdapterV1 {
                         logical_evidence_id,
                         source_occurrence_id: SourceOccurrenceId::new(occurrence.clone())
                             .map_err(contract_error)?,
-                        file_occurrence_id: Some(binding_meta.file.clone()),
+                        file_occurrence_id: Some(binding_chunk.anchor.file_occurrence_id.clone()),
                         source_namespace: self.freshness.source_namespace.clone(),
                         repository_id: self.repository_id.clone(),
                         session_or_thread_id: None,
@@ -266,11 +279,11 @@ impl CodeGraphEvidenceAdapterV1 {
                             candidate_anchor: candidate.anchor_id.clone(),
                             occurrence: CodeOccurrenceRefV1 {
                                 generation: self.generation.clone(),
-                                file: binding_meta.file.clone(),
+                                file: binding_chunk.anchor.file_occurrence_id.clone(),
                                 symbol: Some(edge.to_occurrence.clone()),
-                                chunk: binding_meta.chunk.clone(),
+                                chunk: Some(binding_chunk.id.clone()),
                             },
-                            language_descriptor_revision: binding_meta
+                            language_descriptor_revision: binding_chunk
                                 .language_descriptor_revision
                                 .clone(),
                             matched_term_kinds: Vec::new(),

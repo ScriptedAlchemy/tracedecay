@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{
-    DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
+    CodeFileIndexArtifactsV1, DeterministicCodeChunker, ExactExtractionAuthorityV1,
+    ExtractionAdmittedCodeSearchChunkV1, content_digest,
 };
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
@@ -224,13 +226,11 @@ pub(crate) fn chunk(
     }
 }
 
-fn admitted_rust_chunk(
+fn parser_admitted_rust_artifacts(
     generation: &CodeGenerationId,
     ordinal: u32,
     source: &str,
-    grain: CodeSearchChunkGrainV1,
-    symbol_name: &str,
-) -> ExtractionAdmittedCodeSearchChunkV1 {
+) -> (CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1) {
     let registry = StaticLanguageRegistry::new();
     let descriptor = registry
         .descriptor(&id("rust"))
@@ -282,7 +282,7 @@ fn admitted_rust_chunk(
         id("chunker.v1"),
         tracedecay_code_extraction::LanguageRegistry::new(),
     );
-    let (artifacts, authority) = chunker
+    chunker
         .index_file_with_authority_from_extraction(
             &file,
             &batch,
@@ -290,7 +290,17 @@ fn admitted_rust_chunk(
             SensitivityLevelV1::Public,
             &NeverCancelled,
         )
-        .expect("chunk with exact authority");
+        .expect("chunk with exact authority")
+}
+
+fn admitted_rust_chunk(
+    generation: &CodeGenerationId,
+    ordinal: u32,
+    source: &str,
+    grain: CodeSearchChunkGrainV1,
+    symbol_name: &str,
+) -> ExtractionAdmittedCodeSearchChunkV1 {
+    let (artifacts, authority) = parser_admitted_rust_artifacts(generation, ordinal, source);
     let chunk = artifacts
         .chunks
         .chunks
@@ -525,6 +535,33 @@ fn exact_projection_matches_typescript_and_csharp_diagnostic_codes() {
             .len(),
         2
     );
+}
+
+#[test]
+fn lexical_projection_retains_the_shared_admitted_chunk_allocation() {
+    let generation = id::<CodeGenerationId>("generation.1");
+    let (artifacts, authority) =
+        parser_admitted_rust_artifacts(&generation, 1, "pub fn reserve_stock() {}\n");
+    let canonical = Arc::new(artifacts.chunks.chunks);
+    let prior_owners = Arc::strong_count(&canonical);
+    let admitted = authority
+        .admit_shared(Arc::clone(&canonical))
+        .expect("shared exact admission");
+
+    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
+        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
+        admitted,
+    )
+    .expect("projection builds");
+
+    assert_eq!(Arc::strong_count(&canonical), prior_owners + 1);
+    let request = lexical_request("reserve_stock", &["reserve_stock"], &[], &[], 0, 8);
+    let batch = complete(
+        LexicalLane::new(projection)
+            .retrieve_lexical(&request)
+            .expect("whole-term retrieval succeeds"),
+    );
+    assert!(!batch.candidates.is_empty());
 }
 
 #[test]
