@@ -60,6 +60,16 @@ impl ExistingReaderLocator {
             .as_deref()
             .map(OpenedDatabaseFile::identity)
     }
+    pub(crate) fn verify_connection(
+        &self,
+        connection: &rusqlite::Connection,
+    ) -> Result<(), ReaderStartError> {
+        self.opened_database.as_deref().map_or(Ok(()), |opened| {
+            opened
+                .verify_connection(connection, &self.path)
+                .map_err(ReaderStartError::OpenedDatabaseIdentity)
+        })
+    }
     pub(crate) fn worker_open_path(&self) -> Result<PathBuf, ReaderStartError> {
         self.opened_database.as_deref().map_or_else(
             || Ok(self.path.clone()),
@@ -88,7 +98,6 @@ pub enum ReaderStartError {
     ReadOnlySetupFailed,
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
     OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
-    OpenedDatabasePathMismatch,
 }
 
 impl fmt::Display for ReaderStartError {
@@ -118,9 +127,6 @@ impl fmt::Display for ReaderStartError {
                 f,
                 "SQLite reader opened file identity {actual}, expected {expected}"
             ),
-            Self::OpenedDatabasePathMismatch => {
-                f.write_str("SQLite reader opened a displaced pinned database path")
-            }
         }
     }
 }
