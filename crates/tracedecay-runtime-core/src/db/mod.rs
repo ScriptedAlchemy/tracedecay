@@ -62,7 +62,7 @@ pub use memory_v2::{
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
-    publish_anchor_derivative, publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
+    publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
 pub use search::DependencyImportUse;
 pub use sql::{
