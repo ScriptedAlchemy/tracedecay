@@ -133,30 +133,33 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     _client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
-    let user_session_db = match store_administration
+    let user_session_db = store_administration
         .registered_profile_session_database()
         .await
-    {
-        Ok(database) => database,
-        Err(error) => {
-            eprintln!(
-                "[tracedecay] user-profile host admission disposition: authority_unavailable: {error}"
-            );
-            return Ok(());
-        }
-    };
-    let Ok(state) = store_administration
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "registered_authority_unavailable",
+                true,
+                error.to_string(),
+            )
+        })?;
+    let state = store_administration
         .host_admission_broker(&user_session_db)
         .await
-    else {
-        eprintln!("[tracedecay] user-profile host admission disposition: authority_unavailable");
-        return Ok(());
-    };
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "host_admission_broker_unavailable",
+                true,
+                error.to_string(),
+            )
+        })?;
     if let Some(outcome) = state.unavailable_outcome() {
-        eprintln!(
-            "[tracedecay] user-profile host admission disposition: {}",
-            outcome.reason_code.unwrap_or("spool_unavailable")
-        );
+        let reason_code = outcome.reason_code.unwrap_or("spool_unavailable");
+        return Err(TraceDecayError::project_route(
+            reason_code,
+            outcome.retryable,
+            "user-profile host admission spool is unavailable",
+        ));
     }
     // host_admission_broker already kicks the coalesced worker for user-sessions DBs.
     Ok(())
@@ -165,36 +168,28 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
 /// Kick cold profile-session/spool setup outside the connection's admission
 /// permit. Concurrent requests for one profile share a single bootstrap, while
 /// the retained replay worker still coalesces subsequent passes.
-pub(super) fn schedule_user_profile_host_admission_replay_for_identity(
+pub(super) async fn schedule_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     client_identity: &DaemonClientIdentity,
-    lifecycle: &DaemonLifecycle,
 ) -> Result<()> {
-    let Some(reservation) = store_administration
-        .reserve_profile_host_admission_bootstrap(&client_identity.profile_root)?
-    else {
-        return Ok(());
-    };
-    let Some(activity) = lifecycle.try_enter() else {
-        return Ok(());
-    };
-    let store_administration = store_administration.clone();
-    let client_identity = client_identity.clone();
-    tokio::spawn(async move {
-        let _reservation = reservation;
-        let _activity = activity;
-        if let Err(error) = ensure_user_profile_host_admission_replay_for_identity(
-            &store_administration,
-            &client_identity,
-        )
+    let profile_root = client_identity.profile_root.clone();
+    let operation_store_administration = store_administration.clone();
+    let operation_client_identity = client_identity.clone();
+    let operation: profile_host_admission_replay::ProfileHostAdmissionBootstrapOperation =
+        Arc::new(move || {
+            let store_administration = operation_store_administration.clone();
+            let client_identity = operation_client_identity.clone();
+            Box::pin(async move {
+                ensure_user_profile_host_admission_replay_for_identity(
+                    &store_administration,
+                    &client_identity,
+                )
+                .await
+            })
+        });
+    store_administration
+        .ensure_profile_host_admission_bootstrap(&profile_root, operation)
         .await
-        {
-            eprintln!(
-                "[tracedecay] user-profile host admission disposition: authority_unavailable: {error}"
-            );
-        }
-    });
-    Ok(())
 }
 
 #[cfg(test)]
