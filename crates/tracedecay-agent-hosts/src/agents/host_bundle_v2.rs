@@ -18,6 +18,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_json_bytes;
+use tracedecay_host_integration::host_bundle_recovery_required;
+use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 pub use tracedecay_host_integration::{
     ClineFamilyAdmissionV1, ClineFamilyEvidenceV1, ClineFamilyProviderV1,
@@ -838,7 +840,7 @@ pub trait HostComponentSetRegistrationV1 {
             || preview.current_registration_revision != preview.base_registration_revision
             || self.current_revision(component_set, request)? != preview.base_registration_revision
         {
-            return Err(HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         Ok(())
     }
@@ -963,7 +965,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
                 .load_component_set_journal_for(component_set.host)?
                 .is_some()
         {
-            return Err(HostBundleError::RecoveryRequired);
+            return Err(host_bundle_recovery_required!());
         }
         dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
             &self.writer.root_path,
@@ -991,7 +993,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
         }
         validate_component_set_request(component_set, request)?;
         if preview.operation_id != request.operation_id {
-            return Err(HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         if let Some(receipt) = self
             .writer
@@ -1002,7 +1004,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
             }
             return component_set_receipt_matches_preview(&receipt, preview)
                 .then_some(receipt)
-                .ok_or(HostBundleError::StalePreview);
+                .ok_or(host_bundle_stale_preview!());
         }
         // The re-preview reports why this plan can no longer be applied.
         // `StalePreview` is reserved for genuine drift between the confirmed
@@ -1019,7 +1021,7 @@ impl<'a> HostComponentSetTransactionV1<'a> {
             || current.component_plans != preview.component_plans
             || current.competing_extension_claims != preview.competing_extension_claims
         {
-            return Err(HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         registration.confirm_preview(component_set, request, preview)?;
         self.writer.execute_confirmed_component_set(
@@ -1475,17 +1477,17 @@ pub fn dry_run_host_component_set_lifecycle_with_lifecycle_root_at<
     let current_registration_revision =
         registration.current_revision(component_set, &planning_request)?;
     if current_registration_revision != base_registration_revision {
-        return Err(HostBundleError::StalePreview);
+        return Err(host_bundle_stale_preview!());
     }
     if discovered_competing_extension_claims(component_set, &planning_request, registration)?
         != competing_extension_claims
     {
-        return Err(HostBundleError::StalePreview);
+        return Err(host_bundle_stale_preview!());
     }
     let current_artifact_state_revision =
         component_set_artifact_state_revision(artifact_root, lifecycle_root, component_set)?;
     if current_artifact_state_revision != base_artifact_state_revision {
-        return Err(HostBundleError::StalePreview);
+        return Err(host_bundle_stale_preview!());
     }
     let artifact_state_revision = base_artifact_state_revision;
     let plan_digest = component_set_plan_digest(
@@ -2451,13 +2453,13 @@ impl HostBundleWriterV1 {
                         continue;
                     }
                     if regular_file_exists(&parent, &name)? {
-                        return Err(HostBundleError::RecoveryRequired);
+                        return Err(host_bundle_recovery_required!());
                     }
                 }
                 let backups = backup_dir
                     .as_ref()
                     .filter(|_| backup_exists)
-                    .ok_or(HostBundleError::RecoveryRequired)?;
+                    .ok_or(host_bundle_recovery_required!())?;
                 if entry.wrote_new {
                     remove_if_digest_matches(
                         &parent,
@@ -2467,7 +2469,7 @@ impl HostBundleWriterV1 {
                             .ok_or(HostBundleError::ReceiptCorrupted)?,
                     )?;
                 } else if regular_file_exists(&parent, &name)? {
-                    return Err(HostBundleError::RecoveryRequired);
+                    return Err(host_bundle_recovery_required!());
                 }
                 backups
                     .rename(backup_name, &parent, &name)
@@ -2513,7 +2515,7 @@ impl HostBundleWriterV1 {
             .load_component_set_journal_for(manifest.host)?
             .is_some()
         {
-            return Err(HostBundleError::RecoveryRequired);
+            return Err(host_bundle_recovery_required!());
         }
         self.recover_interrupted_operation()?;
         let previous_receipt = self.load_receipt(manifest.host, manifest.component)?;
@@ -2742,7 +2744,7 @@ impl HostBundleWriterV1 {
     ) -> Result<HostComponentSetReceiptV1, HostBundleError> {
         validate_component_set_request(component_set, request)?;
         if self.load_journal()?.is_some() {
-            return Err(HostBundleError::RecoveryRequired);
+            return Err(host_bundle_recovery_required!());
         }
         // Never clobber this host's own outstanding journal: it is the only
         // durable record of how to roll the earlier transaction back.
@@ -2750,7 +2752,7 @@ impl HostBundleWriterV1 {
             .load_component_set_journal_for(component_set.host)?
             .is_some()
         {
-            return Err(HostBundleError::RecoveryRequired);
+            return Err(host_bundle_recovery_required!());
         }
         if let Some(receipt) = self.load_component_set_receipt(request.operation_id)? {
             if !component_set_receipt_matches(&receipt, component_set, request)? {
@@ -2759,7 +2761,7 @@ impl HostBundleWriterV1 {
             if confirmed_preview
                 .is_some_and(|preview| !component_set_receipt_matches_preview(&receipt, preview))
             {
-                return Err(HostBundleError::StalePreview);
+                return Err(host_bundle_stale_preview!());
             }
             return Ok(receipt);
         }
@@ -2885,7 +2887,7 @@ impl HostBundleWriterV1 {
                     .rollback_component_set(component_set, request, registration, &mut journal)
                     .is_err()
                 {
-                    Err(HostBundleError::RecoveryRequired)
+                    Err(host_bundle_recovery_required!())
                 } else {
                     Err(error)
                 }
@@ -3258,12 +3260,12 @@ impl HostBundleWriterV1 {
                     return Ok(());
                 }
                 if regular_file_exists(&parent, &name)? {
-                    return Err(HostBundleError::RecoveryRequired);
+                    return Err(host_bundle_recovery_required!());
                 }
             }
             let backups = backup_dir
                 .filter(|_| backup_exists)
-                .ok_or(HostBundleError::RecoveryRequired)?;
+                .ok_or(host_bundle_recovery_required!())?;
             if entry.wrote_new {
                 remove_if_digest_matches(
                     &parent,
@@ -3278,9 +3280,9 @@ impl HostBundleWriterV1 {
                 // therefore stays fail-closed.
                 let installed = entry
                     .installed_digest
-                    .ok_or(HostBundleError::RecoveryRequired)?;
+                    .ok_or(host_bundle_recovery_required!())?;
                 if <[u8; 32]>::from(Sha256::digest(&live)) != installed {
-                    return Err(HostBundleError::RecoveryRequired);
+                    return Err(host_bundle_recovery_required!());
                 }
                 parent
                     .remove_file(&name)
@@ -4174,7 +4176,7 @@ fn open_writer_lock(control: &Dir) -> Result<fs::File, HostBundleError> {
         .map_err(|_| HostBundleError::UnsafeInstallPath)?
         .into_std();
     file.try_lock_exclusive()
-        .map_err(|_| HostBundleError::RecoveryRequired)?;
+        .map_err(|_| host_bundle_recovery_required!())?;
     Ok(file)
 }
 
@@ -4241,7 +4243,7 @@ fn remove_if_digest_matches(
     };
     let actual: [u8; 32] = Sha256::digest(&bytes).into();
     if actual != expected_digest {
-        return Err(HostBundleError::RecoveryRequired);
+        return Err(host_bundle_recovery_required!());
     }
     parent
         .remove_file(name)
@@ -4258,7 +4260,7 @@ fn move_regular_to_backup(
         return Err(HostBundleError::UnsafeInstallPath);
     }
     if regular_file_exists(backup_dir, backup_name)? {
-        return Err(HostBundleError::RecoveryRequired);
+        return Err(host_bundle_recovery_required!());
     }
     parent
         .rename(name, backup_dir, backup_name)
@@ -5801,7 +5803,10 @@ mod tests {
         let (mut writer, outcome) =
             wedge_repair_with_second_writer(root.path(), b"foreign-third-party-bytes");
 
-        assert_eq!(outcome.err(), Some(HostBundleError::RecoveryRequired));
+        assert!(matches!(
+            outcome.err(),
+            Some(HostBundleError::RecoveryRequired(_))
+        ));
         assert_eq!(
             fs::read(root.path().join("plugins/core.json")).unwrap(),
             b"foreign-third-party-bytes",
@@ -5812,12 +5817,12 @@ mod tests {
             vec![HostKindV1::OpenCode]
         );
         // Convergent recovery cannot resolve this, so it still fails closed.
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer)
                 .recover_host(HostKindV1::OpenCode, &mut ArtifactOnlyTestRegistration)
                 .err(),
-            Some(HostBundleError::RecoveryRequired)
-        );
+            Some(HostBundleError::RecoveryRequired(_))
+        ));
 
         // The recovery verb's escape hatch: the journal is set aside (not
         // deleted) and the immutable backups stay on disk.
@@ -5889,7 +5894,7 @@ mod tests {
             bytes: b"foreign".to_vec(),
             rolled_back: false,
         };
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer)
                 .execute(
                     &wedged,
@@ -5898,8 +5903,8 @@ mod tests {
                     &mut second_writer,
                 )
                 .err(),
-            Some(HostBundleError::RecoveryRequired)
-        );
+            Some(HostBundleError::RecoveryRequired(_))
+        ));
         assert_eq!(
             writer.pending_component_set_journal_hosts().unwrap(),
             vec![HostKindV1::OpenCode]
@@ -5938,12 +5943,12 @@ mod tests {
         let repair_request =
             component_set_request(HostKindV1::Codex, HostBundleLifecycleOpV1::Repair, 53);
         let repair_verifier = ComponentSetVerifier::from_set(&repair);
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer)
                 .execute(&repair, &repair_request, &repair_verifier, &mut also_wedged)
                 .err(),
-            Some(HostBundleError::RecoveryRequired)
-        );
+            Some(HostBundleError::RecoveryRequired(_))
+        ));
         writer
             .quarantine_component_set_journal(HostKindV1::Codex, 1_700_000_000)
             .unwrap()
@@ -6169,7 +6174,7 @@ mod tests {
         assert_eq!(repeated, preview);
 
         registration.revision = [2; 32];
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &component_set,
                 &request,
@@ -6177,8 +6182,8 @@ mod tests {
                 &verifier,
                 &mut registration,
             ),
-            Err(HostBundleError::StalePreview)
-        );
+            Err(HostBundleError::StalePreview(_))
+        ));
         assert!(!root.path().join("plugins").exists());
     }
 
@@ -6206,7 +6211,7 @@ mod tests {
             operation_id: full_request.operation_id,
         };
 
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &narrowed,
                 &narrowed_request,
@@ -6214,8 +6219,8 @@ mod tests {
                 &verifier,
                 &mut registration,
             ),
-            Err(HostBundleError::StalePreview)
-        );
+            Err(HostBundleError::StalePreview(_))
+        ));
         assert!(!root.path().join("plugins").exists());
     }
 

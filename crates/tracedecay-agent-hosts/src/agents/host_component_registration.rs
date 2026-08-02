@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 2;
@@ -835,7 +836,7 @@ impl HostComponentRegistrationDelegate {
                 continue;
             }
             match fs::symlink_metadata(path) {
-                Ok(_) => return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview),
+                Ok(_) => return Err(host_bundle_stale_preview!()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
                     return Err(host_bundle_storage_failure!());
@@ -905,7 +906,7 @@ impl HostComponentRegistrationDelegate {
             let expected: RegistrationObservedStateV1 = serde_json::from_slice(&expected)
                 .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::WrongTarget)?;
             if registration_observed_state(path)? != expected {
-                return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                return Err(host_bundle_stale_preview!());
             }
         }
         Ok(())
@@ -1101,9 +1102,7 @@ impl HostComponentRegistrationDelegate {
                         let observed = crate::agents::capture_host_file_metadata(path)
                             .map_err(|_| host_bundle_storage_failure!())?;
                         if observed != original_metadata {
-                            return Err(
-                                crate::agents::host_bundle_v2::HostBundleError::StalePreview,
-                            );
+                            return Err(host_bundle_stale_preview!());
                         }
                         let recovery_marker =
                             self.directory_recovery_metadata_marker(operation_id, index);
@@ -1116,9 +1115,7 @@ impl HostComponentRegistrationDelegate {
                                     crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
                                 })?;
                             if recovery_metadata != original_metadata {
-                                return Err(
-                                    crate::agents::host_bundle_v2::HostBundleError::StalePreview,
-                                );
+                                return Err(host_bundle_stale_preview!());
                             }
                             recovery_owned_directories.push(path);
                         }
@@ -1150,9 +1147,7 @@ impl HostComponentRegistrationDelegate {
                                 recovery_owned_directories.push(path);
                                 continue;
                             }
-                            return Err(
-                                crate::agents::host_bundle_v2::HostBundleError::StalePreview,
-                            );
+                            return Err(host_bundle_stale_preview!());
                         }
                         let applied: RegistrationDirectoryAppliedStateV2 =
                             serde_json::from_slice(&fs::read(applied_marker).map_err(|_| {
@@ -1162,9 +1157,7 @@ impl HostComponentRegistrationDelegate {
                                 crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
                             })?;
                         if registration_directory_applied_state(path)? != applied {
-                            return Err(
-                                crate::agents::host_bundle_v2::HostBundleError::StalePreview,
-                            );
+                            return Err(host_bundle_stale_preview!());
                         }
                         recovery_owned_directories.push(path);
                     }
@@ -1187,7 +1180,7 @@ impl HostComponentRegistrationDelegate {
                 && intended.as_ref() != Some(&observed)
                 && !parent_will_be_recreated
             {
-                return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                return Err(host_bundle_stale_preview!());
             }
         }
         vanished_directories.sort_by_key(|(_, path)| path.components().count());
@@ -1328,7 +1321,7 @@ impl HostComponentRegistrationDelegate {
                     .map_err(|_| host_bundle_storage_failure!())?
                     != metadata
                 {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                    return Err(host_bundle_stale_preview!());
                 }
                 crate::agents::restore_host_file_metadata(path, &metadata)
                     .map_err(|_| host_bundle_storage_failure!())?;
@@ -1375,7 +1368,7 @@ impl HostComponentRegistrationDelegate {
                         crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
                     })?;
                     if registration_directory_applied_state(path)? != applied {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                        return Err(host_bundle_stale_preview!());
                     }
                 }
                 match fs::remove_dir(path) {
@@ -1477,7 +1470,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             || self.component_registration_revision(component_set)?
                 != preview.base_registration_revision
         {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         self.confirmed_registration_revision = Some(preview.base_registration_revision);
         Ok(())
@@ -1511,7 +1504,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         if let Some(expected) = self.confirmed_registration_revision
             && self.current_registration_revision(component_set)? != expected
         {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         let states = component_set
             .components
@@ -1567,14 +1560,14 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             if let Some(expected) = self.confirmed_registration_revision
                 && self.component_registration_revision(component_set)? != expected
             {
-                return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                return Err(host_bundle_stale_preview!());
             }
             return Ok(());
         }
         if let Some(expected) = self.confirmed_registration_revision
             && self.current_registration_revision(component_set)? != expected
         {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+            return Err(host_bundle_stale_preview!());
         }
         // Last observation before the transaction writes its own artifacts.
         // Everything outside the declared write set must still look like this
@@ -1615,7 +1608,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                     &self.declared_artifact_writes,
                 )? != expected
                 {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                    return Err(host_bundle_stale_preview!());
                 }
             }
             // No staged observation (a caller driving the adapter directly
@@ -1625,7 +1618,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                 if let Some(expected) = self.confirmed_registration_revision
                     && self.current_registration_revision(component_set)? != expected
                 {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
+                    return Err(host_bundle_stale_preview!());
                 }
             }
         }
