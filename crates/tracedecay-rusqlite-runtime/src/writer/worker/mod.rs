@@ -98,7 +98,10 @@ impl Worker {
             Err(error) if error.is_open_failure() => {
                 return self.fail_start(WriterStartError::OpenFailed);
             }
-            Err(_) => return self.fail_start(WriterStartError::BusyTimeoutSetupFailed),
+            Err(error) => {
+                return self
+                    .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
+            }
         };
         #[cfg(unix)]
         if self.expected_file_identity.is_some()

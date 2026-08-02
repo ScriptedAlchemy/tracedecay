@@ -368,9 +368,46 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Returns the path to opencode config (global).
-/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME`.
+///
+/// Honors an absolute `$XDG_CONFIG_HOME`, including locations outside `HOME` —
+/// but only when `home` *is* this process user's home. See
+/// [`ambient_xdg_config_home`].
 fn opencode_config_path(home: &Path) -> std::path::PathBuf {
-    opencode_config_path_for(home, std::env::var_os("XDG_CONFIG_HOME").as_deref())
+    opencode_config_path_for(home, ambient_xdg_config_home(home).as_deref())
+}
+
+/// The ambient `$XDG_CONFIG_HOME`, scoped to the home it actually describes.
+///
+/// `$XDG_CONFIG_HOME` names *this process user's* config root, so it only
+/// answers for a caller that is resolving that same user's home. A caller that
+/// names a different root — a per-home sweep, a managed-skill export
+/// destination scan, a test sandbox — must stay inside the root it named.
+///
+/// Reading it unconditionally let a lifecycle export sweep that was handed a
+/// sandbox `home` resolve OpenCode to the operator's real
+/// `~/.config/opencode/AGENTS.md` and deploy managed skills into it, and made
+/// `primary_config_path(home)` answer outside `home`. Only the resolution of
+/// the ambient value is scoped; [`opencode_config_path_for`] still honors an
+/// explicit external root exactly as before.
+fn ambient_xdg_config_home(home: &Path) -> Option<std::ffi::OsString> {
+    if !is_process_home(home) {
+        return None;
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+}
+
+/// True when `home` is the home directory of the running process.
+fn is_process_home(home: &Path) -> bool {
+    let Some(own) = super::home_dir() else {
+        return false;
+    };
+    if own == home {
+        return true;
+    }
+    match (std::fs::canonicalize(&own), std::fs::canonicalize(home)) {
+        (Ok(own), Ok(home)) => own == home,
+        _ => false,
+    }
 }
 
 fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::path::PathBuf {
@@ -396,7 +433,7 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 /// everyone else gets the modern config-dir path, whose parent the write path
 /// creates on demand.
 fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+    if let Some(xdg) = ambient_xdg_config_home(home)
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute())
     {
@@ -921,6 +958,77 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct XdgConfigHomeGuard {
+        previous_xdg: Option<std::ffi::OsString>,
+        previous_home: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl XdgConfigHomeGuard {
+        fn set(xdg: &Path, home: &Path) -> Self {
+            let lock = crate::config::lock_user_data_dir_test_env();
+            let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+            let previous_home = std::env::var_os("HOME");
+            // SAFETY: the shared profile-discovery lock is held for the
+            // guard's lifetime, so no sibling test observes the override.
+            unsafe {
+                std::env::set_var("XDG_CONFIG_HOME", xdg);
+                std::env::set_var("HOME", home);
+            }
+            Self {
+                previous_xdg,
+                previous_home,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for XdgConfigHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `XdgConfigHomeGuard::set`; the lock is still held.
+            unsafe {
+                match self.previous_xdg.take() {
+                    Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match self.previous_home.take() {
+                    Some(previous) => std::env::set_var("HOME", previous),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// An ambient `$XDG_CONFIG_HOME` describes the process user's own home. A
+    /// caller that names a different root must be answered inside that root:
+    /// otherwise a managed-skill export sweep handed a sandbox home resolves
+    /// OpenCode to the operator's real `~/.config/opencode` and writes there.
+    #[test]
+    fn ambient_xdg_never_redirects_a_foreign_home_outside_itself() {
+        let process_home = tempfile::tempdir().unwrap();
+        let xdg = tempfile::tempdir().unwrap();
+        let other_home = tempfile::tempdir().unwrap();
+        let _guard = XdgConfigHomeGuard::set(xdg.path(), process_home.path());
+
+        assert!(
+            opencode_config_path(other_home.path()).starts_with(other_home.path()),
+            "config path escaped the requested home"
+        );
+        assert!(
+            opencode_prompt_path(other_home.path()).starts_with(other_home.path()),
+            "prompt path escaped the requested home"
+        );
+        // The same ambient value still answers for the home it describes.
+        assert_eq!(
+            opencode_config_path(process_home.path()),
+            xdg.path().join("opencode/opencode.json")
+        );
+        assert_eq!(
+            opencode_prompt_path(process_home.path()),
+            xdg.path().join("opencode/AGENTS.md")
+        );
+    }
 
     #[test]
     fn lsp_registration_records_retained_analyzers_per_extension() {
