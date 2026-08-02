@@ -1173,15 +1173,18 @@ impl HostComponentRegistrationDelegate {
                         let applied_marker =
                             self.directory_applied_metadata_marker(operation_id, index);
                         if !applied_marker.is_file() {
-                            // Authentic schema-v1 backups recorded only that
-                            // the directory was absent. Preserve their bounded
-                            // recovery contract; schema v2 requires exact
-                            // applied metadata before claiming the directory.
-                            if mutation_plan.schema_version == 1 {
-                                recovery_owned_directories.push(path);
-                                continue;
-                            }
-                            return Err(host_bundle_stale_preview!());
+                            // No applied-state marker means the directory came
+                            // back before `prepare_missing_registration_directories`
+                            // could claim it -- typically because the transaction's
+                            // own artifact write created it and then a later step
+                            // failed. Refusing here left the journal on disk with
+                            // no convergence path, so every later lifecycle command
+                            // reported stale preview forever. Claim it instead and
+                            // assert nothing about its exact state: the removal pass
+                            // below is empty-guarded, so a directory that anyone else
+                            // is using survives untouched.
+                            recovery_owned_directories.push(path);
+                            continue;
                         }
                         let applied: RegistrationDirectoryAppliedStateV2 =
                             serde_json::from_slice(&fs::read(applied_marker).map_err(|_| {
@@ -1361,11 +1364,13 @@ impl HostComponentRegistrationDelegate {
                     .map_err(|_| host_bundle_storage_failure!())?;
             } else {
                 let applied_marker = self.directory_applied_metadata_marker(operation_id, index);
-                let legacy_missing_directory =
-                    mutation_plan.schema_version == 1 && !applied_marker.is_file();
-                if !applied_marker.is_file() && !legacy_missing_directory {
-                    continue;
-                }
+                // Legacy schema-v1 backups never recorded applied state, and a
+                // schema-v2 operation that died between its artifact write and
+                // `prepare_missing_registration_directories` did not get to
+                // record it either. Both cases still have to roll back, so
+                // assert nothing about the directory's exact state and let the
+                // empty-guarded removal below decide.
+                let unattributed_missing_directory = !applied_marker.is_file();
                 match fs::symlink_metadata(path) {
                     Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                         return Err(
@@ -1394,7 +1399,7 @@ impl HostComponentRegistrationDelegate {
                         return Err(host_bundle_storage_failure!());
                     }
                 }
-                if !legacy_missing_directory {
+                if !unattributed_missing_directory {
                     let applied: RegistrationDirectoryAppliedStateV2 = serde_json::from_slice(
                         &fs::read(applied_marker).map_err(|_| host_bundle_storage_failure!())?,
                     )
@@ -2117,6 +2122,67 @@ mod tests {
             delegate.prepare_missing_registration_directories(operation_id),
             Err(HostBundleError::StalePreview(_))
         ));
+    }
+
+    /// The wedge this pair of defects produced: an operation died after its
+    /// artifact write created a registration directory but before `apply` could
+    /// record the applied-state marker. Rollback then found a directory the
+    /// backup said was absent, with nothing attributing it, and refused. The
+    /// journal stayed on disk and every later lifecycle command reported the
+    /// same stale preview, with no way out short of deleting state by hand.
+    #[test]
+    fn rollback_converges_when_a_missing_directory_has_no_applied_marker() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let orphaned = home.path().join(".claude/agents");
+
+        let (delegate, operation_id) =
+            missing_directory_fixture(home.path(), lifecycle.path(), &[orphaned.clone()]);
+        // The state the dead operation left behind: the directory exists, but
+        // no `directory-0.applied.metadata.json` ever got written.
+        fs::create_dir_all(&orphaned).unwrap();
+        assert!(
+            !delegate
+                .directory_applied_metadata_marker(operation_id, 0)
+                .is_file()
+        );
+
+        let component_set = empty_claude_component_set();
+
+        delegate
+            .restore_registration(&component_set, operation_id)
+            .expect("rollback must converge instead of wedging on an unattributable directory");
+
+        assert!(
+            !orphaned.exists(),
+            "an empty directory this operation introduced is removed, restoring the pre-op tree"
+        );
+    }
+
+    /// Convergence must not become a licence to delete a directory somebody
+    /// else is using: the removal stays empty-guarded.
+    #[test]
+    fn rollback_leaves_a_non_empty_unattributed_directory_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let orphaned = home.path().join(".claude/agents");
+
+        let (delegate, operation_id) =
+            missing_directory_fixture(home.path(), lifecycle.path(), &[orphaned.clone()]);
+        fs::create_dir_all(&orphaned).unwrap();
+        fs::write(orphaned.join("someone-elses.md"), b"keep me").unwrap();
+
+        let component_set = empty_claude_component_set();
+
+        delegate
+            .restore_registration(&component_set, operation_id)
+            .expect("rollback still converges");
+
+        assert_eq!(
+            fs::read(orphaned.join("someone-elses.md")).unwrap(),
+            b"keep me",
+            "unaccountable content is preserved, never silently discarded"
+        );
     }
 
     #[test]
