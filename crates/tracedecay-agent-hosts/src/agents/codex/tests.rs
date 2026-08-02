@@ -774,33 +774,180 @@ fn codex_skill_cross_references_resolve_to_shipped_skills() {
     );
 }
 
-/// Doctor downgrades a never-activated Codex component from a blocking
-/// `Missing` to a pending user action purely on the strength of
-/// `interactive_activation_guidance`. That downgrade is only honest while the
-/// same adapter also refuses a non-interactive install, so the two must agree:
-/// a Codex whose preflight reported `Ready` would have a reinstall that really
-/// could converge the state, and doctor must keep failing for it.
-#[test]
-fn codex_activation_guidance_matches_its_non_interactive_deferral() {
-    let home = tempfile::tempdir().unwrap();
-    let ctx = InstallContext {
-        home: home.path().to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+fn install_ctx(home: &Path) -> InstallContext {
+    InstallContext {
+        home: home.to_path_buf(),
+        tracedecay_bin: TEST_BIN.to_string(),
         tool_permissions: Vec::new(),
         project_root: None,
         dashboard: false,
-    };
+    }
+}
 
-    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = CodexIntegration
-        .preflight_non_interactive_install(&ctx)
-        .unwrap()
-    else {
-        panic!("Codex has no supported non-interactive activation surface");
-    };
+/// Doctor downgrades a never-activated component to `ActivationDeferred` purely
+/// on the strength of `interactive_activation_guidance`, and that downgrade is
+/// only honest for a host TraceDecay genuinely cannot activate. Codex records
+/// activation in plain files, so the probe must report no interactive
+/// requirement and preflight must report `Ready` — doctor then keeps the
+/// blocking classification, which a reinstall really can converge.
+#[test]
+fn codex_reports_a_non_interactive_activation_surface() {
+    let home = tempfile::tempdir().unwrap();
 
     assert_eq!(
         CodexIntegration.interactive_activation_guidance(),
-        Some(deferred.remediation),
-        "the doctor-side capability probe must speak the adapter's own deferral"
+        None,
+        "Codex activation is file-based, so nothing waits on its plugin UI"
     );
+    assert_eq!(
+        CodexIntegration
+            .preflight_non_interactive_install(&install_ctx(home.path()))
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready,
+        "the capability probe and preflight must agree the host is activatable"
+    );
+}
+
+/// Activation is exactly the pair Codex itself writes for `codex plugin add`:
+/// the cached version bundle it loads plus `enabled = true` in `config.toml`.
+#[test]
+fn codex_activation_records_enabled_plugin_and_cached_bundle() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+
+    let ctx = HealthcheckContext {
+        home: home.path().to_path_buf(),
+        project_path: home.path().to_path_buf(),
+    };
+    assert_eq!(
+        CodexIntegration
+            .host_component_registration(super::super::host_bundle_v2::HostBundleComponentV1::Core, &ctx),
+        super::super::host_bundle_v2::HostBundleRegistrationStateV1::Repairable,
+        "a staged-but-unactivated bundle is not a current registration"
+    );
+
+    let key = codex_activate_plugin(home.path(), TEST_BIN).unwrap();
+    assert_eq!(key, "tracedecay@personal");
+
+    let config_path = codex_config_path(home.path());
+    let config = load_toml_file(&config_path).unwrap();
+    assert!(
+        config["plugins"]["tracedecay@personal"]["enabled"]
+            .as_bool()
+            .unwrap(),
+        "Codex reads activation from [plugins.\"<plugin>@<marketplace>\"].enabled"
+    );
+    assert!(
+        codex_plugin_current_cached_install_dir(home.path())
+            .join(".codex-plugin/plugin.json")
+            .is_file(),
+        "Codex only loads a plugin whose cached version bundle exists"
+    );
+    assert_eq!(
+        CodexIntegration
+            .host_component_registration(super::super::host_bundle_v2::HostBundleComponentV1::Core, &ctx),
+        super::super::host_bundle_v2::HostBundleRegistrationStateV1::Current,
+    );
+
+    // Idempotent: re-running activation leaves exactly one record.
+    codex_activate_plugin(home.path(), TEST_BIN).unwrap();
+    let config = load_toml_file(&config_path).unwrap();
+    assert_eq!(config["plugins"].as_table().unwrap().len(), 1);
+}
+
+/// Every other plugin's activation record and the user's own settings survive.
+#[test]
+fn codex_activation_preserves_foreign_plugin_records() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "model = \"o4-mini\"\n\n[plugins.\"other@openai-curated\"]\nenabled = false\n",
+    )
+    .unwrap();
+
+    codex_activate_plugin(home.path(), TEST_BIN).unwrap();
+
+    let config = load_toml_file(&config_path).unwrap();
+    assert_eq!(config["model"].as_str().unwrap(), "o4-mini");
+    assert!(
+        !config["plugins"]["other@openai-curated"]["enabled"]
+            .as_bool()
+            .unwrap(),
+        "a foreign plugin's activation state must not be touched"
+    );
+    assert!(
+        config["plugins"]["tracedecay@personal"]["enabled"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+/// Fail-safe: an unrecognised record shape under our own key is refused, the
+/// config is left byte-for-byte intact, and preflight defers with the exact
+/// one-time command instead.
+#[test]
+fn codex_activation_refuses_a_foreign_owned_activation_record() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let original = "[plugins]\n\"tracedecay@personal\" = \"managed-elsewhere\"\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    let error = codex_set_plugin_activation(home.path(), true).unwrap_err();
+    assert!(
+        error.to_string().contains("refusing to overwrite"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        original,
+        "a refused activation must not rewrite the host config"
+    );
+
+    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = CodexIntegration
+        .preflight_non_interactive_install(&install_ctx(home.path()))
+        .unwrap()
+    else {
+        panic!("an unwritable [plugins] shape must defer to the operator");
+    };
+    assert!(
+        deferred
+            .remediation
+            .contains("codex plugin add tracedecay@personal"),
+        "the deferral must name the exact one-time step: {}",
+        deferred.remediation
+    );
+}
+
+/// Uninstall clears our activation record and nothing else.
+#[test]
+fn codex_uninstall_clears_only_the_tracedecay_activation_record() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "model = \"o4-mini\"\n\n[plugins.\"other@openai-curated\"]\nenabled = true\n",
+    )
+    .unwrap();
+    codex_activate_plugin(home.path(), TEST_BIN).unwrap();
+
+    uninstall_codex_config(&config_path).unwrap();
+
+    let config = load_toml_file(&config_path).unwrap();
+    assert!(
+        config["plugins"].get("tracedecay@personal").is_none(),
+        "activation record should be removed on uninstall"
+    );
+    assert!(
+        config["plugins"]["other@openai-curated"]["enabled"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(config["model"].as_str().unwrap(), "o4-mini");
 }
