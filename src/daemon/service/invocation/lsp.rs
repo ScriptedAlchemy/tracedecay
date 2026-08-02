@@ -408,7 +408,7 @@ impl DaemonInvocationService {
         self.operation_events.expire_all().await;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) async fn active_lsp_runtime_count(&self) -> usize {
         self.lsp_sessions.lock().await.len()
     }

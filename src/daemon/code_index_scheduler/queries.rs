@@ -225,7 +225,10 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let scope = scope.clone();
         let generation_id = generation_id.clone();
-        tokio::task::spawn_blocking(move || {
+        // The blocking side may park on the single-flight decode barrier for a
+        // sealed generation, which is an O(store) sweep. Do not hold an admission
+        // slot across it.
+        crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
             if let Some(generation) = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -243,7 +246,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let generation = scheduler.generation(&generation_id).ok().flatten()?;
             Self::latest_matches_scope(&generation, &scope).then_some(generation)
-        })
+        }))
         .await
         .ok()
         .flatten()

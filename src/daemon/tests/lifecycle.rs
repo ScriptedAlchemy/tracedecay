@@ -100,6 +100,105 @@ fn daemon_admission_preserves_reserved_health_capacity() {
     assert!(!super::super::is_reserved_control_request(&bulk_request));
 }
 
+/// A request parked on a barrier must not occupy an admission slot.
+///
+/// Observed live during a generation rebuild: 101 `bulk_capacity_reached` sheds
+/// in ten minutes against a cap of 64 while the reader pool was completely idle
+/// (0 leased, 0 waiting). The slots were held by requests asleep on project
+/// warm-up, on the writer gate, and on the single-flight generation decode, so
+/// calls that needed no generation at all — `tracedecay_diff_context`, session,
+/// memory, and git tools — were rejected by work that was doing nothing.
+///
+/// The acceptance property: while every general slot is held by a parked
+/// request, a fresh call still admits as `General` and completes; the parked
+/// requests still finish after their barrier lifts; and no permit leaks.
+#[tokio::test]
+async fn parked_requests_never_starve_admission_for_work_that_cannot_park() {
+    const GENERAL_CAPACITY: usize = 4;
+    let admission =
+        super::super::DaemonClientAdmission::with_reserved_capacity(GENERAL_CAPACITY + 1, 1);
+    let baseline = admission.available_general_permits();
+    assert_eq!(baseline, GENERAL_CAPACITY);
+
+    // Every general slot goes to a connection that parks on a barrier, exactly
+    // as a query behind a generation rebuild does.
+    let (barrier, _) = tokio::sync::watch::channel(false);
+    let mut parked = Vec::new();
+    for _ in 0..GENERAL_CAPACITY {
+        let permit = match admission.try_admit() {
+            super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+                panic!("parked client rejected below capacity")
+            }
+        };
+        assert_eq!(
+            permit.class(),
+            super::super::DaemonClientAdmissionClass::General
+        );
+        let mut lifted = barrier.subscribe();
+        parked.push(tokio::spawn(super::super::with_connection_admission(
+            permit,
+            async move {
+                super::super::park_admission(async {
+                    while !*lifted.borrow_and_update() {
+                        lifted.changed().await.expect("barrier sender retained");
+                    }
+                })
+                .await;
+                "parked request completed"
+            },
+        )));
+    }
+    assert_eq!(
+        admission.available_general_permits(),
+        0,
+        "parked clients must start out holding their slots"
+    );
+
+    // Each park surrenders its slot once it outlives the grace.
+    let surrendered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while admission.available_general_permits() < GENERAL_CAPACITY {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        surrendered.is_ok(),
+        "parked requests kept their admission slots"
+    );
+
+    // The acceptance property: a call that never touches a generation still
+    // admits as general traffic instead of being shed.
+    let unparked = match admission.try_admit() {
+        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        super::super::DaemonClientAdmissionOutcome::Saturated(response) => {
+            panic!("generation-parked requests starved unrelated work: {response:?}")
+        }
+    };
+    assert_eq!(
+        unparked.class(),
+        super::super::DaemonClientAdmissionClass::General,
+        "unrelated work must not be pushed onto the reserved control lane"
+    );
+    drop(unparked);
+
+    // Parked requests still complete once their barrier lifts.
+    barrier.send(true).expect("lift barrier");
+    for task in parked {
+        assert_eq!(
+            task.await.expect("parked client task"),
+            "parked request completed"
+        );
+    }
+
+    // No permit leaks: every slot is back.
+    assert_eq!(
+        admission.available_general_permits(),
+        baseline,
+        "admission permits leaked across park and resume"
+    );
+}
+
 /// MCP discovery must never be rejected as bulk traffic.
 ///
 /// A rejected `tools/call` costs one call; a rejected `initialize` or
