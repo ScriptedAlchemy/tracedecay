@@ -6549,9 +6549,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "legacy_backfill_complete": {
-          "type": "boolean"
-        },
         "missing_vector_count": {
           "format": "uint",
           "minimum": 0,
@@ -6601,7 +6598,6 @@
         "helpful_count",
         "unhelpful_count",
         "missing_vector_count",
-        "legacy_backfill_complete",
         "repair",
         "feedback_funnel"
       ],
