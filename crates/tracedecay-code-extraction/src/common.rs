@@ -19,7 +19,6 @@ fn node_text(source: &[u8], node: TsNode<'_>) -> String {
 
 /// Strip comment markers from a single C-style comment text
 /// (`//` line comments and `/* ... */` block comments).
-#[allow(dead_code)]
 pub(crate) fn clean_c_comment(comment: &str) -> String {
     let trimmed = comment.trim();
     if let Some(stripped) = trimmed.strip_prefix("//") {
@@ -45,7 +44,6 @@ pub(crate) fn clean_c_comment(comment: &str) -> String {
 
 /// Strip comment markers from a single C-style comment text, including
 /// `///` doc comments.
-#[allow(dead_code)]
 pub(crate) fn clean_c_doc_comment(comment: &str) -> String {
     let trimmed = comment.trim();
     if let Some(stripped) = trimmed.strip_prefix("///") {
@@ -73,7 +71,6 @@ pub(crate) fn clean_c_doc_comment(comment: &str) -> String {
 
 /// Extract a docstring from the run of `comment` siblings immediately
 /// preceding `node`, cleaning each comment with `clean`.
-#[allow(dead_code)]
 pub(crate) fn docstring_from_preceding_comments(
     source: &[u8],
     node: TsNode<'_>,
@@ -105,7 +102,7 @@ pub(crate) fn docstring_from_preceding_comments(
 
 /// Extract a docstring from the run of `#` comment siblings immediately
 /// preceding `node`.
-#[allow(dead_code)]
+#[cfg(any(feature = "lang-bash", feature = "lang-ruby"))]
 pub(crate) fn docstring_from_hash_comments(source: &[u8], node: TsNode<'_>) -> Option<String> {
     let mut comments: Vec<String> = Vec::new();
     let mut prev = node.prev_named_sibling();
@@ -129,7 +126,6 @@ pub(crate) fn docstring_from_hash_comments(source: &[u8], node: TsNode<'_>) -> O
 
 /// Recursively find `call_expression` nodes and create unresolved Calls
 /// references, taking the callee name from the first named child.
-#[allow(dead_code)]
 pub(crate) fn extract_call_expression_sites(
     source: &[u8],
     file_path: &str,

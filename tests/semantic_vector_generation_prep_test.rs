@@ -1168,3 +1168,154 @@ async fn database_store_survives_restart_and_preserves_superseded_generations() 
         "rollback atomically restores the prior active pointer"
     );
 }
+
+/// An encoder whose declared width changes how the projector windows and
+/// dispatches groups, while the values it produces stay a pure function of the
+/// chunk. Groups are executed out of order on purpose (last group first) so any
+/// dependence of the output on execution order surfaces as a failure.
+struct WidthEncoder {
+    concurrency: usize,
+    groups: std::sync::Arc<std::sync::Mutex<Vec<Vec<CodeSearchChunkId>>>>,
+}
+
+impl WidthEncoder {
+    fn new(concurrency: usize) -> Self {
+        Self {
+            concurrency,
+            groups: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Group compositions, sorted so the comparison is about *which* chunks
+    /// share a tensor — not the order the encoder happened to run them in,
+    /// which this fixture deliberately scrambles.
+    fn observed_groups(&self) -> Vec<Vec<CodeSearchChunkId>> {
+        let mut groups = self.groups.lock().expect("group log").clone();
+        groups.sort();
+        groups
+    }
+}
+
+impl CanonicalChunkVectorEncoderV1 for WidthEncoder {
+    fn encode(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunk: &CodeSearchChunkV1,
+    ) -> Result<Vec<f32>, String> {
+        let seed = chunk
+            .sanitized_text
+            .as_str()
+            .bytes()
+            .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(byte)));
+        Ok((0..key.dimensions as usize)
+            .map(|index| (seed.wrapping_add(index as u32) % 101) as f32 / 101.0)
+            .collect())
+    }
+
+    fn encode_batch(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        chunks: &[&CodeSearchChunkV1],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        self.groups
+            .lock()
+            .expect("group log")
+            .push(chunks.iter().map(|chunk| chunk.id.clone()).collect());
+        chunks.iter().map(|chunk| self.encode(key, chunk)).collect()
+    }
+
+    fn encode_concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    fn encode_batches(
+        &mut self,
+        key: &EmbeddingProjectionKeyV1,
+        groups: &[&[&CodeSearchChunkV1]],
+    ) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        let mut encoded = groups
+            .iter()
+            .rev()
+            .map(|group| self.encode_batch(key, group))
+            .collect::<Result<Vec<_>, _>>()?;
+        encoded.reverse();
+        Ok(encoded)
+    }
+}
+
+#[test]
+fn projection_vectors_are_byte_identical_at_every_encoder_width() {
+    let key = embedding_key();
+    let admitted = admitted_key(&key);
+    let projection_key = key.projection_key().expect("projection key");
+
+    // More chunks than one dispatch window holds at width 1, so the narrow run
+    // really does span several windows while the wide runs do not.
+    let corpus = (0..97u32)
+        .map(|index| {
+            chunk(
+                "code-generation.1",
+                // Zero-padded so lexicographic chunk-id order matches the
+                // numeric order the canonical changed set requires.
+                &format!("chunk{index:04}"),
+                &format!("fn chunk_{index}() -> u32 {{ {index} }}"),
+                index,
+            )
+        })
+        .collect::<Vec<_>>();
+    let build_request = || {
+        request(
+            changes(
+                None,
+                "code-generation.1",
+                corpus
+                    .iter()
+                    .map(|chunk| change(chunk, None, Some(chunk.content_digest.clone())))
+                    .collect(),
+                vec![],
+                vec![],
+            ),
+            None,
+            projection_key.clone(),
+            ProjectionReplayReasonV1::InitialProjection,
+        )
+    };
+
+    let mut narrow_encoder = WidthEncoder::new(1);
+    let narrow =
+        prepare_vector_generation(&admitted, build_request(), &corpus, &mut narrow_encoder)
+            .expect("width-1 projection");
+
+    for width in [2usize, 8, 64] {
+        let mut wide_encoder = WidthEncoder::new(width);
+        let wide =
+            prepare_vector_generation(&admitted, build_request(), &corpus, &mut wide_encoder)
+                .expect("wide projection");
+        assert_eq!(
+            narrow.vectors, wide.vectors,
+            "width {width} changed the projected vectors"
+        );
+        assert_eq!(
+            narrow.receipt, wide.receipt,
+            "width {width} changed the Plan 25 receipt"
+        );
+        assert_eq!(
+            narrow_encoder.observed_groups(),
+            wide_encoder.observed_groups(),
+            "width {width} regrouped the encoder batches, which would change tensor shape"
+        );
+    }
+
+    let groups = narrow_encoder.observed_groups();
+    assert_eq!(
+        groups.iter().map(Vec::len).sum::<usize>(),
+        corpus.len(),
+        "every chunk is encoded exactly once"
+    );
+    assert_eq!(
+        groups.iter().filter(|group| group.len() != 8).count(),
+        1,
+        "groups are fixed-size — only the final short group may differ, so the \
+         tensor shape never depends on the window"
+    );
+}
