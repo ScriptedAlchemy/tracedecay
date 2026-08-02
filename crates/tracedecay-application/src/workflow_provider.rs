@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::configuration::{WorkTopologyPolicyV1, WorktreePlacementModeV1};
+use tracedecay_domain::configuration::WorkTopologyPolicyV1;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowStepId,
-    canonical_sha256,
+    ManifestDigest, RunId, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowPlacementReceiptV1,
+    WorkflowStepId, canonical_sha256,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -130,55 +130,6 @@ pub struct WorkflowTopologyPlacementRequestV1 {
     pub topology_digest: ManifestDigest,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementReceiptV1 {
-    run_id: RunId,
-    step_id: WorkflowStepId,
-    route: WorkProviderRouteV1,
-    backend: WorkProviderBackendV1,
-    model: String,
-    configuration_digest: ManifestDigest,
-    topology_digest: ManifestDigest,
-    provider_registry_digest: ManifestDigest,
-    worktree_placement: WorktreePlacementModeV1,
-    placement_digest: ManifestDigest,
-}
-
-impl WorkflowPlacementReceiptV1 {
-    pub fn route(&self) -> &WorkProviderRouteV1 {
-        &self.route
-    }
-
-    pub const fn backend(&self) -> WorkProviderBackendV1 {
-        self.backend
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn configuration_digest(&self) -> &ManifestDigest {
-        &self.configuration_digest
-    }
-
-    pub fn topology_digest(&self) -> &ManifestDigest {
-        &self.topology_digest
-    }
-
-    pub fn provider_registry_digest(&self) -> &ManifestDigest {
-        &self.provider_registry_digest
-    }
-
-    pub fn worktree_placement(&self) -> &WorktreePlacementModeV1 {
-        &self.worktree_placement
-    }
-
-    pub fn placement_digest(&self) -> &ManifestDigest {
-        &self.placement_digest
-    }
-}
-
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowProviderPlacementErrorV1 {
     #[error("workflow provider registry is invalid")]
@@ -225,25 +176,17 @@ impl WorkflowProviderPlacementServiceV1 {
             .registrations()
             .first()
             .ok_or(WorkflowProviderPlacementErrorV1::Unavailable)?;
-        let placement_digest = canonical_sha256(&(
-            "tracedecay.application.workflow-placement.v1",
-            request,
-            registration,
-            self.registry.digest(),
-            &topology.placement,
-        ))
-        .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidRegistry)?;
-        Ok(WorkflowPlacementReceiptV1 {
-            run_id: request.run_id.clone(),
-            step_id: request.step_id.clone(),
-            route: registration.route.clone(),
-            backend: registration.backend,
-            model: registration.model.clone(),
-            configuration_digest: request.configuration_digest.clone(),
+        WorkflowPlacementReceiptV1::new(
+            request.run_id.clone(),
+            request.step_id.clone(),
+            registration.route.clone(),
+            registration.backend,
+            registration.model.clone(),
+            request.configuration_digest.clone(),
             topology_digest,
-            provider_registry_digest: self.registry.digest().clone(),
-            worktree_placement: topology.placement.clone(),
-            placement_digest,
-        })
+            self.registry.digest().clone(),
+            topology.placement.clone(),
+        )
+        .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidRegistry)
     }
 }
