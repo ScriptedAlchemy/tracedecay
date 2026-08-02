@@ -2880,6 +2880,7 @@ mod tests {
     async fn legacy_inventory_never_deserializes_vectors_and_quarantines_only_unreadable_entries() {
         let temporary = tempfile::tempdir().expect("temporary project database");
         let path = temporary.path().join("project.db");
+        crate::register_test_schema_installer();
         let authority =
             DatabaseAuthority::acquire_test(&path, "legacy vector migration").expect("authority");
         let (database, _) =
@@ -3042,6 +3043,7 @@ mod tests {
     async fn retained_canonical_rebuild_and_active_pointer_publish_together() {
         let temporary = tempfile::tempdir().expect("temporary project database");
         let path = temporary.path().join("project.db");
+        crate::register_test_schema_installer();
         let authority =
             DatabaseAuthority::acquire_test(&path, "canonical vector rebuild").expect("authority");
         let (database, _) =
@@ -3161,6 +3163,7 @@ mod tests {
     async fn request_read_ignores_corrupt_inactive_and_staged_generations() {
         let temporary = tempfile::tempdir().expect("temporary project database");
         let path = temporary.path().join("project.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(&path, "active vector request read")
             .expect("authority");
         let (database, _) =
@@ -3237,6 +3240,7 @@ mod tests {
     async fn native_evaluation_state_is_sqlite_backed_and_never_becomes_authoritative() {
         let temporary = tempfile::tempdir().expect("temporary project database");
         let path = temporary.path().join("project.db");
+        crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(&path, "native semantic evaluation")
             .expect("authority");
         let (database, _) =

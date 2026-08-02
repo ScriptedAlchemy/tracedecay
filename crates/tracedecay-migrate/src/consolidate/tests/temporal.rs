@@ -56,6 +56,7 @@ async fn temporal_database(
     path: &Path,
     mode: tracedecay_runtime_core::db::TestDatabaseRuntimeMode,
 ) -> Database {
+    register_test_schema_installer();
     let runtime_mode = if mode == tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize {
         let seed = tracedecay_runtime_core::db::engine::TestConnection::open(path);
         crate::root_seam::global_db::ensure_registered_schema(&seed)
