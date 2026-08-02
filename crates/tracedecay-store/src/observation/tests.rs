@@ -6,7 +6,7 @@ use tracedecay_domain::{
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
     ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId,
-    UtcMicros, VectorWatermark,
+    UtcMicros, VectorWatermark, canonical_json_bytes, canonical_sha256,
 };
 
 use super::*;
@@ -157,6 +157,25 @@ fn anchored_write_and_replay_receipt_keep_the_original_anchor() {
         replay.receipt().projection_generation(),
         &projection_generation()
     );
+}
+
+#[test]
+fn anchored_write_canonical_bytes_and_digest_round_trip_exactly() {
+    let observation = observation("canonical-wire", ObservationScopeV1::Profile);
+    let anchored = AnchoredObservationWrite::new(
+        write(observation.clone()),
+        anchor(&observation, ObservationScopeV1::Profile, vec![], 17),
+        projection_generation(),
+    )
+    .unwrap();
+
+    let bytes = canonical_json_bytes(&anchored).unwrap();
+    let digest = canonical_sha256(&anchored).unwrap();
+    let decoded: AnchoredObservationWrite = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(decoded, anchored);
+    assert_eq!(canonical_json_bytes(&decoded).unwrap(), bytes);
+    assert_eq!(canonical_sha256(&decoded).unwrap(), digest);
 }
 
 #[test]
