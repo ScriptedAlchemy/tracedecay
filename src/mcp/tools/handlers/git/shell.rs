@@ -176,6 +176,7 @@ fn admit_git_change(
 /// from the head. This matches `git diff base...head`; comparing the two tip
 /// trees directly would incorrectly report unrelated files added to an
 /// advanced default branch as deletions in the PR.
+#[cfg(test)]
 pub(super) fn git_pr_comparison(
     project_root: &std::path::Path,
     base_ref: &str,

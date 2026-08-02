@@ -2,9 +2,12 @@
 
 use super::shell::{
     classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
-    git_pr_comparison, git_recent_commits,
+    git_pr_comparison_controlled, git_recent_commits,
 };
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_global_db::RegisteredGlobalDb;
 
 /// Runs one synchronous gix span on the blocking pool.
 ///
@@ -26,6 +29,131 @@ where
         .map_err(|join_error| TraceDecayError::Config {
             message: format!("git {label} task failed: {join_error}"),
         })
+}
+
+struct CancelBlockingGitOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelBlockingGitOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct MarkBlockingGitExited(Arc<AtomicBool>);
+
+impl Drop for MarkBlockingGitExited {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct BlockingGitWorkerState {
+    cancelled: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+}
+
+impl BlockingGitWorkerState {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            exited: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+async fn blocking_git_span_controlled<T, F>(
+    label: &str,
+    request_cancellation: Option<tracedecay_application::CancellationSignal>,
+    request_deadline: Option<tracedecay_application::Deadline>,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    blocking_git_span_controlled_with_state(
+        label,
+        request_cancellation,
+        request_deadline,
+        BlockingGitWorkerState::new(),
+        work,
+    )
+    .await
+}
+
+async fn blocking_git_span_controlled_with_state<T, F>(
+    label: &str,
+    request_cancellation: Option<tracedecay_application::CancellationSignal>,
+    request_deadline: Option<tracedecay_application::Deadline>,
+    state: BlockingGitWorkerState,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let _cancel_on_drop = CancelBlockingGitOnDrop(Arc::clone(&state.cancelled));
+    let worker_cancelled = Arc::clone(&state.cancelled);
+    let worker_exited = Arc::clone(&state.exited);
+    let worker_request_cancellation = request_cancellation.clone();
+    let worker_request_deadline = request_deadline.clone();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let _mark_exited = MarkBlockingGitExited(worker_exited);
+        let checkpoint = || {
+            worker_cancelled.load(Ordering::Acquire)
+                || worker_request_cancellation
+                    .as_ref()
+                    .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                || worker_request_deadline.as_ref().is_some_and(|deadline| {
+                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                })
+        };
+        work(&checkpoint)
+    });
+    let joined = loop {
+        tokio::select! {
+            joined = &mut worker => break joined,
+            () = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
+                let request_stopped = request_cancellation.as_ref().is_some_and(
+                    tracedecay_application::CancellationSignal::is_cancelled,
+                ) || request_deadline.as_ref().is_some_and(|deadline| {
+                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                });
+                if request_stopped {
+                    state.cancelled.store(true, Ordering::Release);
+                    break worker.await;
+                }
+            }
+        }
+    }
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("git {label} task failed: {join_error}"),
+    })?;
+    debug_assert!(state.exited.load(Ordering::Acquire));
+    Ok(joined)
+}
+
+fn pr_context_checkpoint(
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
+    deadline: Option<&tracedecay_application::Deadline>,
+) -> Result<()> {
+    if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
+        return Err(TraceDecayError::project_route(
+            "pr_context_cancelled",
+            true,
+            "PR context was cancelled",
+        ));
+    }
+    if deadline.is_some_and(|deadline| crate::daemon_client::deadline_remaining(deadline).is_none())
+    {
+        return Err(TraceDecayError::project_route(
+            "tool_dispatch_deadline_exceeded",
+            true,
+            "PR context exceeded its dispatch deadline",
+        ));
+    }
+    Ok(())
 }
 
 /// Handles `tracedecay_diff_context` tool calls.
@@ -340,7 +468,14 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
-pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_pr_context(
+    cg: &TraceDecay,
+    args: Value,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+    _registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+) -> Result<ToolResult> {
+    pr_context_checkpoint(cancellation.as_ref(), deadline.as_ref())?;
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
@@ -360,22 +495,24 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         let project_root = cg.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.to_owned();
-        match tokio::task::spawn_blocking(move || {
-            git_pr_comparison(&project_root, &base_ref, &head_ref)
-        })
-        .await
+        match blocking_git_span_controlled(
+            "PR comparison",
+            cancellation.clone(),
+            deadline.clone(),
+            move |cancelled| {
+                git_pr_comparison_controlled(&project_root, &base_ref, &head_ref, cancelled)
+            },
+        )
+        .await?
         {
-            Ok(Ok(comparison)) => comparison,
-            Ok(Err(e)) => {
+            Ok(comparison) => comparison,
+            Err(e) => {
+                pr_context_checkpoint(cancellation.as_ref(), deadline.as_ref())?;
                 return Ok(git_error_result(cg, &args, "diff", &e));
-            }
-            Err(join_error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("git PR comparison task failed: {join_error}"),
-                });
             }
         }
     };
+    pr_context_checkpoint(cancellation.as_ref(), deadline.as_ref())?;
     let GitPrComparison {
         base_oid,
         head_oid,
@@ -502,7 +639,9 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
 
 #[cfg(test)]
 mod blocking_git_span_tests {
-    use super::blocking_git_span;
+    use super::{
+        BlockingGitWorkerState, blocking_git_span, blocking_git_span_controlled_with_state,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -540,6 +679,40 @@ mod blocking_git_span_tests {
             "a concurrent task must have run while the gix span was blocking"
         );
         ticker.await.expect("ticker joins");
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_the_blocking_worker_to_exit() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.pr-context-worker")
+                .expect("cancellation");
+        let trigger = cancellation.clone();
+        let state = BlockingGitWorkerState::new();
+        let observed = state.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel(tracedecay_domain::UtcMicros(1));
+        });
+
+        let value = blocking_git_span_controlled_with_state(
+            "test",
+            Some(cancellation),
+            None,
+            state,
+            |cancelled| {
+                while !cancelled() {
+                    std::thread::yield_now();
+                }
+                7_u8
+            },
+        )
+        .await
+        .expect("cancelled worker joins");
+
+        canceller.await.expect("canceller joins");
+        assert_eq!(value, 7);
+        assert!(observed.cancelled.load(Ordering::Acquire));
+        assert!(observed.exited.load(Ordering::Acquire));
     }
 }
 
