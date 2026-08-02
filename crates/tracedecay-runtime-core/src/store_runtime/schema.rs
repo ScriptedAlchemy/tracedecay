@@ -8,6 +8,8 @@ use crate::db::engine::{Connection, Error as EngineError};
 const GRAPH_MEMORY_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDG2");
 const REGISTERED_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDR2");
 const FINAL_SCHEMA_VERSION_V2: u32 = 1;
+const GRAPH_MEMORY_CATALOG_FINGERPRINT_V2: &str =
+    "a815c62d1a306ed2cef7c7092605f7fa574b8206f2cfa59266e5d90ed13aaf78";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreSchemaKindV2 {
@@ -251,6 +253,45 @@ pub async fn observe_store_schema(
     })
 }
 
+pub fn observe_existing_store_schema(
+    path: &Path,
+) -> Result<ObservedStoreSchemaV2, tracedecay_rusqlite_runtime::SqliteSchemaInspectionError> {
+    let inspection = tracedecay_rusqlite_runtime::inspect_existing_schema(path)?;
+    let mut hasher = Sha256::new();
+    for object in &inspection.catalog {
+        for value in [
+            &object.object_type,
+            &object.name,
+            &object.table_name,
+            &object.sql,
+        ] {
+            hash_catalog_field(&mut hasher, value)
+                .map_err(|_| tracedecay_rusqlite_runtime::SqliteSchemaInspectionError::Invalid)?;
+        }
+    }
+    Ok(ObservedStoreSchemaV2 {
+        application_id: inspection.application_id,
+        user_version: inspection.user_version,
+        catalog_fingerprint: (!inspection.catalog.is_empty())
+            .then(|| hex::encode(hasher.finalize())),
+    })
+}
+
+pub fn validate_existing_store_schema(
+    path: &Path,
+    contract: &StoreSchemaContractV2,
+) -> Result<ExactStoreSchemaV2, StoreSchemaAdmissionErrorV2> {
+    let observed = observe_existing_store_schema(path).map_err(|_| {
+        StoreSchemaAdmissionErrorV2::ResetRequired(ResetRequiredV2::unreadable(
+            path,
+            contract.clone(),
+        ))
+    })?;
+    contract
+        .classify(path, observed)
+        .map_err(StoreSchemaAdmissionErrorV2::ResetRequired)
+}
+
 pub async fn validate_quick_check(connection: &Connection) -> Result<(), EngineError> {
     let mut rows = connection.query("PRAGMA quick_check(1)", ()).await?;
     let Some(row) = rows.next().await? else {
@@ -284,8 +325,12 @@ async fn read_pragma_u32(connection: &Connection, sql: &str) -> Result<u32, Engi
 }
 
 fn hash_field(hasher: &mut Sha256, value: &str) -> Result<(), EngineError> {
-    let length = u64::try_from(value.len())
-        .map_err(|_| EngineError::invalid_operation("SQLite schema field is too large"))?;
+    hash_catalog_field(hasher, value)
+        .map_err(|_| EngineError::invalid_operation("SQLite schema field is too large"))
+}
+
+fn hash_catalog_field(hasher: &mut Sha256, value: &str) -> Result<(), ()> {
+    let length = u64::try_from(value.len()).map_err(|_| ())?;
     hasher.update(length.to_be_bytes());
     hasher.update(value.as_bytes());
     Ok(())
@@ -296,6 +341,29 @@ fn is_sha256_hex(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub fn final_graph_memory_schema_contract()
+-> Result<StoreSchemaContractV2, StoreSchemaContractErrorV2> {
+    StoreSchemaContractV2::new(
+        StoreSchemaKindV2::GraphMemory,
+        GRAPH_MEMORY_CATALOG_FINGERPRINT_V2,
+    )
+}
+
+pub async fn install_final_graph_memory_schema(
+    connection: &Connection,
+) -> crate::errors::Result<()> {
+    crate::db::migrations::create_schema_connection(connection).await?;
+    let transaction = connection.schema_migration_transaction().await?;
+    transaction
+        .execute_schema_batch_step(
+            "PRAGMA application_id = 1413760818;
+             PRAGMA user_version = 1;",
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -449,5 +517,28 @@ mod tests {
             StoreSchemaAdmissionErrorV2::ResetRequired(reset)
                 if reset.reason() == StoreSchemaResetReasonV2::Empty
         ));
+    }
+
+    #[tokio::test]
+    async fn final_graph_memory_catalog_fingerprint_is_pinned() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("memory.db");
+        let connection = TestConnection::open(&path);
+        install_final_graph_memory_schema(&connection)
+            .await
+            .unwrap();
+        let observed = observe_store_schema(&connection).await.unwrap();
+        assert_eq!(
+            observed.catalog_fingerprint.as_deref(),
+            Some(GRAPH_MEMORY_CATALOG_FINGERPRINT_V2)
+        );
+        drop(connection);
+        assert_eq!(
+            validate_existing_store_schema(&path, &final_graph_memory_schema_contract().unwrap())
+                .unwrap()
+                .contract()
+                .catalog_fingerprint(),
+            GRAPH_MEMORY_CATALOG_FINGERPRINT_V2
+        );
     }
 }

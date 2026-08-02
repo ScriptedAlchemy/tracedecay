@@ -99,6 +99,7 @@ struct StoreRuntimeHandleInner {
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     schema_migrated: bool,
+    exact_schema: Option<crate::store_runtime::schema::ExactStoreSchemaV2>,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -230,6 +231,18 @@ impl StoreRuntimeHandle {
 
     pub fn schema_migrated(&self) -> bool {
         self.inner.schema_migrated
+    }
+
+    pub fn exact_schema(
+        &self,
+    ) -> Result<&crate::store_runtime::schema::ExactStoreSchemaV2, StoreRuntimeRegistryFailure>
+    {
+        self.inner.exact_schema.as_ref().ok_or_else(|| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "require exact final SQLite schema",
+                message: "runtime publication has no exact-final schema proof".to_owned(),
+            }
+        })
     }
 
     pub fn database_authority(

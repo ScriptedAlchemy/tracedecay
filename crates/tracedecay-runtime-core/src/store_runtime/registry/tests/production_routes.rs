@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{
@@ -54,7 +53,7 @@ impl StoreRuntimeResolver for FileResolver {
     fn resolve<'a>(
         &'a self,
         key: &'a StoreRuntimeKey,
-        _mode: StoreRuntimeOpenMode,
+        mode: StoreRuntimeOpenMode,
         _database_authority: Option<&'a crate::db::DatabaseAuthority>,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
@@ -71,7 +70,13 @@ impl StoreRuntimeResolver for FileResolver {
             key.incarnation,
             LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
         );
-        Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
+        Box::pin(async move {
+            if mode == StoreRuntimeOpenMode::Initialize && !path.exists() {
+                Ok(ResolvedStoreLocator::prospective(locator, path))
+            } else {
+                Ok(ResolvedStoreLocator::new(locator, path))
+            }
+        })
     }
 }
 
@@ -107,14 +112,16 @@ fn health_request(
     )
 }
 
-fn seed_db(root: &TempDir, name: &str) -> PathBuf {
-    let path = root.path().join(name);
-    Connection::open(&path).unwrap();
-    path.canonicalize().unwrap()
+fn store_path(root: &TempDir, name: &str) -> PathBuf {
+    root.path().join(name)
 }
 
-fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
-    StoreRuntimeOpenRequest::new(
+fn sessions_request(
+    project: &str,
+    pin: &ProfileAuthorityPin,
+    authority: crate::db::DatabaseAuthority,
+) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new_initialize_authorized(
         StoreShardIdV1::project_sessions(
             id::<BrainId>("brain.registry"),
             id::<UserProfileId>("profile.registry"),
@@ -122,6 +129,7 @@ fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpe
         ),
         incarnation(),
         Some(pin.clone()),
+        authority,
     )
 }
 
@@ -158,9 +166,12 @@ async fn assert_health_route(handle: &StoreRuntimeHandle) {
 async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
-    resolver.push(seed_db(&root, "profile.db"));
-    resolver.push(seed_db(&root, "project.db"));
-    resolver.push(seed_db(&root, "sessions.db"));
+    let profile_path = store_path(&root, "profile.db");
+    let project_path = store_path(&root, "project.db");
+    let sessions_path = store_path(&root, "sessions.db");
+    resolver.push(profile_path.clone());
+    resolver.push(project_path.clone());
+    resolver.push(sessions_path.clone());
 
     let registry = StoreRuntimeRegistry::with_config(
         resolver,
@@ -171,15 +182,52 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
 
     let profile = open_published(
         &registry,
-        StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+        StoreRuntimeOpenRequest::new_initialize_authorized(
+            profile_shard(),
+            incarnation(),
+            None,
+            crate::db::DatabaseAuthority::for_runtime(
+                &profile_path,
+                "initialize production-routes profile fixture",
+            )
+            .unwrap(),
+        ),
     )
     .await;
     let pin = match registry.profile_authority_pin(&profile_shard()) {
         ProfileAuthorityPinResult::Pinned(pin) => pin,
         other => panic!("profile was not pinned: {other:?}"),
     };
-    let project = open_published(&registry, project_request("project.s8-route", &pin)).await;
-    let sessions = open_published(&registry, sessions_request("project.s8-route", &pin)).await;
+    let project = open_published(
+        &registry,
+        StoreRuntimeOpenRequest::new_initialize_authorized(
+            project_request("project.s8-route", &pin)
+                .key()
+                .shard_id()
+                .clone(),
+            incarnation(),
+            Some(pin.clone()),
+            crate::db::DatabaseAuthority::for_runtime(
+                &project_path,
+                "initialize production-routes project fixture",
+            )
+            .unwrap(),
+        ),
+    )
+    .await;
+    let sessions = open_published(
+        &registry,
+        sessions_request(
+            "project.s8-route",
+            &pin,
+            crate::db::DatabaseAuthority::for_runtime(
+                &sessions_path,
+                "initialize production-routes sessions fixture",
+            )
+            .unwrap(),
+        ),
+    )
+    .await;
 
     assert_health_route(&profile).await;
     assert_health_route(&project).await;

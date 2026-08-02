@@ -4,8 +4,8 @@ use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
 use tempfile::NamedTempFile;
 
 use super::{
-    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
-    open_writer, with_progress_cancellation,
+    ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, inspect_existing_schema, open,
+    open_immutable_reader, open_writer, with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -309,6 +309,90 @@ fn create_new_refuses_to_replace_an_existing_database() {
         OpenedDatabaseFile::create_new(file.path()),
         Err(OpenedDatabaseFileError::Create)
     ));
+}
+
+#[test]
+fn staged_publish_is_no_replace_and_leaves_no_sidecars() {
+    let directory = tempfile::tempdir().unwrap();
+    let canonical = directory.path().join("final.db");
+    let (staged, staging_path) = OpenedDatabaseFile::create_staged(&canonical).unwrap();
+    std::fs::write(&staging_path, b"exact-final").unwrap();
+
+    let publication = staged.publish_staged(&staging_path, &canonical).unwrap();
+
+    assert!(!publication.staging_cleanup_pending);
+    assert_eq!(std::fs::read(&canonical).unwrap(), b"exact-final");
+    assert!(!staging_path.exists());
+    assert!(
+        ["-wal", "-shm", "-journal"]
+            .iter()
+            .all(|suffix| !sidecar_path(&canonical, suffix).exists())
+    );
+}
+
+#[test]
+fn staged_publish_never_replaces_an_existing_destination() {
+    let directory = tempfile::tempdir().unwrap();
+    let canonical = directory.path().join("final.db");
+    let (staged, staging_path) = OpenedDatabaseFile::create_staged(&canonical).unwrap();
+    std::fs::write(&canonical, b"existing").unwrap();
+
+    assert_eq!(
+        staged.publish_staged(&staging_path, &canonical),
+        Err(OpenedDatabaseFileError::DestinationExists)
+    );
+    assert_eq!(std::fs::read(&canonical).unwrap(), b"existing");
+}
+
+#[test]
+fn staged_publish_refuses_live_sidecars() {
+    let directory = tempfile::tempdir().unwrap();
+    let canonical = directory.path().join("final.db");
+    let (staged, staging_path) = OpenedDatabaseFile::create_staged(&canonical).unwrap();
+    std::fs::write(sidecar_path(&staging_path, "-wal"), b"live").unwrap();
+
+    assert_eq!(
+        staged.publish_staged(&staging_path, &canonical),
+        Err(OpenedDatabaseFileError::SidecarPresent)
+    );
+    assert!(!canonical.exists());
+}
+
+#[test]
+fn schema_inspection_is_read_only_and_exact() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("final.db");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA application_id = 1413760818;
+             PRAGMA user_version = 1;
+             CREATE TABLE exact_table(id INTEGER PRIMARY KEY) STRICT;",
+        )
+        .unwrap();
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+
+    let inspection = inspect_existing_schema(&path).unwrap();
+
+    assert_eq!(inspection.application_id, 1413760818);
+    assert_eq!(inspection.user_version, 1);
+    assert_eq!(inspection.catalog.len(), 1);
+    assert_eq!(inspection.catalog[0].name, "exact_table");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!sidecar_path(&path, "-wal").exists());
+    assert!(!sidecar_path(&path, "-shm").exists());
+}
+
+#[test]
+fn schema_inspection_rejects_corruption_without_rewriting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("corrupt.db");
+    std::fs::write(&path, b"not sqlite").unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    assert!(inspect_existing_schema(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[cfg(unix)]

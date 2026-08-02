@@ -9,7 +9,8 @@ pub use connection::file_family::{
     SqliteFamilyComponent, SqliteFamilyIntegrityError, SqliteFamilyViolation,
 };
 pub use connection::{
-    ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_health_reader,
+    ConnectionPolicyError, OpenedDatabaseFileError, SqliteCatalogObject, SqliteSchemaInspection,
+    SqliteSchemaInspectionError, inspect_existing_schema, open_immutable_health_reader,
     open_immutable_reader,
 };
 mod content_digest;

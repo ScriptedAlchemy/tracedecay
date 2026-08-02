@@ -119,7 +119,7 @@ pub mod registered_schema {
     /// Production, and every dependent crate's test build, fails closed: an
     /// uninitialised profile or session store must never be published.
     #[cfg(not(test))]
-    fn unregistered_outcome() -> Result<()> {
+    async fn unregistered_outcome(_connection: &Connection) -> Result<()> {
         Err(missing_installer_error())
     }
 
@@ -140,7 +140,16 @@ pub mod registered_schema {
     /// production or `--all-features` binary is affected — `test-helpers` and
     /// `test-transport` deliberately do not reach it.
     #[cfg(test)]
-    fn unregistered_outcome() -> Result<()> {
+    async fn unregistered_outcome(connection: &Connection) -> Result<()> {
+        let transaction = connection.schema_migration_transaction().await?;
+        transaction
+            .execute_schema_batch_step(
+                "CREATE TABLE runtime_core_registered_fixture(id INTEGER PRIMARY KEY) STRICT;
+                 PRAGMA application_id = 1413763634;
+                 PRAGMA user_version = 1;",
+            )
+            .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -152,15 +161,29 @@ pub mod registered_schema {
     pub async fn install_final_registered_schema(connection: &Connection) -> Result<()> {
         match AUTHORITY.get() {
             Some(authority) => (authority.installer)(connection).await,
-            None => unregistered_outcome(),
+            None => unregistered_outcome(connection).await,
         }
     }
 
     pub fn final_registered_schema_contract() -> Result<StoreSchemaContractV2> {
         match AUTHORITY.get() {
             Some(authority) => (authority.contract)(),
-            None => Err(missing_installer_error()),
+            None => unregistered_contract(),
         }
+    }
+
+    #[cfg(not(test))]
+    fn unregistered_contract() -> Result<StoreSchemaContractV2> {
+        Err(missing_installer_error())
+    }
+
+    #[cfg(test)]
+    fn unregistered_contract() -> Result<StoreSchemaContractV2> {
+        StoreSchemaContractV2::new(
+            crate::store_runtime::schema::StoreSchemaKindV2::Registered,
+            "53fda1e46e4391e791502e7d079e6630cd5ca8dd46e9fd44c355fcc04021f584",
+        )
+        .map_err(|_| missing_installer_error())
     }
 
     #[cfg(test)]

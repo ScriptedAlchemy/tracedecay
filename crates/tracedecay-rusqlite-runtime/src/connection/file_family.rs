@@ -171,6 +171,38 @@ impl SqliteFamilyGuard {
         state.disarmed = true;
     }
 
+    pub(crate) fn remove_closed_sidecars(&self) -> Result<(), SqliteFamilyIntegrityError> {
+        let mut state = self.lock_state();
+        if let Some(error) = state.quarantine {
+            return Err(error);
+        }
+        probe_pinned(&self.path, SqliteFamilyComponent::Main, &state.main)?;
+        for component in [SqliteFamilyComponent::Wal, SqliteFamilyComponent::Shm] {
+            let path = component_path(&self.path, component);
+            let slot = match component {
+                SqliteFamilyComponent::Wal => &mut state.wal,
+                SqliteFamilyComponent::Shm => &mut state.shm,
+                SqliteFamilyComponent::Main => unreachable!("main is always pinned"),
+            };
+            if let Some(pinned) = slot.as_ref() {
+                match probe_pinned(&path, component, pinned) {
+                    Ok(()) => std::fs::remove_file(&path)
+                        .map_err(|_| SqliteFamilyIntegrityError::ProbeUnavailable { component })?,
+                    Err(SqliteFamilyIntegrityError::Quarantined {
+                        violation: SqliteFamilyViolation::Missing | SqliteFamilyViolation::Unlinked,
+                        ..
+                    }) => {}
+                    Err(error) => return Err(error),
+                }
+            } else if path.exists() {
+                return Err(SqliteFamilyIntegrityError::ProbeUnavailable { component });
+            }
+            *slot = None;
+        }
+        state.disarmed = true;
+        Ok(())
+    }
+
     pub(crate) fn quarantine(&self) -> Option<SqliteFamilyIntegrityError> {
         self.lock_state().quarantine
     }

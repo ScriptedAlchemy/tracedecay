@@ -301,7 +301,36 @@ impl RegisteredGlobalDb {
             self.runtime.binding(),
             self.runtime.locator().verified(),
         )?;
-        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+        let exact_schema = self.runtime.exact_schema().map_err(|error| {
+            registered_error(
+                "attach registered Work storage",
+                format!("exact-final schema proof unavailable: {error:?}"),
+            )
+        })?;
+        if exact_schema.contract().kind()
+            != tracedecay_runtime_core::store_runtime::schema::StoreSchemaKindV2::Registered
+        {
+            return Err(registered_error(
+                "attach registered Work storage",
+                "runtime carries the wrong exact-final schema kind",
+            ));
+        }
+        let work_schema =
+            tracedecay_rusqlite_runtime::work::ExactWorkSchemaV2::from_validated_registered_store(
+                exact_schema.contract().catalog_fingerprint(),
+            )
+            .map_err(|error| {
+                registered_error(
+                    "attach registered Work storage",
+                    format!("invalid exact-final schema capability: {error:?}"),
+                )
+            })?;
+        Ok(
+            tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(
+                handle,
+                work_schema,
+            ),
+        )
     }
 
     pub fn authorized_scope_set_storage(

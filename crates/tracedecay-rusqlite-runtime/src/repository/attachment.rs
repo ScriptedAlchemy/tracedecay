@@ -80,17 +80,20 @@ impl RepositoryPhysicalAttachmentFactory {
         if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
             return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
         }
-        let opened_database = OpenedDatabaseFile::create_new(&path)
+        let canonical_path = path;
+        let (opened_database, staging_path) = OpenedDatabaseFile::create_staged(&canonical_path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(
+        let attachment = self.attach_opened(
             binding,
             locator,
-            path,
+            staging_path,
             admission,
             opened_database,
             true,
             &mut |_| {},
-        )
+        )?;
+        attachment.lock_state().initialization_target = Some(canonical_path);
+        Ok(attachment)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -225,6 +228,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 opened_file_identity,
                 family_guard,
                 initialization_file,
+                initialization_target: None,
                 writer: Some(Arc::new(writer)),
                 readers: Some(readers),
                 admission_open: true,
@@ -318,6 +322,7 @@ struct RepositoryRuntimePhysicalState {
     opened_file_identity: u64,
     family_guard: Arc<SqliteFamilyGuard>,
     initialization_file: Option<OpenedDatabaseFile>,
+    initialization_target: Option<PathBuf>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
     admission_open: bool,
@@ -337,14 +342,37 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub fn commit_initialization(&self) -> Result<(), String> {
         let mut state = self.lock_state();
-        let opened = state
+        if !state.closed {
+            return Err("repository staging runtime must close before publication".to_owned());
+        }
+        state
             .initialization_file
             .as_ref()
             .ok_or_else(|| "repository attachment has no pending initialization".to_owned())?;
-        opened
-            .verify_current_path(&state.database_path)
+        state
+            .initialization_target
+            .as_ref()
+            .ok_or_else(|| "repository attachment has no initialization target".to_owned())?;
+        state
+            .family_guard
+            .remove_closed_sidecars()
             .map_err(|error| error.to_string())?;
-        state.initialization_file.take();
+        let opened = state
+            .initialization_file
+            .take()
+            .ok_or_else(|| "repository attachment lost pending initialization".to_owned())?;
+        let target = state
+            .initialization_target
+            .take()
+            .ok_or_else(|| "repository attachment lost initialization target".to_owned())?;
+        let publication = opened
+            .publish_staged(&state.database_path, &target)
+            .map_err(|error| error.to_string())?;
+        if publication.staging_cleanup_pending {
+            return Err(
+                "repository schema published but staging cleanup remains pending".to_owned(),
+            );
+        }
         Ok(())
     }
 
@@ -635,7 +663,9 @@ impl RepositoryRuntimePhysicalAttachment {
             state.close_failure = Some(message.clone());
             return Err(message);
         }
-        state.family_guard.disarm();
+        if state.initialization_file.is_none() {
+            state.family_guard.disarm();
+        }
         state.drained = true;
         Ok(())
     }

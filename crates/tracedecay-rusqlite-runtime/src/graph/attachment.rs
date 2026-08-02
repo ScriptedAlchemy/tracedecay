@@ -147,18 +147,19 @@ impl GraphPhysicalAttachmentFactory {
         database_path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
-        let opened_database = OpenedDatabaseFile::create_new(&database_path)
+        let canonical_path = database_path;
+        let (opened_database, staging_path) = OpenedDatabaseFile::create_staged(&canonical_path)
             .map_err(GraphPhysicalAttachmentStartError::Identity)?;
         let physical = match CodeShardPhysicalLocator::from_verified_existing(
             binding,
             locator,
-            database_path.clone(),
+            staging_path.clone(),
         ) {
             Ok(physical) if physical.is_mutable() => physical,
             Ok(_) => {
                 return Err(graph_start_failure(
                     opened_database,
-                    &database_path,
+                    &staging_path,
                     true,
                     GraphPhysicalAttachmentStartError::ImmutableInitialization,
                 ));
@@ -166,13 +167,16 @@ impl GraphPhysicalAttachmentFactory {
             Err(error) => {
                 return Err(graph_start_failure(
                     opened_database,
-                    &database_path,
+                    &staging_path,
                     true,
                     GraphPhysicalAttachmentStartError::Locator(error),
                 ));
             }
         };
-        self.attach_opened(&physical, admission, opened_database, true, &mut |_| {})
+        let attachment =
+            self.attach_opened(&physical, admission, opened_database, true, &mut |_| {})?;
+        attachment.lock_state().initialization_target = Some(canonical_path);
+        Ok(attachment)
     }
 
     fn attach_opened(
@@ -319,6 +323,7 @@ impl GraphPhysicalAttachmentFactory {
                 opened_file_identity,
                 family_guard,
                 initialization_file,
+                initialization_target: None,
                 writer,
                 readers: Some(readers),
                 admission_open: true,
@@ -396,6 +401,7 @@ struct GraphRuntimePhysicalState {
     opened_file_identity: u64,
     family_guard: Arc<SqliteFamilyGuard>,
     initialization_file: Option<OpenedDatabaseFile>,
+    initialization_target: Option<PathBuf>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<GraphReaderExecutor>>,
     admission_open: bool,
@@ -415,14 +421,35 @@ impl GraphRuntimePhysicalAttachment {
 
     pub fn commit_initialization(&self) -> Result<(), String> {
         let mut state = self.lock_state();
-        let opened = state
+        if !state.closed {
+            return Err("graph staging runtime must close before publication".to_owned());
+        }
+        state
             .initialization_file
             .as_ref()
             .ok_or_else(|| "graph attachment has no pending initialization".to_owned())?;
-        opened
-            .verify_current_path(&state.database_path)
+        state
+            .initialization_target
+            .as_ref()
+            .ok_or_else(|| "graph attachment has no initialization target".to_owned())?;
+        state
+            .family_guard
+            .remove_closed_sidecars()
             .map_err(|error| error.to_string())?;
-        state.initialization_file.take();
+        let opened = state
+            .initialization_file
+            .take()
+            .ok_or_else(|| "graph attachment lost pending initialization".to_owned())?;
+        let target = state
+            .initialization_target
+            .take()
+            .ok_or_else(|| "graph attachment lost initialization target".to_owned())?;
+        let publication = opened
+            .publish_staged(&state.database_path, &target)
+            .map_err(|error| error.to_string())?;
+        if publication.staging_cleanup_pending {
+            return Err("graph schema published but staging cleanup remains pending".to_owned());
+        }
         Ok(())
     }
 
@@ -702,7 +729,9 @@ impl GraphRuntimePhysicalAttachment {
             state.close_failure = Some(message.clone());
             return Err(message);
         }
-        state.family_guard.disarm();
+        if state.initialization_file.is_none() {
+            state.family_guard.disarm();
+        }
         state.drained = true;
         Ok(())
     }

@@ -1,6 +1,7 @@
 //! Concrete SQLite persistence for the application-owned Work authority.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
@@ -42,11 +43,19 @@ pub(crate) use sql::*;
 #[derive(Clone)]
 pub struct WorkSqliteStorage {
     pub(crate) handle: MigrationSqlHandle,
+    exact_schema: ExactWorkSchemaV2,
 }
 
 impl WorkSqliteStorage {
-    pub fn from_registered(handle: MigrationSqlHandle) -> Self {
-        Self { handle }
+    pub fn from_registered(handle: MigrationSqlHandle, exact_schema: ExactWorkSchemaV2) -> Self {
+        Self {
+            handle,
+            exact_schema,
+        }
+    }
+
+    pub fn require_exact_schema(&self) -> Result<ExactWorkSchemaV2, WorkSchemaCapabilityErrorV2> {
+        Ok(self.exact_schema.clone())
     }
 
     pub fn owner_cursor(
@@ -75,4 +84,36 @@ impl WorkSqliteStorage {
     ) -> Result<WorkProjectionResumeCursorV1, WorkProjectionPortError> {
         projection_cursor(snapshot.generation_id().clone(), snapshot.sequence())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactWorkSchemaV2 {
+    catalog_fingerprint: Arc<str>,
+}
+
+impl ExactWorkSchemaV2 {
+    pub fn from_validated_registered_store(
+        catalog_fingerprint: impl Into<String>,
+    ) -> Result<Self, WorkSchemaCapabilityErrorV2> {
+        let catalog_fingerprint = catalog_fingerprint.into();
+        if catalog_fingerprint.len() != 64
+            || !catalog_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(WorkSchemaCapabilityErrorV2::InvalidCatalogFingerprint);
+        }
+        Ok(Self {
+            catalog_fingerprint: Arc::from(catalog_fingerprint),
+        })
+    }
+
+    pub fn catalog_fingerprint(&self) -> &str {
+        &self.catalog_fingerprint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSchemaCapabilityErrorV2 {
+    InvalidCatalogFingerprint,
 }

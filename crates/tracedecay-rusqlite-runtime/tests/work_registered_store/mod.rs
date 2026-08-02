@@ -111,7 +111,13 @@ impl RegisteredWorkStore {
         .expect("start work store readers");
         let handle = MigrationSqlHandle::attach(&writer, &readers).expect("attach work store");
         Self {
-            storage: WorkSqliteStorage::from_registered(handle),
+            storage: WorkSqliteStorage::from_registered(
+                handle,
+                tracedecay_rusqlite_runtime::work::ExactWorkSchemaV2::from_validated_registered_store(
+                    "0".repeat(64),
+                )
+                .unwrap(),
+            ),
             path,
             _writer: writer,
             _readers: readers,

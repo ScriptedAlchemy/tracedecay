@@ -215,6 +215,7 @@ pub struct PublishedShardRuntime {
     runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     schema_migrated: bool,
+    exact_schema: Option<crate::store_runtime::schema::ExactStoreSchemaV2>,
 }
 
 impl PublishedShardRuntime {
@@ -226,6 +227,7 @@ impl PublishedShardRuntime {
             runtime,
             attachment,
             schema_migrated: false,
+            exact_schema: None,
         }
     }
 
@@ -233,11 +235,13 @@ impl PublishedShardRuntime {
         runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
         schema_migrated: bool,
+        exact_schema: crate::store_runtime::schema::ExactStoreSchemaV2,
     ) -> Self {
         Self {
             runtime,
             attachment,
             schema_migrated,
+            exact_schema: Some(exact_schema),
         }
     }
 
@@ -251,6 +255,10 @@ impl PublishedShardRuntime {
 
     pub const fn schema_migrated(&self) -> bool {
         self.schema_migrated
+    }
+
+    pub fn exact_schema(&self) -> Option<&crate::store_runtime::schema::ExactStoreSchemaV2> {
+        self.exact_schema.as_ref()
     }
 
     pub(super) fn into_parts(

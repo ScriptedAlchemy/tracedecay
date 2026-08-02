@@ -6,7 +6,10 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -19,6 +22,7 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 const PROGRESS_INTERVAL_OPS: i32 = 1_000;
+static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Pins and identifies the exact regular file that an attachment is about to
 /// open. The descriptor stays alive until every SQLite worker has reported
@@ -79,6 +83,32 @@ impl OpenedDatabaseFile {
             identity,
             family_guard,
         })
+    }
+
+    pub(crate) fn create_staged(
+        canonical_path: &Path,
+    ) -> Result<(Self, PathBuf), OpenedDatabaseFileError> {
+        match std::fs::symlink_metadata(canonical_path) {
+            Ok(_) => return Err(OpenedDatabaseFileError::DestinationExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(OpenedDatabaseFileError::Inspect),
+        }
+        let parent = canonical_path
+            .parent()
+            .ok_or(OpenedDatabaseFileError::InvalidDestination)?;
+        for _ in 0..32 {
+            let sequence = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let staging_path = parent.join(format!(
+                ".tracedecay-stage-{}-{sequence}.sqlite",
+                std::process::id()
+            ));
+            match Self::create_new(&staging_path) {
+                Ok(opened) => return Ok((opened, staging_path)),
+                Err(OpenedDatabaseFileError::Create) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OpenedDatabaseFileError::Create)
     }
 
     pub(crate) const fn identity(&self) -> u64 {
@@ -225,18 +255,70 @@ impl OpenedDatabaseFile {
         }
         Ok(())
     }
+
+    pub(crate) fn publish_staged(
+        self,
+        staging_path: &Path,
+        canonical_path: &Path,
+    ) -> Result<StagedDatabasePublication, OpenedDatabaseFileError> {
+        self.verify_current_path(staging_path)?;
+        match std::fs::symlink_metadata(canonical_path) {
+            Ok(_) => return Err(OpenedDatabaseFileError::DestinationExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(OpenedDatabaseFileError::Inspect),
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            match std::fs::symlink_metadata(sidecar_path(staging_path, suffix)) {
+                Ok(_) => return Err(OpenedDatabaseFileError::SidecarPresent),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(OpenedDatabaseFileError::Inspect),
+            }
+        }
+        self.sync_all()?;
+        std::fs::hard_link(staging_path, canonical_path).map_err(|error| match error.kind() {
+            io::ErrorKind::AlreadyExists => OpenedDatabaseFileError::DestinationExists,
+            _ => OpenedDatabaseFileError::Publish,
+        })?;
+        sync_parent_directory(canonical_path)?;
+
+        let Self {
+            file, family_guard, ..
+        } = self;
+        drop(family_guard);
+        drop(file);
+        let staging_cleanup_pending = match std::fs::remove_file(staging_path) {
+            Ok(()) => false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(_) => true,
+        };
+        if !staging_cleanup_pending {
+            sync_parent_directory(canonical_path)?;
+        }
+        Ok(StagedDatabasePublication {
+            staging_cleanup_pending,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StagedDatabasePublication {
+    pub(crate) staging_cleanup_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenedDatabaseFileError {
     Create,
+    DestinationExists,
+    InvalidDestination,
     Open,
     Inspect,
     NotFile,
+    Publish,
     #[cfg(windows)]
     Identify,
     Replaced,
     Remove,
+    SidecarPresent,
     #[cfg(not(any(unix, windows)))]
     Unsupported,
 }
@@ -245,13 +327,17 @@ impl fmt::Display for OpenedDatabaseFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Create => "could not create the canonical SQLite file",
+            Self::DestinationExists => "canonical SQLite destination already exists",
+            Self::InvalidDestination => "canonical SQLite destination has no parent directory",
             Self::Open => "could not open the verified SQLite file",
             Self::Inspect => "could not inspect the verified SQLite file descriptor",
             Self::NotFile => "verified SQLite locator is not a regular file",
+            Self::Publish => "could not atomically publish the staged SQLite file",
             #[cfg(windows)]
             Self::Identify => "could not identify the verified SQLite file descriptor",
             Self::Replaced => "verified SQLite file was replaced while opening workers",
             Self::Remove => "could not remove an uncommitted canonical SQLite file",
+            Self::SidecarPresent => "staged SQLite file still has a live sidecar",
             #[cfg(not(any(unix, windows)))]
             Self::Unsupported => "SQLite file identity is unsupported on this platform",
         };
@@ -260,6 +346,103 @@ impl fmt::Display for OpenedDatabaseFileError {
 }
 
 impl std::error::Error for OpenedDatabaseFileError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteSchemaInspection {
+    pub application_id: u32,
+    pub user_version: u32,
+    pub catalog: Vec<SqliteCatalogObject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqliteCatalogObject {
+    pub object_type: String,
+    pub name: String,
+    pub table_name: String,
+    pub sql: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqliteSchemaInspectionError {
+    Open,
+    Invalid,
+    Query,
+}
+
+impl fmt::Display for SqliteSchemaInspectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Open => "could not open SQLite store for read-only schema inspection",
+            Self::Invalid => "SQLite store failed read-only schema validation",
+            Self::Query => "could not read SQLite schema catalog",
+        })
+    }
+}
+
+impl std::error::Error for SqliteSchemaInspectionError {}
+
+pub fn inspect_existing_schema(
+    path: &Path,
+) -> Result<SqliteSchemaInspection, SqliteSchemaInspectionError> {
+    let opened = OpenedDatabaseFile::pin(path).map_err(|_| SqliteSchemaInspectionError::Open)?;
+    let open_path = opened
+        .worker_open_path(path)
+        .map_err(|_| SqliteSchemaInspectionError::Open)?;
+    let connection = Connection::open_with_flags(
+        open_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| SqliteSchemaInspectionError::Open)?;
+    opened
+        .verify_connection(&connection, path)
+        .map_err(|_| SqliteSchemaInspectionError::Invalid)?;
+    let application_id = query_pragma_u32(&connection, "PRAGMA application_id")?;
+    let user_version = query_pragma_u32(&connection, "PRAGMA user_version")?;
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name, tbl_name, sql",
+        )
+        .map_err(|_| SqliteSchemaInspectionError::Query)?;
+    let catalog = statement
+        .query_map([], |row| {
+            Ok(SqliteCatalogObject {
+                object_type: row.get(0)?,
+                name: row.get(1)?,
+                table_name: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })
+        .map_err(|_| SqliteSchemaInspectionError::Query)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| SqliteSchemaInspectionError::Query)?;
+    let quick_check = connection
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
+        .map_err(|_| SqliteSchemaInspectionError::Query)?;
+    if quick_check != "ok" {
+        return Err(SqliteSchemaInspectionError::Invalid);
+    }
+    opened
+        .verify_connection(&connection, path)
+        .map_err(|_| SqliteSchemaInspectionError::Invalid)?;
+    Ok(SqliteSchemaInspection {
+        application_id,
+        user_version,
+        catalog,
+    })
+}
+
+fn query_pragma_u32(
+    connection: &Connection,
+    sql: &str,
+) -> Result<u32, SqliteSchemaInspectionError> {
+    let value = connection
+        .query_row(sql, [], |row| row.get::<_, i64>(0))
+        .map_err(|_| SqliteSchemaInspectionError::Query)?;
+    u32::try_from(value).map_err(|_| SqliteSchemaInspectionError::Invalid)
+}
 
 #[cfg(not(windows))]
 fn open_pinned_database(path: &Path) -> io::Result<File> {
@@ -306,6 +489,15 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     value.into()
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), OpenedDatabaseFileError> {
+    let parent = path
+        .parent()
+        .ok_or(OpenedDatabaseFileError::InvalidDestination)?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| OpenedDatabaseFileError::Inspect)
 }
 
 #[cfg(unix)]
