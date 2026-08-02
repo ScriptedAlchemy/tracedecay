@@ -6,6 +6,28 @@ use super::shell::{
 };
 use super::*;
 
+/// Runs one synchronous gix span on the blocking pool.
+///
+/// Repo open, tree diff, status classification, and rev-walk are all
+/// synchronous and unbounded on a large or pathological repository. Running
+/// them inline on a runtime worker starves every other request sharing that
+/// worker, and — the sharper problem — makes the carried git dispatch deadline
+/// unenforceable: `tokio::time::timeout` can only preempt at an await point, so
+/// an inline blocking call runs to completion regardless. Awaiting the
+/// `spawn_blocking` join handle restores exactly that composition, which
+/// `handle_pr_context` already relied on.
+async fn blocking_git_span<T, F>(label: &str, work: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|join_error| TraceDecayError::Config {
+            message: format!("git {label} task failed: {join_error}"),
+        })
+}
+
 /// Handles `tracedecay_diff_context` tool calls.
 pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_diff_context")?;
@@ -126,11 +148,20 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
                 message: "missing required parameter: to_ref".to_string(),
             })?;
 
-    // Use gix to diff the two trees
-    let changes = match git_diff_file_changes(cg.project_root(), from_ref, to_ref) {
-        Ok(files) => files,
-        Err(e) => {
-            return Ok(git_error_result(cg, &args, "diff", &e));
+    // Use gix to diff the two trees, off the request runtime's workers.
+    let changes = {
+        let project_root = cg.project_root().to_path_buf();
+        let from_ref = from_ref.to_owned();
+        let to_ref = to_ref.to_owned();
+        match blocking_git_span("tree diff", move || {
+            git_diff_file_changes(&project_root, &from_ref, &to_ref)
+        })
+        .await?
+        {
+            Ok(files) => files,
+            Err(e) => {
+                return Ok(git_error_result(cg, &args, "diff", &e));
+            }
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
@@ -204,19 +235,33 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let changed_files = match git_changed_files(cg.project_root(), staged_only) {
-        Ok(files) => files,
-        Err(e) => {
-            return Ok(git_error_result(cg, &args, "status", &e));
+    // gix status classification walks the whole worktree; keep it off the
+    // request runtime's workers so the carried dispatch deadline can preempt it.
+    let changed_files = {
+        let project_root = cg.project_root().to_path_buf();
+        match blocking_git_span("status", move || {
+            git_changed_files(&project_root, staged_only)
+        })
+        .await?
+        {
+            Ok(files) => files,
+            Err(e) => {
+                return Ok(git_error_result(cg, &args, "status", &e));
+            }
         }
     };
 
     if changed_files.is_empty() {
+        let project_root = cg.project_root().to_path_buf();
+        let recent_commits = blocking_git_span("rev-walk", move || {
+            git_recent_commits(&project_root, 5).unwrap_or_default()
+        })
+        .await?;
         let output = json!({
             "changed_files": [],
             "symbols_by_role": {},
             "suggested_category": Value::Null,
-            "recent_commits": git_recent_commits(cg.project_root(), 5).unwrap_or_default(),
+            "recent_commits": recent_commits,
             "summary": "No changes detected.",
         });
         return Ok(generic_tool_result(
@@ -269,7 +314,13 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         (false, false) => "chore/docs/config",
     };
 
-    let recent_commits = git_recent_commits(cg.project_root(), 5).unwrap_or_default();
+    let recent_commits = {
+        let project_root = cg.project_root().to_path_buf();
+        blocking_git_span("rev-walk", move || {
+            git_recent_commits(&project_root, 5).unwrap_or_default()
+        })
+        .await?
+    };
 
     let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();
     let output = json!({
@@ -443,6 +494,49 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
         &output,
         changed_files,
     ))
+}
+
+#[cfg(test)]
+mod blocking_git_span_tests {
+    use super::blocking_git_span;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn a_blocking_span_returns_the_synchronous_result_unchanged() {
+        let value = blocking_git_span("test", || Ok::<_, String>(vec!["a".to_owned()]))
+            .await
+            .expect("the join must succeed");
+        assert_eq!(value, Ok(vec!["a".to_owned()]));
+        let failure = blocking_git_span("test", || Err::<Vec<String>, _>("boom".to_owned()))
+            .await
+            .expect("a failing gix call is still a successful join");
+        assert_eq!(failure, Err("boom".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_blocking_span_does_not_starve_the_runtime_worker() {
+        // Single-threaded runtime: another task can only make progress if the
+        // synchronous work is genuinely off the worker. Running it inline would
+        // leave `progressed` false when the span returns.
+        let progressed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&progressed);
+        let ticker = tokio::spawn(async move {
+            flag.store(true, Ordering::Release);
+        });
+        let value = blocking_git_span("test", || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            7_u8
+        })
+        .await
+        .expect("the join must succeed");
+        assert_eq!(value, 7);
+        assert!(
+            progressed.load(Ordering::Acquire),
+            "a concurrent task must have run while the gix span was blocking"
+        );
+        ticker.await.expect("ticker joins");
+    }
 }
 
 // ── Cross-branch tools ─────────────────────────────────────────────────

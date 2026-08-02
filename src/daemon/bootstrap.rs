@@ -107,8 +107,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        clients.spawn(async move {
-            let _permit = permit;
+        clients.spawn(with_connection_admission(permit, async move {
             Box::pin(serve_windows_broker_client_with_class_and_invocation(
                 stream,
                 &auth_token,
@@ -123,7 +122,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 None,
             ))
             .await
-        });
+        }));
     }
     lifecycle.begin_draining();
     maintenance.shutdown().await;
@@ -304,10 +303,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             auth_token,
             admission_class,
         ));
-        client_tasks.spawn(async move {
-            let _permit = permit;
-            client.await
-        });
+        client_tasks.spawn(with_connection_admission(permit, client));
     }
     engine.lifecycle.begin_draining();
     // Stop accepting and unlink the socket before draining so clients that
