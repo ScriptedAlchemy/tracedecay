@@ -4,9 +4,11 @@
 //! client permit wait, and concurrent kicks collapse into one bounded pass.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -23,6 +25,13 @@ use super::log_daemon_event;
 
 const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
+const BOOTSTRAP_RUNNING: u8 = 0;
+const BOOTSTRAP_READY: u8 = 1;
+const BOOTSTRAP_TERMINAL: u8 = 2;
+const BOOTSTRAP_CANCELLED: u8 = 3;
+
+pub(super) type ProfileHostAdmissionBootstrapOperation =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = crate::errors::Result<()>> + Send>> + Send + Sync>;
 
 #[cfg(test)]
 type ReplayPassOverride = Arc<
@@ -33,6 +42,8 @@ type ReplayPassOverride = Arc<
 
 pub(super) struct ProfileHostAdmissionReplayRegistry {
     workers: Arc<tokio::sync::Mutex<HashMap<PathBuf, ReplayWorkerEntry>>>,
+    bootstrap_workers:
+        Arc<tokio::sync::Mutex<HashMap<PathBuf, ProfileHostAdmissionBootstrapEntry>>>,
     shutting_down: AtomicBool,
     idle_eviction_after: Duration,
 }
@@ -40,6 +51,20 @@ pub(super) struct ProfileHostAdmissionReplayRegistry {
 struct ReplayWorkerEntry {
     worker: Arc<ProfileHostAdmissionReplayWorker>,
     task: JoinHandle<()>,
+}
+
+struct ProfileHostAdmissionBootstrapEntry {
+    worker: Arc<ProfileHostAdmissionBootstrapWorker>,
+    task: JoinHandle<()>,
+}
+
+struct ProfileHostAdmissionBootstrapWorker {
+    state: AtomicU8,
+    attempt_count: AtomicUsize,
+    backoff_count: AtomicUsize,
+    completed: Notify,
+    cancelled: AtomicBool,
+    cancellation: Notify,
 }
 
 struct ProfileHostAdmissionReplayWorker {
@@ -61,6 +86,7 @@ impl Default for ProfileHostAdmissionReplayRegistry {
     fn default() -> Self {
         Self {
             workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            bootstrap_workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shutting_down: AtomicBool::new(false),
             idle_eviction_after: IDLE_EVICTION_AFTER,
         }
@@ -75,10 +101,49 @@ impl Drop for ProfileHostAdmissionReplayRegistry {
                 entry.worker.cancel();
             }
         }
+        if let Ok(workers) = self.bootstrap_workers.try_lock() {
+            for entry in workers.values() {
+                entry.worker.cancel();
+            }
+        }
     }
 }
 
 impl ProfileHostAdmissionReplayRegistry {
+    pub(super) async fn ensure_bootstrap(
+        &self,
+        profile_root: &Path,
+        operation: ProfileHostAdmissionBootstrapOperation,
+    ) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        let mut workers = self.bootstrap_workers.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(existing) = workers.get(profile_root) {
+            let state = existing.worker.state.load(Ordering::Acquire);
+            if matches!(state, BOOTSTRAP_READY | BOOTSTRAP_TERMINAL) || !existing.task.is_finished()
+            {
+                return;
+            }
+            // A cancelled or panicked task must not permanently suppress a
+            // later authenticated request while the registry is still live.
+            workers.remove(profile_root);
+        }
+
+        let worker = Arc::new(ProfileHostAdmissionBootstrapWorker::new());
+        let task_worker = Arc::clone(&worker);
+        let task = tokio::spawn(async move {
+            task_worker.run(operation).await;
+        });
+        workers.insert(
+            profile_root.to_path_buf(),
+            ProfileHostAdmissionBootstrapEntry { worker, task },
+        );
+    }
+
     pub(super) async fn ensure(
         &self,
         broker_path: &Path,
@@ -158,14 +223,24 @@ impl ProfileHostAdmissionReplayRegistry {
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
-        let entries = {
+        let replay_entries = {
             let mut workers = self.workers.lock().await;
             workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
-        for entry in &entries {
+        let bootstrap_entries = {
+            let mut workers = self.bootstrap_workers.lock().await;
+            workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+        };
+        for entry in &replay_entries {
             entry.worker.cancel();
         }
-        for entry in entries {
+        for entry in &bootstrap_entries {
+            entry.worker.cancel();
+        }
+        for entry in replay_entries {
+            let _ = entry.task.await;
+        }
+        for entry in bootstrap_entries {
             let _ = entry.task.await;
         }
     }
@@ -221,10 +296,157 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     #[cfg(test)]
+    async fn bootstrap_worker_count(&self) -> usize {
+        self.bootstrap_workers.lock().await.len()
+    }
+
+    #[cfg(test)]
+    async fn bootstrap_attempt_count(&self, profile_root: &Path) -> usize {
+        self.bootstrap_workers
+            .lock()
+            .await
+            .get(profile_root)
+            .map_or(0, |entry| {
+                entry.worker.attempt_count.load(Ordering::Acquire)
+            })
+    }
+
+    #[cfg(test)]
+    async fn bootstrap_backoff_count(&self, profile_root: &Path) -> usize {
+        self.bootstrap_workers
+            .lock()
+            .await
+            .get(profile_root)
+            .map_or(0, |entry| {
+                entry.worker.backoff_count.load(Ordering::Acquire)
+            })
+    }
+
+    #[cfg(test)]
+    async fn wait_bootstrap_completed(&self, profile_root: &Path, timeout: Duration) -> bool {
+        let worker = {
+            let workers = self.bootstrap_workers.lock().await;
+            workers
+                .get(profile_root)
+                .map(|entry| Arc::clone(&entry.worker))
+        };
+        let Some(worker) = worker else {
+            return true;
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let completed = worker.completed.notified();
+            if worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            tokio::select! {
+                () = completed => {}
+                () = tokio::time::sleep(remaining) => {
+                    return worker.state.load(Ordering::Acquire) != BOOTSTRAP_RUNNING;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     fn with_idle_eviction_after(idle_eviction_after: Duration) -> Self {
         let mut registry = Self::default();
         registry.idle_eviction_after = idle_eviction_after;
         registry
+    }
+}
+
+impl ProfileHostAdmissionBootstrapWorker {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(BOOTSTRAP_RUNNING),
+            attempt_count: AtomicUsize::new(0),
+            backoff_count: AtomicUsize::new(0),
+            completed: Notify::new(),
+            cancelled: AtomicBool::new(false),
+            cancellation: Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.cancellation.notify_waiters();
+        }
+    }
+
+    fn finish(&self, state: u8) {
+        self.state.store(state, Ordering::Release);
+        self.completed.notify_waiters();
+    }
+
+    async fn wait_for_cancellation(&self) {
+        loop {
+            let notified = self.cancellation.notified();
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn run(&self, operation: ProfileHostAdmissionBootstrapOperation) {
+        let mut consecutive_retryable = 0u32;
+        loop {
+            self.attempt_count.fetch_add(1, Ordering::AcqRel);
+            let result = tokio::select! {
+                () = self.wait_for_cancellation() => {
+                    self.finish(BOOTSTRAP_CANCELLED);
+                    return;
+                }
+                result = operation() => result,
+            };
+            match result {
+                Ok(()) => {
+                    if consecutive_retryable > 0 {
+                        log_daemon_event(
+                            "profile_host_admission_bootstrap_recovered",
+                            &[("attempts", (consecutive_retryable + 1).to_string())],
+                        );
+                    }
+                    self.finish(BOOTSTRAP_READY);
+                    return;
+                }
+                Err(error) => {
+                    let (reason_code, retryable) = error
+                        .project_route_context()
+                        .map_or(("authority_unavailable", true), |(reason, retryable, _)| {
+                            (reason, retryable)
+                        });
+                    if !retryable {
+                        log_daemon_event(
+                            "profile_host_admission_bootstrap_stopped",
+                            &[("reason_code", reason_code.to_owned())],
+                        );
+                        self.finish(BOOTSTRAP_TERMINAL);
+                        return;
+                    }
+                    consecutive_retryable = consecutive_retryable.saturating_add(1);
+                    self.backoff_count.fetch_add(1, Ordering::AcqRel);
+                    if consecutive_retryable == 1 {
+                        log_daemon_event(
+                            "profile_host_admission_bootstrap_retry",
+                            &[("reason_code", reason_code.to_owned())],
+                        );
+                    }
+                    tokio::select! {
+                        () = self.wait_for_cancellation() => {
+                            self.finish(BOOTSTRAP_CANCELLED);
+                            return;
+                        }
+                        () = tokio::time::sleep(profile_replay_backoff(consecutive_retryable)) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -375,6 +597,111 @@ mod tests {
         assert_eq!(profile_replay_backoff(2), Duration::from_millis(50));
         assert_eq!(profile_replay_backoff(3), Duration::from_millis(100));
         assert_eq!(profile_replay_backoff(20), Duration::from_secs(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn simultaneous_bootstrap_ensures_coalesce_and_cache_readiness() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = Arc::new(ProfileHostAdmissionReplayRegistry::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let operation_attempts = Arc::clone(&attempts);
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let attempts = Arc::clone(&operation_attempts);
+            Box::pin(async move {
+                attempts.fetch_add(1, Ordering::AcqRel);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok(())
+            })
+        });
+
+        let mut tasks = JoinSet::new();
+        for _ in 0..8 {
+            let registry = Arc::clone(&registry);
+            let profile_root = profile_root.clone();
+            let operation = Arc::clone(&operation);
+            tasks.spawn(async move {
+                registry.ensure_bootstrap(&profile_root, operation).await;
+            });
+        }
+        while tasks.join_next().await.is_some() {}
+        assert!(
+            registry
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
+                .await,
+            "coalesced bootstrap must complete"
+        );
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert_eq!(registry.bootstrap_worker_count().await, 1);
+
+        registry
+            .ensure_bootstrap(&profile_root, Arc::clone(&operation))
+            .await;
+        assert_eq!(registry.bootstrap_attempt_count(&profile_root).await, 1);
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bootstrap_retries_transient_failure_without_another_ensure() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let operation_attempts = Arc::clone(&attempts);
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let attempts = Arc::clone(&operation_attempts);
+            Box::pin(async move {
+                let attempt = attempts.fetch_add(1, Ordering::AcqRel);
+                if attempt < 2 {
+                    Err(crate::errors::TraceDecayError::project_route(
+                        "test_bootstrap_unavailable",
+                        true,
+                        "transient test failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+
+        registry.ensure_bootstrap(&profile_root, operation).await;
+        assert!(
+            registry
+                .wait_bootstrap_completed(&profile_root, Duration::from_secs(2))
+                .await,
+            "retrying bootstrap must recover without another request"
+        );
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
+        assert_eq!(registry.bootstrap_attempt_count(&profile_root).await, 3);
+        assert_eq!(registry.bootstrap_backoff_count(&profile_root).await, 2);
+        registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bootstrap_shutdown_cancels_and_joins_in_flight_operation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let started = Arc::new(Notify::new());
+        let operation_started = Arc::clone(&started);
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let started = Arc::clone(&operation_started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<crate::errors::Result<()>>().await
+            })
+        });
+
+        registry.ensure_bootstrap(&profile_root, operation).await;
+        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), registry.shutdown())
+            .await
+            .expect("shutdown must cancel and join bootstrap workers");
+        assert_eq!(registry.bootstrap_worker_count().await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
