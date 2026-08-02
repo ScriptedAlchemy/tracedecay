@@ -322,10 +322,23 @@ impl DaemonEngine {
         // Request-side open: take only this store's owner lane, and bound the
         // wait so a stuck writer surfaces as a typed retryable busy error rather
         // than an unbounded park.
-        let (resolved_project_path, _) = Self::project_route(handshake)?;
-        let scope = crate::daemon::branch_admin::project_open_writer_scope(
-            &resolved_project_path,
-            &handshake.client_identity.profile_root,
+        //
+        // Scope resolution is deliberately lenient and never a new failure
+        // path: `open_project_server_until_cancelled` owns route validation and
+        // its errors, and an unresolvable scope simply falls back to the
+        // daemon-wide lane, which is what the single gate always did.
+        let resolved_project_path = handshake
+            .project_path
+            .as_ref()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()));
+        let scope = resolved_project_path.as_deref().map_or(
+            crate::daemon::branch_admin::WriterScope::Daemon,
+            |path| {
+                crate::daemon::branch_admin::project_open_writer_scope(
+                    path,
+                    &handshake.client_identity.profile_root,
+                )
+            },
         );
         let admission = self
             .store_administration
@@ -342,7 +355,9 @@ impl DaemonEngine {
                 return Err(project_open_cancellation_error());
             }
             crate::daemon::branch_admin::WriterAdmission::Busy => {
-                return Err(project_open_writer_busy_error(&resolved_project_path));
+                return Err(project_open_writer_busy_error(
+                    resolved_project_path.as_deref().unwrap_or(Path::new("")),
+                ));
             }
         };
         let (_key, project_path, server, _inserted) = cached;
