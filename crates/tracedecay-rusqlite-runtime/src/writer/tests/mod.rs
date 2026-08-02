@@ -383,6 +383,32 @@ fn start(
     .unwrap()
 }
 
+#[cfg(unix)]
+fn start_pinned(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    applied: Arc<AtomicU64>,
+) -> PersistentWriter {
+    let binding = binding(&request.envelope().metadata);
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        LocatorDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+    );
+    let opened = crate::connection::OpenedDatabaseFile::pin(&database.0).unwrap();
+    PersistentWriter::start_with_persistence(
+        ExistingWriterLocator::new(binding, locator, database.0.clone())
+            .unwrap()
+            .with_opened_database(opened),
+        AdmissionConfigV1::default(),
+        Box::new(TestPersistence {
+            applied,
+            sequence: 0,
+        }),
+    )
+    .unwrap()
+}
+
 fn start_with_persistence(
     database: &TestDatabase,
     request: &RuntimeSubmitRequestV1,
@@ -501,6 +527,50 @@ fn actor_commits_before_reply_and_releases_admission() {
         .query_row("SELECT COUNT(*) FROM writer_test", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 1);
+    writer.shutdown_and_join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn actor_quarantines_before_dequeue_after_the_wal_is_unlinked() {
+    let database = TestDatabase::new();
+    let seed_request = request(metadata(
+        "operation.writer.family",
+        "key.writer.family",
+        'f',
+    ));
+    let applied = Arc::new(AtomicU64::new(0));
+    let writer = start_pinned(&database, &seed_request, Arc::clone(&applied));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let seed_probe = Arc::new(Probe::new(&seed_request, None));
+    assert!(matches!(
+        runtime
+            .block_on(writer.submit(seed_request, seed_probe))
+            .unwrap(),
+        RuntimeSubmitOutcomeV1::Committed { .. }
+    ));
+    let wal = PathBuf::from(format!("{}-wal", database.0.display()));
+    assert!(wal.is_file());
+    std::fs::remove_file(wal).unwrap();
+    let request = request(metadata(
+        "operation.writer.family.rejected",
+        "key.writer.family.rejected",
+        'g',
+    ));
+    let probe = Arc::new(Probe::new(&request, None));
+
+    let outcome = runtime.block_on(writer.submit(request, probe)).unwrap();
+
+    assert_eq!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        }
+    );
+    assert_eq!(writer.state(), WriterState::Faulted);
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
     writer.shutdown_and_join().unwrap();
 }
 

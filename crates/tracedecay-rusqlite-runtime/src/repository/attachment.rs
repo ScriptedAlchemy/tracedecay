@@ -19,7 +19,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
-    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError, file_family::SqliteFamilyGuard},
     migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderQueryExecutor,
@@ -104,6 +104,7 @@ impl RepositoryPhysicalAttachmentFactory {
         created: bool,
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
+        let family_guard = Arc::clone(opened_database.family_guard());
         let writer_locator =
             match ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()) {
                 Ok(locator) => {
@@ -222,6 +223,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 binding,
                 database_path: path,
                 opened_file_identity,
+                family_guard,
                 initialization_file,
                 writer: Some(Arc::new(writer)),
                 readers: Some(readers),
@@ -289,6 +291,7 @@ impl Error for RepositoryAttachmentStartError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryRuntimePhysicalSnapshot {
     pub healthy: bool,
+    pub quarantine: Option<crate::SqliteFamilyIntegrityError>,
     pub writer_present: bool,
     pub reader_handles: u32,
     pub queued_operations: u32,
@@ -313,6 +316,7 @@ struct RepositoryRuntimePhysicalState {
     binding: StoreRuntimeBindingV1,
     database_path: PathBuf,
     opened_file_identity: u64,
+    family_guard: Arc<SqliteFamilyGuard>,
     initialization_file: Option<OpenedDatabaseFile>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<RepositoryRuntimeReadExecutor>>,
@@ -361,6 +365,10 @@ impl RepositoryRuntimePhysicalAttachment {
         if !state.admission_open || state.closed {
             return Err(MigrationSqlError::WriterUnavailable);
         }
+        state
+            .family_guard
+            .probe()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
         let writer = state
             .writer
             .as_deref()
@@ -379,8 +387,12 @@ impl RepositoryRuntimePhysicalAttachment {
         let reader_handles = readers.map_or(0, |snapshot| {
             u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
+        let _ = state.family_guard.probe();
+        let quarantine = state.family_guard.quarantine();
         RepositoryRuntimePhysicalSnapshot {
-            healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
+            healthy: quarantine.is_none()
+                && writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
+            quarantine,
             writer_present: writer.is_some(),
             reader_handles,
             queued_operations: writer_telemetry
@@ -399,20 +411,31 @@ impl RepositoryRuntimePhysicalAttachment {
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, RepositoryDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
             state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
+                .family_guard
+                .probe()
+                .map_err(RepositoryDispatchError::SqliteFamily)?;
+            (
+                state
+                    .writer
+                    .clone()
+                    .ok_or(RepositoryDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
-        writer
+        let outcome = writer
             .submit_authorized(request, probe, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(RepositoryDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub async fn run_bounded_incremental_compaction(
@@ -420,20 +443,30 @@ impl RepositoryRuntimePhysicalAttachment {
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), RepositoryDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
             state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
+                .family_guard
+                .probe()
+                .map_err(RepositoryDispatchError::SqliteFamily)?;
+            (
+                state
+                    .writer
+                    .clone()
+                    .ok_or(RepositoryDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
         writer
             .bounded_incremental_vacuum(max_pages, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(RepositoryDispatchError::SqliteFamily)
     }
 
     pub async fn run_checkpoint(
@@ -441,24 +474,35 @@ impl RepositoryRuntimePhysicalAttachment {
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
-        let checkpoint = {
+        let (checkpoint, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
             state
-                .writer
-                .as_ref()
-                .ok_or(RepositoryDispatchError::Closed)?
-                .checkpoint_handle()
+                .family_guard
+                .probe()
+                .map_err(RepositoryDispatchError::SqliteFamily)?;
+            (
+                state
+                    .writer
+                    .as_ref()
+                    .ok_or(RepositoryDispatchError::Closed)?
+                    .checkpoint_handle(),
+                Arc::clone(&state.family_guard),
+            )
         };
         let ticket = checkpoint
             .trigger_authorized(request, authority)
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
-        ticket
+        let outcome = ticket
             .wait()
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(RepositoryDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub async fn snapshot_to(
@@ -466,20 +510,31 @@ impl RepositoryRuntimePhysicalAttachment {
         destination: PathBuf,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
             state
-                .writer
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
+                .family_guard
+                .probe()
+                .map_err(RepositoryDispatchError::SqliteFamily)?;
+            (
+                state
+                    .writer
+                    .clone()
+                    .ok_or(RepositoryDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
-        writer
+        let receipt = writer
             .snapshot_to(destination, authority)
             .await
-            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(RepositoryDispatchError::SqliteFamily)?;
+        Ok(receipt)
     }
 
     pub fn dispatch_read(
@@ -487,15 +542,22 @@ impl RepositoryRuntimePhysicalAttachment {
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
-        let readers = {
+        let (readers, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(RepositoryDispatchError::Closed);
             }
             state
-                .readers
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
+                .family_guard
+                .probe()
+                .map_err(RepositoryDispatchError::SqliteFamily)?;
+            (
+                state
+                    .readers
+                    .clone()
+                    .ok_or(RepositoryDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
         let mut reader = readers
             .acquire_for_dispatch(&request, probe)
@@ -503,9 +565,13 @@ impl RepositoryRuntimePhysicalAttachment {
         let mut snapshot = reader
             .begin_snapshot()
             .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
-        snapshot
+        let outcome = snapshot
             .execute(request, probe)
-            .map_err(RepositoryDispatchError::Reader)
+            .map_err(RepositoryDispatchError::Reader)?;
+        family_guard
+            .probe()
+            .map_err(RepositoryDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub fn drain(&self) -> Result<(), String> {
@@ -517,6 +583,7 @@ impl RepositoryRuntimePhysicalAttachment {
             return Ok(());
         }
         state.admission_open = false;
+        state.family_guard.disarm();
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
@@ -620,6 +687,7 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
 #[derive(Debug)]
 pub enum RepositoryDispatchError {
     Closed,
+    SqliteFamily(crate::SqliteFamilyIntegrityError),
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
@@ -629,6 +697,9 @@ impl fmt::Display for RepositoryDispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Closed => formatter.write_str("repository runtime is closed"),
+            Self::SqliteFamily(error) => {
+                write!(formatter, "repository runtime quarantined: {error}")
+            }
             Self::Reader(error) => write!(formatter, "repository read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
@@ -640,6 +711,7 @@ impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
+            Self::SqliteFamily(error) => Some(error),
             Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
         }
     }
@@ -813,6 +885,63 @@ mod tests {
             .unwrap();
         assert_eq!(canonical_value, "A");
         assert_eq!(replacement_value, "B");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_reports_terminal_quarantine_and_still_drains() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("repository.sqlite3");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let handle = attachment.migration_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE family_probe(value INTEGER)".to_owned())
+            .unwrap();
+        assert!(attachment.snapshot().healthy);
+        let transaction = handle.begin_immediate().unwrap();
+        transaction
+            .execute(statement(
+                "INSERT INTO family_probe(value) VALUES (?)",
+                vec![MigrationSqlValue::Integer(1)],
+            ))
+            .unwrap();
+        fs::remove_file(format!("{}-wal", path.display())).unwrap();
+
+        assert!(matches!(
+            transaction.commit(),
+            Err(MigrationSqlError::SqliteFamily(
+                crate::SqliteFamilyIntegrityError::Quarantined {
+                    component: crate::SqliteFamilyComponent::Wal,
+                    ..
+                }
+            ))
+        ));
+        let snapshot = attachment.snapshot();
+        assert!(!snapshot.healthy);
+        assert!(matches!(
+            snapshot.quarantine,
+            Some(crate::SqliteFamilyIntegrityError::Quarantined {
+                component: crate::SqliteFamilyComponent::Wal,
+                ..
+            })
+        ));
+        assert!(matches!(
+            attachment.migration_sql_handle(),
+            Err(MigrationSqlError::ReaderUnavailable(_))
+        ));
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 
     #[test]

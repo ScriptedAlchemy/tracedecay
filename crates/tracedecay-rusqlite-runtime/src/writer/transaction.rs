@@ -15,7 +15,7 @@ use tracedecay_store::{
 use crate::{
     RuntimeWriteAuthorityStage,
     admission::QueueItem,
-    connection,
+    connection::{self, file_family::SqliteFamilyGuard},
     read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
     telemetry::{WriterBatchMetrics, WriterTelemetry},
 };
@@ -54,8 +54,14 @@ pub(super) fn process_batch(
     telemetry: &WriterTelemetry,
     state: &AtomicU8,
     watermark_publisher: &CommittedWatermarkPublisher,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) {
     let started = Instant::now();
+    if probe_family(family_guard).is_err() {
+        state.store(WriterState::Faulted as u8, Ordering::Release);
+        settle_quarantined(batch.items, telemetry);
+        return;
+    }
     let mut transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
     {
         Ok(transaction) => transaction,
@@ -120,9 +126,20 @@ pub(super) fn process_batch(
         settle_authority_denied(prepared, authority_denied, telemetry);
         return;
     }
+    if probe_family(family_guard).is_err() {
+        drop(transaction);
+        state.store(WriterState::Faulted as u8, Ordering::Release);
+        settle_precommit_quarantine(prepared, telemetry);
+        return;
+    }
 
     let commit_failure = match transaction.commit() {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
+        Ok(()) if probe_family(family_guard).is_err() => {
+            state.store(WriterState::Faulted as u8, Ordering::Release);
+            settle_postcommit_quarantine(prepared, telemetry);
+            return;
+        }
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
             Ok(()) => None,
             Err(_) => {
@@ -134,6 +151,46 @@ pub(super) fn process_batch(
         },
     };
     settle_prepared(prepared, commit_failure, started, telemetry);
+}
+
+fn probe_family(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), crate::SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe)
+}
+
+fn settle_quarantined(items: Vec<AcceptedRequest>, telemetry: &WriterTelemetry) {
+    telemetry.error();
+    for item in items {
+        let result = Ok(RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::Faulted,
+        });
+        telemetry.completed(&result);
+        item.settle(result);
+    }
+}
+
+fn settle_precommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
+    telemetry.error();
+    for prepared in prepared {
+        let result = match prepared.result {
+            PreparedResult::Final(result) => result,
+            PreparedResult::AwaitingTransactionCommit(_) => {
+                Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::Faulted,
+                })
+            }
+        };
+        telemetry.completed(&result);
+        prepared.item.settle(result);
+    }
+}
+
+fn settle_postcommit_quarantine(prepared: Vec<PreparedRequest>, telemetry: &WriterTelemetry) {
+    // The SQLite commit returned success, but the retained file family changed
+    // before durability could be verified. Do not fabricate a commit receipt;
+    // exact replay against a fresh incarnation resolves the request.
+    settle_precommit_quarantine(prepared, telemetry);
 }
 
 fn publish_committed(

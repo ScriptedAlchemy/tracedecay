@@ -94,6 +94,7 @@ fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch()
         &telemetry,
         &state,
         &watermark,
+        None,
     );
 
     assert!(matches!(
@@ -163,6 +164,7 @@ fn active_long_running_request_remains_interruptible() {
         &telemetry,
         &state,
         &watermark,
+        None,
     );
 
     assert!(matches!(

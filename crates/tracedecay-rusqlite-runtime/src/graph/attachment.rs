@@ -17,7 +17,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
-    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError, file_family::SqliteFamilyGuard},
     migration_sql::{MigrationSqlError, MigrationSqlHandle},
     reader::{ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderStartError},
     writer::WriterPersistence,
@@ -184,6 +184,7 @@ impl GraphPhysicalAttachmentFactory {
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<GraphRuntimePhysicalAttachment, GraphPhysicalAttachmentStartError> {
         let database_path = physical.path().to_path_buf();
+        let family_guard = Arc::clone(opened_database.family_guard());
         let parts = match self.prepare(physical) {
             Ok(parts) => parts,
             Err(error) => {
@@ -316,6 +317,7 @@ impl GraphPhysicalAttachmentFactory {
                 binding,
                 database_path,
                 opened_file_identity,
+                family_guard,
                 initialization_file,
                 writer,
                 readers: Some(readers),
@@ -375,6 +377,7 @@ impl Error for GraphPhysicalAttachmentPrepareError {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GraphRuntimePhysicalSnapshot {
     pub healthy: bool,
+    pub quarantine: Option<crate::SqliteFamilyIntegrityError>,
     pub writer_present: bool,
     pub reader_handles: u32,
     pub queued_operations: u32,
@@ -391,6 +394,7 @@ struct GraphRuntimePhysicalState {
     binding: StoreRuntimeBindingV1,
     database_path: PathBuf,
     opened_file_identity: u64,
+    family_guard: Arc<SqliteFamilyGuard>,
     initialization_file: Option<OpenedDatabaseFile>,
     writer: Option<Arc<PersistentWriter>>,
     readers: Option<ReaderPool<GraphReaderExecutor>>,
@@ -441,6 +445,10 @@ impl GraphRuntimePhysicalAttachment {
                 "graph physical attachment is closed".to_owned(),
             ));
         }
+        state
+            .family_guard
+            .probe()
+            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
         let readers = state.readers.as_ref().ok_or_else(|| {
             MigrationSqlError::ReaderUnavailable("graph readers are unavailable".to_owned())
         })?;
@@ -458,8 +466,12 @@ impl GraphRuntimePhysicalAttachment {
         let reader_handles = readers.map_or(0, |snapshot| {
             u32::from(snapshot.general_workers) + u32::from(snapshot.health_workers)
         });
+        let _ = state.family_guard.probe();
+        let quarantine = state.family_guard.quarantine();
         GraphRuntimePhysicalSnapshot {
-            healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
+            healthy: quarantine.is_none()
+                && writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
+            quarantine,
             writer_present: writer.is_some(),
             reader_handles,
             queued_operations: writer_telemetry
@@ -478,17 +490,28 @@ impl GraphRuntimePhysicalAttachment {
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<RuntimeSubmitOutcomeV1, GraphDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(GraphDispatchError::Closed);
             }
-            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+            state
+                .family_guard
+                .probe()
+                .map_err(GraphDispatchError::SqliteFamily)?;
+            (
+                state.writer.clone().ok_or(GraphDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
-        writer
+        let outcome = writer
             .submit_authorized(request, probe, authority)
             .await
-            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(GraphDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub async fn run_bounded_incremental_compaction(
@@ -496,17 +519,27 @@ impl GraphRuntimePhysicalAttachment {
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), GraphDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(GraphDispatchError::Closed);
             }
-            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+            state
+                .family_guard
+                .probe()
+                .map_err(GraphDispatchError::SqliteFamily)?;
+            (
+                state.writer.clone().ok_or(GraphDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
         writer
             .bounded_incremental_vacuum(max_pages, authority)
             .await
-            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(GraphDispatchError::SqliteFamily)
     }
 
     pub async fn run_checkpoint(
@@ -514,24 +547,35 @@ impl GraphRuntimePhysicalAttachment {
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, GraphDispatchError> {
-        let checkpoint = {
+        let (checkpoint, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(GraphDispatchError::Closed);
             }
             state
-                .writer
-                .as_ref()
-                .ok_or(GraphDispatchError::Closed)?
-                .checkpoint_handle()
+                .family_guard
+                .probe()
+                .map_err(GraphDispatchError::SqliteFamily)?;
+            (
+                state
+                    .writer
+                    .as_ref()
+                    .ok_or(GraphDispatchError::Closed)?
+                    .checkpoint_handle(),
+                Arc::clone(&state.family_guard),
+            )
         };
         let ticket = checkpoint
             .trigger_authorized(request, authority)
             .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
-        ticket
+        let outcome = ticket
             .wait()
             .await
-            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(GraphDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub async fn snapshot_to(
@@ -539,17 +583,28 @@ impl GraphRuntimePhysicalAttachment {
         destination: PathBuf,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<OnlineBackupReceipt, GraphDispatchError> {
-        let writer = {
+        let (writer, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(GraphDispatchError::Closed);
             }
-            state.writer.clone().ok_or(GraphDispatchError::Closed)?
+            state
+                .family_guard
+                .probe()
+                .map_err(GraphDispatchError::SqliteFamily)?;
+            (
+                state.writer.clone().ok_or(GraphDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
-        writer
+        let receipt = writer
             .snapshot_to(destination, authority)
             .await
-            .map_err(|error| GraphDispatchError::Writer(error.to_string()))
+            .map_err(|error| GraphDispatchError::Writer(error.to_string()))?;
+        family_guard
+            .probe()
+            .map_err(GraphDispatchError::SqliteFamily)?;
+        Ok(receipt)
     }
 
     pub fn dispatch_read(
@@ -557,12 +612,19 @@ impl GraphRuntimePhysicalAttachment {
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, GraphDispatchError> {
-        let readers = {
+        let (readers, family_guard) = {
             let state = self.lock_state();
             if !state.admission_open || state.closed {
                 return Err(GraphDispatchError::Closed);
             }
-            state.readers.clone().ok_or(GraphDispatchError::Closed)?
+            state
+                .family_guard
+                .probe()
+                .map_err(GraphDispatchError::SqliteFamily)?;
+            (
+                state.readers.clone().ok_or(GraphDispatchError::Closed)?,
+                Arc::clone(&state.family_guard),
+            )
         };
         let mut reader = readers
             .acquire_for_dispatch(&request, probe)
@@ -570,9 +632,13 @@ impl GraphRuntimePhysicalAttachment {
         let mut snapshot = reader
             .begin_snapshot()
             .map_err(|error| GraphDispatchError::ReaderWorker(error.to_string()))?;
-        snapshot
+        let outcome = snapshot
             .execute(request, probe)
-            .map_err(GraphDispatchError::Reader)
+            .map_err(GraphDispatchError::Reader)?;
+        family_guard
+            .probe()
+            .map_err(GraphDispatchError::SqliteFamily)?;
+        Ok(outcome)
     }
 
     pub fn drain(&self) -> Result<(), String> {
@@ -584,6 +650,7 @@ impl GraphRuntimePhysicalAttachment {
             return Ok(());
         }
         state.admission_open = false;
+        state.family_guard.disarm();
         if let Some(writer) = &state.writer {
             writer.begin_drain();
         }
@@ -687,6 +754,7 @@ impl Drop for GraphRuntimePhysicalAttachment {
 #[derive(Debug)]
 pub enum GraphDispatchError {
     Closed,
+    SqliteFamily(crate::SqliteFamilyIntegrityError),
     Reader(ReaderAcquireError),
     ReaderWorker(String),
     Writer(String),
@@ -696,6 +764,7 @@ impl fmt::Display for GraphDispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Closed => formatter.write_str("graph runtime is closed"),
+            Self::SqliteFamily(error) => write!(formatter, "graph runtime quarantined: {error}"),
             Self::Reader(error) => write!(formatter, "graph read failed: {error}"),
             Self::ReaderWorker(error) => write!(formatter, "graph snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "graph write failed: {error}"),
@@ -707,6 +776,7 @@ impl Error for GraphDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
+            Self::SqliteFamily(error) => Some(error),
             Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
         }
     }

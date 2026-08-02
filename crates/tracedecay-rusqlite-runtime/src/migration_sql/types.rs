@@ -245,6 +245,7 @@ pub enum MigrationSqlError {
     ReaderUnavailable(String),
     TransactionClosed,
     TransactionExpired,
+    SqliteFamily(crate::SqliteFamilyIntegrityError),
     Sqlite {
         operation: &'static str,
         code: Option<i32>,
@@ -284,6 +285,12 @@ impl fmt::Display for MigrationSqlError {
             Self::TransactionExpired => {
                 formatter.write_str("migration SQL transaction lease expired")
             }
+            Self::SqliteFamily(error) => {
+                write!(
+                    formatter,
+                    "migration SQL database family is quarantined: {error}"
+                )
+            }
             Self::Sqlite {
                 operation, message, ..
             } => {
@@ -293,4 +300,11 @@ impl fmt::Display for MigrationSqlError {
     }
 }
 
-impl Error for MigrationSqlError {}
+impl Error for MigrationSqlError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::SqliteFamily(error) => Some(error),
+            _ => None,
+        }
+    }
+}

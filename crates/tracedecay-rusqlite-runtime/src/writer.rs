@@ -40,7 +40,7 @@ use crate::{
         CheckpointBlockers, CheckpointError, CheckpointOutcome, CheckpointPressure,
         CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode, RusqliteCheckpointError,
     },
-    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError, file_family::SqliteFamilyGuard},
     maintenance::ExclusiveMaintenancePermit,
     migration_sql::WriterCommand as MigrationSqlWriterCommand,
     persistence::RuntimeWriterPersistence,
@@ -318,6 +318,11 @@ impl ExistingWriterLocator {
             .as_ref()
             .map(|opened| opened.identity())
     }
+    pub(crate) fn family_guard(&self) -> Option<Arc<SqliteFamilyGuard>> {
+        self.opened_database
+            .as_ref()
+            .map(|opened| Arc::clone(opened.family_guard()))
+    }
     fn worker_open_path(&self) -> Result<PathBuf, WriterStartError> {
         self.opened_database.as_ref().map_or_else(
             || Ok(self.path.clone()),
@@ -352,6 +357,7 @@ pub enum WriterStartError {
     CheckpointSetupFailed,
     CheckpointSchedulerSetupFailed,
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
+    SqliteFamily(crate::SqliteFamilyIntegrityError),
     OpenedDatabaseIdentityMismatch {
         expected: u64,
         actual: u64,
@@ -395,6 +401,9 @@ impl fmt::Display for WriterStartError {
                     "failed to identify opened SQLite writer database: {error}"
                 )
             }
+            Self::SqliteFamily(error) => {
+                write!(f, "SQLite writer family is unavailable: {error}")
+            }
             Self::OpenedDatabaseIdentityMismatch { expected, actual } => write!(
                 f,
                 "SQLite writer opened file identity {actual}, expected {expected}"
@@ -412,6 +421,7 @@ impl Error for WriterStartError {
             Self::InvalidAdmission(error) => Some(error),
             Self::ThreadSpawn(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
+            Self::SqliteFamily(error) => Some(error),
             _ => None,
         }
     }
@@ -569,6 +579,7 @@ impl PersistentWriter {
         let path = locator.path().to_owned();
         let worker_open_path = locator.worker_open_path()?;
         let expected_file_identity = locator.expected_file_identity();
+        let family_guard = locator.family_guard();
         let opened_database = locator.opened_database;
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
         let watermark_source = watermark_publisher.subscribe();
@@ -592,6 +603,7 @@ impl PersistentWriter {
             canonical_path: path.clone(),
             expected_file_identity,
             _opened_database: opened_database,
+            family_guard: family_guard.clone(),
             binding: binding.clone(),
             config,
             receiver,

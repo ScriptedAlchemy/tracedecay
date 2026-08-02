@@ -40,7 +40,10 @@ impl fmt::Display for SqliteFamilyIntegrityError {
                 "SQLite family is quarantined: {component:?} is {violation:?}"
             ),
             Self::ProbeUnavailable { component } => {
-                write!(formatter, "could not inspect SQLite {component:?} file identity")
+                write!(
+                    formatter,
+                    "could not inspect SQLite {component:?} file identity"
+                )
             }
         }
     }
@@ -106,16 +109,8 @@ impl SqliteFamilyGuard {
         if state.disarmed {
             return Ok(());
         }
-        observe_component(
-            &self.path,
-            SqliteFamilyComponent::Wal,
-            &mut state.wal,
-        )?;
-        observe_component(
-            &self.path,
-            SqliteFamilyComponent::Shm,
-            &mut state.shm,
-        )
+        observe_component(&self.path, SqliteFamilyComponent::Wal, &mut state.wal)?;
+        observe_component(&self.path, SqliteFamilyComponent::Shm, &mut state.shm)
     }
 
     pub(crate) fn probe(&self) -> Result<(), SqliteFamilyIntegrityError> {
@@ -127,11 +122,7 @@ impl SqliteFamilyGuard {
             return Ok(());
         }
 
-        if let Err(error) = probe_pinned(
-            &self.path,
-            SqliteFamilyComponent::Main,
-            &state.main,
-        ) {
+        if let Err(error) = probe_pinned(&self.path, SqliteFamilyComponent::Main, &state.main) {
             return quarantine_if_definitive(&mut state, error);
         }
         for component in [SqliteFamilyComponent::Wal, SqliteFamilyComponent::Shm] {
@@ -356,8 +347,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        SqliteFamilyComponent, SqliteFamilyGuard, SqliteFamilyIntegrityError,
-        SqliteFamilyViolation,
+        SqliteFamilyComponent, SqliteFamilyGuard, SqliteFamilyIntegrityError, SqliteFamilyViolation,
     };
 
     fn create_file(path: &std::path::Path) -> File {
@@ -426,6 +416,31 @@ mod tests {
             .unwrap();
 
         guard.probe().unwrap();
+    }
+
+    #[test]
+    fn armed_wal_replacement_terminally_quarantines_the_family() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("store.sqlite3");
+        let main = create_file(&database);
+        let guard = SqliteFamilyGuard::new(database.clone(), main).unwrap();
+        let wal = directory.path().join("store.sqlite3-wal");
+        File::create(&wal).unwrap().write_all(b"original").unwrap();
+        guard.observe_visible_sidecars().unwrap();
+        let displaced = directory.path().join("displaced-wal");
+        std::fs::rename(&wal, displaced).unwrap();
+        File::create(&wal)
+            .unwrap()
+            .write_all(b"replacement")
+            .unwrap();
+
+        assert_eq!(
+            guard.probe(),
+            Err(SqliteFamilyIntegrityError::Quarantined {
+                component: SqliteFamilyComponent::Wal,
+                violation: SqliteFamilyViolation::Replaced,
+            })
+        );
     }
 
     #[test]

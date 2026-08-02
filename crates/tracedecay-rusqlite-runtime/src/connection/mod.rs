@@ -884,6 +884,6 @@ fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError
     ConnectionPolicyError { stage, source }
 }
 
+pub(crate) mod file_family;
 #[cfg(test)]
 mod tests;
-pub(crate) mod file_family;

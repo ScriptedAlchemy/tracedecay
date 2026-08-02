@@ -15,6 +15,8 @@ use std::{
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
+use crate::connection::file_family::SqliteFamilyGuard;
+
 use super::guard::{AuthorizedDatabaseOperation, with_migration_guard};
 use super::{
     MAX_MIGRATION_ATTACHMENTS, MIGRATION_SQL_TRANSACTION_IDLE_LIMIT,
@@ -75,6 +77,7 @@ pub(crate) fn run_writer_command(
     connection: &mut Connection,
     command: WriterCommand,
     shutdown_requested: &Arc<AtomicBool>,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) {
     match command {
         WriterCommand::Dispatch {
@@ -83,6 +86,10 @@ pub(crate) fn run_writer_command(
             last_insert_rowid,
             authority,
         } => {
+            if let Err(error) = verify_family(family_guard) {
+                let _ = reply.send(Err(error));
+                return;
+            }
             if let Err(error) = verify_write_authority(authority.as_deref(), request.intent()) {
                 let _ = reply.send(Err(error));
                 return;
@@ -102,6 +109,11 @@ pub(crate) fn run_writer_command(
                 connection.last_insert_rowid(),
                 &last_insert_rowid,
             );
+            if result.is_ok()
+                && let Err(error) = verify_family(family_guard)
+            {
+                result = Err(error);
+            }
             let _ = reply.send(result);
         }
         WriterCommand::BeginTransaction {
@@ -113,6 +125,10 @@ pub(crate) fn run_writer_command(
             expired,
             authority,
         } => {
+            if let Err(error) = verify_family(family_guard) {
+                let _ = reply.send(Err(error));
+                return;
+            }
             if policy == MigrationSqlTransactionPolicy::SchemaMigration && authority.is_none() {
                 let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
                     "schema migration transaction requires attached write authority".to_owned(),
@@ -138,6 +154,7 @@ pub(crate) fn run_writer_command(
                         &expired,
                         authority,
                         policy,
+                        family_guard,
                     )),
                     Ok(_) => None,
                     Err(error) => {
@@ -151,6 +168,10 @@ pub(crate) fn run_writer_command(
             }
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
+            if let Err(error) = verify_family(family_guard) {
+                let _ = reply.send(Err(error));
+                return;
+            }
             if let Err(error) =
                 verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Query)
             {
@@ -162,7 +183,7 @@ pub(crate) fn run_writer_command(
                 Vec::new(),
             )
             .expect("fixed WAL checkpoint statement is valid");
-            let result = with_migration_guard(
+            let mut result = with_migration_guard(
                 connection,
                 false,
                 false,
@@ -176,9 +197,18 @@ pub(crate) fn run_writer_command(
                 None,
                 || execute_query_unchecked(connection, statement),
             );
+            if result.is_ok()
+                && let Err(error) = verify_family(family_guard)
+            {
+                result = Err(error);
+            }
             let _ = reply.send(result);
         }
         WriterCommand::Vacuum { reply, authority } => {
+            if let Err(error) = verify_family(family_guard) {
+                let _ = reply.send(Err(error));
+                return;
+            }
             let Some(authority) = authority else {
                 let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
                     "exclusive-maintenance vacuum requires attached write authority".to_owned(),
@@ -230,6 +260,11 @@ pub(crate) fn run_writer_command(
                     ));
                 }
             }
+            if result.is_ok()
+                && let Err(error) = verify_family(family_guard)
+            {
+                result = Err(error);
+            }
             let _ = reply.send(result);
         }
     }
@@ -262,6 +297,7 @@ fn run_transaction(
     expired: &AtomicBool,
     authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
     policy: MigrationSqlTransactionPolicy,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) -> TransactionCompletion {
     let mut attachments = Vec::new();
     let mut previous_attachment_limit = None;
@@ -289,6 +325,11 @@ fn run_transaction(
                 return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
             }
         };
+        if let Err(error) = verify_family(family_guard) {
+            let _ = transaction.rollback();
+            reject_transaction_command(command, error);
+            return TransactionCompletion::abandoned(attachments, previous_attachment_limit);
+        }
         match command {
             TransactionCommand::Attach { attachment, reply } => {
                 if Instant::now() >= transaction_deadline {
@@ -345,6 +386,14 @@ fn run_transaction(
                             authority.as_deref(),
                             MigrationSqlWriteIntent::Execute,
                         ) {
+                            let _ = transaction.rollback();
+                            let _ = reply.send(Err(error));
+                            return TransactionCompletion::abandoned(
+                                attachments,
+                                previous_attachment_limit,
+                            );
+                        }
+                        if let Err(error) = verify_family(family_guard) {
                             let _ = transaction.rollback();
                             let _ = reply.send(Err(error));
                             return TransactionCompletion::abandoned(
@@ -439,6 +488,14 @@ fn run_transaction(
                         previous_attachment_limit,
                     );
                 }
+                if let Err(error) = verify_family(family_guard) {
+                    let _ = transaction.rollback();
+                    let _ = reply.send(Err(error));
+                    return TransactionCompletion::abandoned(
+                        attachments,
+                        previous_attachment_limit,
+                    );
+                }
                 if step_policy == MigrationSqlStepPolicy::Bounded
                     && Instant::now() >= transaction_deadline
                 {
@@ -491,6 +548,10 @@ fn run_transaction(
                     .commit()
                     .map(|()| MigrationSqlCommitReceipt { changed_rows })
                     .map_err(|error| sqlite_error("commit immediate transaction", error));
+                let result = match (result, verify_family(family_guard)) {
+                    (Ok(_), Err(error)) => Err(error),
+                    (result, _) => result,
+                };
                 return TransactionCompletion {
                     attachments,
                     previous_attachment_limit,
@@ -511,6 +572,29 @@ fn run_transaction(
                     terminal: Some(TransactionTerminal::Rollback { reply, result }),
                 };
             }
+        }
+    }
+}
+
+fn verify_family(family_guard: Option<&SqliteFamilyGuard>) -> Result<(), MigrationSqlError> {
+    family_guard
+        .map_or(Ok(()), SqliteFamilyGuard::probe)
+        .map_err(MigrationSqlError::SqliteFamily)
+}
+
+fn reject_transaction_command(command: TransactionCommand, error: MigrationSqlError) {
+    match command {
+        TransactionCommand::Attach { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        TransactionCommand::Dispatch { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        TransactionCommand::Commit { reply } => {
+            let _ = reply.send(Err(error));
+        }
+        TransactionCommand::Rollback { reply } => {
+            let _ = reply.send(Err(error));
         }
     }
 }

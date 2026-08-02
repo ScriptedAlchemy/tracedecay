@@ -15,14 +15,12 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
-use crate::{
-    SqliteFamilyIntegrityError,
-    connection::{
-        self, ConnectionMode, OpenedDatabaseFile, file_family::SqliteFamilyGuard,
-    },
-};
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
+};
+use crate::{
+    SqliteFamilyIntegrityError,
+    connection::{self, ConnectionMode, OpenedDatabaseFile, file_family::SqliteFamilyGuard},
 };
 
 use super::{ExistingReaderLocator, ReaderStartError};
@@ -313,7 +311,9 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 return;
             }
             if let Some(guard) = family_guard.as_deref()
-                && let Err(error) = guard.observe_visible_sidecars().and_then(|()| guard.probe())
+                && let Err(error) = guard
+                    .observe_visible_sidecars()
+                    .and_then(|()| guard.probe())
             {
                 let _ = started.send(Err(ReaderStartError::SqliteFamily(error)));
                 return;
@@ -440,9 +440,8 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             }
             SnapshotCommand::MigrationQuery { request, reply } => {
                 if let Err(error) = probe_family(family_guard) {
-                    let _ = reply.send(Err(MigrationSqlError::ReaderUnavailable(
-                        error.to_string(),
-                    )));
+                    let _ =
+                        reply.send(Err(MigrationSqlError::ReaderUnavailable(error.to_string())));
                     continue;
                 }
                 let _ = reply.send(execute_query(&transaction, request));
@@ -529,9 +528,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     false
 }
 
-fn probe_family(
-    family_guard: Option<&SqliteFamilyGuard>,
-) -> Result<(), ReaderWorkerError> {
+fn probe_family(family_guard: Option<&SqliteFamilyGuard>) -> Result<(), ReaderWorkerError> {
     family_guard
         .map_or(Ok(()), SqliteFamilyGuard::probe)
         .map_err(ReaderWorkerError::SqliteFamily)
