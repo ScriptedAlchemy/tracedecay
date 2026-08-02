@@ -12,7 +12,7 @@ use tracedecay_tool_catalog::{
 };
 
 use super::ToolDefinition;
-use super::binding::legacy_execution_class;
+use super::binding::{legacy_execution_class, legacy_requires_cooperative_worker_cleanup};
 
 pub(crate) const EXECUTION_METADATA_KEY: &str = "tracedecay/execution";
 
@@ -34,6 +34,7 @@ pub(crate) struct McpToolExecutionPolicyV1 {
     deadline_millis: u64,
     deadline_behavior: DeadlineBehavior,
     required_features: Vec<String>,
+    cooperative_worker_cleanup: bool,
 }
 
 impl McpToolExecutionPolicyV1 {
@@ -44,6 +45,7 @@ impl McpToolExecutionPolicyV1 {
             deadline_millis,
             deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
             required_features: Vec::new(),
+            cooperative_worker_cleanup: false,
         }
     }
 
@@ -74,6 +76,7 @@ impl McpToolExecutionPolicyV1 {
                 .iter()
                 .map(|feature| feature.as_str().to_owned())
                 .collect(),
+            cooperative_worker_cleanup: false,
         }
     }
 
@@ -86,6 +89,7 @@ impl McpToolExecutionPolicyV1 {
             deadline_millis: 120_000,
             deadline_behavior: DeadlineBehavior::RejectBeforeAdmission,
             required_features: Vec::new(),
+            cooperative_worker_cleanup: false,
         }
     }
 
@@ -99,6 +103,10 @@ impl McpToolExecutionPolicyV1 {
 
     pub(crate) const fn deadline_behavior(&self) -> DeadlineBehavior {
         self.deadline_behavior
+    }
+
+    pub(crate) const fn requires_cooperative_worker_cleanup(&self) -> bool {
+        self.cooperative_worker_cleanup
     }
 
     pub(crate) fn metadata(&self) -> Value {
@@ -165,6 +173,7 @@ pub(crate) fn execution_policy_for_tool(tool_name: &str) -> Option<McpToolExecut
         deadline_millis: class.deadline_millis(),
         deadline_behavior: class.deadline_behavior(),
         required_features: Vec::new(),
+        cooperative_worker_cleanup: legacy_requires_cooperative_worker_cleanup(tool_name),
     })
 }
 
