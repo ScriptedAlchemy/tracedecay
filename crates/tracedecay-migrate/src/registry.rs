@@ -112,8 +112,6 @@ pub struct RegistryReconstructionDiffReport {
 /// The command crate can request exact registry/session operations without
 /// receiving database handles or reopening owned paths.
 pub struct MigrationRegistryRuntime {
-    registry:
-        crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     profile_database: std::sync::Arc<RegisteredGlobalDb>,
 }
 
@@ -162,10 +160,7 @@ impl MigrationRegistryRuntime {
             )
             .await?;
         let profile_database = registry.profile_database().await?;
-        Ok(Self {
-            registry,
-            profile_database,
-        })
+        Ok(Self { profile_database })
     }
 
     pub async fn registered_project_paths(

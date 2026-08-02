@@ -359,8 +359,9 @@ manifest digest, batch publication digests — is derived by the projector from
 domain values, never from the store's encoding, and
 `ProjectedChunkVectorV1::validate` re-derives `output_digest` from the hydrated
 floats on every load, so a mis-bound payload fails closed rather than serving.
-A pre-migration document is still readable and is migrated forward on open
-under the existing revision CAS, so a crash leaves the original blob intact.
+Stores are now born row-per-vector: the inline-payload forward migration that
+once rewrote a pre-migration document on open has been removed, so there is no
+in-place blob rewrite left on the open path.
 
 Measured A/B on identical code with only the encoding differing (2,000 chunks ×
 768 dimensions, debug build): peak process RSS 227MB inline versus 125MB
@@ -394,8 +395,9 @@ writes no new slices.
 is byte-identical to a digest over the bare collection — the build-identity
 digest still hashes the full expected chunk list. Only the state-document
 adapters elide. `DerefMut` clears the address, so a stale address is not
-representable, and a pre-migration document is still readable and migrates
-forward under the existing revision CAS.
+representable. Fresh stores are created at this shape; the forward-migration
+path for a pre-externalization document has since been removed along with the
+rest of the branch's migration machinery.
 
 ### Incremental commits
 
@@ -432,14 +434,22 @@ The document is flat: the curve is per-batch, not per-corpus. The 30,000-chunk
 rows publish the *same* generation `sha256:90f0a889…ed28dea8` at one commit and
 at eight, which is the digest-equality proof that splitting moves no identity.
 
-### Open: the whole-corpus publication transaction
+### Closed: the whole-corpus publication transaction
 
-At 150,000 chunks every batch commits, and the publication then fails with
-`SQLite execute failed: interrupted`. This is not the document ceiling — the
-document is still ~3KB — it is the publication transaction itself running past
-a runtime guard. `MIGRATION_SQL_EXECUTION_LIMIT` bounds one guarded execution at
-30 seconds, and the batch progress handler also trips on a repeated authority
-check, so either can produce this.
+*Superseded.* At 150,000 chunks every batch committed and the publication then
+failed with `SQLite execute failed: interrupted` — not the document ceiling (the
+document is still ~3KB) but the publication transaction running past a runtime
+guard: `MIGRATION_SQL_EXECUTION_LIMIT` bounds one guarded execution at 30
+seconds, and the batch progress handler also trips on a repeated authority
+check.
+
+The dominant writer that pushed publication past that bound — the inline-vector
+payload migration, which rewrote the whole corpus inside the same guarded
+transaction — no longer exists: stores are born row-per-vector and the migration
+was removed with the rest of the branch's migration machinery. The guard itself
+(`MIGRATION_SQL_EXECUTION_LIMIT`) is unchanged, so a large enough single
+publication could still trip it; the two mitigations below were never landed and
+are recorded as options, not as pending work.
 
 Publication is where the remaining O(store) SQL lives: it seals and writes two
 collections built fresh at that moment — the concatenated per-chunk receipts and
