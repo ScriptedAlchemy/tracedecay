@@ -280,7 +280,7 @@ fn output_set_digest(
     outputs: &[WorkflowStepOutputV1],
 ) -> Result<ManifestDigest, WorkflowReceiptError> {
     let mut ordered = outputs.to_vec();
-    ordered.sort_by(|left, right| left.output_name.cmp(&right.output_name));
+    ordered.sort_by(|left, right| left.output_name().cmp(right.output_name()));
     canonical_sha256(&("tracedecay.domain.workflow-output-set.v1", ordered))
         .map_err(|_| WorkflowReceiptError::InvalidEffect)
 }
