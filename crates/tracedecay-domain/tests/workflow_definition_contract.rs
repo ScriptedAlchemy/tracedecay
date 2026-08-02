@@ -3,9 +3,12 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use tracedecay_domain::{
     MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS, MAX_WORKFLOW_PREDECESSORS,
-    MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, WorkflowDefinitionError, WorkflowDefinitionId,
+    MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, RunId, UtcMicros, WorkArtifactId,
+    WorkArtifactRefV1, WorkCommandId, WorkflowDefinitionError, WorkflowDefinitionId,
     WorkflowDefinitionV1, WorkflowFanOutV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowOutputReferenceV1, WorkflowStepId, WorkflowStepV1,
+    WorkflowOutputReferenceV1, WorkflowRunCommandV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
+    WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepId, WorkflowStepOutputV1,
+    WorkflowStepV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -342,4 +345,118 @@ fn identities_are_canonical_product_data_strings() {
 
     let unique = BTreeSet::from([id::<WorkflowStepId>("prepare"), id("review")]);
     assert_eq!(unique.len(), 2);
+}
+
+fn run_context(command: &str, byte: char, occurred_at: i64) -> WorkflowRunEventContextV1 {
+    WorkflowRunEventContextV1 {
+        command_id: id::<WorkCommandId>(command),
+        input_digest: digest(byte),
+        occurred_at: UtcMicros(occurred_at),
+    }
+}
+
+#[test]
+fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
+    let definition = definition(vec![
+        step("prepare", &[], vec![], &["context"]),
+        step(
+            "review",
+            &["prepare"],
+            vec![output("prepare", "context")],
+            &["finding"],
+        ),
+    ])
+    .unwrap();
+    let admitted = WorkflowRunEventV1::admitted(
+        id::<RunId>("run.workflow.dataflow"),
+        definition,
+        digest('d'),
+        run_context("workflow.admit", 'e', 1),
+    )
+    .unwrap();
+    let mut run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("prepare")]);
+
+    let started = run
+        .next_event(
+            WorkflowRunCommandV1::StartStep {
+                step_id: id("prepare"),
+            },
+            run_context("workflow.prepare.start", 'f', 2),
+        )
+        .unwrap();
+    run = run.apply(&started).unwrap();
+
+    let artifact =
+        WorkArtifactRefV1::new(id::<WorkArtifactId>("artifact.context"), digest('1'), 42).unwrap();
+    let completed = run
+        .next_event(
+            WorkflowRunCommandV1::CompleteStep {
+                step_id: id("prepare"),
+                outputs: vec![WorkflowStepOutputV1 {
+                    output_name: id("context"),
+                    artifact: artifact.clone(),
+                }],
+            },
+            run_context("workflow.prepare.complete", '2', 3),
+        )
+        .unwrap();
+    run = run.apply(&completed).unwrap();
+
+    assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("review")]);
+    assert_eq!(run.resolved_inputs(&id("review")).unwrap(), vec![artifact]);
+    assert_eq!(run.status(), WorkflowRunStatusV1::Running);
+}
+
+#[test]
+fn run_projection_rejects_a_digest_only_or_misnamed_output() {
+    let definition = definition(vec![
+        step("prepare", &[], vec![], &["context"]),
+        step(
+            "review",
+            &["prepare"],
+            vec![output("prepare", "context")],
+            &[],
+        ),
+    ])
+    .unwrap();
+    let admitted = WorkflowRunEventV1::admitted(
+        id::<RunId>("run.workflow.invalid-output"),
+        definition,
+        digest('d'),
+        run_context("workflow.invalid.admit", '3', 1),
+    )
+    .unwrap();
+    let mut run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    run = run
+        .apply(
+            &run.next_event(
+                WorkflowRunCommandV1::StartStep {
+                    step_id: id("prepare"),
+                },
+                run_context("workflow.invalid.start", '4', 2),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let wrong =
+        WorkArtifactRefV1::new(id::<WorkArtifactId>("artifact.wrong"), digest('5'), 1).unwrap();
+
+    let error = run
+        .next_event(
+            WorkflowRunCommandV1::CompleteStep {
+                step_id: id("prepare"),
+                outputs: vec![WorkflowStepOutputV1 {
+                    output_name: id("undeclared"),
+                    artifact: wrong,
+                }],
+            },
+            run_context("workflow.invalid.complete", '6', 3),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        tracedecay_domain::WorkflowRunStateError::InvalidStepOutputs
+    );
 }
