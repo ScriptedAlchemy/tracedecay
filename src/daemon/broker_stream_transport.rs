@@ -8,15 +8,17 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 
-use crate::mcp::JsonRpcResponse;
+use crate::mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
+use super::transport::{BrokerReadHalf, BrokerWriteHalf};
 use super::*;
 
 pub(super) struct BrokerStreamTransport {
-    reader: tokio::io::BufReader<tokio::io::ReadHalf<BrokerStream>>,
-    writer: Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<BrokerStream>>>>,
+    reader: tokio::io::BufReader<BrokerReadHalf>,
+    writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
     replay: VecDeque<String>,
     response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
@@ -24,7 +26,7 @@ pub(super) struct BrokerStreamTransport {
 
 impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
-        let (reader, writer) = stream.into_split();
+        let (reader, writer) = stream.into_owned_split();
         Self {
             reader: tokio::io::BufReader::new(reader),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
@@ -57,7 +59,7 @@ impl BrokerStreamTransport {
     }
 
     async fn write_all_and_flush(
-        writer: Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<BrokerStream>>>>,
+        writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
         bytes: Vec<u8>,
     ) -> std::io::Result<()> {
         let mut writer = writer.lock().await;
@@ -85,7 +87,7 @@ impl BrokerStreamTransport {
     }
 
     async fn write_if_active(
-        writer: Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<BrokerStream>>>>,
+        writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
         active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
         request_key: Option<String>,
         bytes: Vec<u8>,
@@ -141,6 +143,38 @@ impl BrokerStreamTransport {
             active.insert(request_key);
         }
     }
+
+    async fn wait_for_peer_full_close(writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>) {
+        loop {
+            let full_close = {
+                let writer = writer.lock().await;
+                let Some(writer) = writer.as_ref() else {
+                    return;
+                };
+                match writer.peer_write_readiness_now().await {
+                    // The readiness future is deliberately polled once. If
+                    // it is pending, release the writer mutex and retry on
+                    // the next 100ms interval so a blocked response write is
+                    // never starved by the close monitor.
+                    None => false,
+                    Some(Ok(ready)) if ready.is_write_closed() => true,
+                    Some(Ok(_)) => match writer.consume_write_readiness() {
+                        Ok(()) => false,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                        Err(_) => true,
+                    },
+                    Some(Err(_)) => true,
+                }
+            };
+            if full_close {
+                return;
+            }
+            // WRITABLE is level-triggered, so avoid a busy loop while a
+            // legitimate half-closed one-shot client is still computing its
+            // response. No request deadline is imposed here.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 }
 
 impl crate::mcp::McpTransport for BrokerStreamTransport {
@@ -171,6 +205,12 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
             )
         })?;
         writer.flush().await
+    }
+
+    fn peer_fully_closed_after_eof(
+        &self,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        Self::wait_for_peer_full_close(Arc::clone(&self.writer))
     }
 }
 
@@ -216,7 +256,15 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         loop {
             let line = match self.read_line().await {
                 Ok(Some(line)) => line,
-                Ok(None) => return None,
+                Ok(None) => {
+                    // A one-shot client may half-close its request side while
+                    // still waiting for an in-flight response. Keep rmcp's
+                    // receive loop alive until the native transport observes
+                    // the peer's full close; otherwise rmcp tears down the
+                    // service and strands the request permit.
+                    self.peer_fully_closed_after_eof().await;
+                    return None;
+                }
                 Err(error)
                     if crate::application::host_admission::is_wire_oversized_io_error(&error) =>
                 {
@@ -265,5 +313,67 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
     async fn close(&mut self) -> std::result::Result<(), Self::Error> {
         self.writer.lock().await.take();
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod peer_close_tests {
+    use super::*;
+    use crate::mcp::McpTransport;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn full_close_wait_ignores_request_half_close() {
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .shutdown()
+            .await
+            .expect("half-close client request side");
+        let mut peer_close = Box::pin(transport.peer_fully_closed_after_eof());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut peer_close)
+                .await
+                .is_err(),
+            "request-half close must not cancel the response"
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut peer_close)
+            .await
+            .expect("full peer close must be observed");
+    }
+
+    #[tokio::test]
+    async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .shutdown()
+            .await
+            .expect("half-close client request side");
+        let mut receive = Box::pin(<BrokerStreamTransport as rmcp::transport::Transport<
+            rmcp::RoleServer,
+        >>::receive(&mut transport));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut receive)
+                .await
+                .is_err(),
+            "rmcp receive must not treat a request-half close as full peer loss"
+        );
+
+        drop(client_writer);
+        drop(client_reader);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut receive)
+                .await
+                .expect("rmcp receive must finish after full peer close")
+                .is_none()
+        );
     }
 }
