@@ -4978,12 +4978,15 @@ mod tests {
         );
         assert!(
             registration.injected_after_apply,
-            "the failure must be injected after stale export replacement"
+            "the failure must be injected after stale export replacement: {:?}",
+            result.as_ref().err()
         );
 
         assert_eq!(
             std::fs::read(&manifest_path).unwrap(),
-            manifest_bytes.as_bytes()
+            manifest_bytes.as_bytes(),
+            "rollback must restore the ownership manifest: {:?}",
+            result.as_ref().err()
         );
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
         assert_eq!(std::fs::read(&current_path).unwrap(), current_bytes);
@@ -5087,16 +5090,13 @@ mod tests {
             if operation == HostBundleCliOperation::Uninstall {
                 assert!(config["lsp"].get("tracedecay").is_none());
             } else {
+                // The bridge binds its workspace roots from the host's own
+                // `initialize` frame, so the registration deliberately carries
+                // no `--project`: pinning it to OpenCode's process CWD would
+                // override the folders the editor actually opened.
                 assert_eq!(
                     config["lsp"]["tracedecay"]["command"],
-                    serde_json::json!([
-                        tracedecay_bin.clone(),
-                        "lsp",
-                        "bridge",
-                        "--stdio",
-                        "--project",
-                        "."
-                    ])
+                    serde_json::json!([tracedecay_bin.clone(), "lsp", "bridge", "--stdio"])
                 );
             }
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
