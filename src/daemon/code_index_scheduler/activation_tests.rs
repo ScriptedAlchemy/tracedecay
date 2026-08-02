@@ -211,6 +211,110 @@ fn concurrent_cold_readers_share_one_in_flight_decode() {
     );
 }
 
+/// The decode-free admission is what lets a query with something servable in
+/// hand resolve freshness without ever entering the O(store) decode. It must
+/// abstain while nothing is decoded, never read sealed bytes, and serve the
+/// identical shared allocation once the generation is warm.
+#[test]
+fn the_decode_free_admission_abstains_instead_of_reading_sealed_bytes() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    let publication = publication_store(store.path());
+    assert_eq!(publication.sealed_decode_count(), 0);
+    assert!(
+        publication
+            .active_already_decoded()
+            .expect("decode-free probe")
+            .is_none(),
+        "nothing is decoded yet, so the decode-free admission abstains"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        0,
+        "the decode-free admission must never read or decode sealed bytes"
+    );
+
+    // Nothing servable: the awaiting admission still pays the one decode.
+    let active = publication
+        .load_active_shared()
+        .expect("load active generation")
+        .expect("active generation is present");
+    assert_eq!(publication.sealed_decode_count(), 1);
+
+    // Warm: the probe now serves, and serves the same allocation.
+    let probed = publication
+        .active_already_decoded()
+        .expect("decode-free probe")
+        .expect("warm active generation");
+    assert!(
+        Arc::ptr_eq(&active, &probed),
+        "the decode-free admission must serve the one decoded generation"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        1,
+        "probing a warm generation must not re-decode"
+    );
+}
+
+/// The other side of the same rule: when nothing is servable, awaiting the
+/// in-flight decode is still correct and still single-flight. A reader that
+/// arrives mid-decode parks and is handed the generation the holder installs,
+/// without starting a second sweep.
+#[test]
+fn the_awaiting_admission_still_joins_an_in_flight_decode() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    {
+        let mut scheduler = open(project.path(), store.path());
+        let _ = publish(&mut scheduler);
+    }
+
+    let publication = publication_store(store.path());
+    let expected = publication
+        .load_active_shared()
+        .expect("load active generation")
+        .expect("active generation is present");
+    let decodes = publication.sealed_decode_count();
+
+    // Occupy the barrier as an activation decode does.
+    let held = publication.hold_active_decode();
+    assert!(
+        publication
+            .active_already_decoded()
+            .expect("decode-free probe")
+            .is_none(),
+        "the decode-free admission abstains for the whole activation window"
+    );
+
+    let served = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            publication
+                .load_active_shared()
+                .expect("load active generation")
+                .expect("active generation is present")
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+        reader.join().expect("parked reader")
+    });
+
+    assert!(
+        Arc::ptr_eq(&served, &expected),
+        "a parked reader must be handed the generation the in-flight decode installs"
+    );
+    assert_eq!(
+        publication.sealed_decode_count(),
+        decodes,
+        "parking must join the in-flight decode, never start a second sweep"
+    );
+}
+
 /// Pinned and cursor-paged reads churn superseded generations through the LRU.
 /// The active generation lives in its own pinned slot, so that churn must never
 /// evict it and force a re-decode on an unpinned query.
