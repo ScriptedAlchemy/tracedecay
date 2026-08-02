@@ -256,6 +256,22 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
 }
 
 #[test]
+fn root_surface_operation_authority_is_the_http_catalog_authority() {
+    assert_eq!(
+        APPLICATION_SURFACE_OPERATIONS,
+        tracedecay_api::HttpApplicationOperation::ALL
+    );
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_preview"),
+        Some(ApplicationSurfaceOperation::GitPreview)
+    );
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_git_apply"),
+        Some(ApplicationSurfaceOperation::GitApply)
+    );
+}
+
+#[test]
 fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
