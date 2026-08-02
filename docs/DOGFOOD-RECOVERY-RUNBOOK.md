@@ -88,8 +88,8 @@ Two mutually exclusive modes, gated by `TRACEDECAY_DOGFOOD_BACKUP_PLAIN`
   enough that the checksummed path's two full read/write passes outlast the
   available maintenance window.
 
-Both modes require the backup to already exist; `cargo dogfood` never
-creates one implicitly.
+Naming a backup is optional (see below), but when one is named, both modes
+require it to already exist; `cargo dogfood` never creates one implicitly.
 
 A backup is optional insurance, not a gate. With `TRACEDECAY_DOGFOOD_BACKUP`
 unset, dogfood proceeds and warns on stderr that it is running without one;
