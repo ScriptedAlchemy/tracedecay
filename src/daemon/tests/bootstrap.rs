@@ -45,7 +45,40 @@ fn project_open_test_route(name: &str) -> ProjectRouteKey {
 }
 
 #[test]
-fn host_ingest_waits_for_registered_project_authority_publication() {
+fn hook_runtime_reset_counter_only_requires_core_publication() {
+    let reset = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_hook_runtime",
+            "arguments": {"action": "reset_counter"}
+        }
+    })
+    .to_string();
+    let status = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    })
+    .to_string();
+
+    assert_eq!(
+        project_server_requirement(&reset),
+        ProjectServerRequirement::Core
+    );
+    assert_eq!(
+        project_server_requirement(&status),
+        ProjectServerRequirement::Core
+    );
+}
+
+#[test]
+fn hook_runtime_ingest_waits_for_registered_project_authority_publication() {
     let ingest = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -61,34 +94,50 @@ fn host_ingest_waits_for_registered_project_authority_publication() {
         }
     })
     .to_string();
+
+    assert_eq!(
+        project_server_requirement(&ingest),
+        ProjectServerRequirement::RegisteredHostIngest
+    );
+}
+
+#[test]
+fn hook_runtime_missing_malformed_or_unknown_action_waits_for_registration() {
+    for arguments in [
+        json!({}),
+        json!({"action": 42}),
+        json!({"action": "unknown"}),
+    ] {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_hook_runtime",
+                "arguments": arguments
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            project_server_requirement(&request),
+            ProjectServerRequirement::RegisteredHostIngest
+        );
+    }
+}
+
+#[test]
+fn hook_event_waits_for_registered_project_authority_publication() {
     let hook_event = json!({
         "jsonrpc": "2.0",
         "method": crate::daemon::HOOK_EVENT_METHOD,
         "params": {}
     })
     .to_string();
-    let status = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "tracedecay_status",
-            "arguments": {"format": "json"}
-        }
-    })
-    .to_string();
 
-    assert_eq!(
-        project_server_requirement(&ingest),
-        ProjectServerRequirement::RegisteredHostIngest
-    );
     assert_eq!(
         project_server_requirement(&hook_event),
         ProjectServerRequirement::RegisteredHostIngest
-    );
-    assert_eq!(
-        project_server_requirement(&status),
-        ProjectServerRequirement::Core
     );
 }
 
