@@ -323,7 +323,7 @@ impl ExistingWriterLocator {
             || Ok(self.path.clone()),
             |opened| {
                 opened
-                    .worker_open_path(&self.path)
+                    .writer_open_path(&self.path)
                     .map_err(WriterStartError::OpenedDatabaseIdentity)
             },
         )

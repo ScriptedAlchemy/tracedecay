@@ -20,8 +20,8 @@ use thiserror::Error;
 use tokio_stream::StreamExt;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationInvocationFuture,
-    HttpApplicationOperation, HttpApplicationRequest, MultiRootHttpOperation, MultiRootHttpRequest,
-    WorkOperation, WorkflowOperation, application_problem_response, sse_response,
+    HttpApplicationOperation, HttpApplicationRequest, WorkOperation, WorkflowOperation,
+    application_problem_response, sse_response,
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
@@ -36,17 +36,16 @@ use tracedecay_application::{
     AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, MultiRootExecuteRequestV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1, OpaqueCursor,
-    OperationTermination, PageRequest, ProblemOwningLayer, ReplanDependenciesCommand,
-    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
-    RetrievalRequestMeta, RetryDirective, ReviewProposalRequestV1, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
-    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
-    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
+    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination,
+    PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
+    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
+    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
+    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
 };
 use tracedecay_domain::configuration::{
     ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -104,228 +103,15 @@ const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApplicationSurfaceOperation {
-    GitStatus,
-    GitDiff,
-    GitHistory,
-    GitBlame,
-    GitHunks,
-    GitPreview,
-    GitApply,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    FeedbackAdvisoryCycle,
-    FeedbackImpact,
-    AffectedTests,
-    TestResults,
-    CodeExactOccurrence,
-    CodePhraseSearch,
-    CodeSymbolSearch,
-    CodeSignatureSearch,
-    CodeImplementations,
-    CodeTypeHierarchy,
-    CodeCallers,
-    CodeCallees,
-    CodeFacets,
-    CodeTimeline,
-    CodeDeclaration,
-    CodeDefinition,
-    CodeTypeDefinition,
-    CodeReferences,
-    SessionLookup,
-    QualifiedName,
-    CallChain,
-    FileDependents,
-    SourceLines,
-    SourceBody,
-    SourceOutline,
-    ModuleApi,
-    FileMetadata,
-    HealthRead,
-    HealthDelta,
-    StorageStatus,
-    DiagnosticsRead,
-    ConfigurationList,
-    ConfigurationExplain,
-    ConfigurationGet,
-    ConfigurationSet,
-    ConfigurationUnset,
-    ConfigurationBatch,
-    ConfigurationWriteCredential,
-    ConfigurationObservedState,
-    ConfigurationProtectedPreview,
-    ConfigurationProtectedApply,
-    ConfigurationRollbackPreview,
-    ConfigurationRollbackApply,
-    ConfigurationAudit,
-    ContextScoutStatus,
-    ContextScoutRecent,
-    ContextScoutExplain,
-    ContextScoutCapability,
-    ContextScoutBudget,
-    ContextScoutPause,
-    ContextScoutResume,
-    ContextScoutCancel,
-    ContextScoutClaim,
-    ContextScoutDelivery,
-    ContextScoutFeedback,
-}
+/// Canonical operation identity shared by HTTP, MCP, CLI, LSP, SSE, and
+/// dashboard adapters. The API crate owns the names and complete operation
+/// family; surface bindings decide which transports expose each operation.
+pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] = [
-    ApplicationSurfaceOperation::GitStatus,
-    ApplicationSurfaceOperation::GitDiff,
-    ApplicationSurfaceOperation::GitHistory,
-    ApplicationSurfaceOperation::GitBlame,
-    ApplicationSurfaceOperation::GitHunks,
-    ApplicationSurfaceOperation::GitPreview,
-    ApplicationSurfaceOperation::GitApply,
-    ApplicationSurfaceOperation::FeedbackDiagnostics,
-    ApplicationSurfaceOperation::FeedbackGet,
-    ApplicationSurfaceOperation::FeedbackExpand,
-    ApplicationSurfaceOperation::FeedbackList,
-    ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
-    ApplicationSurfaceOperation::FeedbackImpact,
-    ApplicationSurfaceOperation::AffectedTests,
-    ApplicationSurfaceOperation::TestResults,
-    ApplicationSurfaceOperation::CodeExactOccurrence,
-    ApplicationSurfaceOperation::CodePhraseSearch,
-    ApplicationSurfaceOperation::CodeSymbolSearch,
-    ApplicationSurfaceOperation::CodeSignatureSearch,
-    ApplicationSurfaceOperation::CodeImplementations,
-    ApplicationSurfaceOperation::CodeTypeHierarchy,
-    ApplicationSurfaceOperation::CodeCallers,
-    ApplicationSurfaceOperation::CodeCallees,
-    ApplicationSurfaceOperation::CodeFacets,
-    ApplicationSurfaceOperation::CodeTimeline,
-    ApplicationSurfaceOperation::CodeDeclaration,
-    ApplicationSurfaceOperation::CodeDefinition,
-    ApplicationSurfaceOperation::CodeTypeDefinition,
-    ApplicationSurfaceOperation::CodeReferences,
-    ApplicationSurfaceOperation::SessionLookup,
-    ApplicationSurfaceOperation::QualifiedName,
-    ApplicationSurfaceOperation::CallChain,
-    ApplicationSurfaceOperation::FileDependents,
-    ApplicationSurfaceOperation::SourceLines,
-    ApplicationSurfaceOperation::SourceBody,
-    ApplicationSurfaceOperation::SourceOutline,
-    ApplicationSurfaceOperation::ModuleApi,
-    ApplicationSurfaceOperation::FileMetadata,
-    ApplicationSurfaceOperation::HealthRead,
-    ApplicationSurfaceOperation::HealthDelta,
-    ApplicationSurfaceOperation::StorageStatus,
-    ApplicationSurfaceOperation::DiagnosticsRead,
-    ApplicationSurfaceOperation::ConfigurationList,
-    ApplicationSurfaceOperation::ConfigurationExplain,
-    ApplicationSurfaceOperation::ConfigurationGet,
-    ApplicationSurfaceOperation::ConfigurationSet,
-    ApplicationSurfaceOperation::ConfigurationUnset,
-    ApplicationSurfaceOperation::ConfigurationBatch,
-    ApplicationSurfaceOperation::ConfigurationWriteCredential,
-    ApplicationSurfaceOperation::ConfigurationObservedState,
-    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
-    ApplicationSurfaceOperation::ConfigurationProtectedApply,
-    ApplicationSurfaceOperation::ConfigurationRollbackPreview,
-    ApplicationSurfaceOperation::ConfigurationRollbackApply,
-    ApplicationSurfaceOperation::ConfigurationAudit,
-    ApplicationSurfaceOperation::ContextScoutStatus,
-    ApplicationSurfaceOperation::ContextScoutRecent,
-    ApplicationSurfaceOperation::ContextScoutExplain,
-    ApplicationSurfaceOperation::ContextScoutCapability,
-    ApplicationSurfaceOperation::ContextScoutBudget,
-    ApplicationSurfaceOperation::ContextScoutPause,
-    ApplicationSurfaceOperation::ContextScoutResume,
-    ApplicationSurfaceOperation::ContextScoutCancel,
-    ApplicationSurfaceOperation::ContextScoutClaim,
-    ApplicationSurfaceOperation::ContextScoutDelivery,
-    ApplicationSurfaceOperation::ContextScoutFeedback,
-];
-
-impl ApplicationSurfaceOperation {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::GitStatus => "git_status",
-            Self::GitDiff => "git_diff",
-            Self::GitHistory => "git_history",
-            Self::GitBlame => "git_blame",
-            Self::GitHunks => "git_hunks",
-            Self::GitPreview => "git_preview",
-            Self::GitApply => "git_apply",
-            Self::FeedbackDiagnostics => "feedback_diagnostics",
-            Self::FeedbackGet => "feedback_get",
-            Self::FeedbackExpand => "feedback_expand",
-            Self::FeedbackList => "feedback_list",
-            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
-            Self::FeedbackImpact => "feedback_impact",
-            Self::AffectedTests => "affected_tests",
-            Self::TestResults => "test_results",
-            Self::CodeExactOccurrence => "code_exact_occurrence",
-            Self::CodePhraseSearch => "code_phrase_search",
-            Self::CodeSymbolSearch => "code_symbol_search",
-            Self::CodeSignatureSearch => "code_signature_search",
-            Self::CodeImplementations => "code_implementations",
-            Self::CodeTypeHierarchy => "code_type_hierarchy",
-            Self::CodeCallers => "code_callers",
-            Self::CodeCallees => "code_callees",
-            Self::CodeFacets => "code_facets",
-            Self::CodeTimeline => "code_timeline",
-            Self::CodeDeclaration => "code_declaration",
-            Self::CodeDefinition => "code_definition",
-            Self::CodeTypeDefinition => "code_type_definition",
-            Self::CodeReferences => "code_references",
-            Self::SessionLookup => "session_lookup",
-            Self::QualifiedName => "qualified_name",
-            Self::CallChain => "call_chain",
-            Self::FileDependents => "file_dependents",
-            Self::SourceLines => "source_lines",
-            Self::SourceBody => "source_body",
-            Self::SourceOutline => "source_outline",
-            Self::ModuleApi => "module_api",
-            Self::FileMetadata => "file_metadata",
-            Self::HealthRead => "health_read",
-            Self::HealthDelta => "health_delta",
-            Self::StorageStatus => "storage_status",
-            Self::DiagnosticsRead => "diagnostics_read",
-            Self::ConfigurationList => "configuration_list",
-            Self::ConfigurationExplain => "configuration_explain",
-            Self::ConfigurationGet => "configuration_get",
-            Self::ConfigurationSet => "configuration_set",
-            Self::ConfigurationUnset => "configuration_unset",
-            Self::ConfigurationBatch => "configuration_batch",
-            Self::ConfigurationWriteCredential => "configuration_write_credential",
-            Self::ConfigurationObservedState => "configuration_observed_state",
-            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
-            Self::ConfigurationProtectedApply => "configuration_protected_apply",
-            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
-            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
-            Self::ConfigurationAudit => "configuration_audit",
-            Self::ContextScoutStatus => "context_scout_status",
-            Self::ContextScoutRecent => "context_scout_recent",
-            Self::ContextScoutExplain => "context_scout_explain",
-            Self::ContextScoutCapability => "context_scout_capability",
-            Self::ContextScoutBudget => "context_scout_budget",
-            Self::ContextScoutPause => "context_scout_pause",
-            Self::ContextScoutResume => "context_scout_resume",
-            Self::ContextScoutCancel => "context_scout_cancel",
-            Self::ContextScoutClaim => "context_scout_claim",
-            Self::ContextScoutDelivery => "context_scout_delivery",
-            Self::ContextScoutFeedback => "context_scout_feedback",
-        }
-    }
-
-    pub fn from_tool_name(tool_name: &str) -> Option<Self> {
-        let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-        if operation == "diagnostics" {
-            return Some(Self::DiagnosticsRead);
-        }
-        APPLICATION_SURFACE_OPERATIONS
-            .into_iter()
-            .find(|candidate| candidate.as_str() == operation)
-    }
-}
+/// Compatibility export for existing callers. The array is the canonical
+/// operation authority's list, not a second root-owned registry.
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] =
+    tracedecay_api::HttpApplicationOperation::ALL;
 
 /// Transport keys every surface adapter accepts but no reviewed application
 /// request schema declares. `format` selects the rendered output and
@@ -1076,8 +862,10 @@ fn application_invoker_for_surface(
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
     if surface == BindingSurface::Http {
-        for http_operation in HttpApplicationOperation::ALL {
-            let operation = application_operation_for_http(http_operation);
+        for operation in HttpApplicationOperation::ALL {
+            if !operation.is_http_exposed() {
+                continue;
+            }
             if resolve_application_binding(&resolver, surface, operation).is_none() {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
@@ -1146,275 +934,6 @@ fn work_application_router_with_executor(
 }
 
 #[allow(dead_code)]
-fn multi_root_application_router_with_executor(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-) -> axum::Router {
-    tracedecay_api::multi_root_application_router(MultiRootExecutorOwner { executor })
-}
-
-#[derive(Clone)]
-struct MultiRootExecutorOwner {
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-}
-
-impl tracedecay_api::MultiRootApplicationOwner for MultiRootExecutorOwner {
-    fn invoke_multi_root(
-        &self,
-        request: MultiRootHttpRequest,
-    ) -> tracedecay_api::MultiRootInvocationFuture {
-        let executor = Arc::clone(&self.executor);
-        Box::pin(async move { invoke_multi_root_operation(executor, request).await })
-    }
-}
-
-async fn invoke_multi_root_operation(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-    request: MultiRootHttpRequest,
-) -> Response {
-    let MultiRootHttpRequest {
-        operation,
-        request_id,
-        controls,
-        body,
-    } = request;
-    let observed_at = crate::daemon_client::invocation_now_micros();
-    match operation {
-        MultiRootHttpOperation::ScopeSetRead => {
-            let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
-                return work_adapter_unavailable(
-                    request_id,
-                    "multi_root.invalid_request",
-                    "The multi-root application request is invalid",
-                );
-            };
-            let invocation =
-                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_read(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    controls.deadline.clone(),
-                    controls.cancellation.context(),
-                );
-            invoke_multi_root_http::<Option<tracedecay_application::AuthorizedScopeSet>>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetRead {
-                        scope,
-                        outcome,
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }
-        MultiRootHttpOperation::ScopeSetCompareAndSwap => {
-            let Ok(request) = serde_json::from_value::<MultiRootScopeSetCasRequestV1>(body) else {
-                return work_adapter_unavailable(
-                    request_id,
-                    "multi_root.invalid_request",
-                    "The multi-root application request is invalid",
-                );
-            };
-            let invocation =
-                crate::daemon_contract::DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
-                    request_id.as_str(),
-                    request,
-                    observed_at,
-                    controls.deadline.clone(),
-                    controls.cancellation.context(),
-                );
-            invoke_multi_root_http::<tracedecay_application::MultiRootScopeSetCasResultV1>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
-                        scope,
-                        outcome,
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }
-        MultiRootHttpOperation::Execute => {
-            let Ok(request) = serde_json::from_value::<MultiRootExecuteRequestV1>(body) else {
-                return work_adapter_unavailable(
-                    request_id,
-                    "multi_root.invalid_request",
-                    "The multi-root application request is invalid",
-                );
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::multi_root_execute(
-                request_id.as_str(),
-                request,
-                observed_at,
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_multi_root_http::<
-                tracedecay_application::MultiRootQueryPageV1<serde_json::Value>,
-            >(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::MultiRootQueryPage {
-                        scope,
-                        outcome,
-                    } => Some((scope, outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }
-    }
-}
-
-async fn invoke_multi_root_http<T>(
-    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
-    operation: MultiRootHttpOperation,
-    request_id: RequestId,
-    controls: HttpApplicationControls,
-    invocation: crate::daemon_contract::DaemonInvocationRequest,
-    select_outcome: fn(
-        crate::daemon_contract::DaemonInvocationOutcome,
-    ) -> Option<(
-        tracedecay_application::ResolvedScope,
-        tracedecay_application::ApplicationOutcome<T>,
-    )>,
-) -> Response
-where
-    T: Serialize,
-{
-    let registry = match tracedecay_application::work_executable_binding_registry() {
-        Ok(registry) => registry,
-        Err(_) => {
-            return work_adapter_unavailable(
-                request_id,
-                "multi_root.catalog_unavailable",
-                "The multi-root capability catalog is unavailable",
-            );
-        }
-    };
-    let operation_id = match tracedecay_tool_catalog::OperationId::new(operation.operation_id()) {
-        Ok(operation_id) => operation_id,
-        Err(_) => {
-            return work_adapter_unavailable(
-                request_id,
-                "multi_root.operation_identity_unavailable",
-                "The multi-root operation identity is unavailable",
-            );
-        }
-    };
-    let Some(binding) = registry
-        .get(&operation_id)
-        .and_then(|availability| availability.binding())
-    else {
-        return work_adapter_unavailable(
-            request_id,
-            "multi_root.binding_unavailable",
-            "The multi-root operation is not advertised by this build",
-        );
-    };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
-        return work_adapter_unavailable(
-            request_id,
-            "multi_root.route_unavailable",
-            "The multi-root operation binding carries no public route",
-        );
-    };
-    let Ok(result_contract) = ResultContractRef::new(
-        binding.result_schema().schema_ref().schema_id().clone(),
-        binding.result_schema().schema_ref().revision(),
-    ) else {
-        return work_adapter_unavailable(
-            request_id,
-            "multi_root.result_contract_unavailable",
-            "The multi-root operation result contract is unavailable",
-        );
-    };
-    let response = executor
-        .invoke_controlled(
-            invocation,
-            controls.deadline,
-            controls.cancellation,
-            if operation == MultiRootHttpOperation::ScopeSetCompareAndSwap {
-                InvocationCancellationPolicy::AuthoritativeEffect
-            } else {
-                InvocationCancellationPolicy::ReadOnly
-            },
-        )
-        .await;
-    let outcome = match response {
-        Ok(crate::daemon_contract::DaemonInvocationResponse { outcome, .. }) => outcome,
-        Err(_) => {
-            return work_adapter_unavailable(
-                request_id,
-                "multi_root.transport_unavailable",
-                "The multi-root application transport is unavailable",
-            );
-        }
-    };
-    if let crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } = outcome {
-        let problem = match problem {
-            crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-            | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
-                ApplicationProblem::InvalidRequest {
-                    diagnostic: SafeDiagnostic {
-                        code: "multi_root.invalid_request".to_owned(),
-                        message: "The multi-root request is invalid".to_owned(),
-                    },
-                    retry: RetryDirective::Never,
-                    legal_actions: vec![LegalAction::CorrectRequest],
-                }
-            }
-            crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-            }
-            crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
-                ApplicationProblem::unavailable(SafeDiagnostic {
-                    code: "multi_root.unavailable".to_owned(),
-                    message: "The multi-root authority is unavailable".to_owned(),
-                })
-            }
-        };
-        return CanonicalInvocationResult::<T>::new(
-            binding_id.clone(),
-            Err(
-                ApplicationProblemEnvelope::new(result_contract, request_id, problem)
-                    .with_owning_layer(ProblemOwningLayer::Runtime),
-            ),
-        )
-        .into_http_response();
-    }
-    let Some((scope, outcome)) = select_outcome(outcome) else {
-        return work_adapter_unavailable(
-            request_id,
-            "multi_root.runtime_unavailable",
-            "The multi-root runtime returned a mismatched outcome",
-        );
-    };
-    CanonicalInvocationResult::new(
-        binding_id.clone(),
-        Ok(ApplicationEnvelope {
-            contract: result_contract,
-            request_id,
-            scope,
-            outcome,
-        }),
-    )
-    .into_http_response()
-}
-
 fn workflow_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -4384,10 +3903,9 @@ fn invoke_catalog_bound_application_request(
     surface: BindingSurface,
     composition: &ApplicationCatalogComposition<HttpApplicationCatalogDispatcher>,
 ) -> HttpApplicationInvocationFuture {
-    let surface_operation = application_operation_for_http(request.operation);
     let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)
         .unwrap_or_else(|_| panic!("the application profile id is static"));
-    let operation_name = SurfaceOperationName::new(surface_operation.as_str())
+    let operation_name = SurfaceOperationName::new(request.operation.as_str())
         .unwrap_or_else(|_| panic!("the application operation name is static"));
     let capability = composition
         .snapshot()
@@ -4412,7 +3930,7 @@ async fn invoke_application_adapter_request(
     executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     catalog: &CatalogSnapshotV1,
 ) -> CanonicalInvocationResult<Value> {
-    let operation = application_operation_for_http(request.operation);
+    let operation = request.operation;
     let resolver = CatalogBindingResolver::new(catalog);
     let binding = resolve_application_binding(&resolver, surface, operation).unwrap_or_else(|| {
         panic!("surface bindings are validated before the application router is mounted")
@@ -4540,135 +4058,6 @@ fn apply_http_page_to_surface_body(
         );
     }
     body
-}
-
-fn application_operation_for_http(
-    operation: HttpApplicationOperation,
-) -> ApplicationSurfaceOperation {
-    match operation {
-        HttpApplicationOperation::GitStatus => ApplicationSurfaceOperation::GitStatus,
-        HttpApplicationOperation::GitDiff => ApplicationSurfaceOperation::GitDiff,
-        HttpApplicationOperation::GitHistory => ApplicationSurfaceOperation::GitHistory,
-        HttpApplicationOperation::GitBlame => ApplicationSurfaceOperation::GitBlame,
-        HttpApplicationOperation::GitHunks => ApplicationSurfaceOperation::GitHunks,
-        HttpApplicationOperation::FeedbackDiagnostics => {
-            ApplicationSurfaceOperation::FeedbackDiagnostics
-        }
-        HttpApplicationOperation::FeedbackGet => ApplicationSurfaceOperation::FeedbackGet,
-        HttpApplicationOperation::FeedbackExpand => ApplicationSurfaceOperation::FeedbackExpand,
-        HttpApplicationOperation::FeedbackList => ApplicationSurfaceOperation::FeedbackList,
-        HttpApplicationOperation::FeedbackImpact => ApplicationSurfaceOperation::FeedbackImpact,
-        HttpApplicationOperation::FeedbackAdvisoryCycle => {
-            ApplicationSurfaceOperation::FeedbackAdvisoryCycle
-        }
-        HttpApplicationOperation::AffectedTests => ApplicationSurfaceOperation::AffectedTests,
-        HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
-        HttpApplicationOperation::CodeExactOccurrence => {
-            ApplicationSurfaceOperation::CodeExactOccurrence
-        }
-        HttpApplicationOperation::CodePhraseSearch => ApplicationSurfaceOperation::CodePhraseSearch,
-        HttpApplicationOperation::CodeSymbolSearch => ApplicationSurfaceOperation::CodeSymbolSearch,
-        HttpApplicationOperation::CodeSignatureSearch => {
-            ApplicationSurfaceOperation::CodeSignatureSearch
-        }
-        HttpApplicationOperation::CodeImplementations => {
-            ApplicationSurfaceOperation::CodeImplementations
-        }
-        HttpApplicationOperation::CodeTypeHierarchy => {
-            ApplicationSurfaceOperation::CodeTypeHierarchy
-        }
-        HttpApplicationOperation::CodeCallers => ApplicationSurfaceOperation::CodeCallers,
-        HttpApplicationOperation::CodeCallees => ApplicationSurfaceOperation::CodeCallees,
-        HttpApplicationOperation::CodeFacets => ApplicationSurfaceOperation::CodeFacets,
-        HttpApplicationOperation::CodeTimeline => ApplicationSurfaceOperation::CodeTimeline,
-        HttpApplicationOperation::CodeDeclaration => ApplicationSurfaceOperation::CodeDeclaration,
-        HttpApplicationOperation::CodeDefinition => ApplicationSurfaceOperation::CodeDefinition,
-        HttpApplicationOperation::CodeTypeDefinition => {
-            ApplicationSurfaceOperation::CodeTypeDefinition
-        }
-        HttpApplicationOperation::CodeReferences => ApplicationSurfaceOperation::CodeReferences,
-        HttpApplicationOperation::SessionLookup => ApplicationSurfaceOperation::SessionLookup,
-        HttpApplicationOperation::QualifiedName => ApplicationSurfaceOperation::QualifiedName,
-        HttpApplicationOperation::CallChain => ApplicationSurfaceOperation::CallChain,
-        HttpApplicationOperation::FileDependents => ApplicationSurfaceOperation::FileDependents,
-        HttpApplicationOperation::SourceLines => ApplicationSurfaceOperation::SourceLines,
-        HttpApplicationOperation::SourceBody => ApplicationSurfaceOperation::SourceBody,
-        HttpApplicationOperation::SourceOutline => ApplicationSurfaceOperation::SourceOutline,
-        HttpApplicationOperation::ModuleApi => ApplicationSurfaceOperation::ModuleApi,
-        HttpApplicationOperation::FileMetadata => ApplicationSurfaceOperation::FileMetadata,
-        HttpApplicationOperation::HealthRead => ApplicationSurfaceOperation::HealthRead,
-        HttpApplicationOperation::HealthDelta => ApplicationSurfaceOperation::HealthDelta,
-        HttpApplicationOperation::StorageStatus => ApplicationSurfaceOperation::StorageStatus,
-        HttpApplicationOperation::DiagnosticsRead => ApplicationSurfaceOperation::DiagnosticsRead,
-        HttpApplicationOperation::ConfigurationList => {
-            ApplicationSurfaceOperation::ConfigurationList
-        }
-        HttpApplicationOperation::ConfigurationExplain => {
-            ApplicationSurfaceOperation::ConfigurationExplain
-        }
-        HttpApplicationOperation::ConfigurationGet => ApplicationSurfaceOperation::ConfigurationGet,
-        HttpApplicationOperation::ConfigurationSet => ApplicationSurfaceOperation::ConfigurationSet,
-        HttpApplicationOperation::ConfigurationUnset => {
-            ApplicationSurfaceOperation::ConfigurationUnset
-        }
-        HttpApplicationOperation::ConfigurationBatch => {
-            ApplicationSurfaceOperation::ConfigurationBatch
-        }
-        HttpApplicationOperation::ConfigurationWriteCredential => {
-            ApplicationSurfaceOperation::ConfigurationWriteCredential
-        }
-        HttpApplicationOperation::ConfigurationObservedState => {
-            ApplicationSurfaceOperation::ConfigurationObservedState
-        }
-        HttpApplicationOperation::ConfigurationProtectedPreview => {
-            ApplicationSurfaceOperation::ConfigurationProtectedPreview
-        }
-        HttpApplicationOperation::ConfigurationProtectedApply => {
-            ApplicationSurfaceOperation::ConfigurationProtectedApply
-        }
-        HttpApplicationOperation::ConfigurationRollbackPreview => {
-            ApplicationSurfaceOperation::ConfigurationRollbackPreview
-        }
-        HttpApplicationOperation::ConfigurationRollbackApply => {
-            ApplicationSurfaceOperation::ConfigurationRollbackApply
-        }
-        HttpApplicationOperation::ConfigurationAudit => {
-            ApplicationSurfaceOperation::ConfigurationAudit
-        }
-        HttpApplicationOperation::ContextScoutStatus => {
-            ApplicationSurfaceOperation::ContextScoutStatus
-        }
-        HttpApplicationOperation::ContextScoutRecent => {
-            ApplicationSurfaceOperation::ContextScoutRecent
-        }
-        HttpApplicationOperation::ContextScoutExplain => {
-            ApplicationSurfaceOperation::ContextScoutExplain
-        }
-        HttpApplicationOperation::ContextScoutCapability => {
-            ApplicationSurfaceOperation::ContextScoutCapability
-        }
-        HttpApplicationOperation::ContextScoutBudget => {
-            ApplicationSurfaceOperation::ContextScoutBudget
-        }
-        HttpApplicationOperation::ContextScoutPause => {
-            ApplicationSurfaceOperation::ContextScoutPause
-        }
-        HttpApplicationOperation::ContextScoutResume => {
-            ApplicationSurfaceOperation::ContextScoutResume
-        }
-        HttpApplicationOperation::ContextScoutCancel => {
-            ApplicationSurfaceOperation::ContextScoutCancel
-        }
-        HttpApplicationOperation::ContextScoutClaim => {
-            ApplicationSurfaceOperation::ContextScoutClaim
-        }
-        HttpApplicationOperation::ContextScoutDelivery => {
-            ApplicationSurfaceOperation::ContextScoutDelivery
-        }
-        HttpApplicationOperation::ContextScoutFeedback => {
-            ApplicationSurfaceOperation::ContextScoutFeedback
-        }
-    }
 }
 
 fn resolve_application_binding(

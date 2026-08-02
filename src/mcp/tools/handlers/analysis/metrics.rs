@@ -253,16 +253,11 @@ pub(crate) async fn handle_distribution(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let results = cg.get_node_distribution(path_prefix).await?;
-
     let output = if summary {
-        // Aggregate counts across all files
-        let mut totals: HashMap<String, u64> = HashMap::new();
-        for (_file, kind, count) in &results {
-            *totals.entry(kind.clone()).or_insert(0) += count;
-        }
-        let mut sorted: Vec<(String, u64)> = totals.into_iter().collect();
-        sorted.sort_by_key(|x| std::cmp::Reverse(x.1));
+        // Totals per kind come straight from SQL: the per-file rows were only
+        // ever folded away here, and reading them made a summary request cost
+        // O(files) instead of O(kinds).
+        let sorted = cg.get_node_kind_totals(path_prefix).await?;
 
         let items: Vec<Value> = sorted
             .iter()
@@ -276,7 +271,17 @@ pub(crate) async fn handle_distribution(
             "distribution": items,
         })
     } else {
-        // Per-file breakdown, grouped by file
+        // Per-file breakdown for the highest-node-count files. Reading every
+        // file in the store was rejected outright by the row materialization
+        // limiter, so this surface never worked on a real repository.
+        let file_limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(100u64, |v| v.clamp(1, 1000));
+        let results = cg
+            .get_node_distribution(path_prefix, u32::try_from(file_limit).unwrap_or(u32::MAX))
+            .await?;
+
         let mut by_file: Vec<(String, Vec<Value>)> = Vec::new();
         let mut current_file = String::new();
         for (file, kind, count) in &results {
@@ -294,10 +299,15 @@ pub(crate) async fn handle_distribution(
             .map(|(file, kinds)| json!({ "file": file, "kinds": kinds }))
             .collect();
 
+        let total_files = cg.count_distribution_files(path_prefix).await?;
+        let returned = u64::try_from(items.len()).unwrap_or(u64::MAX);
+
         json!({
             "path_filter": path_prefix,
             "mode": "per_file",
             "file_count": items.len(),
+            "total_file_count": total_files,
+            "omitted_file_count": total_files.saturating_sub(returned),
             "files": items,
         })
     };

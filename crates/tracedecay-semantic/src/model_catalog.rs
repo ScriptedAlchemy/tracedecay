@@ -3,8 +3,6 @@
 //! Catalog entries pin source revision, license, member lengths, and SHA-256
 //! digests. There are no signatures or trust roots — integrity is the
 //! declared length + digest identity, matching the distribution fixture.
-#![allow(dead_code)] // fastembed model catalog; Plan 31 — staged
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +54,7 @@ pub struct FastEmbedModelCatalogV1 {
 }
 
 /// Production catalog used by settings validation and daemon acquisition.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn production_fastembed_catalog() -> FastEmbedModelCatalogV1 {
     FastEmbedModelCatalogV1::production()
 }

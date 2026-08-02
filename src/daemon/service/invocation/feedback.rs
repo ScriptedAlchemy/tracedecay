@@ -7,8 +7,6 @@ pub(crate) fn daemon_operation_event_authority() -> OperationEventAuthority {
 }
 
 pub(crate) struct DaemonFeedbackInvocationRequest {
-    #[allow(dead_code)] // in-flight feedback request field — staged
-    pub(crate) request_id: RequestId,
     pub(crate) operation: DaemonInvocationOperation,
     pub(crate) request_handle: String,
     pub(crate) observed_at: UtcMicros,
@@ -238,16 +236,15 @@ pub(super) async fn execute_feedback(
             }),
         );
     };
-    let Ok(request_id) = RequestId::new(wire_request_id.clone()) else {
+    if RequestId::new(wire_request_id.clone()).is_err() {
         return DaemonInvocationResponse::problem(
             wire_request_id,
             DaemonInvocationProblem::InvalidRequest,
         );
-    };
+    }
     let result = owner
         .service
         .invoke(DaemonFeedbackInvocationRequest {
-            request_id,
             operation,
             request_handle,
             observed_at,
@@ -282,7 +279,6 @@ pub(super) async fn execute_feedback_advisory_cycle(
     )
 }
 
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) async fn feedback_runtime(
         &self,
@@ -310,16 +306,5 @@ impl DaemonInvocationService {
             .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root?)
             .await
             .map(|input| -> Arc<dyn FeedbackCycleRuntimePort> { input })
-    }
-
-    pub(crate) async fn feedback_publication_store(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<ProjectFeedbackStore> {
-        self.project_runtimes
-            .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
-                registered.runtime.publication_store()
-            })
-            .await
     }
 }

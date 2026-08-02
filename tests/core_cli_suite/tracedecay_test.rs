@@ -684,11 +684,19 @@ async fn test_get_undocumented_public_symbols_with_prefix() {
 #[tokio::test]
 async fn test_get_node_distribution() {
     let (_dir, cg) = setup().await;
-    let dist = cg.get_node_distribution(None).await.unwrap();
+    let dist = cg.get_node_distribution(None, 100).await.unwrap();
     assert!(!dist.is_empty(), "should have node distribution data");
     // Each entry is (file_path, kind, count)
     for (file, kind, count) in &dist {
         assert!(!file.is_empty());
+        assert!(!kind.is_empty());
+        assert!(*count > 0);
+    }
+
+    // The summary path reports the same kinds without a per-file read.
+    let totals = cg.get_node_kind_totals(None).await.unwrap();
+    assert!(!totals.is_empty(), "should have per-kind totals");
+    for (kind, count) in &totals {
         assert!(!kind.is_empty());
         assert!(*count > 0);
     }
