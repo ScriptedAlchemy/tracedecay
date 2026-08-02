@@ -240,7 +240,8 @@ impl PhysicalVectorBytePoolV1 {
             return Ok(shared);
         }
         let shared: Arc<[f32]> = Arc::from(values.to_vec());
-        pool.entries.insert(reuse_key.clone(), Arc::downgrade(&shared));
+        pool.entries
+            .insert(reuse_key.clone(), Arc::downgrade(&shared));
         pool.interns_since_sweep += 1;
         if pool.interns_since_sweep >= PHYSICAL_VECTOR_POOL_SWEEP_INTERVAL {
             pool.sweep();
@@ -388,9 +389,9 @@ mod externalized_vectors {
 
     pub(super) mod prepared_batches {
         use super::{
-            AdmittedEmbeddingProjectionKeyV1, Deserialize, Deserializer, PreparedVectorGenerationV1,
-            ProjectionBatchReceiptV1, ProjectionBatchRequestV1, Serialize, Serializer,
-            VectorRowV1, VectorSliceRefV1, VectorTombstoneV1,
+            AdmittedEmbeddingProjectionKeyV1, Deserialize, Deserializer,
+            PreparedVectorGenerationV1, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+            Serialize, Serializer, VectorRowV1, VectorSliceRefV1, VectorTombstoneV1,
         };
 
         #[derive(Serialize)]
@@ -988,11 +989,7 @@ impl FakeVectorGenerationStoreV1 {
             self.fail_before_publication_swap = false;
             return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
         }
-        intern_generation_vectors(
-            &self.physical_vector_pool,
-            &mut self.published,
-            &generation,
-        )?;
+        intern_generation_vectors(&self.physical_vector_pool, &mut self.published, &generation)?;
         let checkpoint = if replays_existing {
             self.published
                 .generations
@@ -1448,13 +1445,8 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                 .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
                 .await
                 .map_err(storage_error)?;
-            write_vector_payloads(
-                &transaction,
-                VECTOR_PAYLOAD_TABLE_V1,
-                &state,
-                &load.durable,
-            )
-            .await?;
+            write_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state, &load.durable)
+                .await?;
             let changed = transaction
                 .execute_engine(
                     "UPDATE semantic_vector_generation_state_v1
@@ -2128,13 +2120,8 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                 .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
                 .await
                 .map_err(storage_error)?;
-            write_vector_payloads(
-                &transaction,
-                VECTOR_PAYLOAD_TABLE_V1,
-                &state,
-                &load.durable,
-            )
-            .await?;
+            write_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state, &load.durable)
+                .await?;
             if reclaim_unreferenced {
                 prune_unreferenced_vector_payloads(&transaction, VECTOR_PAYLOAD_TABLE_V1, &state)
                     .await?;
@@ -2438,8 +2425,11 @@ impl FakeVectorGenerationStoreV1 {
         let generations = std::mem::take(&mut self.published.generations);
         let mut outcome = Ok(());
         for generation in generations.values() {
-            outcome =
-                intern_generation_vectors(&self.physical_vector_pool, &mut self.published, generation);
+            outcome = intern_generation_vectors(
+                &self.physical_vector_pool,
+                &mut self.published,
+                generation,
+            );
             if outcome.is_err() {
                 break;
             }
@@ -2736,7 +2726,7 @@ struct VectorPayloadLoadV1 {
 }
 
 fn encode_vector_payload(values: &[f32]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(values.len() * size_of::<f32>());
+    let mut payload = Vec::with_capacity(std::mem::size_of_val(values));
     for value in values {
         payload.extend_from_slice(&value.to_le_bytes());
     }
@@ -2750,7 +2740,7 @@ fn decode_vector_payload(
 ) -> Result<Vec<f32>, VectorGenerationStoreErrorV1> {
     let width = size_of::<f32>();
     if dimensions <= 0
-        || payload.len() % width != 0
+        || !payload.len().is_multiple_of(width)
         || usize::try_from(dimensions).ok() != Some(payload.len() / width)
     {
         return Err(VectorGenerationStoreErrorV1::Storage(format!(
@@ -2759,17 +2749,12 @@ fn decode_vector_payload(
     }
     Ok(payload
         .chunks_exact(width)
-        .map(|chunk| {
-            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-        })
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
 
 impl FakeVectorGenerationStoreV1 {
-    fn visit_vectors<'state>(
-        &'state self,
-        visit: &mut impl FnMut(&'state ProjectedChunkVectorV1),
-    ) {
+    fn visit_vectors<'state>(&'state self, visit: &mut impl FnMut(&'state ProjectedChunkVectorV1)) {
         for generation in self.published.generations.values() {
             for vector in generation.vectors.values() {
                 visit(vector);
@@ -2919,7 +2904,9 @@ async fn read_vector_payloads(
         );
         let values = group
             .iter()
-            .map(|digest| tracedecay_runtime_core::db::engine::Value::Text(digest.as_str().to_owned()))
+            .map(|digest| {
+                tracedecay_runtime_core::db::engine::Value::Text(digest.as_str().to_owned())
+            })
             .collect::<Vec<_>>();
         let mut rows = connection
             .query(
@@ -2929,8 +2916,9 @@ async fn read_vector_payloads(
             .await
             .map_err(storage_error)?;
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let output_digest = ContentDigest::try_from(row.get::<String>(0).map_err(storage_error)?)
-                .map_err(storage_error)?;
+            let output_digest =
+                ContentDigest::try_from(row.get::<String>(0).map_err(storage_error)?)
+                    .map_err(storage_error)?;
             let dimensions = row.get::<i64>(1).map_err(storage_error)?;
             let payload = row.get::<Vec<u8>>(2).map_err(storage_error)?;
             let decoded = decode_vector_payload(&output_digest, dimensions, &payload)?;
@@ -3533,14 +3521,16 @@ mod tests {
                 .expect("projection request digest");
         let receipt = tracedecay_code_index::projection::build_batch_receipt(
             &request,
-            &[tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
-                chunk_id: chunk_id.clone(),
-                prior_chunk_digest: None,
-                current_chunk_digest: Some(chunk_digest.clone()),
-                operation: ProjectionOperationV1::Added,
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(output_digest.clone()),
-            }],
+            &[
+                tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
+                    chunk_id: chunk_id.clone(),
+                    prior_chunk_digest: None,
+                    current_chunk_digest: Some(chunk_digest.clone()),
+                    operation: ProjectionOperationV1::Added,
+                    outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: Some(output_digest.clone()),
+                },
+            ],
         )
         .expect("added projection receipt");
         PreparedVectorGenerationV1 {
@@ -4714,7 +4704,6 @@ mod tests {
 
         // Restart: a fresh handle over the same database resumes the staged
         // build and publishes the byte-identical generation identity.
-        drop(store);
         let restarted = DatabaseVectorGenerationStoreV1::open(&database)
             .await
             .expect("reopen vector generation store");
@@ -4723,7 +4712,10 @@ mod tests {
             .await
             .expect("publish resumed build");
         assert_eq!(publication.generation_id, oracle_publication.generation_id);
-        assert_eq!(publication.manifest_digest, oracle_publication.manifest_digest);
+        assert_eq!(
+            publication.manifest_digest,
+            oracle_publication.manifest_digest
+        );
         assert_eq!(publication.checkpoint, oracle_publication.checkpoint);
 
         let observed = restarted
@@ -4790,10 +4782,10 @@ mod tests {
 
         // Re-inline the payloads to reproduce the pre-migration encoding.
         let mut document = serde_json::to_value(&state).expect("state document");
-        let vectors = document["published"]["generations"][generation_id.as_digest().as_str()]
-            ["vectors"]
-            .as_object_mut()
-            .expect("vector map");
+        let vectors =
+            document["published"]["generations"][generation_id.as_digest().as_str()]["vectors"]
+                .as_object_mut()
+                .expect("vector map");
         for vector in vectors.values_mut() {
             vector["values"] = serde_json::json!([0.75_f32]);
         }
@@ -4956,14 +4948,16 @@ mod tests {
                 prior_digest: None,
                 current_digest: Some(chunk_digest.clone()),
             });
-            decisions.push(tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
-                chunk_id: chunk_id.clone(),
-                prior_chunk_digest: None,
-                current_chunk_digest: Some(chunk_digest.clone()),
-                operation: ProjectionOperationV1::Added,
-                outcome: ProjectionOutcomeV1::Applied,
-                output_digest: Some(output_digest.clone()),
-            });
+            decisions.push(
+                tracedecay_code_index::projection::ChunkProjectionDecisionV1 {
+                    chunk_id: chunk_id.clone(),
+                    prior_chunk_digest: None,
+                    current_chunk_digest: Some(chunk_digest.clone()),
+                    operation: ProjectionOperationV1::Added,
+                    outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: Some(output_digest.clone()),
+                },
+            );
             vectors.push(ProjectedChunkVectorV1 {
                 projection_key: projection_key.clone(),
                 source_generation: source.clone(),
