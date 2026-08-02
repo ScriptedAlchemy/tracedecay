@@ -66,7 +66,7 @@ impl<'store, 'db> GitIndexReadExecutor<'store, 'db> {
 
     /// Keyset page over a repository's non-terminal recovery records, ordered by
     /// idempotency key. The store returns the whole recovery set (bounded by the
-    /// number of in-flight transactions, not the repository's full history); the
+    /// number of active transactions, not the repository's full history); the
     /// walk is applied here so the contract cursor stays store-neutral.
     async fn recovery_candidates(
         &self,

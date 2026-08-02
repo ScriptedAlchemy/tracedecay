@@ -3,49 +3,39 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use tracedecay_application::{
-    AuthorityReceipt, CancellationContext, CancellationStage, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, GitIndexApplyRequestV1,
-    GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
-    GitIndexPreviewRequestV1, GitIndexTransactionPort, GitIndexTransactionPortError,
-    IdempotencyKey, OperationBudgetUsage, OperationReceipt, OperationTermination,
-    PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+    CancellationStage, GitIndexApplyRequestV1, GitIndexTransactionPort,
+    GitIndexTransactionPortError, OperationTermination,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1,
-    GitIndexCommitIntentV1, GitIndexIdempotencyKey, GitIndexJournalPhaseV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    GitObjectFormatV1, GitOidV1, GitOperationStateV1, ManifestDigest, ProjectId, RefId,
-    RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
-    canonical_sha256,
+    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewV1,
+    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
+    GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId, RepositoryId,
+    RepositoryIndexStateV1, UtcMicros,
 };
-use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
+use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
     GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
     GitIndexTransactionTerminalWriteV1,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::CapabilityId;
 
 use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck, preview_conflict_risk};
 use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
-use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
-use super::service::{
-    CurrentGitIndexPolicyStateV1, GitIndexNativeExecutor, GitIndexPolicyRecheckPort,
-    NativeGitIndexApplyOutcomeV1, NativeGitIndexApplyResult,
-};
+use super::service::GitIndexPolicyRecheckPort;
 use super::store::DaemonGitIndexTransactionStore;
+use super::test_support::{
+    FakeNative, NativeMode, RecoveryMode, TestHarness, TestPolicy, apply_request, digest, id,
+    preview, preview_with_expiry, receipt_for, test_store, transaction_id_for,
+};
 use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
     DaemonGitIndexTransactionServiceRegistry,
 };
-use crate::db::engine::TestConnection;
 
 #[test]
 fn same_repository_mutations_never_enter_the_native_section_together() {
@@ -149,100 +139,6 @@ fn queued_repository_mutation_observes_live_cancellation() {
     assert!(waiter.join().expect("waiter joins"));
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity")
-}
-
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
-
-fn oid(byte: char) -> GitOidV1 {
-    GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")
-}
-
-fn snapshot() -> RepositoryStateSnapshotV1 {
-    RepositoryStateSnapshotV1::new(
-        id::<ProjectId>("project.fixture"),
-        id::<RepositoryId>("repository.fixture"),
-        Some(id::<WorktreeId>("worktree.fixture")),
-        1,
-        GitObjectFormatV1::Sha1,
-        GitHeadStateV1::Attached {
-            branch: "refs/heads/main".to_owned(),
-            commit: oid('a'),
-        },
-        RepositoryIndexSnapshotV1 {
-            checksum: digest('b'),
-            tree_id: Some(oid('c')),
-            state: RepositoryIndexStateV1::Clean,
-            unmerged_stage_digest: None,
-        },
-        RepositoryWorkingTreeSnapshotV1 {
-            state: RepositoryWorkingTreeStateV1::Clean,
-            tracked_digest: digest('d'),
-            untracked_name_digest: None,
-            ignored_collision_digest: None,
-        },
-        GitOperationStateV1::None,
-        Some(digest('1')),
-        Some(digest('2')),
-        Some(digest('3')),
-        Some(digest('4')),
-        UtcMicros(1),
-        GitCoverageV1::complete(),
-    )
-    .expect("snapshot")
-    .with_native_identity(
-        "git version fixture".to_owned(),
-        "tracedecay.git-index-adapter.v1".to_owned(),
-        digest('5'),
-    )
-    .expect("native identity")
-}
-
-fn commit_intent() -> GitIndexCommitIntentV1 {
-    let identity = GitCommitIdentityV1 {
-        name: "TraceDecay Test".to_owned(),
-        email: "tracedecay@example.com".to_owned(),
-        at: UtcMicros(1_000_000),
-    };
-    GitIndexCommitIntentV1::new(
-        "transaction fixture\n".to_owned(),
-        identity.clone(),
-        identity,
-        GitIndexSigningPolicyV1::UnsignedPermitted,
-    )
-    .expect("intent")
-}
-
-fn preview() -> GitIndexPreviewV1 {
-    preview_with_expiry(UtcMicros(100))
-}
-
-fn preview_with_expiry(expires_at: UtcMicros) -> GitIndexPreviewV1 {
-    let snapshot = snapshot();
-    let snapshot_digest =
-        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-    GitIndexPreviewV1::new_with_commit_intent(
-        GitIndexPreviewId::new("preview.fixture").expect("preview id"),
-        GitIndexTransactionOperationV1::CommitIndex,
-        snapshot.clone(),
-        snapshot_digest,
-        Vec::new(),
-        snapshot.index.tree_id.clone(),
-        Some(&commit_intent()),
-        GitIndexPreviewDispositionV1::Applicable,
-        UtcMicros(10),
-        expires_at,
-    )
-    .expect("preview")
-}
-
 #[test]
 fn policy_recheck_uses_previewed_conflict_evidence() {
     let clean = preview();
@@ -261,290 +157,6 @@ fn policy_recheck_uses_previewed_conflict_evidence() {
         preview_conflict_risk(&confirmed),
         GitConflictRiskV1::Confirmed
     );
-}
-
-fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexApplyRequestV1 {
-    let capability_id = CapabilityId::new("capability.git.commit-index").expect("capability");
-    let use_case_id = UseCaseId::new("use-case.git.commit-index").expect("use case");
-    let scope = ResolvedScope::new(
-        id::<ProjectId>("project.fixture"),
-        id::<RepositoryId>("repository.fixture"),
-        id::<WorktreeId>("worktree.fixture"),
-        Some(id::<RefId>("refs/heads/main")),
-    )
-    .expect("scope");
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.fixture").expect("grant id"),
-        1,
-        digest('6'),
-        id::<ActorId>("actor.issuer"),
-        UtcMicros(1),
-        UtcMicros(1_000),
-        scope.clone(),
-        BTreeSet::from([capability_id.clone()]),
-        BTreeSet::from([use_case_id.clone()]),
-        DisclosureClass::Sensitive,
-    )
-    .expect("grant");
-    let context = RequestContext::new(
-        id::<ActorId>("actor.requester"),
-        scope,
-        grant,
-        RequestId::new("request.fixture").expect("request id"),
-        Deadline::new(UtcMicros(500)).expect("deadline"),
-        CancellationContext::active("cancel.fixture").expect("cancellation"),
-    )
-    .expect("context");
-    let authority = AuthorityReceipt::from_context(
-        &context,
-        PolicyDecisionRef::new(
-            "policy.fixture",
-            1,
-            digest('7'),
-            ComponentVersion::new("policy.evaluator.v1").expect("policy version"),
-        )
-        .expect("policy"),
-        UtcMicros(2),
-    )
-    .expect("authority");
-    GitIndexApplyRequestV1 {
-        context,
-        authority: authority.clone(),
-        binding: GitIndexOperationBindingV1 {
-            capability_id,
-            use_case_id,
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-        },
-        preview_id: preview.preview_id.clone(),
-        preview_digest: preview.preview_digest.clone(),
-        idempotency_key: IdempotencyKey::new(key).expect("idempotency key"),
-        proof: GitIndexEffectProofV1 {
-            policy_digest: authority.policy.digest,
-            configuration_digest: digest('8'),
-            catalog_digest: digest('9'),
-            privacy_digest: digest('a'),
-            external_proof: None,
-        },
-        observed_at: UtcMicros(15),
-    }
-}
-
-fn transaction_id_for(
-    request: &GitIndexApplyRequestV1,
-    preview: &GitIndexPreviewV1,
-) -> GitIndexTransactionId {
-    let input_digest = request.input_digest().expect("input digest");
-    let digest = canonical_sha256(&(
-        "tracedecay.daemon.git-index-transaction.v1",
-        request.idempotency_key.as_str(),
-        input_digest,
-        &preview.preview_digest,
-    ))
-    .expect("transaction digest");
-    GitIndexTransactionId::new(format!(
-        "git-index-transaction.v1.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .expect("transaction id")
-}
-
-fn receipt_for(
-    transaction_id: &GitIndexTransactionId,
-    preview: &GitIndexPreviewV1,
-    outcome: GitIndexReceiptOutcomeV1,
-) -> GitIndexTransactionReceiptV1 {
-    let (final_snapshot, new_index_tree, new_head, created_commit) = match outcome {
-        GitIndexReceiptOutcomeV1::Committed => {
-            (digest('f'), Some(oid('c')), Some(oid('d')), Some(oid('d')))
-        }
-        GitIndexReceiptOutcomeV1::AbortedNoChange | GitIndexReceiptOutcomeV1::NeedsInspection => (
-            preview.repository_snapshot_digest.clone(),
-            preview.repository_snapshot.index.tree_id.clone(),
-            preview.repository_snapshot.head.commit().cloned(),
-            None,
-        ),
-    };
-    GitIndexTransactionReceiptV1::new(
-        GitIndexReceiptId::new(format!("git-index-receipt.v1.{}", transaction_id.as_str()))
-            .expect("receipt id"),
-        transaction_id.clone(),
-        preview,
-        final_snapshot,
-        new_index_tree,
-        new_head,
-        created_commit,
-        outcome,
-        UtcMicros(15),
-    )
-    .expect("receipt")
-}
-
-fn execution_for(
-    request: &GitIndexApplyRequestV1,
-    outcome: GitIndexReceiptOutcomeV1,
-) -> OperationReceipt {
-    let termination = match outcome {
-        GitIndexReceiptOutcomeV1::Committed => OperationTermination::Completed,
-        GitIndexReceiptOutcomeV1::AbortedNoChange => OperationTermination::Failed,
-        GitIndexReceiptOutcomeV1::NeedsInspection => OperationTermination::EffectUnknown,
-    };
-    OperationReceipt {
-        started_at: request.observed_at,
-        ended_at: request.observed_at,
-        effective_deadline: request.context.deadline().clone(),
-        cancellation: None,
-        budget: OperationBudgetUsage::default(),
-        termination,
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum NativeMode {
-    ProvenNoMutation,
-    CommitBoundaryUnknown,
-    Completed(GitIndexReceiptOutcomeV1),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RecoveryMode {
-    AbortedNoChange,
-    NeedsInspection,
-    Error,
-}
-
-struct FakeNative {
-    apply_modes: Mutex<VecDeque<NativeMode>>,
-    recovery_modes: Mutex<VecDeque<RecoveryMode>>,
-    apply_calls: Arc<AtomicUsize>,
-    recovery_calls: Arc<AtomicUsize>,
-    discard_calls: Arc<AtomicUsize>,
-    entered_native: Arc<AtomicBool>,
-}
-
-impl FakeNative {
-    fn new(
-        apply_modes: impl IntoIterator<Item = NativeMode>,
-        recovery_modes: impl IntoIterator<Item = RecoveryMode>,
-    ) -> Self {
-        Self {
-            apply_modes: Mutex::new(apply_modes.into_iter().collect()),
-            recovery_modes: Mutex::new(recovery_modes.into_iter().collect()),
-            apply_calls: Arc::new(AtomicUsize::new(0)),
-            recovery_calls: Arc::new(AtomicUsize::new(0)),
-            discard_calls: Arc::new(AtomicUsize::new(0)),
-            entered_native: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl GitIndexNativeExecutor for FakeNative {
-    fn preview(
-        &self,
-        _request: &GitIndexPreviewRequestV1,
-    ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        Err(GitIndexTransactionPortError::StalePreview)
-    }
-
-    fn apply(
-        &self,
-        transaction_id: &GitIndexTransactionId,
-        preview: &GitIndexPreviewV1,
-        request: &GitIndexApplyRequestV1,
-    ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError> {
-        self.entered_native.store(true, Ordering::SeqCst);
-        self.apply_calls.fetch_add(1, Ordering::SeqCst);
-        let mode = self
-            .apply_modes
-            .lock()
-            .expect("apply modes")
-            .pop_front()
-            .unwrap_or(NativeMode::ProvenNoMutation);
-        match mode {
-            NativeMode::ProvenNoMutation => Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation),
-            NativeMode::CommitBoundaryUnknown => {
-                Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown)
-            }
-            NativeMode::Completed(outcome) => Ok(NativeGitIndexApplyOutcomeV1::Completed(
-                Box::new(NativeGitIndexApplyResult {
-                    receipt: receipt_for(transaction_id, preview, outcome),
-                    execution: execution_for(request, outcome),
-                }),
-            )),
-        }
-    }
-
-    fn discard_preview(&self, _preview_id: &GitIndexPreviewId) {
-        self.discard_calls.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-impl GitIndexRecoveryExecutor for FakeNative {
-    fn reconcile(
-        &self,
-        record: &tracedecay_store::GitIndexTransactionRecordV1,
-    ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
-        self.recovery_calls.fetch_add(1, Ordering::SeqCst);
-        let mode = self
-            .recovery_modes
-            .lock()
-            .expect("recovery modes")
-            .pop_front()
-            .unwrap_or(RecoveryMode::Error);
-        let outcome = match mode {
-            RecoveryMode::AbortedNoChange => GitIndexReceiptOutcomeV1::AbortedNoChange,
-            RecoveryMode::NeedsInspection => GitIndexReceiptOutcomeV1::NeedsInspection,
-            RecoveryMode::Error => return Err(GitIndexRecoveryError::Indeterminate),
-        };
-        Ok(receipt_for(
-            &record.journal.transaction_id,
-            &record.preview,
-            outcome,
-        ))
-    }
-}
-
-struct TestPolicy {
-    allow: Arc<std::sync::atomic::AtomicBool>,
-    calls: Arc<AtomicUsize>,
-    evaluated_at: Arc<Mutex<Option<UtcMicros>>>,
-}
-
-impl TestPolicy {
-    fn allowing() -> Self {
-        Self {
-            allow: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            calls: Arc::new(AtomicUsize::new(0)),
-            evaluated_at: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
-impl GitIndexPolicyRecheckPort for TestPolicy {
-    fn recheck(
-        &self,
-        request: &GitIndexApplyRequestV1,
-        _preview: &GitIndexPreviewV1,
-    ) -> Result<CurrentGitIndexPolicyStateV1, GitIndexTransactionPortError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if !self.allow.load(Ordering::SeqCst) {
-            return Err(GitIndexTransactionPortError::PolicyDenied);
-        }
-        Ok(CurrentGitIndexPolicyStateV1 {
-            authorization: GitEffectAuthorizationV1 {
-                capability_granted: true,
-                owner_scope_matches: true,
-            },
-            conflict_risk: GitConflictRiskV1::NoneKnown,
-            policy_revision: request.authority.policy.revision,
-            policy_digest: request.proof.policy_digest.clone(),
-            configuration_digest: request.proof.configuration_digest.clone(),
-            evaluated_at: self
-                .evaluated_at
-                .lock()
-                .expect("policy evaluated-at")
-                .unwrap_or(request.observed_at),
-        })
-    }
 }
 
 struct MutableDaemonGitAuthority {
@@ -594,33 +206,6 @@ fn daemon_policy_recheck_rejects_a_capability_revoked_after_preview() {
         recheck.recheck(&request, &preview),
         Err(GitIndexTransactionPortError::PolicyDenied)
     );
-}
-
-type TestPort = DaemonGitIndexTransactionPort<
-    DaemonGitIndexTransactionStore,
-    FakeNative,
-    GitEffectClassifierV1,
-    TestPolicy,
->;
-
-struct TestHarness {
-    _directory: tempfile::TempDir,
-    port: TestPort,
-    preview: GitIndexPreviewV1,
-    request: GitIndexApplyRequestV1,
-    apply_calls: Arc<AtomicUsize>,
-    recovery_calls: Arc<AtomicUsize>,
-    discard_calls: Arc<AtomicUsize>,
-    entered_native: Arc<AtomicBool>,
-    allow: Arc<std::sync::atomic::AtomicBool>,
-    policy_calls: Arc<AtomicUsize>,
-    policy_evaluated_at: Arc<Mutex<Option<UtcMicros>>>,
-}
-
-fn test_store(directory: &tempfile::TempDir) -> DaemonGitIndexTransactionStore {
-    let path = directory.path().join("canonical-project.db");
-    DaemonGitIndexTransactionStore::open_engine_test(TestConnection::open(&path))
-        .expect("canonical store actor")
 }
 
 struct StartupUnavailableStore(DaemonGitIndexTransactionStore);

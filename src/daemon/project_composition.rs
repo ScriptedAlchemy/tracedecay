@@ -244,8 +244,14 @@ pub(super) async fn production_project_server(
         })?;
     let semantic_config = &runtime_configuration.config.semantic;
     let semantic_resources = &semantic_config.resources;
+    // The configured ceiling still caps concurrency; this only narrows it to
+    // what the serving reservation leaves room for and adds one slot so an
+    // interactive query keeps a warm session while a rebuild holds the rest.
     let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
-        semantic_resources.max_concurrent_sessions as usize,
+        tracedecay_semantic::embedding_parallelism::embedding_pool_sessions(
+            semantic_resources.max_threads,
+            semantic_resources.max_concurrent_sessions,
+        ),
         usize::try_from(semantic_resources.max_resident_bytes / 4096)
             .unwrap_or(usize::MAX)
             .max(semantic_resources.max_batch_size as usize),
