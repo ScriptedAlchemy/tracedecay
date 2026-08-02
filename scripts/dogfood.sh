@@ -113,6 +113,18 @@ if ! refresh_dashboard_source_stamp; then
     "$dashboard_source_stamp" >&2
   exit 1
 fi
+checkout_build_identity_early() {
+  local sha status
+  sha=$(git -C "$repo_root" rev-parse --short=12 HEAD) || return 1
+  status=$(git -C "$repo_root" status --porcelain) || return 1
+  if [[ -n "$status" ]]; then printf '%s.dirty' "$sha"; else printf '%s' "$sha"; fi
+}
+
+# Pin the checkout identity the build starts from. Concurrent workers commit
+# to this checkout continuously, so the install-time checkout can differ from
+# what the binary was faithfully built against; the verify step accepts either.
+pinned_build_identity=$(checkout_build_identity_early || true)
+
 stage_started=$SECONDS
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
   # Default features only — never `--all-features` (enables test-transport).
@@ -200,16 +212,23 @@ verify_binary_identity() {
   # `.dirty` suffix must NOT fail the run — the build's own git probe can read a
   # transiently-dirty tree (a concurrent git index.lock, a build-time file
   # touch) even from a clean checkout, and an intentionally-dirty iteration
-  # build is explicitly fine to dogfood. Compare SHAs, tolerating `.dirty`.
-  if [[ "${reported_identity%.dirty}" != "${expected_identity%.dirty}" ]]; then
+  # build is explicitly fine to dogfood. Concurrent workers also commit to this
+  # checkout continuously, so the binary is accepted when its SHA matches
+  # EITHER the identity pinned when the build started or the checkout at
+  # install time — both mean the binary faithfully represents an identity this
+  # dogfood invocation legitimately built.
+  local reported_sha="${reported_identity%.dirty}"
+  local expected_sha="${expected_identity%.dirty}"
+  local pinned_sha="${pinned_build_identity%.dirty}"
+  if [[ "$reported_sha" != "$expected_sha" && "$reported_sha" != "$pinned_sha" ]]; then
     printf '%s\n' \
-      "dogfood candidate binary identity mismatch: expected $expected_identity, got $reported_version." \
+      "dogfood candidate binary identity mismatch: expected $expected_identity (pinned $pinned_build_identity), got $reported_version." \
       'Force a fresh dogfood rebuild, then rerun cargo dogfood.' >&2
     return 1
   fi
   if [[ "$reported_identity" != "$expected_identity" ]]; then
-    printf 'dogfood: installing a %s build at commit %s (checkout identity %s)\n' \
-      "$reported_version" "${expected_identity%.dirty}" "$expected_identity" >&2
+    printf 'dogfood: installing %s (checkout now %s, pinned %s)\n' \
+      "$reported_version" "$expected_identity" "$pinned_build_identity" >&2
   fi
 }
 
