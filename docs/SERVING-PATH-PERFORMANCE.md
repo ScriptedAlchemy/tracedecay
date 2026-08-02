@@ -12,6 +12,55 @@ Deadlines are the last resort, not the design: agents saturate the daemon with
 hundreds of concurrent calls, and the system must stay fast without dropping
 or killing requests.
 
+## Operating assumption: continuous churn
+
+Agents edit the codebase continuously — commits, branch switches, and
+transient worktrees arrive at all times. There is no quiescent window to
+finish indexing in. Three consequences are load-bearing:
+
+- **Serving never couples to indexing recency.** Reads always serve the last
+  complete generation (stale-while-revalidate); a new generation swaps in
+  atomically when ready. Blocking a query on an in-progress rebuild is
+  disqualifying — under continuous churn that read would block forever.
+- **Reindexing is incremental at file granularity.** A commit touching three
+  files costs three files, not a generation rebuild. Full rebuilds can never
+  keep up with continuous edits; they are reserved for bootstrap and
+  corruption recovery.
+- **Edits coalesce.** Bursts of commits collapse into batched reindex windows
+  (debounced), and transient agent worktrees are indexed lazily on first
+  query — never eagerly on registration — and deregistered on deletion.
+
+### Retrieval lanes degrade independently
+
+Serving never couples to indexing recency at the *lane* level either. A query
+runs whichever lanes are ready and returns their fused results with an explicit
+per-lane coverage marker (`CodeIndexSearchCoverageV1`); a lane that cannot run
+is reported `unavailable` with a stable reason, and a lane answering from an
+older complete generation is reported `stale` with the generation that
+answered. Only when *no* lane can serve does the query fail, and then it fails
+immediately with a typed reason rather than waiting on a rebuild.
+
+The coverage marker is additive: a warm response carries the same candidates,
+fallback bytes, and cursor it always did, and renders identically. A degraded
+response says "partial recall" in its body, because a short result list is
+otherwise indistinguishable from a thorough one.
+
+Known gap (owned by the code-index scheduler lane, not the retrieval lane): MCP
+search resolves its generation through
+`CodeIndexSchedulerRegistryV1::latest_complete_ready_for_scope`, which admits
+only an *already-current* generation — `latest_complete_ready_for_query`
+abstains whenever freshness is unknown, git metadata moved, or the staleness
+threshold elapsed. Every other callable code query resolves through
+`latest_complete_fresh_for_scope`, which serves the last complete generation.
+That asymmetry is why, after a daemon restart, callers/callees/grep answer from
+a published generation within seconds while `search` reports
+`GenerationUnavailable` for as long as the rebuild runs. The generation store
+makes stale-while-revalidate cheap here — the last complete generation is
+already held in the per-worktree `serving_generation` `RwLock` and needs no
+re-read — so the fix is for `execute_query_search` to fall back to that
+generation and mark the exact/lexical/graph lanes `stale` instead of failing.
+Both change points live under `src/daemon/code_index_scheduler/`.
+
 ## The invariant
 
 **A serving-path operation performs O(result) work, never O(store).**
@@ -37,20 +86,49 @@ A published code-index generation is content-addressed and immutable.
   candidates by hash lookup; `.iter().find()` over snapshot vectors on a
   query path is a defect.
 
-### 2. Serving has priority; maintenance runs on a budget
+### 2. Serving is protected by a reservation; batch work races to idle
 
-Interactive requests never queue behind background CPU.
+Interactive requests never queue behind background CPU. The mechanism is a
+**reserved slice of cores**, not a slower background job.
 
-- Every maintenance loop (reconcile, redundancy, retention, projection
-  refresh) does bounded work per tick — a work budget plus a fairness cursor
-  (the retention round-robin is the reference implementation) — and yields
-  between slices.
-- Background concurrency is capped (bounded semaphores, sized to cores), and
-  long CPU slices run in `spawn_blocking` chunks, never on the request
+Maintenance splits into two kinds of work, and they get opposite treatment:
+
+**Batch work with a finish line** — a full index, a worktree reconcile — runs
+at full machine width and finishes. Throttling it does not reduce
+interference; it stretches the interference window. A reindex that pins 8 of
+96 cores for ten minutes is worse for every agent on the box than one that
+pins 90 cores for one minute. So:
+
+- One process-wide indexing pool is sized to
+  `total_cores - max(2, cores/16)` (90 of 96), and every per-file stage —
+  read, sanitize, tree-sitter extract, chunk, digest — fans out across it
+  with **no batch barrier**. Barriers are the hidden throttle: re-joining
+  every N files means the slowest file in each group gates the group, and
+  the pipeline never reaches its nominal width.
+- The reserved cores are what keep reads fast during a reindex. They are
+  reserved, not merely deprioritized, so an interactive request always has a
+  runnable CPU no matter how deep the indexing queue is.
+- Width is sizing policy and never semantics. Per-file results are collected
+  in input order and the lowest-index failure is the reported one, so a
+  sealed generation is byte-identical at width 1 and at width 90. That
+  equivalence is a test, not a claim.
+- Cross-worktree admission does **not** multiply throughput, because every
+  worktree shares that one pool. Admitting N worktrees only interleaves
+  them: the makespan is unchanged, each worktree's index lands N times
+  later, and N snapshots sit in RSS at once. Reconcile admission is
+  therefore 2 (enough to overlap one worktree's git/store/publication I/O
+  with another's extraction), not "half the cores".
+
+**Open-ended sweeps** — redundancy scanning, retention, projection refresh —
+have no finish line, so they stay paced:
+
+- Bounded work per tick (a work budget plus a fairness cursor; the retention
+  round-robin is the reference implementation), yielding between slices.
+- Long CPU slices run in `spawn_blocking` chunks, never on the request
   runtime's workers for unbounded stretches.
-- A cheap serving-pressure signal (in-flight interactive request count)
-  lets maintenance defer or shrink its slice while agents are actively
-  querying. Results are identical; only pacing changes.
+- A cheap serving-pressure signal (in-flight interactive request count) lets
+  them defer or shrink a slice while agents are actively querying. Results
+  are identical; only pacing changes.
 
 ### 3. Hash where data is born, never where it is served
 
@@ -90,6 +168,7 @@ rather than by serving stale data.
 | 1 snapshot hash indices (record port + relation BFS adjacency) | merged |
 | 2 redundancy comparison-budget pacing + shared shingle merge | merged |
 | 2 reconcile semaphore + retention round-robin | merged |
+| 2 reserved-width indexing pool (barrier-free per-file fan-out, capture fan-out, admission 2) | merged |
 | 3 lazy output digests + threaded projections + constant-digest memo | merged |
 | 4 idna/remote-normalization memoization | merged |
 | 5 paging/bounded heaps/batch IN | merged (20-finding wave) |
@@ -101,3 +180,22 @@ First post-wave measurement (2026-08-01, release build, 96-core host): index
 151ms, callers 65ms, context 197ms, grep 195ms (baseline before the wave: one
 search took 6+ minutes at 670% daemon CPU). Open tails: grep p95 4.6s / max
 25s; daemon peak RSS 4.4GB.
+
+Reservation measurement (2026-08-02, release build, 96-core host,
+`PERF_REINDEX_WORKTREES=2`, 6 workers × 120s, 149,737 nodes). Interactive p95
+with the box idle versus with a full index running continuously beside the
+daemon:
+
+| tool | p95 idle | p95 during full reindex |
+|---|---:|---:|
+| callers | 0.062 s | 0.082 s |
+| context | 0.385 s | 0.390 s |
+| grep | 0.576 s | 0.493 s |
+| search | 1.531 s | 1.375 s |
+
+A full index saturating the machine is within run-to-run noise of an idle
+box: the reserved slice, not a slower indexer, is what holds the line.
+`search` p95 sits above 1s in BOTH columns, so that tail is a search-path
+cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
+no indexing at all, well over the 6GB gate budget — a live, separate breach
+of Principle 5 that this measurement did not introduce.
