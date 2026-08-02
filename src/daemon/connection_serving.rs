@@ -109,6 +109,7 @@ fn is_mcp_initialize_request(line: &str) -> bool {
 }
 
 const MAX_PENDING_PROJECT_OPEN_LINES: usize = 64;
+const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
 
 pub(super) async fn await_project_owner_or_disconnect<T>(
     transport: &mut impl McpTransport,
@@ -123,11 +124,22 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
                 let Some(line) = incoming? else {
                     // EOF closes only the client's request half. It may still
                     // be reading the response, as one-shot CLI clients do.
-                    // Finish the already bounded owner lookup and let the
-                    // subsequent write prove whether the peer fully left.
-                    return open
-                        .await
-                        .map(|owner| Some((owner, pending_lines)));
+                    // Give a bounded owner lookup enough time to produce its
+                    // warming response, but do not retain a connection permit
+                    // indefinitely when the peer fully disappeared.
+                    return match tokio::time::timeout(
+                        PROJECT_OWNER_HALF_CLOSE_GRACE,
+                        &mut open,
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map(|owner| Some((owner, pending_lines))),
+                        Err(_) => Err(TraceDecayError::Config {
+                            message: format!(
+                                "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
+                            ),
+                        }),
+                    };
                 };
                 if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
                     return Err(TraceDecayError::Config {

@@ -21,16 +21,36 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
         std::future::pending::<crate::errors::Result<()>>().await
     };
 
-    let result = tokio::time::timeout(
+    let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         super::super::await_project_owner_or_disconnect(&mut transport, open),
     )
     .await
     .expect("disconnect detection must be bounded")
-    .expect("disconnect detection");
+    .expect_err("a never-ready owner must return a warming error");
 
-    assert!(result.is_none());
+    assert!(
+        super::super::error_message_is_project_warming(&error.to_string()),
+        "unexpected owner timeout: {error}"
+    );
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn project_owner_half_close_can_still_receive_a_bounded_result() {
+    let (mut transport, input, _output) = crate::mcp::transport::ChannelTransport::new();
+    drop(input);
+    let result = super::super::await_project_owner_or_disconnect(&mut transport, async {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        Ok::<_, crate::errors::TraceDecayError>(17)
+    })
+    .await
+    .expect("half-closed owner lookup");
+
+    assert_eq!(
+        result.map(|(owner, pending)| (owner, pending.len())),
+        Some((17, 0))
+    );
 }
 
 fn closed_feedback_list_request(
