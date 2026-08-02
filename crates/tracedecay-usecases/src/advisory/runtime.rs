@@ -1119,6 +1119,11 @@ fn ci_discovery_terminal_state(
             Plan26FeedbackOutcomeV1::Denied,
             Plan26CoverageV1::Unknown,
         )),
+        ProductionCiFailureDiscoveryOutcomeV1::Stale => Some((
+            ProviderEvaluationStateV1::Stale,
+            Plan26FeedbackOutcomeV1::Stale,
+            Plan26CoverageV1::Stale,
+        )),
         ProductionCiFailureDiscoveryOutcomeV1::RateLimited(_) => Some((
             ProviderEvaluationStateV1::Partial,
             Plan26FeedbackOutcomeV1::RateLimited,
@@ -1246,6 +1251,10 @@ mod tests {
             (
                 ProductionCiFailureDiscoveryOutcomeV1::Denied,
                 ProviderEvaluationStateV1::Unavailable,
+            ),
+            (
+                ProductionCiFailureDiscoveryOutcomeV1::Stale,
+                ProviderEvaluationStateV1::Stale,
             ),
             (
                 ProductionCiFailureDiscoveryOutcomeV1::Unavailable,
