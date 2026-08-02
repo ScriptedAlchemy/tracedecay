@@ -436,6 +436,7 @@ impl DiagnosticBroker {
                 .insert(language.to_string(), message.clone());
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Unavailable);
+            self.remove_language_clients(language);
             TraceDecayError::Config { message }
         })?;
         self.engine_overrides
