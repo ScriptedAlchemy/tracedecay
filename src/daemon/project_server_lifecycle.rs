@@ -162,6 +162,41 @@ pub(super) async fn ensure_user_profile_host_admission_replay_for_identity(
     Ok(())
 }
 
+/// Kick cold profile-session/spool setup outside the connection's admission
+/// permit. Concurrent requests for one profile share a single bootstrap, while
+/// the retained replay worker still coalesces subsequent passes.
+pub(super) fn schedule_user_profile_host_admission_replay_for_identity(
+    store_administration: &StoreAdministration,
+    client_identity: &DaemonClientIdentity,
+    lifecycle: &DaemonLifecycle,
+) -> Result<()> {
+    let Some(reservation) = store_administration
+        .reserve_profile_host_admission_bootstrap(&client_identity.profile_root)?
+    else {
+        return Ok(());
+    };
+    let Some(activity) = lifecycle.try_enter() else {
+        return Ok(());
+    };
+    let store_administration = store_administration.clone();
+    let client_identity = client_identity.clone();
+    tokio::spawn(async move {
+        let _reservation = reservation;
+        let _activity = activity;
+        if let Err(error) = ensure_user_profile_host_admission_replay_for_identity(
+            &store_administration,
+            &client_identity,
+        )
+        .await
+        {
+            eprintln!(
+                "[tracedecay] user-profile host admission disposition: authority_unavailable: {error}"
+            );
+        }
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) async fn replay_user_profile_host_admission_for_identity(
     store_administration: &StoreAdministration,

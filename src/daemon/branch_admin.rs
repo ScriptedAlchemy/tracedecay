@@ -268,6 +268,20 @@ type SessionRuntimeRegistries = HashMap<
 >;
 type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
 
+pub(super) struct ProfileHostAdmissionBootstrapReservation {
+    profile_root: PathBuf,
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+}
+
+impl Drop for ProfileHostAdmissionBootstrapReservation {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.profile_root);
+    }
+}
+
 /// Coordinates every daemon operation that can create, rekey, or remove a
 /// database owner. There is intentionally one gate and one copy of each shared
 /// registry so branch administration cannot prove ownership against stale
@@ -286,6 +300,7 @@ pub(super) struct StoreAdministration {
         >,
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
+    profile_host_admission_bootstraps: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     #[cfg(unix)]
     automation_schedulers:
@@ -312,6 +327,9 @@ impl Default for StoreAdministration {
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
+            profile_host_admission_bootstraps: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -626,6 +644,24 @@ impl StoreAdministration {
         self.profile_host_admission_replay
             .ensure(broker_path, profile_root, broker)
             .await;
+    }
+
+    pub(super) fn reserve_profile_host_admission_bootstrap(
+        &self,
+        profile_root: &Path,
+    ) -> Result<Option<ProfileHostAdmissionBootstrapReservation>> {
+        let profile_root = authority::canonical_identity_path(profile_root)?;
+        let mut in_flight = self
+            .profile_host_admission_bootstraps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !in_flight.insert(profile_root.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(ProfileHostAdmissionBootstrapReservation {
+            profile_root,
+            in_flight: Arc::clone(&self.profile_host_admission_bootstraps),
+        }))
     }
 
     async fn maybe_ensure_user_profile_host_admission_replay(
@@ -1411,6 +1447,35 @@ mod tests {
             .unwrap();
         assert!(healthy.broker().is_some());
         administration.shutdown_host_admission_replay().await;
+    }
+
+    #[test]
+    fn profile_host_admission_bootstrap_singleflights_and_releases() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir(&profile_root).unwrap();
+        let administration = StoreAdministration::default();
+
+        let reservation = administration
+            .reserve_profile_host_admission_bootstrap(&profile_root)
+            .unwrap()
+            .expect("first bootstrap reserves the profile");
+        assert!(
+            administration
+                .reserve_profile_host_admission_bootstrap(&profile_root)
+                .unwrap()
+                .is_none(),
+            "concurrent bootstrap must join the in-flight profile"
+        );
+
+        drop(reservation);
+        assert!(
+            administration
+                .reserve_profile_host_admission_bootstrap(&profile_root)
+                .unwrap()
+                .is_some(),
+            "completed bootstrap must permit a later replay kick"
+        );
     }
 
     fn owner(graph_db_path: &str) -> StoreOwnerKey {
