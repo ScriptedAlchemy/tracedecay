@@ -358,14 +358,6 @@ pub(crate) struct SessionRetrievalOmissionView {
     pub(crate) reason: HydrationStateV1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionRetrievalNextActionView {
-    pub(crate) kind: &'static str,
-    pub(crate) tool: &'static str,
-    pub(crate) action: &'static str,
-    pub(crate) reason: &'static str,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct SessionTemporalWatermarksView {
     pub(crate) generation: u64,
