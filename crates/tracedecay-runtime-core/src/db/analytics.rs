@@ -1446,7 +1446,7 @@ impl Database {
                     message: format!("failed to read dead function/method count: {e}"),
                     operation: op.to_string(),
                 })?;
-                cursor = file_path.clone();
+                cursor.clone_from(&file_path);
                 page_rows += 1;
                 items.push(HealthFileAggregate {
                     file_path,

@@ -83,15 +83,11 @@ impl McpServer {
         // requests", not "peer is gone". Stop watching for cancellations and
         // keep serving the in-flight response. Cancel only on actual peer loss
         // (read/write I/O failure) or explicit shutdown/cancel paths.
-        let mut peer_input_closed = false;
         let mut peer_close_check: Option<
             std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         > = None;
         loop {
-            if peer_input_closed {
-                let peer_close_check = peer_close_check
-                    .as_mut()
-                    .expect("peer close check must follow transport EOF");
+            if let Some(peer_close_check) = peer_close_check.as_mut() {
                 tokio::select! {
                     response = &mut handling => return Ok((response, false)),
                     () = &mut shutdown_requested => {
@@ -116,11 +112,10 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line(), if !peer_input_closed => {
+                incoming = transport.read_line() => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
-                            peer_input_closed = true;
                             peer_close_check = Some(Box::pin(
                                 transport.peer_fully_closed_after_eof(),
                             ));
@@ -190,15 +185,11 @@ impl McpServer {
             false,
         ));
         tokio::pin!(handling);
-        let mut peer_input_closed = false;
         let mut peer_close_check: Option<
             std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         > = None;
         loop {
-            if peer_input_closed {
-                let peer_close_check = peer_close_check
-                    .as_mut()
-                    .expect("peer close check must follow transport EOF");
+            if let Some(peer_close_check) = peer_close_check.as_mut() {
                 tokio::select! {
                     response = &mut handling => return Ok((response, false)),
                     () = &mut shutdown_requested => {
@@ -236,7 +227,6 @@ impl McpServer {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
-                            peer_input_closed = true;
                             peer_close_check = Some(Box::pin(
                                 transport.peer_fully_closed_after_eof(),
                             ));
