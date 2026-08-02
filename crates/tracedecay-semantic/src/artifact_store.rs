@@ -115,7 +115,9 @@ pub struct RuntimeEnvironmentV1 {
     pub available_threads: u32,
 }
 
+#[cfg(any(test, feature = "semantic-fastembed"))]
 pub const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
+#[cfg(any(test, feature = "semantic-fastembed"))]
 pub const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
 
 impl RuntimeEnvironmentV1 {
