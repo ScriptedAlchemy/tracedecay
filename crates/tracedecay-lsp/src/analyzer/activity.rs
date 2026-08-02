@@ -12,10 +12,20 @@ thread_local! {
     static PROJECT_ROOT_CANONICALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
-fn canonicalize_project_root(project_root: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn canonicalize_project_root(project_root: &Path) -> std::io::Result<PathBuf> {
     #[cfg(test)]
     PROJECT_ROOT_CANONICALIZATIONS.set(PROJECT_ROOT_CANONICALIZATIONS.get() + 1);
     project_root.canonicalize()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_project_root_canonicalization_count() {
+    PROJECT_ROOT_CANONICALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn project_root_canonicalization_count() -> usize {
+    PROJECT_ROOT_CANONICALIZATIONS.get()
 }
 
 pub fn active_languages_for_files(
@@ -130,7 +140,7 @@ pub fn adapter_workspace_root(
     adapter_workspace_root_from_canonical_root(&project_root, adapter, file)
 }
 
-fn adapter_workspace_root_from_canonical_root(
+pub(crate) fn adapter_workspace_root_from_canonical_root(
     project_root: &Path,
     adapter: &LspAdapterDefinition,
     file: &str,
