@@ -1143,11 +1143,7 @@ impl LatestCompleteCodeIndexV1 {
             graph,
         });
         let _ = self.query_owners.set(Arc::clone(&owners));
-        Ok(self
-            .query_owners
-            .get()
-            .map(Arc::clone)
-            .unwrap_or(owners))
+        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
     }
 }
 
