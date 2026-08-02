@@ -13,7 +13,6 @@ mod maintenance;
 mod memory_connection;
 mod memory_v2;
 mod metadata;
-pub mod migration_policy;
 pub mod migrations;
 mod nodes;
 #[cfg(test)]
