@@ -119,6 +119,7 @@ rather than by serving stale data.
 | 1 snapshot hash indices (record port + relation BFS adjacency) | merged |
 | 2 redundancy comparison-budget pacing + shared shingle merge | merged |
 | 2 reconcile semaphore + retention round-robin | merged |
+| 2 reserved-width indexing pool (barrier-free per-file fan-out, capture fan-out, admission 2) | merged |
 | 3 lazy output digests + threaded projections + constant-digest memo | merged |
 | 4 idna/remote-normalization memoization | merged |
 | 5 paging/bounded heaps/batch IN | merged (20-finding wave) |
@@ -130,3 +131,22 @@ First post-wave measurement (2026-08-01, release build, 96-core host): index
 151ms, callers 65ms, context 197ms, grep 195ms (baseline before the wave: one
 search took 6+ minutes at 670% daemon CPU). Open tails: grep p95 4.6s / max
 25s; daemon peak RSS 4.4GB.
+
+Reservation measurement (2026-08-02, release build, 96-core host,
+`PERF_REINDEX_WORKTREES=2`, 6 workers × 120s, 149,737 nodes). Interactive p95
+with the box idle versus with a full index running continuously beside the
+daemon:
+
+| tool | p95 idle | p95 during full reindex |
+|---|---:|---:|
+| callers | 0.062 s | 0.082 s |
+| context | 0.385 s | 0.390 s |
+| grep | 0.576 s | 0.493 s |
+| search | 1.531 s | 1.375 s |
+
+A full index saturating the machine is within run-to-run noise of an idle
+box: the reserved slice, not a slower indexer, is what holds the line.
+`search` p95 sits above 1s in BOTH columns, so that tail is a search-path
+cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
+no indexing at all, well over the 6GB gate budget — a live, separate breach
+of Principle 5 that this measurement did not introduce.
