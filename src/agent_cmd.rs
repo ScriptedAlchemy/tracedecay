@@ -5087,16 +5087,13 @@ mod tests {
             if operation == HostBundleCliOperation::Uninstall {
                 assert!(config["lsp"].get("tracedecay").is_none());
             } else {
+                // The bridge binds its workspace roots from the host's own
+                // `initialize` frame, so the registration deliberately carries
+                // no `--project`: pinning it to OpenCode's process CWD would
+                // override the folders the editor actually opened.
                 assert_eq!(
                     config["lsp"]["tracedecay"]["command"],
-                    serde_json::json!([
-                        tracedecay_bin.clone(),
-                        "lsp",
-                        "bridge",
-                        "--stdio",
-                        "--project",
-                        "."
-                    ])
+                    serde_json::json!([tracedecay_bin.clone(), "lsp", "bridge", "--stdio"])
                 );
             }
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
