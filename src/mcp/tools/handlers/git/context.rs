@@ -110,20 +110,33 @@ where
         };
         work(&checkpoint)
     });
-    let joined = loop {
-        tokio::select! {
-            joined = &mut worker => break joined,
-            () = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
-                let request_stopped = request_cancellation.as_ref().is_some_and(
-                    tracedecay_application::CancellationSignal::is_cancelled,
-                ) || request_deadline.as_ref().is_some_and(|deadline| {
-                    crate::daemon_client::deadline_remaining(deadline).is_none()
-                });
-                if request_stopped {
-                    state.cancelled.store(true, Ordering::Release);
-                    break worker.await;
-                }
-            }
+    let cancellation_wait = async {
+        match request_cancellation.as_ref() {
+            Some(cancellation) => cancellation.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let deadline_wait = async {
+        match request_deadline
+            .as_ref()
+            .and_then(crate::daemon_client::deadline_remaining)
+        {
+            Some(remaining) => tokio::time::sleep(remaining).await,
+            None if request_deadline.is_some() => {}
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(cancellation_wait);
+    tokio::pin!(deadline_wait);
+    let joined = tokio::select! {
+        joined = &mut worker => joined,
+        () = &mut cancellation_wait => {
+            state.cancelled.store(true, Ordering::Release);
+            worker.await
+        }
+        () = &mut deadline_wait => {
+            state.cancelled.store(true, Ordering::Release);
+            worker.await
         }
     }
     .map_err(|join_error| TraceDecayError::Config {
@@ -138,16 +151,18 @@ fn pr_context_checkpoint(
     deadline: Option<&tracedecay_application::Deadline>,
 ) -> Result<()> {
     if cancellation.is_some_and(tracedecay_application::CancellationSignal::is_cancelled) {
-        return Err(TraceDecayError::project_route(
-            "pr_context_cancelled",
+        return Err(TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_cancelled",
+            "handler",
             true,
             "PR context was cancelled",
         ));
     }
     if deadline.is_some_and(|deadline| crate::daemon_client::deadline_remaining(deadline).is_none())
     {
-        return Err(TraceDecayError::project_route(
+        return Err(TraceDecayError::mcp_tool_dispatch(
             "tool_dispatch_deadline_exceeded",
+            "handler",
             true,
             "PR context exceeded its dispatch deadline",
         ));
