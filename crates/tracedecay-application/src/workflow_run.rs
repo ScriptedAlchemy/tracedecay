@@ -8,6 +8,7 @@ use tracedecay_domain::{
     WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
     WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError,
     WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepInputV1, WorkflowStepOutputV1,
+    canonical_sha256,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -293,7 +294,7 @@ where
         match started.next_event(
             WorkflowRunCommandV1::CompleteStep {
                 step_id: step_id.clone(),
-                outputs: result.outputs,
+                outputs: result.outputs.clone(),
                 effect_receipt: result.effect_receipt.clone(),
             },
             contexts.completed,
@@ -306,6 +307,21 @@ where
                     })?
                     .into_projection(),
             )),
+            Err(
+                WorkflowRunStateError::InvalidStepOutputs
+                | WorkflowRunStateError::InvalidEffectReceipt,
+            ) => self.fail_started_step(
+                &started,
+                step_id,
+                Vec::new(),
+                protocol_failure_receipt(
+                    &started,
+                    step_id,
+                    &result.effect_receipt,
+                    &result.outputs,
+                )?,
+                contexts.failed,
+            ),
             Err(error) => Err(error.into()),
         }
     }
@@ -318,14 +334,33 @@ where
         effect_receipt: WorkflowStepEffectReceiptV1,
         context: WorkflowRunEventContextV1,
     ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
-        let failed = started.next_event(
+        let failed = match started.next_event(
             WorkflowRunCommandV1::FailStep {
                 step_id: step_id.clone(),
-                outputs,
-                effect_receipt,
+                outputs: outputs.clone(),
+                effect_receipt: effect_receipt.clone(),
             },
-            context,
-        )?;
+            context.clone(),
+        ) {
+            Ok(failed) => failed,
+            Err(
+                WorkflowRunStateError::InvalidStepOutputs
+                | WorkflowRunStateError::InvalidEffectReceipt,
+            ) => started.next_event(
+                WorkflowRunCommandV1::FailStep {
+                    step_id: step_id.clone(),
+                    outputs: Vec::new(),
+                    effect_receipt: protocol_failure_receipt(
+                        started,
+                        step_id,
+                        &effect_receipt,
+                        &outputs,
+                    )?,
+                },
+                context,
+            )?,
+            Err(error) => return Err(error.into()),
+        };
         Ok(WorkflowStepExecutionOutcomeV1::Failed(
             self.storage
                 .append(&WorkflowRunAppendRequestV1 {
@@ -335,4 +370,32 @@ where
                 .into_projection(),
         ))
     }
+}
+
+fn protocol_failure_receipt(
+    started: &WorkflowRunProjectionV1,
+    step_id: &WorkflowStepId,
+    observed_receipt: &WorkflowStepEffectReceiptV1,
+    observed_outputs: &[WorkflowStepOutputV1],
+) -> Result<WorkflowStepEffectReceiptV1, WorkflowStepExecutionServiceError> {
+    let placement_digest = started
+        .step(step_id)
+        .and_then(|step| step.placement_receipt())
+        .map(|placement| placement.placement_digest().clone())
+        .ok_or(WorkflowRunStateError::InvalidPlacementReceipt)?;
+    let effect_digest = canonical_sha256(&(
+        "tracedecay.application.workflow-provider-protocol-failure.v1",
+        observed_receipt,
+        observed_outputs,
+    ))
+    .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
+    WorkflowStepEffectReceiptV1::new(
+        started.run_id().clone(),
+        step_id.clone(),
+        placement_digest,
+        tracedecay_domain::WorkflowStepEffectOutcomeV1::Failed,
+        effect_digest,
+        &[],
+    )
+    .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt.into())
 }
