@@ -211,7 +211,7 @@ pub fn verified_embedded_project_host_component_set(
             component,
             integration_manifest_digest,
             catalog_digest,
-            configuration_snapshot_id: format!("first-party.{}", env!("CARGO_PKG_VERSION")),
+            configuration_snapshot_id: format!("first-party.{}", crate::PRODUCT_VERSION),
             effective_behavior_digest: embedded_bundle_identity(
                 "project_effective_behavior",
                 host,
@@ -374,7 +374,7 @@ fn verified_embedded_host_bundle_with_tracedecay_bin(
         catalog_digest: catalog
             .canonical_authority_digest()
             .map_err(|_| HostBundleRegistryError::Incompatible)?,
-        configuration_snapshot_id: format!("first-party.{}", env!("CARGO_PKG_VERSION")),
+        configuration_snapshot_id: format!("first-party.{}", crate::PRODUCT_VERSION),
         effective_behavior_digest: embedded_bundle_identity(
             "effective_behavior",
             host,

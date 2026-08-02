@@ -1016,7 +1016,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     }
     if let Some(message) =
-        super::cursor_diagnostics::plugin_version_staleness(&manifest, env!("CARGO_PKG_VERSION"))
+        super::cursor_diagnostics::plugin_version_staleness(&manifest, crate::PRODUCT_VERSION)
     {
         dc.warn(&message);
     }
