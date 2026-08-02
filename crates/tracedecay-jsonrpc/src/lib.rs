@@ -153,6 +153,17 @@ pub trait McpTransport {
 
     /// Flush any buffered output.
     fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
+
+    /// Wait until a peer fully closes the connection. A read-side EOF is not
+    /// sufficient: one-shot clients legitimately half-close after writing
+    /// their request and still wait for the response. Callers may start this
+    /// wait before EOF while setup work is pending. Transports without a
+    /// native full-close signal leave this future pending.
+    fn peer_fully_closed_after_eof(
+        &self,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        std::future::pending()
+    }
 }
 
 #[cfg(test)]

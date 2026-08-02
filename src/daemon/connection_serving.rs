@@ -127,18 +127,18 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
                     // Give a bounded owner lookup enough time to produce its
                     // warming response, but do not retain a connection permit
                     // indefinitely when the peer fully disappeared.
-                    return match tokio::time::timeout(
-                        PROJECT_OWNER_HALF_CLOSE_GRACE,
-                        &mut open,
-                    )
-                    .await
-                    {
-                        Ok(result) => result.map(|owner| Some((owner, pending_lines))),
-                        Err(_) => Err(TraceDecayError::Config {
-                            message: format!(
-                                "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
-                            ),
-                        }),
+                    let peer_full_close = transport.peer_fully_closed_after_eof();
+                    tokio::pin!(peer_full_close);
+                    return tokio::select! {
+                        result = &mut open =>
+                            result.map(|owner| Some((owner, pending_lines))),
+                        () = &mut peer_full_close => Ok(None),
+                        _ = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
+                            Err(TraceDecayError::Config {
+                                message: format!(
+                                    "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
+                                ),
+                            }),
                     };
                 };
                 if pending_lines.len() >= MAX_PENDING_PROJECT_OPEN_LINES {
@@ -190,8 +190,12 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let peer_full_close = transport.peer_fully_closed_after_eof();
+    tokio::pin!(peer_full_close);
+    let store_administration = tokio::select! {
+        result = bind_authenticated_profile_identity(&mut handshake, &engine.store_administration) => result?,
+        () = &mut peer_full_close => return Ok(()),
+    };
     let mut engine = engine;
     engine.store_administration = store_administration;
     let first_request_line = tokio::select! {
@@ -588,8 +592,12 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
+    let peer_full_close = transport.peer_fully_closed_after_eof();
+    tokio::pin!(peer_full_close);
+    let store_administration = tokio::select! {
+        result = bind_authenticated_profile_identity(&mut handshake, &store_administration) => result?,
+        () = &mut peer_full_close => return Ok(()),
+    };
     let reserved_control_request = is_reserved_control_request(&first_request_line);
     if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
         drop(setup_activity);

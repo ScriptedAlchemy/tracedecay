@@ -10,7 +10,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rmcp::ServiceExt;
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
@@ -292,6 +291,7 @@ use project_open_orchestration::{
 #[cfg(unix)]
 use project_open_orchestration::{
     spawn_lifecycle_automation_scheduler_activation, start_lifecycle_project_open,
+    wait_for_project_open_publication,
 };
 // The portable reconciler only exists off-unix (or under test transports), so
 // its import carries the same gate as its definition.
