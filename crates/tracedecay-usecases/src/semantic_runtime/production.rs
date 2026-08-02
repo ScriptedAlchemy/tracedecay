@@ -2588,7 +2588,6 @@ mod tests {
         VectorWatermark,
     };
 
-    use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_semantic::{
         DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1,
         PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
