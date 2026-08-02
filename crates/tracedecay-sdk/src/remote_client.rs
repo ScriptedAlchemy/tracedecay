@@ -20,11 +20,21 @@ use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 
 const MAX_CREDENTIAL_BYTES: usize = 4_096;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EnrolledRemoteClient {
     http: HttpClient,
     endpoint: reqwest::Url,
     authorization: HeaderValue,
+}
+
+impl fmt::Debug for EnrolledRemoteClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnrolledRemoteClient")
+            .field("endpoint", &self.endpoint)
+            .field("authorization", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,9 +102,7 @@ impl EnrolledRemoteClient {
                 "Remote Brain credential length is invalid".to_owned(),
             ));
         }
-        let authorization =
-            HeaderValue::from_bytes([b"Bearer ".as_slice(), credential].concat().as_slice())
-                .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+        let authorization = authorization_header(credential)?;
         let http = HttpClient::builder()
             .timeout(timeout)
             .build()
@@ -104,6 +112,45 @@ impl EnrolledRemoteClient {
             endpoint,
             authorization,
         })
+    }
+
+    /// Build a client authenticated by an explicit private CA and client identity.
+    ///
+    /// The caller resolves both PEM values through its secret authority. This
+    /// method consumes and clears those input buffers after rustls parses them.
+    pub fn new_mutual_tls(
+        endpoint: impl AsRef<str>,
+        credential: impl AsRef<[u8]>,
+        timeout: Duration,
+        mut authority_ca_pem: Vec<u8>,
+        mut client_identity_pem: Vec<u8>,
+    ) -> Result<Self, RemoteClientError> {
+        let result = (|| {
+            let endpoint = validated_endpoint(endpoint.as_ref())?;
+            let authorization = authorization_header(credential.as_ref())?;
+            let authority_ca = reqwest::Certificate::from_pem(&authority_ca_pem)
+                .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+            let client_identity = reqwest::Identity::from_pem(&client_identity_pem)
+                .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+            let http = HttpClient::builder()
+                .timeout(timeout)
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(authority_ca)
+                .identity(client_identity)
+                .https_only(true)
+                .build()
+                .map_err(|error| RemoteClientError::Transport(error.to_string()))?;
+            Ok(Self {
+                http,
+                endpoint,
+                authorization,
+            })
+        })();
+        authority_ca_pem.fill(0);
+        client_identity_pem.fill(0);
+        std::hint::black_box(&authority_ca_pem);
+        std::hint::black_box(&client_identity_pem);
+        result
     }
 
     pub fn execute<Request>(
@@ -196,6 +243,39 @@ impl EnrolledRemoteClient {
     }
 }
 
+fn validated_endpoint(endpoint: &str) -> Result<reqwest::Url, RemoteClientError> {
+    let endpoint = reqwest::Url::parse(endpoint)
+        .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+    if endpoint.scheme() != "https"
+        || endpoint.host_str().is_none()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.username() != ""
+        || endpoint.password().is_some()
+    {
+        return Err(RemoteClientError::Configuration(
+            "Remote Brain endpoint must be a credential-free HTTPS URL".to_owned(),
+        ));
+    }
+    Ok(endpoint)
+}
+
+fn authorization_header(credential: &[u8]) -> Result<HeaderValue, RemoteClientError> {
+    if credential.is_empty() || credential.len() > MAX_CREDENTIAL_BYTES {
+        return Err(RemoteClientError::Configuration(
+            "Remote Brain credential length is invalid".to_owned(),
+        ));
+    }
+    let mut value = Vec::with_capacity(b"Bearer ".len() + credential.len());
+    value.extend_from_slice(b"Bearer ");
+    value.extend_from_slice(credential);
+    let header = HeaderValue::from_bytes(&value)
+        .map_err(|error| RemoteClientError::Configuration(error.to_string()));
+    value.fill(0);
+    std::hint::black_box(&value);
+    header
+}
+
 fn decode_wire_response(
     value: serde_json::Value,
 ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
@@ -229,5 +309,18 @@ mod tests {
         .expect_err("URL credentials must fail");
 
         assert!(matches!(error, RemoteClientError::Configuration(_)));
+    }
+
+    #[test]
+    fn enrolled_remote_client_debug_redacts_bearer_credential() {
+        let client = EnrolledRemoteClient::new(
+            "https://remote.example",
+            "credential-that-must-stay-secret",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("credential-that-must-stay-secret"));
     }
 }
