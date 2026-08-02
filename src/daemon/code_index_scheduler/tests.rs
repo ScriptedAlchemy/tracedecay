@@ -198,21 +198,18 @@ fn retention_generations(
         store_root.to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
-    // Every seeded revision must carry content no earlier revision published.
-    // A store is seeded per scope while the fixture worktree is shared, so a
-    // per-call `0..count` sequence replayed the same bytes for the second scope
-    // and the scheduler correctly no-op'd instead of sealing a new generation.
-    static SEEDED_REVISION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let scope = tracedecay_domain::canonical_sha256(&store_root.display().to_string())
+        .expect("retention scope digest");
     let mut generations = Vec::with_capacity(count);
     for revision in 0..count {
-        if revision > 0 {
-            let revision = SEEDED_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            fixture.edit(
-                "src/lib.rs",
-                &format!("pub fn retained_revision() -> usize {{ {revision} }}\n"),
-            );
-            scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
-        }
+        fixture.edit(
+            "src/lib.rs",
+            &format!(
+                "pub fn retained_revision() -> (&'static str, usize) {{ (\"{}\", {revision}) }}\n",
+                scope.as_str()
+            ),
+        );
+        scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
         generations.push(
             published(
                 scheduler
@@ -1371,12 +1368,8 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
 
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
-    // A file with a compiled language descriptor (so the snapshot has something
-    // extractable and the reconcile reaches a publish) whose content yields no
-    // symbols, so the sealed generation is chunk-empty. `# fixture` used to be
-    // that file, but the markdown extractor now chunks headings, which made
-    // this fixture produce a non-empty generation and stopped exercising the
-    // empty-generation restore this test exists for.
+    // Markdown is supported input, while empty content yields no chunks.
+    // `# fixture` no longer works because the Markdown extractor chunks headings.
     let fixture = GitFixture::new(&[("README.md", "")]);
     let store = TempDir::new().expect("store root");
     let project_id = ProjectId::new("project.empty-restart").expect("valid project");
@@ -2902,7 +2895,7 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
 async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 0);
     registry
         .mount_worktree(
             test_project_id(),
@@ -2912,16 +2905,22 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         )
         .await
         .expect("mount worktree");
-    // Let the mount-time reconcile finish first. Until it does, the background
-    // worker owns the scheduler lock itself, and shutdown joining a worker that
-    // is *already* blocked acquiring that lock is a different wait than the one
-    // under test — this test is about shutdown never taking the lock on its own
-    // behalf.
-    wait_for_initial_generation(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
         .expect("scheduler handle");
+    let scope = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ResolvedScope::new(
+            test_project_id(),
+            scheduler.identity().repository_id().clone(),
+            scheduler.identity().worktree_id().clone(),
+            scheduler.identity().head_ref().cloned(),
+        )
+        .expect("mounted scope")
+    };
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let lock_thread = std::thread::spawn(move || {
         let _guard = scheduler
@@ -2931,6 +2930,24 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         std::thread::sleep(Duration::from_millis(750));
     });
     held_rx.recv().expect("scheduler lock acquired");
+
+    assert_ne!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .expect("mounted worktree"),
+        0,
+        "mount must leave one reconcile wake pending behind admission"
+    );
+    registry.background_reconcile_admission().add_permits(1);
+    while registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree")
+        != 0
+    {
+        tokio::task::yield_now().await;
+    }
 
     let started = std::time::Instant::now();
     registry.shutdown().await;
@@ -2944,9 +2961,10 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn background_reconciles_respect_a_single_admission_permit() {
-    // A bound of ONE serializes all worktrees: while the first worker holds the
-    // sole permit (blocked on its scheduler lock), the second cannot start.
+async fn busy_scheduler_releases_shared_admission_for_another_worktree() {
+    // Scheduler-lock contention is not active reconciliation. It must release
+    // the daemon-wide permit so another worktree can make progress at a bound
+    // of one, while preserving the first worktree's coalesced follow-up wake.
     let first = GitFixture::new(&[("src/lib.rs", "pub fn first() -> u32 { 1 }\n")]);
     let second = GitFixture::new(&[("src/lib.rs", "pub fn second() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -2988,7 +3006,6 @@ async fn background_reconciles_respect_a_single_admission_permit() {
 
     first.edit("src/lib.rs", "pub fn first() -> u32 { 2 }\n");
     first_wake.notify_one();
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     second.edit("src/lib.rs", "pub fn second() -> u32 { 2 }\n");
     assert!(
@@ -2996,12 +3013,9 @@ async fn background_reconciles_respect_a_single_admission_permit() {
             .notify_path(second.path(), second.path().join("src/lib.rs"))
             .await
     );
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        registry.latest_generation_id(second.path()).await,
-        Some(second_generation.clone()),
-        "with a single permit a second worktree must wait behind the first"
-    );
+    let changed_second =
+        wait_for_generation_change(&registry, second.path(), &second_generation).await;
+    assert_ne!(changed_second, second_generation);
 
     release_tx.send(()).expect("release first scheduler");
     lock_thread.join().expect("first lock thread joins");

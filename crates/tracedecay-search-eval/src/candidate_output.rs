@@ -37,8 +37,8 @@ use tracedecay_application::{
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
+    CodeIndexActiveSlotV1, CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1,
+    CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexProductionConfigV1,
     CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
 };
 use tracedecay_code_index::projection::{
@@ -456,13 +456,13 @@ pub trait ProductionCandidateNativeExecutionAuthorityV1: Send + Sync {
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexActiveSlotV1, CodeIndexPublishedGenerationV1>>>,
 }
 
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         let active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
@@ -474,7 +474,7 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
 
     fn publish_atomically(
         &mut self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -3136,7 +3136,7 @@ fn prove_cancellation(
             profile_digest: lexical_projection_profile_digest()?,
         },
     };
-    let generation_scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+    let generation_scope = CodeIndexActiveSlotV1::for_snapshot(&request.snapshot);
     let config = CodeIndexProductionConfigV1 {
         project_id: id::<ProjectId>("project.candidate.cancel")?,
         repository: id::<RepositoryId>("repository.candidate.cancel")?,

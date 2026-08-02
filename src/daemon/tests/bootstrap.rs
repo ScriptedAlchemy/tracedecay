@@ -1853,31 +1853,43 @@ async fn production_composition_harness_wires_query_search_authority() {
     let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
         .await
         .expect("production composition");
-    let payload = tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
-        loop {
-            let response = harness
-                .call_tool(
-                    &project,
-                    "tracedecay_search",
-                    json!({
-                        "query": "production_composition_probe",
-                        "limit": 10,
-                        "format": "json"
-                    }),
-                )
-                .await
-                .expect("production search");
-            let payload: serde_json::Value =
-                serde_json::from_str(production_composition_tool_text(&response))
-                    .expect("search json");
-            if payload["code_generation"].as_str().is_some() {
-                break payload;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        }
-    })
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({
+                "query": "production_composition_probe",
+                "limit": 1,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("production search demand");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        harness.await_code_index_generation(&project),
+    )
     .await
-    .expect("production query authority did not become ready");
+    .expect("production code index did not publish after search demand")
+    .expect("production code-index publication");
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({
+                "query": "production_composition_probe",
+                "limit": 1,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("production search");
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&response)).expect("search json");
+    assert!(
+        payload["code_generation"].as_str().is_some(),
+        "production search must bind the demanded generation: {payload}"
+    );
     let candidate = payload["results"]
         .as_array()
         .and_then(|matches| {
@@ -1947,7 +1959,7 @@ async fn production_composition_harness_wires_cross_project_resolver() {
             "tracedecay_grep",
             json!({
                 "pattern": "second_project_probe",
-                "project_path": canonical_second,
+                "project_path": canonical_second.clone(),
                 "format": "json"
             }),
         )

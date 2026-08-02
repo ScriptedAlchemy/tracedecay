@@ -6,8 +6,8 @@ use std::{
 use tracedecay_code_index::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
+        CodeIndexActiveSlotV1, CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1,
+        CodeIndexCapturedFileV1, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     },
@@ -30,7 +30,7 @@ use crate::support::{RUST_SOURCE, id};
 
 #[derive(Clone, Default)]
 struct SharedPublicationStore {
-    active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<BTreeMap<CodeIndexActiveSlotV1, CodeIndexPublishedGenerationV1>>>,
 }
 
 impl SharedPublicationStore {
@@ -46,7 +46,7 @@ impl SharedPublicationStore {
 impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
     fn load_active(
         &self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .active
@@ -58,7 +58,7 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
 
     fn publish_atomically(
         &mut self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -300,7 +300,7 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
             .expect("restart owner");
     let restored = restarted
-        .active_generation(&CodeIndexGenerationScopeV1::for_snapshot(
+        .active_generation(&CodeIndexActiveSlotV1::for_snapshot(
             &request("file.production.scope", 1_100_000).snapshot,
         ))
         .expect("active generation loads")
@@ -518,7 +518,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
         None,
         "commit.main.1",
     );
-    let primary_scope = CodeIndexGenerationScopeV1::for_snapshot(&primary_request.snapshot);
+    let primary_scope = CodeIndexActiveSlotV1::for_snapshot(&primary_request.snapshot);
     let primary = owner
         .build_and_publish(primary_request, &ActiveControl)
         .expect("primary generation publishes");
@@ -530,7 +530,7 @@ fn linked_worktrees_share_one_repository_store_but_isolate_active_generations() 
         Some("worktree.feature"),
         "commit.feature.1",
     );
-    let linked_scope = CodeIndexGenerationScopeV1::for_snapshot(&linked_request.snapshot);
+    let linked_scope = CodeIndexActiveSlotV1::for_snapshot(&linked_request.snapshot);
     let linked = owner
         .build_and_publish(linked_request, &ActiveControl)
         .expect("linked-worktree generation publishes");
@@ -635,8 +635,62 @@ fn branch_stack_nodes_and_snapshots_derive_the_same_path_free_scope() {
     };
 
     assert_eq!(
-        CodeIndexGenerationScopeV1::for_branch_stack_node(&node),
-        CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot)
+        CodeIndexActiveSlotV1::for_branch_stack_node(&node),
+        CodeIndexActiveSlotV1::for_snapshot(&request.snapshot)
+    );
+}
+
+#[test]
+fn references_in_one_worktree_share_the_active_publication_slot() {
+    let store = SharedPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), store.clone(), ApplyingProjectionSink)
+            .expect("production owner");
+    let main = request_in_scope(
+        "file.slot.main",
+        1_100_000,
+        "refs/heads/main",
+        Some("worktree.slot"),
+        "commit.slot.main",
+    );
+    let feature = request_in_scope(
+        "file.slot.feature",
+        1_200_000,
+        "refs/heads/feature",
+        Some("worktree.slot"),
+        "commit.slot.feature",
+    );
+    let main_slot = CodeIndexActiveSlotV1::for_snapshot(&main.snapshot);
+    let feature_slot = CodeIndexActiveSlotV1::for_snapshot(&feature.snapshot);
+
+    assert_eq!(
+        main_slot, feature_slot,
+        "the active pointer follows one physical worktree frontier; each sealed generation retains its own exact reference"
+    );
+    let main_generation = owner
+        .build_and_publish(main, &ActiveControl)
+        .expect("main generation");
+    let feature_generation = owner
+        .build_and_publish(feature, &ActiveControl)
+        .expect("feature generation replaces the worktree frontier");
+
+    assert_eq!(
+        feature_generation.manifest().parent_generation,
+        Some(main_generation.manifest().generation_id.clone())
+    );
+    assert_eq!(
+        feature_generation.snapshot().reference.as_ref(),
+        Some(&id::<RefId>("refs/heads/feature")),
+        "the active slot omits a movable label, but its immutable generation must retain exact attribution"
+    );
+    assert_eq!(store.scope_count(), 1);
+    assert_eq!(
+        store
+            .load_active(&feature_slot)
+            .expect("active slot read")
+            .expect("feature generation active")
+            .manifest(),
+        feature_generation.manifest()
     );
 }
 
@@ -659,7 +713,7 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     ));
     assert!(
         store
-            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+            .load_active(&CodeIndexActiveSlotV1::for_snapshot(
                 &request("file.production.cancelled.scope", 1_100_000).snapshot,
             ))
             .expect("read publication state")
@@ -678,7 +732,7 @@ fn production_owner_abstains_without_publication_on_cancellation_or_deadline() {
     ));
     assert!(
         store
-            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+            .load_active(&CodeIndexActiveSlotV1::for_snapshot(
                 &request("file.production.expired.scope", 1_100_000).snapshot,
             ))
             .expect("read publication state")
@@ -702,7 +756,7 @@ fn production_owner_never_activates_a_generation_after_projection_failure() {
     assert!(matches!(error, CodeIndexProductionErrorV1::Projection(_)));
     assert!(
         store
-            .load_active(&CodeIndexGenerationScopeV1::for_snapshot(
+            .load_active(&CodeIndexActiveSlotV1::for_snapshot(
                 &request("file.production.rejected.scope", 1_100_000).snapshot,
             ))
             .expect("read publication state")

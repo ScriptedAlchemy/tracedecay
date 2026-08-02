@@ -95,33 +95,29 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
 #[tokio::test]
 async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     let project = fixture();
+    let project_id = ProjectId::new("project.code-index-memory").expect("valid project");
     let store = TempDir::new().expect("store root");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project_id.clone(),
+        project.path(),
+        scoped_store,
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open seed scheduler");
+    assert!(matches!(
+        scheduler.reconcile_now().expect("seed retained generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    drop(scheduler);
+
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
-        .mount_worktree(
-            ProjectId::new("project.code-index-memory").expect("valid project"),
-            project.path(),
-            store.path().to_path_buf(),
-            None,
-        )
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
         .await
         .expect("mount worktree");
 
-    // Mount restores whatever the store retained and hands the first build to
-    // the background worker, so an empty store reports no retained bytes until
-    // that reconcile lands. Settle on the post-reconcile state instead of
-    // racing it; the assertions below are unchanged and must all hold at once.
-    let stats = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let stats = registry.memory_stats().await;
-            if stats.reconciling_worktrees == 0 && stats.retained_generation_encoded_bytes > 0 {
-                break stats;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the mount-time reconcile publishes a retained generation");
+    let stats = registry.memory_stats().await;
 
     assert_eq!(stats.mounted_worktrees, 1);
     assert_eq!(stats.reconciling_worktrees, 0);

@@ -50,6 +50,7 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 /// worktrees (which write to path-scoped stores) reconcile in parallel; it can
 /// never overlap two reconciles for the same worktree/store.
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
+const SCHEDULER_BUSY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 
 fn bounded_daemon_admission_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
@@ -134,6 +135,14 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
 
 pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
     _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+enum BackgroundCodeIndexReconcileV1 {
+    Completed {
+        outcome: Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1>,
+        latest: Option<LatestCompleteCodeIndexV1>,
+    },
+    SchedulerBusy,
 }
 
 #[derive(Clone)]
@@ -741,10 +750,14 @@ impl CodeIndexSchedulerRegistryV1 {
                     CodeIndexCadenceTriggerV1::Mount,
                 );
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut scheduler = scheduler
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let result = scheduler.reconcile_now();
+                    let mut scheduler = match scheduler.try_lock() {
+                        Ok(scheduler) => scheduler,
+                        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            return BackgroundCodeIndexReconcileV1::SchedulerBusy;
+                        }
+                    };
+                    let outcome = scheduler.reconcile_now();
                     let latest = scheduler.latest_complete();
                     // Reconcile completion is an activation point: build this
                     // generation's serving derivations here, on the blocking
@@ -752,15 +765,23 @@ impl CodeIndexSchedulerRegistryV1 {
                     if let Some(latest) = latest.as_ref() {
                         latest.warm_serving_caches();
                     }
-                    (result, latest)
+                    BackgroundCodeIndexReconcileV1::Completed { outcome, latest }
                 })
                 .await;
-                if let Ok((_, Some(latest))) = &result {
+                if let Ok(BackgroundCodeIndexReconcileV1::Completed {
+                    latest: Some(latest),
+                    ..
+                }) = &result
+                {
                     *worker_serving_generation
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
                 }
-                if let Ok((Ok(outcome), _)) = &result {
+                if let Ok(BackgroundCodeIndexReconcileV1::Completed {
+                    outcome: Ok(outcome),
+                    ..
+                }) = &result
+                {
                     if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
                         Self::publish_generation(
                             &worker_generation_publications,
@@ -777,24 +798,34 @@ impl CodeIndexSchedulerRegistryV1 {
                         outcome,
                     );
                 } else {
-                    // A reconcile that never reaches a terminal outcome is the
-                    // failure mode that leaves search stale indefinitely, and it
-                    // used to be entirely silent. Surface it: bounded, redacted,
-                    // no project path beyond what cadence events already carry.
-                    match &result {
-                        Ok((Err(error), _)) => tracing::warn!(
-                            event = "code_index_reconcile_failed",
-                            path = "background_worker",
-                            error = %error,
-                            "code-index background reconcile failed; the served generation stays stale"
-                        ),
-                        Err(error) => tracing::warn!(
-                            event = "code_index_reconcile_failed",
-                            path = "background_worker",
-                            error = %error,
-                            "code-index background reconcile task did not complete"
-                        ),
-                        Ok((Ok(_), _)) => {}
+                    let scheduler_busy =
+                        matches!(&result, Ok(BackgroundCodeIndexReconcileV1::SchedulerBusy));
+                    if !scheduler_busy {
+                        // A reconcile that never reaches a terminal outcome can
+                        // leave search stale indefinitely. Surface it: bounded,
+                        // redacted, and without project paths beyond cadence.
+                        match &result {
+                            Ok(BackgroundCodeIndexReconcileV1::Completed {
+                                outcome: Err(error),
+                                ..
+                            }) => tracing::warn!(
+                                event = "code_index_reconcile_failed",
+                                path = "background_worker",
+                                error = %error,
+                                "code-index background reconcile failed; the served generation stays stale"
+                            ),
+                            Err(error) => tracing::warn!(
+                                event = "code_index_reconcile_failed",
+                                path = "background_worker",
+                                error = %error,
+                                "code-index background reconcile task did not complete"
+                            ),
+                            Ok(BackgroundCodeIndexReconcileV1::SchedulerBusy)
+                            | Ok(BackgroundCodeIndexReconcileV1::Completed {
+                                outcome: Ok(_),
+                                ..
+                            }) => {}
+                        }
                     }
                     // No terminal outcome, so no receipt is owed. Give the
                     // arrival back or the next pass would measure from its own
@@ -803,8 +834,18 @@ impl CodeIndexSchedulerRegistryV1 {
                         &worker_pending_wake_micros,
                         &worker_pending_wake_trigger,
                         arrival,
-                        trigger,
+                        if scheduler_busy {
+                            CodeIndexCadenceTriggerV1::BusyFollowUp
+                        } else {
+                            trigger
+                        },
                     );
+                    if scheduler_busy && !worker_shutting_down.load(Ordering::Acquire) {
+                        tokio::time::sleep(SCHEDULER_BUSY_RETRY_DELAY).await;
+                        if !worker_shutting_down.load(Ordering::Acquire) {
+                            worker_wake.notify_one();
+                        }
+                    }
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;

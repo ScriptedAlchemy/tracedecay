@@ -36,8 +36,8 @@ use crate::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
-            CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-            CodeIndexGenerationScopeV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
+            CodeIndexActiveSlotV1, CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1,
+            CodeIndexCapturedFileV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
             CodeIndexPublishedGenerationV1, SharedPhysicalCodeArtifactPoolV1,
         },
@@ -695,7 +695,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
 impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
     fn load_active(
         &self,
-        _scope: &CodeIndexGenerationScopeV1,
+        _scope: &CodeIndexActiveSlotV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
         Ok(self
             .load_active_shared()?
@@ -704,7 +704,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
 
     fn publish_atomically(
         &mut self,
-        _scope: &CodeIndexGenerationScopeV1,
+        _scope: &CodeIndexActiveSlotV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
