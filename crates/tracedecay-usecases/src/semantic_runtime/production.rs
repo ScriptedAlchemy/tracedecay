@@ -206,7 +206,6 @@ pub struct SemanticVectorPublicationLeaseV1<'runtime> {
 }
 
 impl ProductionSemanticRuntimeV1 {
-    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
     pub fn new(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
@@ -382,7 +381,6 @@ impl ProductionSemanticRuntimeV1 {
 
     /// Enqueue one saved code generation. Model verification, ORT startup,
     /// changed-chunk embedding, and database publication remain background work.
-    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
     pub fn schedule_saved_generation(&self, generation: &CodeIndexPublishedGenerationV1) -> bool {
         self.schedule_saved_generation_inner(generation, None)
     }
@@ -981,23 +979,6 @@ impl ProductionSemanticRuntimeV1 {
             self.resources.max_resident_bytes,
         )?;
         Ok((prepared.prepared, elapsed_micros(started), input_bytes))
-    }
-
-    #[allow(dead_code)] // production semantic runtime mount — preserve authority surface
-    pub(crate) async fn inspect_compatible_current_generation(
-        &self,
-        required: &crate::config::retrieval::SemanticCompatibilityPinsV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
-    ) -> Result<SemanticExecutableGenerationV1, SemanticRuntimeBackendErrorV1> {
-        Ok(self
-            .inspect_compatible_current_generation_snapshot(
-                required,
-                source_generation,
-                source_manifest_digest,
-            )
-            .await?
-            .executable)
     }
 
     pub async fn inspect_compatible_current_generation_snapshot(

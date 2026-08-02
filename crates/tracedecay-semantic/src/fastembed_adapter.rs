@@ -32,8 +32,6 @@
 //!   are modelled here as a `Duration` against the injected pool clock and
 //!   cancellation as the [`CancellationSignal`] trait; the integrator adapts
 //!   `RetrievalBudget` onto both.
-#![allow(dead_code)] // semantic fastembed adapter; Plan 31 — staged
-
 #[cfg(feature = "semantic-fastembed")]
 use fastembed::{
     InitOptionsUserDefined, Pooling as FastEmbedPooling, QuantizationMode, TextEmbedding,
@@ -44,6 +42,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -196,10 +195,6 @@ struct LifecycleInstallArtifactV1 {
 impl VerifiedEmbeddingArtifactV1 {
     fn embedding_key(&self) -> &tracedecay_domain::EmbeddingProjectionKeyV1 {
         self.projection.embedding_key()
-    }
-
-    fn artifact_digest(&self) -> &ManifestDigest {
-        &self.embedding_key().model_artifact_digest
     }
 
     fn dimensions(&self) -> u32 {
@@ -765,11 +760,13 @@ pub trait CancellationSignal: Send + Sync {
 }
 
 /// A manually flipped cancellation flag.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct ManualCancellation {
     flag: AtomicBool,
 }
 
+#[cfg(test)]
 impl ManualCancellation {
     pub fn new() -> Self {
         Self::default()
@@ -780,6 +777,7 @@ impl ManualCancellation {
     }
 }
 
+#[cfg(test)]
 impl CancellationSignal for ManualCancellation {
     fn cancelled(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
@@ -789,12 +787,14 @@ impl CancellationSignal for ManualCancellation {
 /// A deterministic scripted signal that reports cancelled once it has been
 /// polled more than `cancel_after` times. `cancel_after = 0` cancels on the
 /// first poll. Used to test mid-batch cancellation deterministically.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct ScriptedCancellation {
     checks: AtomicUsize,
     cancel_after: usize,
 }
 
+#[cfg(test)]
 impl ScriptedCancellation {
     pub fn new(cancel_after: usize) -> Self {
         Self {
@@ -804,6 +804,7 @@ impl ScriptedCancellation {
     }
 }
 
+#[cfg(test)]
 impl CancellationSignal for ScriptedCancellation {
     fn cancelled(&self) -> bool {
         let poll = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1266,7 +1267,8 @@ impl EmbeddingRuntime for FakeEmbeddingRuntime {
             vector_seed: fnv1a64(
                 authority
                     .runtime_artifact()
-                    .artifact_digest()
+                    .embedding_key()
+                    .model_artifact_digest
                     .as_str()
                     .as_bytes(),
                 FNV_OFFSET_BASIS,
