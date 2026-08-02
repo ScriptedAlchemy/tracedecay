@@ -1778,6 +1778,231 @@ async fn bundled_query_profile_composes_live_code_index_lanes() {
         !executed.authorized.fallback.ordered_candidates.is_empty(),
         "live main symbol is returned"
     );
+    assert!(
+        !executed.served_stale,
+        "a ready generation serves the fresh path and is never marked stale"
+    );
+    registry.shutdown().await;
+}
+
+/// Build the bundled-authority search policy shared by the
+/// stale-while-revalidate tests.
+fn bundled_search_request(query: &str) -> super::query_runtime::QuerySearchExecutionRequestV1 {
+    super::query_runtime::QuerySearchExecutionRequestV1::new(
+        query,
+        super::query_runtime::QuerySearchExecutionPolicyV1 {
+            principal: PrincipalId::new("principal.stale-serving.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.stale-serving.fixture",
+            )
+            .expect("authorization revision"),
+            sanitizer_revision: SanitizerRevision::new(
+                tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
+            )
+            .expect("sanitizer revision"),
+            normalization_revision: QueryNormalizationRevision::new(
+                tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
+            )
+            .expect("normalization revision"),
+            exact_rule_revision: ExactAdmissionRuleRevision::new(
+                tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
+            )
+            .expect("exact rules revision"),
+            lexical_profile_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile revision"),
+            lexical_score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("lexical score domain"),
+            fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+            graph_edge_kinds: vec![RelationEdgeKindV1::Calls],
+            graph_max_depth: 1,
+            page_size: 10,
+            cursor: None,
+        },
+    )
+}
+
+/// Mount one worktree, publish an initial generation, and mount the bundled
+/// query authority for its exact scope.
+async fn mounted_bundled_query_worktree(
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("live generation");
+    let snapshot = latest.generation.snapshot();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.stale-serving.fixture").expect("project id"),
+        snapshot.repository.clone(),
+        snapshot.worktree.clone().expect("worktree id"),
+        snapshot.reference.clone(),
+    )
+    .expect("resolved scope");
+    let (_, accepted, _) =
+        crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
+    let keyring = RetrievalCursorKeyringV1::new(
+        latest.generation.manifest().privacy_domain.clone(),
+        RetrievalCursorKeyId::new("retrieval-key.stale-serving.fixture").expect("cursor key id"),
+        1,
+        vec![7_u8; 32],
+        1_000_000,
+    )
+    .expect("cursor keyring");
+    let authority = Arc::new(
+        QueryAuthorityV1::new(
+            accepted.profile().clone(),
+            accepted.diversity().clone(),
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .expect("ranking revision"),
+            keyring,
+        )
+        .expect("query authority"),
+    );
+    registry
+        .mount_query_authority(fixture.path(), &scope, authority)
+        .await
+        .expect("mount bundled authority");
+    (registry, scope)
+}
+
+/// The defect this covers: during any generation rebuild the ready gate
+/// abstains, and search used to collapse into `GenerationUnavailable` for the
+/// whole window while callers/grep/context kept serving. Holding the scheduler
+/// mutex reproduces exactly that window — the background worker owns the
+/// scheduler, so the ready gate's `try_lock` abstains — while the last complete
+/// generation stays in `serving_generation`.
+// Holding the scheduler guard across the awaits is the scenario, not an
+// oversight: it is how this test occupies the rebuild window that the fallback
+// exists to serve through. The guard is released before shutdown.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+
+    // Baseline: the ready path, byte-for-byte, before anything is degraded.
+    let fresh = registry
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+        .expect("ready generation serves the fresh path");
+    assert!(!fresh.served_stale);
+    let fresh_generation = fresh.generation.clone();
+    let fresh_candidates = fresh.authorized.fallback.ordered_candidates.clone();
+    assert!(!fresh_candidates.is_empty(), "live main symbol is returned");
+
+    // Enter the rebuild window: the scheduler is owned elsewhere, so the ready
+    // gate cannot admit a current generation.
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let held = scheduler
+        .lock()
+        .expect("hold the scheduler as a rebuild would");
+    assert!(
+        registry
+            .latest_complete_ready_for_scope(&scope)
+            .await
+            .is_none(),
+        "the ready gate abstains for the whole rebuild window"
+    );
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_some(),
+        "the last complete generation is still held and needs no re-read"
+    );
+
+    let stale = registry
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+        .expect("search keeps serving through the rebuild instead of failing");
+    assert!(
+        stale.served_stale,
+        "a fallback answer must be reported stale, never as current"
+    );
+    assert_eq!(
+        stale.generation, fresh_generation,
+        "the stale answer names the complete generation that actually answered"
+    );
+    assert_eq!(
+        stale.authorized.fallback.ordered_candidates, fresh_candidates,
+        "serving stale changes only the coverage marker, not ranking identity"
+    );
+
+    // The coverage marker the executor derives from this flag.
+    let coverage = tracedecay_query::code_search::CodeIndexSearchCoverageV1::fused_stale(
+        stale.generation.as_str(),
+        &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete,
+    );
+    assert!(coverage.any_servable(), "a stale answer is still servable");
+    assert!(
+        coverage.is_degraded(),
+        "a stale answer says recall is partial"
+    );
+    assert_eq!(
+        coverage.exact,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale {
+            generation: fresh_generation.as_str().to_owned(),
+        }
+    );
+
+    drop(held);
+    registry.shutdown().await;
+}
+
+/// Fail-closed: the fallback serves a *retained complete* generation, never a
+/// missing one. With no mounted worktree neither resolver can produce one, and
+/// the typed fail-fast is preserved rather than degraded into an empty answer.
+#[tokio::test]
+async fn search_fails_fast_when_no_complete_generation_exists() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+
+    let empty = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        empty
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_none(),
+        "an unmounted scope has no retained generation to serve"
+    );
+    // `ExecutedQuerySearchV1` intentionally omits `Debug` (it carries the
+    // sanitized query), so assert on the error arm directly.
+    match empty
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+    {
+        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable) => {}
+        Err(other) => panic!("expected the typed fail-fast, got {other:?}"),
+        Ok(_) => panic!("absent generations must not be degraded into a stale answer"),
+    }
+
+    empty.shutdown().await;
     registry.shutdown().await;
 }
 

@@ -45,21 +45,27 @@ fallback bytes, and cursor it always did, and renders identically. A degraded
 response says "partial recall" in its body, because a short result list is
 otherwise indistinguishable from a thorough one.
 
-Known gap (owned by the code-index scheduler lane, not the retrieval lane): MCP
-search resolves its generation through
+This applies to generation resolution too. MCP search resolves through
 `CodeIndexSchedulerRegistryV1::latest_complete_ready_for_scope`, which admits
 only an *already-current* generation — `latest_complete_ready_for_query`
 abstains whenever freshness is unknown, git metadata moved, or the staleness
 threshold elapsed. Every other callable code query resolves through
 `latest_complete_fresh_for_scope`, which serves the last complete generation.
-That asymmetry is why, after a daemon restart, callers/callees/grep answer from
-a published generation within seconds while `search` reports
-`GenerationUnavailable` for as long as the rebuild runs. The generation store
-makes stale-while-revalidate cheap here — the last complete generation is
-already held in the per-worktree `serving_generation` `RwLock` and needs no
-re-read — so the fix is for `execute_query_search` to fall back to that
-generation and mark the exact/lexical/graph lanes `stale` instead of failing.
-Both change points live under `src/daemon/code_index_scheduler/`.
+That asymmetry used to make `search` report `GenerationUnavailable` for as long
+as a rebuild ran, while callers/callees/grep answered from a published
+generation within seconds.
+
+`execute_query_search` now closes that gap: when the ready gate abstains it
+falls back to `latest_complete_serving_for_scope` and marks the
+exact/lexical/graph lanes `stale` against the generation that answered. The
+fallback is O(1) and never blocks — the last complete generation is already
+held in the per-worktree `serving_generation` `RwLock`, seeded at mount and
+rewritten by every publication, so it needs no re-read, no gix status, and no
+scheduler lock. Fail-closed behavior is unchanged in both directions: the
+fallback still requires an exact scope match, and when no complete generation
+exists at all the typed `GenerationUnavailable` fail-fast is preserved rather
+than degraded into an empty answer. When a ready generation does exist the
+fresh path is untouched, so a warm response is byte-identical.
 
 ## The invariant
 
