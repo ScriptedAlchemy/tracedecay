@@ -26,6 +26,8 @@ use tracedecay_store::{
     StoreRuntimeBindingV1,
 };
 
+#[cfg(not(any(unix, windows)))]
+use crate::connection::ConnectionMode;
 use crate::{
     RuntimeWriteAuthorityStage,
     admission::{FairQueue, QueueItem},
@@ -34,7 +36,7 @@ use crate::{
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
-    connection::{self, ConnectionMode, OpenedDatabaseFile},
+    connection::{self, OpenedDatabaseFile},
     migration_sql::{
         WriterCommand as MigrationSqlWriterCommand, reject_writer_command, run_writer_command,
     },
@@ -93,6 +95,39 @@ pub(super) struct Worker {
 
 impl Worker {
     pub(super) fn run(self) {
+        #[cfg(any(unix, windows))]
+        if let Some(opened_database) = self._opened_database.as_deref() {
+            #[cfg(unix)]
+            let canonical_path = &self.canonical_path;
+            #[cfg(windows)]
+            let canonical_path = &self.path;
+            if let Err(error) = opened_database.verify_current_path(canonical_path) {
+                return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+            }
+        }
+        #[cfg(unix)]
+        let canonical_path = &self.canonical_path;
+        #[cfg(windows)]
+        let canonical_path = &self.path;
+        #[cfg(any(unix, windows))]
+        let connection = match connection::open_writer(
+            &self.path,
+            self._opened_database.as_deref(),
+            canonical_path,
+        ) {
+            Ok(connection) => connection,
+            Err(connection::WriterOpenError::Identity(error)) => {
+                return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+            }
+            Err(connection::WriterOpenError::Policy(error)) if error.is_open_failure() => {
+                return self.fail_start(WriterStartError::OpenFailed);
+            }
+            Err(connection::WriterOpenError::Policy(error)) => {
+                return self
+                    .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
+            }
+        };
+        #[cfg(not(any(unix, windows)))]
         let connection = match connection::open(&self.path, ConnectionMode::Writer) {
             Ok(connection) => connection,
             Err(error) if error.is_open_failure() => {
@@ -103,6 +138,18 @@ impl Worker {
                     .fail_start(WriterStartError::ConnectionPolicyFailed(error.to_string()));
             }
         };
+        #[cfg(unix)]
+        if let Some(opened_database) = self._opened_database.as_deref()
+            && let Err(error) = opened_database.verify_connection(&connection, &self.canonical_path)
+        {
+            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+        }
+        #[cfg(windows)]
+        if let Some(opened_database) = self._opened_database.as_deref()
+            && let Err(error) = opened_database.verify_connection(&connection, &self.path)
+        {
+            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+        }
         #[cfg(unix)]
         if self.expected_file_identity.is_some()
             && connection
@@ -131,7 +178,7 @@ impl Worker {
             }
             None => None,
         };
-        let checkpoint = match WriterCheckpointController::new(
+        let mut checkpoint = match WriterCheckpointController::new(
             RusqliteCheckpointDriver::new(connection),
             CheckpointConfig::default(),
         ) {
@@ -145,6 +192,13 @@ impl Worker {
             Ok(runtime) => runtime,
             Err(_) => return self.fail_start(WriterStartError::CheckpointSchedulerSetupFailed),
         };
+        #[cfg(any(unix, windows))]
+        if let Some(opened_database) = self._opened_database.as_deref()
+            && let Err(error) =
+                opened_database.verify_connection(checkpoint.connection_mut(), canonical_path)
+        {
+            return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
+        }
         self.state
             .store(WriterState::Ready as u8, Ordering::Release);
         if self.started.send(Ok(opened_file_identity)).is_err() {

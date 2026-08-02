@@ -90,13 +90,19 @@ const fn default_http_page_size() -> u32 {
     DEFAULT_HTTP_PAGE_SIZE
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Canonical operation identity shared by every retained application surface.
+/// Transport bindings select the exposed subset without defining another
+/// operation enum or name conversion.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum HttpApplicationOperation {
     GitStatus,
     GitDiff,
     GitHistory,
     GitBlame,
     GitHunks,
+    GitPreview,
+    GitApply,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
@@ -170,12 +176,14 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 66] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
         Self::GitBlame,
         Self::GitHunks,
+        Self::GitPreview,
+        Self::GitApply,
         Self::FeedbackDiagnostics,
         Self::FeedbackGet,
         Self::FeedbackExpand,
@@ -243,6 +251,14 @@ impl HttpApplicationOperation {
             .find(|operation| operation.as_str() == name)
     }
 
+    pub fn from_tool_name(tool_name: &str) -> Option<Self> {
+        let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+        if operation == "diagnostics" {
+            return Some(Self::DiagnosticsRead);
+        }
+        Self::from_catalog_name(operation)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GitStatus => "git_status",
@@ -250,6 +266,8 @@ impl HttpApplicationOperation {
             Self::GitHistory => "git_history",
             Self::GitBlame => "git_blame",
             Self::GitHunks => "git_hunks",
+            Self::GitPreview => "git_preview",
+            Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
@@ -318,7 +336,9 @@ impl HttpApplicationOperation {
             | Self::GitDiff
             | Self::GitHistory
             | Self::GitBlame
-            | Self::GitHunks => HttpApplicationOwnerKind::Git,
+            | Self::GitHunks
+            | Self::GitPreview
+            | Self::GitApply => HttpApplicationOwnerKind::Git,
             Self::FeedbackDiagnostics
             | Self::FeedbackGet
             | Self::FeedbackExpand
@@ -407,6 +427,14 @@ impl HttpApplicationOperation {
         )
     }
 
+    /// Whether this canonical operation has a public HTTP catalog binding.
+    ///
+    /// Git preview/apply remain in the shared operation family but are
+    /// intentionally exposed through CLI/MCP mutation bindings only.
+    pub const fn is_http_exposed(self) -> bool {
+        !matches!(self, Self::GitPreview | Self::GitApply)
+    }
+
     pub fn route_path(self) -> String {
         match self {
             operation if operation.owner_kind() == HttpApplicationOwnerKind::Git => {
@@ -483,6 +511,9 @@ pub fn http_route_documents(
         else {
             continue;
         };
+        if !operation.is_http_exposed() {
+            continue;
+        }
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
             path: operation.route_path(),
@@ -1133,5 +1164,35 @@ mod tests {
         }
         assert_eq!(parse_context_scout_operation("context_scout"), None);
         assert_eq!(parse_context_scout_operation("context_scout_status/"), None);
+    }
+
+    #[test]
+    fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
+        assert_eq!(HttpApplicationOperation::ALL.len(), 66);
+        for operation in HttpApplicationOperation::ALL {
+            assert_eq!(
+                HttpApplicationOperation::from_tool_name(&format!(
+                    "tracedecay_{}",
+                    operation.as_str()
+                )),
+                Some(operation),
+                "{} must round-trip through the canonical tool name",
+                operation.as_str()
+            );
+        }
+        assert_eq!(
+            HttpApplicationOperation::from_tool_name("tracedecay_diagnostics"),
+            Some(HttpApplicationOperation::DiagnosticsRead)
+        );
+        assert!(!HttpApplicationOperation::GitPreview.is_http_exposed());
+        assert!(!HttpApplicationOperation::GitApply.is_http_exposed());
+        assert_eq!(
+            HttpApplicationOperation::GitPreview.owner_kind(),
+            HttpApplicationOwnerKind::Git
+        );
+        assert_eq!(
+            HttpApplicationOperation::GitApply.owner_kind(),
+            HttpApplicationOwnerKind::Git
+        );
     }
 }

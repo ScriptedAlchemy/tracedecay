@@ -12,7 +12,6 @@ use super::*;
 #[cfg(test)]
 const INVOKE_FUTURE_SIZE_BUDGET: usize = 24 * 1024;
 
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(crate) fn operation_events(&self) -> OperationEventAuthority {
         self.operation_events.clone()

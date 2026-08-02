@@ -265,12 +265,11 @@ pub(super) fn safe_extract(
 /// Tuple shape produced per file by both extraction paths.
 type ExtractTuple = (String, ExtractionResult, String, u64, i64);
 
-const MAX_EXTRACTION_WORKERS: usize = 8;
-
-fn bounded_extraction_workers(available: usize, file_count: usize) -> usize {
-    available
-        .clamp(1, MAX_EXTRACTION_WORKERS)
-        .min(file_count.max(1))
+/// Subprocess extraction width: the same race-to-idle reservation the
+/// in-process code-index pool uses, so a full index finishes as fast as the
+/// host allows while a slice of cores stays free for whatever is serving.
+fn bounded_extraction_workers(file_count: usize) -> usize {
+    tracedecay_code_index::parallelism::indexing_workers().min(file_count.max(1))
 }
 
 /// Extract every file in `files`, isolating each extraction in a subprocess
@@ -293,8 +292,7 @@ fn extract_files_isolated(
         return (Vec::new(), Vec::new());
     }
     if should_use_subprocess() {
-        let available = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
-        let workers = bounded_extraction_workers(available, files.len());
+        let workers = bounded_extraction_workers(files.len());
         let timeout = std::time::Duration::from_secs(
             crate::user_config::UserConfig::load().extraction_timeout_secs,
         );
@@ -2111,16 +2109,29 @@ mod path_normalization_tests;
 
 #[cfg(test)]
 mod worker_pool_tests {
-    use super::{MAX_EXTRACTION_WORKERS, bounded_extraction_workers};
+    use super::bounded_extraction_workers;
+    use tracedecay_code_index::parallelism::{
+        clear_forced_indexing_workers_for_test, force_indexing_workers_for_test,
+        indexing_worker_target,
+    };
 
     #[test]
-    fn extraction_worker_count_bounds_parallel_allocators() {
-        assert_eq!(
-            bounded_extraction_workers(96, 2_467),
-            MAX_EXTRACTION_WORKERS
-        );
-        assert_eq!(bounded_extraction_workers(96, 3), 3);
-        assert_eq!(bounded_extraction_workers(0, 0), 1);
+    fn extraction_width_reserves_a_serving_slice_and_never_exceeds_the_batch() {
+        // Race to idle: a wide host runs wide, minus the serving reserve.
+        assert_eq!(indexing_worker_target(96), 90);
+        assert_eq!(indexing_worker_target(16), 14);
+
+        force_indexing_workers_for_test(90);
+        assert_eq!(bounded_extraction_workers(2_467), 90);
+        // Never more workers than files.
+        assert_eq!(bounded_extraction_workers(3), 3);
+
+        force_indexing_workers_for_test(1);
+        assert_eq!(bounded_extraction_workers(100), 1);
+        // Never zero workers.
+        assert_eq!(bounded_extraction_workers(0), 1);
+
+        clear_forced_indexing_workers_for_test();
     }
 }
 
