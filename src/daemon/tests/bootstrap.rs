@@ -1782,6 +1782,31 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         .expect("direct warmup shutdown timed out");
 }
 
+#[tokio::test(start_paused = true)]
+async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
+    let project_path = std::path::PathBuf::from("/projects/uncontended");
+    let published = super::super::project_open_orchestration::wait_for_project_open_publication(
+        &project_path,
+        async { Ok::<(), crate::errors::TraceDecayError>(()) },
+    )
+    .await;
+    assert!(
+        published.is_ok(),
+        "publication inside the deadline must succeed"
+    );
+
+    let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
+        &project_path,
+        std::future::pending::<crate::errors::Result<()>>(),
+    )
+    .await
+    .expect_err("an uncontended warm-up must not pin the foreground request");
+    assert!(
+        warming.to_string().contains("warming in the background"),
+        "{warming}"
+    );
+}
+
 fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
     assert!(response.error.is_none(), "tool failed: {response:?}");
     let result = response.result.as_ref().expect("tool result");
