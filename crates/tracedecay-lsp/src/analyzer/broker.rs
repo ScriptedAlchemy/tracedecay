@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use url::Url;
 
-use super::activity::{
-    adapter_workspace_root, adapter_workspace_root_from_canonical_root, canonicalize_project_root,
-};
+use super::activity::{adapter_workspace_root_from_canonical_root, canonicalize_project_root};
 use super::adapters::{LspAdapterDefinition, LspInstallOption};
 use super::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
@@ -20,7 +18,7 @@ mod semantic_authority;
 #[path = "broker/tests.rs"]
 mod tests;
 
-use refresh::RefreshBatch;
+use refresh::{BrokerRefreshCapacity, RefreshBatch};
 pub use refresh::{
     CompletedRefresh, MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS, MAX_ANALYZER_QUEUED_ROOT_BATCHES,
     PreparedRefresh,
@@ -198,6 +196,7 @@ pub struct DiagnosticBroker {
     project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
     settings_unavailable: Option<SettingsUnavailable>,
+    refresh_capacity: BrokerRefreshCapacity,
 }
 
 impl DiagnosticBroker {
@@ -218,6 +217,7 @@ impl DiagnosticBroker {
             project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
             settings_unavailable: None,
+            refresh_capacity: BrokerRefreshCapacity::new(),
         }
     }
 
@@ -429,24 +429,26 @@ impl DiagnosticBroker {
             return Err(TraceDecayError::Config { message });
         }
 
+        let project_root = self.project_root.clone();
+        let canonical_project_root = canonicalize_project_root(&project_root).map_err(|error| {
+            let message = format!("failed to resolve admitted project root: {error}");
+            self.engine_errors
+                .insert(language.to_string(), message.clone());
+            self.engine_overrides
+                .insert(language.to_string(), EngineState::Unavailable);
+            TraceDecayError::Config { message }
+        })?;
         self.engine_overrides
             .insert(language.to_string(), EngineState::Refreshing);
         let epoch = self.next_refresh_epoch(language);
-        let project_root = self.project_root.clone();
-        let canonical_project_root = canonicalize_project_root(&project_root).ok();
         let mut documents_by_root: BTreeMap<PathBuf, Vec<LspDocument>> = BTreeMap::new();
         for document in documents {
-            let workspace_root = match canonical_project_root.as_deref() {
-                Some(root) => adapter_workspace_root_from_canonical_root(
-                    root,
-                    &adapter,
-                    &document.relative_path,
-                ),
-                None => {
-                    adapter_workspace_root(&self.project_root, &adapter, &document.relative_path)
-                }
-            }
-            .unwrap_or_else(|| self.project_root.clone());
+            let workspace_root = adapter_workspace_root_from_canonical_root(
+                &canonical_project_root,
+                &adapter,
+                &document.relative_path,
+            )
+            .unwrap_or_else(|| canonical_project_root.clone());
             documents_by_root
                 .entry(workspace_root)
                 .or_default()
@@ -463,6 +465,19 @@ impl DiagnosticBroker {
                 .insert(language.to_string(), EngineState::Unavailable);
             return Err(TraceDecayError::Config { message });
         }
+        let reservation = self
+            .refresh_capacity
+            .reserve(documents_by_root.len())
+            .ok_or_else(|| {
+                let message = format!(
+                    "analyzer root queue saturated: {} batches exceed the {MAX_ANALYZER_QUEUED_ROOT_BATCHES} limit",
+                    documents_by_root.len()
+                );
+                self.engine_errors.insert(language.to_string(), message.clone());
+                self.engine_overrides
+                    .insert(language.to_string(), EngineState::Unavailable);
+                TraceDecayError::Config { message }
+            })?;
         let batches = documents_by_root
             .into_iter()
             .map(|(workspace_root, documents)| {
@@ -485,11 +500,12 @@ impl DiagnosticBroker {
             .collect();
         Ok(Some(PreparedRefresh::new(
             language.to_string(),
-            project_root,
+            canonical_project_root,
             command,
             adapter.args,
             epoch,
             batches,
+            reservation,
         )))
     }
 
