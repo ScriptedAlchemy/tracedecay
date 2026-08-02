@@ -182,7 +182,9 @@ fn scheduler(
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
     match outcome {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,
-        CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
+        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
+            panic!("expected a published generation, got noop {evidence:?}")
+        }
     }
 }
 
@@ -196,9 +198,15 @@ fn retention_generations(
         store_root.to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    // Every seeded revision must carry content no earlier revision published.
+    // A store is seeded per scope while the fixture worktree is shared, so a
+    // per-call `0..count` sequence replayed the same bytes for the second scope
+    // and the scheduler correctly no-op'd instead of sealing a new generation.
+    static SEEDED_REVISION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let mut generations = Vec::with_capacity(count);
     for revision in 0..count {
         if revision > 0 {
+            let revision = SEEDED_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             fixture.edit(
                 "src/lib.rs",
                 &format!("pub fn retained_revision() -> usize {{ {revision} }}\n"),
@@ -1363,7 +1371,13 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
 
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
-    let fixture = GitFixture::new(&[("README.md", "# fixture\n")]);
+    // A file with a compiled language descriptor (so the snapshot has something
+    // extractable and the reconcile reaches a publish) whose content yields no
+    // symbols, so the sealed generation is chunk-empty. `# fixture` used to be
+    // that file, but the markdown extractor now chunks headings, which made
+    // this fixture produce a non-empty generation and stopped exercising the
+    // empty-generation restore this test exists for.
+    let fixture = GitFixture::new(&[("README.md", "")]);
     let store = TempDir::new().expect("store root");
     let project_id = ProjectId::new("project.empty-restart").expect("valid project");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -2898,6 +2912,12 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         )
         .await
         .expect("mount worktree");
+    // Let the mount-time reconcile finish first. Until it does, the background
+    // worker owns the scheduler lock itself, and shutdown joining a worker that
+    // is *already* blocked acquiring that lock is a different wait than the one
+    // under test — this test is about shutdown never taking the lock on its own
+    // behalf.
+    wait_for_initial_generation(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -4541,15 +4561,19 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
     let cursor = first_page.next_cursor.clone().expect("continuation cursor");
     let original_generation = first_page.generation.clone();
 
-    let encoded = cursor
+    // The envelope prefix names the cursor wire revision and is bumped whenever
+    // that contract changes (it is `ccq2.` today). Take it from the cursor the
+    // production path just minted rather than pinning a literal here: this test
+    // is about expiry tampering, not about which revision is current.
+    let (prefix, encoded) = cursor
         .as_str()
-        .strip_prefix("ccq1.")
-        .expect("callable cursor prefix");
+        .split_once('.')
+        .expect("callable cursor revision prefix");
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&hex::decode(encoded).expect("cursor hex")).expect("cursor JSON");
     tampered["payload"]["expires_at"] = serde_json::json!(0);
     let tampered = OpaqueCursor::new(format!(
-        "ccq1.{}",
+        "{prefix}.{}",
         hex::encode(serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
     ))
     .expect("tampered cursor");
@@ -4587,14 +4611,16 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\npub fn unrelated() {}\n",
     );
     git(fixture.path(), &["commit", "-qam", "refresh"]);
-    let refreshed = registry
+    // Serve-old-first: the freshness ladder answers from the retained
+    // generation and only *requests* the rebuild, so the new generation
+    // arrives from the background worker rather than from this call.
+    let _requested = registry
         .latest_complete_fresh(fixture.path())
         .await
-        .expect("refreshed generation");
-    assert_ne!(
-        refreshed.generation.manifest().generation_id,
-        original_generation
-    );
+        .expect("retained generation stays servable while the rebuild runs");
+    let refreshed =
+        wait_for_generation_change(&registry, fixture.path(), &original_generation).await;
+    assert_ne!(refreshed, original_generation);
 
     let continuation_request = ExactOccurrenceRequest::new(
         "shared",
