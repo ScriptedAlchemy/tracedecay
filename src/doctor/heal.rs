@@ -120,14 +120,6 @@ impl std::fmt::Display for HealthPassWarning {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStoreRepairHealth {
-    NotRequired,
-    Pending,
-    Complete,
-    Degraded,
-}
-
 /// Outcome of one post-update health pass.
 #[derive(Debug, Default)]
 pub struct HealthPassReport {
@@ -141,7 +133,6 @@ pub struct HealthPassReport {
     /// Stale store manifests reconciled to the registry canonical path.
     pub reconciled_store_roots: Vec<super::registry_drift::ReconciledStoreRoot>,
     pub remaining_findings: Vec<String>,
-    pub session_store_repair: Option<SessionStoreRepairHealth>,
     pub warnings: Vec<HealthPassWarning>,
 }
 
@@ -249,55 +240,6 @@ async fn run_post_update_health_pass_for_profile(
     report
 }
 
-/// Repairs the working directory's session store, when it has one.
-///
-/// Returns `None` when there is no current-project session store to repair.
-///
-/// The current project's sessions store is dominated by recoverable bulk data
-/// (transcripts and the evidence derived from them -- see
-/// `crate::migrate::durability::session_authority_table_class`), so a failure
-/// to mount or repair it is advisory: the caller records it as a warning and it
-/// must never block a `--strict` upgrade the way it did in the diagnosed
-/// failure (mounting a 15GB `sessions.db` triggered an in-place schema rewrite
-/// that got interrupted, and the resulting warning failed the whole upgrade).
-async fn repair_current_project_session_store(
-    profile_root: &Path,
-    runtime_registry: &crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-) -> Option<Result<SessionStoreRepairHealth, String>> {
-    let project_root = std::env::current_dir().ok()?;
-    let layout = crate::storage::resolve_layout(&project_root, profile_root).ok()?;
-    if !layout.sessions_db_path.is_file() {
-        return None;
-    }
-    let project_id = layout.identity.project_id.clone()?;
-
-    let project_id = match tracedecay_store::ProjectId::new(project_id) {
-        Ok(project_id) => project_id,
-        Err(error) => {
-            return Some(Err(format!(
-                "could not repair the current project session store because its identity is invalid: {error}"
-            )));
-        }
-    };
-    let session_database = match runtime_registry
-        .project_sessions(project_id, [project_root, layout.project_root.clone()])
-        .await
-    {
-        Ok(session_database) => session_database,
-        Err(error) => {
-            return Some(Err(format!(
-                "could not mount the current project session store for repair: {error}"
-            )));
-        }
-    };
-    match crate::global_db::enqueue_session_temporal_store_repair(&session_database).await {
-        Ok(outcome) => Some(Ok(session_store_repair_health(outcome))),
-        Err(error) => Some(Err(format!(
-            "could not enqueue the current project session-store repair: {error}"
-        ))),
-    }
-}
-
 /// Applies the safe remedies and gathers everything the pass has to say into
 /// a [`HealthPassReport`], without printing anything.
 async fn compute_health_pass_report(
@@ -311,18 +253,6 @@ async fn compute_health_pass_report(
     report
         .warnings
         .extend(warnings.into_iter().map(HealthPassWarning::durable));
-
-    match repair_current_project_session_store(profile_root, runtime_registry).await {
-        Some(Ok(health)) => report.session_store_repair = Some(health),
-        Some(Err(message)) => {
-            report.session_store_repair = Some(SessionStoreRepairHealth::Degraded);
-            report.warnings.push(HealthPassWarning::about_store(
-                message,
-                StoreShardKind::ProjectSessions,
-            ));
-        }
-        None => {}
-    }
 
     let global_db = match runtime_registry.profile_database().await {
         Ok(global_db) => global_db,
@@ -393,22 +323,6 @@ async fn compute_health_pass_report(
             .map(|message| HealthPassWarning::about_store(message, StoreShardKind::Profile)),
     );
     report
-}
-
-fn session_store_repair_health(
-    outcome: crate::global_db::SessionTemporalRepairOutcome,
-) -> SessionStoreRepairHealth {
-    match outcome {
-        crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
-            SessionStoreRepairHealth::NotRequired
-        }
-        crate::global_db::SessionTemporalRepairOutcome::Pending { .. } => {
-            SessionStoreRepairHealth::Pending
-        }
-        crate::global_db::SessionTemporalRepairOutcome::Complete => {
-            SessionStoreRepairHealth::Complete
-        }
-    }
 }
 
 async fn retire_completed_consolidation_manifests(
@@ -650,16 +564,6 @@ mod tests {
         let path = shard.join(BRANCH_META_FILENAME);
         std::fs::write(&path, content).unwrap();
         path
-    }
-
-    #[test]
-    fn queued_session_repair_is_reported_as_pending_not_healthy() {
-        assert_eq!(
-            session_store_repair_health(crate::global_db::SessionTemporalRepairOutcome::Pending {
-                stage: crate::global_db::SessionTemporalRepairStage::RepairState,
-            }),
-            SessionStoreRepairHealth::Pending
-        );
     }
 
     #[test]

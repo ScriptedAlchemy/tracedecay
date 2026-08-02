@@ -1,122 +1,105 @@
-# Dogfood Migration-Boundary Recovery Runbook
+# Dogfood Recovery Runbook
 
-How to recover `cargo dogfood` once it has crossed its forward-only migration
-boundary. Documents the boundary state file format, the backup contract, the
+How to recover `cargo dogfood` if it fails partway through installing a new
+binary. Documents the forward-only binary policy, the backup contract, the
 recovery ladder, and the failure classes that strand a run. Sourced from
 `scripts/dogfood.sh`, `.claude/skills/dogfooding-tracedecay/SKILL.md`, and
 the runtime source cited inline. Do not read `~/.tracedecay` directly to
 verify this document — every claim below traces to a file in this repo.
 
-## 1. The boundary state file
+## 1. The forward-only binary policy
 
-Path: `$HOME/.tracedecay/dogfood-migration-boundary.state` (overridable via
-`TRACEDECAY_DOGFOOD_PROFILE_DIR`). Written and read entirely by
-`scripts/dogfood.sh`; nothing else touches it.
+There is no on-disk state file tracking dogfood's progress across runs.
+Each `cargo dogfood` invocation is self-contained: it stages a candidate
+binary, atomically installs it, then runs `post-update --strict --mode
+dogfood-forward-only` (`scripts/dogfood.sh:454`). In-run bookkeeping lives
+entirely in shell variables local to the script process
+(`replacement_active`, `boundary_reached`, `committed`,
+`scripts/dogfood.sh:310-312`) — nothing is written to `~/.tracedecay` to
+remember where a prior attempt left off.
 
-Structural rules, enforced by `load_boundary_state()`
-(`scripts/dogfood.sh:287-380`):
+The forward-only guarantee — never let an older binary reopen a store a
+newer binary has already touched — is enforced by the binary itself at
+open time (a schema/version identity check), not by a marker file. An old
+binary either matches what a store expects or is refused there, typed and
+observable, rather than by a script-side ceremony.
 
-- Must not be a symlink, must be a regular file, must be mode `0600`.
-- Currently written as `format=3` (`record_boundary_outcome()`,
-  `scripts/dogfood.sh:430-470`). `format=2` is still accepted for reading
-  (no `retained_binary_sha256` line) so a marker left by an older dogfood
-  build doesn't hard-fail the next run.
-- Eight newline-delimited fields for `format=3`:
-  1. `format=3`
-  2. `attempt_id=<epoch-pid-random-random>`
-  3. `outcome=<state>`
-  4. `attempt_boundary=<reached|not-reached>`
-  5. `old_binary_policy=<allowed|forbidden>`
-  6. `managed_daemon=<state>`
-  7. `retained_binary_sha256=<sha256|none>` — checksum of whatever is
-     currently at `~/.local/bin/tracedecay` at write time, used to prove a
-     later reader that the *retained* binary is the one the marker was
-     written for.
-  8. `checksum=<sha256 of lines 1-7>` — tamper/corruption check for the
-     marker itself.
+### What `cleanup_install()` does on failure
 
-### outcome values and what each means
+`cleanup_install()` (`scripts/dogfood.sh:356-415`) is an `EXIT`/`HUP`/
+`INT`/`TERM` trap that only acts if a candidate replaced the installed
+binary during this invocation (`replacement_active=1`) and the run did not
+reach `committed=1`:
 
-`marker_transition_is_valid()` (`scripts/dogfood.sh:255-276`) is the
-authoritative table of legal `outcome:boundary:policy:daemon` tuples. In
-practice:
-
-| outcome | boundary | old_binary_policy | meaning |
-|---|---|---|---|
-| `preparing` | `not-reached` | either | a run is staging a new candidate binary; nothing has replaced the installed binary yet. |
-| `safe-rollback-complete` | `not-reached` | either | a run failed before crossing the boundary; `scripts/dogfood.sh` restored the previous installed/staged binaries (`cleanup_install()`, `scripts/dogfood.sh:610-681`, the non-`boundary_reached` branch). Safe to just rerun `cargo dogfood`. |
-| `post-update-starting` | `reached` | `forbidden` | the new binary is installed and `post-update --strict --mode dogfood-forward-only` is running. If the process dies here, the marker is left in this state and the **next** run must recover forward, never re-run an old binary. |
-| `forward-recovery-required` | `reached` | `forbidden` | a run crossed the boundary and then failed; `cleanup_install()` recorded this outcome instead of restoring the old binary, because doing so would let an older binary reopen a store a newer one may have already migrated. `managed_daemon` is `inactivity-pending`, `inactive`, or `inactivity-unproven` depending on whether the daemon could be proven stopped. |
-| `validated` | `reached` | `forbidden` | the boundary was crossed and `post-update` succeeded; `committed=1`. This is the terminal success state. |
-
-Once `attempt_boundary=reached`, `old_binary_policy` is always forced to
-`forbidden` (`scripts/dogfood.sh:532-535`) regardless of what the marker
-said before — the script never trusts a "the old binary is fine to run"
-claim after the point of no return.
-
-`marker_retained_binary_trusted` (set in `load_boundary_state()`,
-`scripts/dogfood.sh:373-379`) is `1` only when the SHA-256 of the file
-currently at `~/.local/bin/tracedecay` matches `retained_binary_sha256`
-from the marker. If someone replaced the installed binary out from under a
-pending marker, this flag drops to `0` and
-`require_inactive_recovery_before_preparing()`
-(`scripts/dogfood.sh:494-528`) refuses to execute it, falling back to the
-freshly built source binary for recovery instead.
+- **Before the new binary was installed** (`boundary_reached=0`): the
+  script restores the pre-existing `installed_binary` and `staged_binary`
+  from the copies it took at `scripts/dogfood.sh:436-447`
+  (`restore_path()`, `scripts/dogfood.sh:316-326`). Safe to just rerun
+  `cargo dogfood`.
+- **After the new binary was installed but before `post-update` finished**
+  (`boundary_reached=1`, set at `scripts/dogfood.sh:453`): the script does
+  **not** restore the previous binary — running an older binary against a
+  store the new one may already have touched is exactly what the
+  forward-only policy forbids. Instead it runs
+  `post-update --mode dogfood-recover-inactive` against whichever binary is
+  available (installed, then staged, then the candidate,
+  `scripts/dogfood.sh:367-380`) to prove the managed daemon is stopped, then
+  prints recovery instructions to stderr
+  (`scripts/dogfood.sh:381-395`). Recover forward: fix or rebuild a newer
+  binary and rerun `cargo dogfood`.
 
 ## 2. The backup contract
 
 Two mutually exclusive modes, gated by `TRACEDECAY_DOGFOOD_BACKUP_PLAIN`
-(`scripts/dogfood.sh:538-557`):
+(`scripts/dogfood.sh:291-303`):
 
 - **Checksummed backup (default).** `TRACEDECAY_DOGFOOD_BACKUP` must name a
   directory containing `backup-manifest.json`
   (`tracedecay migrate backup-profile --to <dir> --backup-id <id>`, CLI
-  definition at `src/cli.rs:1218-1225`). Before crossing the boundary,
-  `scripts/dogfood.sh:689-697` rehearses it with
+  definition at `src/cli.rs:1218-1225`). Before installing the new binary,
+  `scripts/dogfood.sh:423-431` rehearses it with
   `tracedecay migrate rehearse-profile-backup --backup <dir> --restore <tmp>`
   (`src/cli.rs:1227-1234`) — a full restore-and-verify into a throwaway
   directory, deleted immediately after. This is the safe, default path but
   re-reads and re-writes the entire profile twice.
 - **Plain backup** (`TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1`, the owner-authorized
-  fast path, `scripts/dogfood.sh:538-557`).
+  fast path, `scripts/dogfood.sh:291-297`).
   `TRACEDECAY_DOGFOOD_BACKUP` must name a directory holding a plain `cp -a`
   profile copy at `<dir>/profile`, with `<dir>/profile/global.db` present.
-  No manifest, no rehearsal (`scripts/dogfood.sh:687-697` skips the
-  rehearsal step entirely when this flag is set). The script only checks
-  that the copy *looks like* a profile (directory + `global.db` file
-  exist) — it does not verify contents. This mode exists for profiles large
-  enough that the checksummed path's two full read/write passes outlast the
+  No manifest, no rehearsal (`scripts/dogfood.sh:423` skips the rehearsal
+  step entirely when this flag is set). The script only checks that the
+  copy *looks like* a profile (directory + `global.db` file exist) — it
+  does not verify contents. This mode exists for profiles large enough
+  that the checksummed path's two full read/write passes outlast the
   available maintenance window.
 
 Naming a backup is optional (see below), but when one is named, both modes
 require it to already exist; `cargo dogfood` never creates one implicitly.
 
 A backup is optional insurance, not a gate. With `TRACEDECAY_DOGFOOD_BACKUP`
-unset, dogfood proceeds and warns on stderr that it is running without one;
-the forward-only boundary still recovers forward (rung 1 below), but rungs 2
-and 3 have nothing to restore from. Naming a backup that is incomplete is
-still refused outright — that is a misconfiguration, not an opt-out.
+unset, dogfood proceeds and warns on stderr that it is running without one
+(`scripts/dogfood.sh:285-290`); the forward-only policy still recovers
+forward (rung 1 below), but rungs 2 and 3 have nothing to restore from.
+Naming a backup that is incomplete is still refused outright — that is a
+misconfiguration, not an opt-out.
 
 ## 3. The recovery ladder
 
-In order, this is what takes a stuck forward-only boundary back to a clean
-`validated` state:
+In order, this is what takes a stuck forward-only run back to a clean
+install:
 
-1. **Zero-writer proof.** Before touching anything, confirm no process
-   still holds the managed daemon or an authority lease on the live
-   stores. `scripts/dogfood.sh`'s own recovery path does this
+1. **Zero-writer proof.** Before touching anything further, confirm no
+   process still holds the managed daemon or an authority lease on the
+   live stores. `scripts/dogfood.sh`'s own failure path does this
    automatically via `post-update --mode dogfood-recover-inactive`
-   (`require_inactive_recovery_before_preparing()`,
-   `scripts/dogfood.sh:494-528`, and the `cleanup_install()` failure branch
-   at `scripts/dogfood.sh:620-658`), which runs the retained/staged/source
-   binary just far enough to prove the managed service is stopped and
-   record `managed_daemon=inactive` (or `inactivity-unproven` if that
-   proof itself fails).
+   (`cleanup_install()`, `scripts/dogfood.sh:376-380`), which runs the
+   retained/staged/candidate binary just far enough to prove the managed
+   service is stopped.
 2. **Plain backup.** `TRACEDECAY_DOGFOOD_BACKUP_PLAIN=1` with
    `TRACEDECAY_DOGFOOD_BACKUP=<dir>` pointing at a `cp -a` copy already
    taken of `~/.tracedecay` (`<dir>/profile/global.db` present), per
    section 2.
-3. **Restore the pre-boundary `global.db`.** The registry — which projects
+3. **Restore the pre-failure `global.db`.** The registry — which projects
    are enrolled, their storage locations, graph scopes, artifacts — lives
    inside `global.db` and does not need to be reconstructed from scratch;
    it is *in* the restored file. What actually matters is that enrollment
@@ -145,10 +128,9 @@ In order, this is what takes a stuck forward-only boundary back to a clean
    `diff_registry_reconstruction_report`) is the read-only way to confirm
    the registry now matches on-disk reality before moving on.
 5. **Rerun `cargo dogfood`.** Once the daemon is proven inactive, the
-   profile is backed up, `global.db` is consistent (restored or
-   reconstructed), and `tracedecay init` has rebuilt the derived graph,
-   `cargo dogfood` runs the normal flow end to end and should reach
-   `outcome=validated`.
+   profile is backed up, and `global.db` is consistent (restored or
+   reconstructed), `cargo dogfood` runs the normal flow end to end and
+   should install and validate cleanly.
 
 ## 4. Failure classes that strand a run
 
@@ -176,8 +158,8 @@ In order, this is what takes a stuck forward-only boundary back to a clean
   Authority-invariant audits page with a keyset cursor at
   `AUDIT_PAGE_ROWS = 128` (`invariants.rs:49`) and observation scans at
   `OBSERVATION_AUDIT_PAGE_ROWS = 48` (`invariants.rs:52-58`) instead of one
-  unbounded `SELECT`. The migration path uses the same pattern —
-  `MIGRATION_QUERY_PAGE_ROWS = 256`
+  unbounded `SELECT`. The profile-consolidation path uses the same
+  pattern — `MIGRATION_QUERY_PAGE_ROWS = 256`
   (`crates/tracedecay-migrate/src/hermes/copy.rs:14`) drives keyset-paged
   `SELECT rowid, ... WHERE rowid > ?1 ... ORDER BY rowid LIMIT ?2` queries
   (`crates/tracedecay-migrate/src/hermes/resolution.rs:225-252` and

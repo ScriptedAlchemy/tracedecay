@@ -1,4 +1,4 @@
-//! Explicit offline union of branch-local legacy memory into project memory.
+//! Union of a retiring branch store's durable memory into project memory.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -12,11 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use tracedecay_domain::{FactOwnerV1, ProjectId, ProvenanceId, SourceStoreId};
-use tracedecay_store::{
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
-    FactCompatibilityStore, MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, plan_memory_v2_owner_merge,
-};
+use tracedecay_domain::FactOwnerV1;
+use tracedecay_store::{MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, plan_memory_v2_owner_merge};
 
 use tracedecay_runtime_core::branch_meta;
 use tracedecay_runtime_core::db::engine::QueryExecutor;
@@ -25,11 +22,8 @@ use tracedecay_runtime_core::db::{
 };
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage;
-use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 
-const LEGACY_SOURCE_STORE: &str = "legacy-memory-v1";
 const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
-const MAX_CUTOVER_PASSES: usize = 100_000;
 const MIN_SUPPORTED_SOURCE_SCHEMA: i64 = 15;
 
 #[cfg(any(test, feature = "test-transport"))]
@@ -90,7 +84,6 @@ pub struct MemoryCutoverReport {
     pub sources: Vec<MemoryCutoverSource>,
     pub confirmation_token: String,
     pub applied: bool,
-    pub cutover_passes: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,11 +101,6 @@ struct BranchMemoryCutoverReceiptSource {
     generation: String,
     legacy_only: bool,
     archives: Vec<crate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
-}
-
-pub async fn plan(options: &MemoryCutoverOptions) -> Result<MemoryCutoverReport> {
-    let resolved = resolve(options)?;
-    plan_resolved(&resolved).await
 }
 
 async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutoverReport> {
@@ -156,38 +144,7 @@ async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutover
         sources,
         confirmation_token,
         applied: false,
-        cutover_passes: 0,
     })
-}
-
-pub async fn apply(
-    options: &MemoryCutoverOptions,
-    expected_confirmation_token: &str,
-) -> Result<MemoryCutoverReport> {
-    let resolved = resolve(options)?;
-    let planned = plan_resolved(&resolved).await?;
-    if planned.confirmation_token != expected_confirmation_token {
-        return Err(migration_error(
-            "memory cutover confirmation token does not match the current branch-store generation",
-        ));
-    }
-    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-        &resolved.profile_root,
-        "project-wide branch memory cutover",
-    )?;
-    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &resolved.profile_root,
-        "project-wide branch memory cutover",
-    )?;
-    let identity = crate::profile_identity::load_or_create(&resolved.profile_root)?;
-    let runtime = crate::session_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
-    let project_id = ProjectId::new(resolved.project_id.clone())
-        .map_err(|error| migration_error(error.to_string()))?;
-    let target = runtime
-        .project_memory(project_id, [resolved.project_root.clone()])
-        .await?;
-    apply_planned(&resolved, &target, planned).await
 }
 
 /// Runs the same generation-bound cutover as the offline migration command
@@ -251,40 +208,6 @@ async fn apply_planned(
     }
     crate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(target).await?;
 
-    let owner = FactOwnerV1::Project {
-        project_id: ProjectId::new(resolved.project_id.clone())
-            .map_err(|error| migration_error(error.to_string()))?,
-    };
-    let source_store_id = SourceStoreId::new(LEGACY_SOURCE_STORE.to_owned())
-        .map_err(|error| migration_error(error.to_string()))?;
-    target
-        .reopen_memory_v2_cutover_for_legacy_union(&owner, &source_store_id)
-        .await?;
-
-    let cutover = CompatibilityLegacyMemoryCutoverCommandV1::new(
-        owner,
-        ProvenanceId::new("v1-cutover".to_owned())
-            .map_err(|error| migration_error(error.to_string()))?,
-    )
-    .map_err(|error| migration_error(error.to_string()))?;
-    let store = DatabaseFactStore::new(target);
-    let mut cutover_passes = 0;
-    loop {
-        cutover_passes += 1;
-        if cutover_passes > MAX_CUTOVER_PASSES {
-            return Err(migration_error(
-                "memory cutover exceeded its bounded pass limit",
-            ));
-        }
-        if store
-            .advance_compatibility_legacy_memory_cutover(cutover.clone())
-            .await
-            .map_err(|error| migration_error(error.to_string()))?
-            == CompatibilityLegacyMemoryCutoverProgressV1::Complete
-        {
-            break;
-        }
-    }
     verify_source_generations(&planned.sources)?;
     target.checkpoint().await?;
     inject_cutover_fault(CutoverFaultPhase::TargetDurabilityBarrier)?;
@@ -294,7 +217,6 @@ async fn apply_planned(
 
     Ok(MemoryCutoverReport {
         applied: true,
-        cutover_passes,
         ..planned
     })
 }
@@ -725,7 +647,9 @@ fn branch_has_no_durable_memory(path: &Path) -> bool {
 }
 
 struct ResolvedMemoryCutover {
+    #[allow(dead_code)]
     project_root: PathBuf,
+    #[allow(dead_code)]
     profile_root: PathBuf,
     data_root: PathBuf,
     graph_db_path: PathBuf,
@@ -970,6 +894,7 @@ fn migration_error(message: impl Into<String>) -> TraceDecayError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use tracedecay_domain::ProjectId;
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     /// A project store holding one tracked branch whose `SQLite` family carries a

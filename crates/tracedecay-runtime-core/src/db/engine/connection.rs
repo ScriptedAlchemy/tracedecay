@@ -145,10 +145,7 @@ impl ReadConnection {
     #[must_use]
     pub fn background(&self) -> Self {
         Self {
-            connection: Connection {
-                runtime: Arc::clone(&self.connection.runtime),
-                read_priority: OperationPriorityV1::Background,
-            },
+            connection: self.connection.background_reads(),
         }
     }
 }
@@ -164,6 +161,28 @@ impl Connection {
     pub fn read_only(&self) -> ReadConnection {
         ReadConnection {
             connection: self.clone(),
+        }
+    }
+
+    /// The same store and the same writer, with every read this handle issues
+    /// admitted as background work.
+    ///
+    /// Writes are unaffected: the returned handle shares this one's runtime, so
+    /// `execute`, `execute_batch`, and every transaction still reach the same
+    /// serialized writer. Only the reader-pool admission of non-transactional
+    /// `query`/`read_snapshot` calls changes, and those then admit against the
+    /// unreserved slice of the general lane.
+    ///
+    /// Background maintenance that runs on a *write* connection needs this:
+    /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
+    /// the writer would otherwise contend for the same reserved lane slice as
+    /// interactive queries — and, because reader leases are bounded, be the
+    /// first thing to fail once it has saturated that lane itself.
+    #[must_use]
+    pub fn background_reads(&self) -> Self {
+        Self {
+            runtime: Arc::clone(&self.runtime),
+            read_priority: OperationPriorityV1::Background,
         }
     }
 

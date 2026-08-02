@@ -388,17 +388,6 @@ pub(super) const TABLES: &[Table] = &[
         []
     ),
     table!(
-        "observation_projection_migrations",
-        [
-            column("source_projector_version", "TEXT", true, None, 1),
-            column("target_projector_version", "TEXT", true, None, 2),
-            column("source_frontier", "INTEGER", true, None, 0),
-            column("migrated_through", "INTEGER", true, None, 0),
-            column("completed", "INTEGER", true, None, 0),
-        ],
-        []
-    ),
-    table!(
         "observation_projection_aliases",
         [
             column("projector_version", "TEXT", true, None, 1),

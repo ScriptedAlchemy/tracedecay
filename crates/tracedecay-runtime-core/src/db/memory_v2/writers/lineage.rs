@@ -2,9 +2,8 @@
 //! writers.
 
 use tracedecay_domain::{
-    Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
-    FactEvidenceRelationV1, FactId, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState,
-    SourceStoreId, UtcMicros,
+    FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId, FactEvidenceRelationV1,
+    FactId, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState,
 };
 
 use crate::db::engine::params;
@@ -14,10 +13,8 @@ use crate::errors::Result;
 use super::super::types::{OwnerKey, StoredAssertionHeaderV1};
 use super::super::{
     MemoryV2Executor, OPERATION, canonical_mapping_replay, canonical_replay, db_error, db_message,
-    json_text, optional_i64, optional_string, payload_access_label, row_exists, scalar_i64_params,
-    validate_v1_compatibility_source,
+    json_text, optional_string, payload_access_label, row_exists, scalar_i64_params,
 };
-use super::purge::insert_quarantine;
 
 pub(in crate::db::memory_v2) async fn insert_fact_identity(
     conn: &impl MemoryV2Executor,
@@ -96,275 +93,11 @@ pub(in crate::db::memory_v2) async fn insert_mapping(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db::memory_v2) async fn insert_legacy_feedback_event_mapping(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    source_store_id: &SourceStoreId,
-    legacy_feedback_event_id: i64,
-    fact_id: &FactId,
-    event_id: &FactEventId,
-) -> Result<()> {
-    validate_v1_compatibility_source(source_store_id)?;
-    let mut rows = conn
-        .query(
-            "SELECT fact_id, event_id FROM memory_v2_legacy_feedback_event_map
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND source_store_id = ?3 AND legacy_feedback_event_id = ?4",
-            params![
-                owner.kind,
-                owner.project_id.as_str(),
-                source_store_id.as_str(),
-                legacy_feedback_event_id
-            ],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-    {
-        let existing_fact_id = row
-            .get::<String>(0)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_event_id = row
-            .get::<String>(1)
-            .map_err(|error| db_error(OPERATION, error))?;
-        if existing_fact_id == fact_id.as_str() && existing_event_id == event_id.as_str() {
-            return Ok(());
-        }
-        return Err(db_message(
-            OPERATION,
-            "legacy feedback event mapping identity collision",
-        ));
-    }
-    drop(rows);
-    if let Some(existing_legacy_id) = optional_i64(
-        conn,
-        "SELECT legacy_feedback_event_id FROM memory_v2_legacy_feedback_event_map
-         WHERE owner_kind = ?1 AND project_id = ?2
-           AND source_store_id = ?3 AND event_id = ?4",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            source_store_id.as_str(),
-            event_id.as_str()
-        ],
-    )
-    .await?
-    {
-        if existing_legacy_id == legacy_feedback_event_id {
-            return Ok(());
-        }
-        return Err(db_message(
-            OPERATION,
-            "canonical feedback event maps to a different legacy event",
-        ));
-    }
-    conn.execute(
-        "INSERT INTO memory_v2_legacy_feedback_event_map(
-            owner_kind, project_id, source_store_id, legacy_feedback_event_id, fact_id, event_id
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            source_store_id.as_str(),
-            legacy_feedback_event_id,
-            fact_id.as_str(),
-            event_id.as_str()
-        ],
-    )
-    .await
-    .map_err(|error| db_error(OPERATION, error))?;
-    Ok(())
-}
-
 /// Conflicting legacy numeric rows must not turn a resumable V22 repair or
 /// V1 backfill into a permanent error. The first canonical mapping wins;
 /// divergent replays are quarantined while the caller advances its cursor.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db::memory_v2) async fn legacy_feedback_mapping_can_be_recorded(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    source_store_id: &SourceStoreId,
-    legacy_feedback_event_id: i64,
-    fact_id: &FactId,
-    event_id: &FactEventId,
-    recorded_at: i64,
-) -> Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT fact_id, event_id FROM memory_v2_legacy_feedback_event_map
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND source_store_id = ?3 AND legacy_feedback_event_id = ?4",
-            params![
-                owner.kind,
-                owner.project_id.as_str(),
-                source_store_id.as_str(),
-                legacy_feedback_event_id
-            ],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-    {
-        let existing_fact_id = row
-            .get::<String>(0)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_event_id = row
-            .get::<String>(1)
-            .map_err(|error| db_error(OPERATION, error))?;
-        if existing_fact_id != fact_id.as_str() || existing_event_id != event_id.as_str() {
-            insert_quarantine(
-                conn,
-                owner,
-                source_store_id,
-                "memory_feedback_events",
-                legacy_feedback_event_id,
-                "feedback_mapping_collision",
-                recorded_at,
-            )
-            .await?;
-            return Ok(false);
-        }
-    }
-    drop(rows);
-    if let Some(existing_legacy_event_id) = optional_i64(
-        conn,
-        "SELECT legacy_feedback_event_id FROM memory_v2_legacy_feedback_event_map
-         WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
-           AND event_id = ?4",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            source_store_id.as_str(),
-            event_id.as_str()
-        ],
-    )
-    .await?
-        && existing_legacy_event_id != legacy_feedback_event_id
-    {
-        insert_quarantine(
-            conn,
-            owner,
-            source_store_id,
-            "memory_feedback_events",
-            legacy_feedback_event_id,
-            "feedback_event_duplicate",
-            recorded_at,
-        )
-        .await?;
-        return Ok(false);
-    }
-    Ok(true)
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db::memory_v2) async fn insert_feedback_history(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    fact_id: &FactId,
-    event_id: &FactEventId,
-    action: &str,
-    old_trust: Confidence,
-    new_trust: Confidence,
-    occurred_at: UtcMicros,
-    source: Option<&str>,
-    note: Option<&str>,
-    details_availability: &str,
-) -> Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT action, old_trust, new_trust, occurred_at, source, note, details_availability
-             FROM memory_v2_feedback_history
-             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3 AND event_id = ?4",
-            params![
-                owner.kind,
-                owner.project_id.as_str(),
-                fact_id.as_str(),
-                event_id.as_str()
-            ],
-        )
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    if let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-    {
-        let existing_action = row
-            .get::<String>(0)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_old_trust = row
-            .get::<f64>(1)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_new_trust = row
-            .get::<f64>(2)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_occurred_at = row
-            .get::<i64>(3)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_source = row
-            .get::<Option<String>>(4)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_note = row
-            .get::<Option<String>>(5)
-            .map_err(|error| db_error(OPERATION, error))?;
-        let existing_availability = row
-            .get::<String>(6)
-            .map_err(|error| db_error(OPERATION, error))?;
-        if existing_action != action
-            || existing_old_trust.to_bits() != old_trust.as_f64().to_bits()
-            || existing_new_trust.to_bits() != new_trust.as_f64().to_bits()
-            || existing_occurred_at != occurred_at.0
-        {
-            return Err(db_message(OPERATION, "feedback history identity collision"));
-        }
-        if existing_source.as_deref() == source
-            && existing_note.as_deref() == note
-            && existing_availability == details_availability
-        {
-            return Ok(());
-        }
-        if existing_source.is_none()
-            && existing_note.is_none()
-            && matches!(
-                existing_availability.as_str(),
-                "legacy_redacted" | "unknown"
-            )
-        {
-            return Ok(());
-        }
-        return Err(db_message(OPERATION, "feedback history detail collision"));
-    }
-    drop(rows);
-    conn.execute(
-        "INSERT INTO memory_v2_feedback_history(
-            owner_kind, project_id, fact_id, event_id, action, old_trust, new_trust,
-            occurred_at, source, note, details_availability
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            fact_id.as_str(),
-            event_id.as_str(),
-            action,
-            old_trust.as_f64(),
-            new_trust.as_f64(),
-            occurred_at.0,
-            source,
-            note,
-            details_availability
-        ],
-    )
-    .await
-    .map_err(|error| db_error(OPERATION, error))?;
-    Ok(())
-}
-
 pub(in crate::db::memory_v2) async fn insert_event(
     conn: &impl MemoryV2Executor,
     owner: &OwnerKey,
