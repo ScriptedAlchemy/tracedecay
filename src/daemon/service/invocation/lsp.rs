@@ -3,22 +3,6 @@
 use super::*;
 use tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS;
 
-impl DaemonInvocationService {
-    /// Returns the retained semantic scheduling handle for `project_root`,
-    /// or the sole mounted handle when no root is given and exactly one
-    /// project is registered.
-    #[allow(dead_code)] // Plan 31 semantic runtime accessor — staged
-    pub(crate) async fn semantic_runtime(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1> {
-        match project_root {
-            Some(root) => self.project_runtimes.get(root).await,
-            None => self.project_runtimes.sole().await,
-        }
-    }
-}
-
 pub(super) fn canonicalize_lsp_roots(roots: &mut [(PathBuf, String, ResolvedScope)]) -> bool {
     roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
     !roots
@@ -33,7 +17,6 @@ pub(super) fn runtime_lsp_actor(
     DaemonLspSessionFactory::open_federated_workspace_session(workspace, factories)
 }
 
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(super) async fn install_lsp_owner(
         &self,
