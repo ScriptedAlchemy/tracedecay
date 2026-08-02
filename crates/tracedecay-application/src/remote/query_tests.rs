@@ -9,15 +9,18 @@ use super::composition::{
     PendingLocalObservationsV1, QueryManifestBindingV1, RemoteCompletenessV1, RemoteFreshnessV1,
     RemoteQueryCompositionV1, ShardCoverageStateV1, ShardQueryContributionV1,
 };
-use super::protocol::{RemoteProtocolPortV1, RemoteProtocolRequestV1};
+use super::protocol::{
+    RemoteClockPortV1, RemoteProtocolExecutionErrorV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1,
+};
 use super::query::{
     REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1, REMOTE_QUERY_SCHEMA_REVISION_V1,
     RemoteExactObservationQueryCommandV1, RemoteExactObservationQueryErrorV1,
     RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryProtocolAdapterV1,
     RemoteExactObservationQueryReadPortV1, RemoteExactObservationQueryServiceV1,
     RemoteExactObservationResultV1, RemoteQueryAuthorizationEvidenceV1,
-    RemoteQueryAuthorizationPortV1, RemoteQueryClockPortV1, RemoteQueryCompleteValueV1,
-    RemoteQueryOperationV1, RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
+    RemoteQueryAuthorizationPortV1, RemoteQueryCompleteValueV1, RemoteQueryOperationV1,
+    RemoteQueryRequestV1, RemoteQueryResultV1, query_protocol_failure,
     remote_exact_observation_query_result_contract_v1, validate_composition,
     validate_protocol_authority_binding, validate_result_identity, validate_returned_authority,
     validate_returned_observation_identity, validate_returned_provenance,
@@ -524,6 +527,19 @@ impl RemoteEnrollmentCredentialLookupPortV1 for UnavailableCredentials {
 struct UnreachableRead;
 
 impl RemoteExactObservationQueryReadPortV1 for UnreachableRead {
+    fn current_authority(
+        &self,
+        expected: &RemoteWriterFenceV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteExactObservationQueryErrorV1> {
+        Ok(CurrentRemoteAuthorityStateV1::Partial {
+            known_fence: Some(expected.clone()),
+            missing: std::collections::BTreeSet::from([
+                tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+            ]),
+            observed_at: UtcMicros(77),
+        })
+    }
+
     fn read_exact_observation(
         &self,
         _command: &RemoteExactObservationQueryCommandV1,
@@ -549,9 +565,17 @@ impl RemoteQueryAuthorizationPortV1 for UnreachableAuthorization {
 
 struct FixedClock(UtcMicros);
 
-impl RemoteQueryClockPortV1 for FixedClock {
-    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
+impl RemoteClockPortV1 for FixedClock {
+    fn now(&self) -> Result<UtcMicros, RemoteProtocolExecutionErrorV1> {
         Ok(self.0)
+    }
+}
+
+struct UnavailableClock;
+
+impl RemoteClockPortV1 for UnavailableClock {
+    fn now(&self) -> Result<UtcMicros, RemoteProtocolExecutionErrorV1> {
+        Err(RemoteProtocolExecutionErrorV1::ClockUnavailable)
     }
 }
 
@@ -581,10 +605,12 @@ fn unavailable_service() -> RemoteExactObservationQueryServiceV1 {
 #[test]
 fn protocol_failure_uses_server_clock_and_never_returns_partial_success() {
     let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(unavailable_service());
-    let response = adapter.execute(
-        protocol_request(UtcMicros(10)),
-        OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
-    );
+    let response = adapter
+        .execute(
+            protocol_request(UtcMicros(10)),
+            OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+        )
+        .unwrap();
 
     assert!(response.result.is_err());
     assert!(matches!(
@@ -593,5 +619,25 @@ fn protocol_failure_uses_server_clock_and_never_returns_partial_success() {
             observed_at: UtcMicros(77),
             ..
         }
+    ));
+}
+
+#[test]
+fn protocol_clock_failure_has_no_fabricated_response() {
+    let service = RemoteExactObservationQueryServiceV1::new_with_clock(
+        Arc::new(UnavailableCredentials),
+        Arc::new(UnreachableAuthorization),
+        Arc::new(UnreachableRead),
+        Arc::new(UnavailableClock),
+    );
+    let adapter = RemoteExactObservationQueryProtocolAdapterV1::new(service);
+    let response = adapter.execute(
+        protocol_request(UtcMicros(10)),
+        OpaqueRemoteCredential::new(vec![b'q'; 32].into_boxed_slice()).unwrap(),
+    );
+
+    assert!(matches!(
+        response,
+        Err(RemoteProtocolExecutionErrorV1::ClockUnavailable)
     ));
 }

@@ -119,7 +119,7 @@ impl EnrolledRemoteClient {
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
         request
             .body
-            .validate_remote_protocol_body(request.sent_at)
+            .validate_remote_protocol_body()
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
         let url = self
             .endpoint
@@ -145,7 +145,7 @@ impl EnrolledRemoteClient {
     ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
         request
             .validate_metadata()
-            .and_then(|()| request.body.validate_remote_protocol_body(request.sent_at))
+            .and_then(|()| request.body.validate_remote_protocol_body())
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
         let url = self
             .endpoint
@@ -172,7 +172,7 @@ impl EnrolledRemoteClient {
     ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
         request
             .validate_initial_enrollment_metadata()
-            .and_then(|()| request.body.validate_remote_protocol_body(request.sent_at))
+            .and_then(|()| request.body.validate_remote_protocol_body())
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
         let enrollment_credential = HeaderValue::from_bytes(enrollment_credential.as_ref())
             .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;

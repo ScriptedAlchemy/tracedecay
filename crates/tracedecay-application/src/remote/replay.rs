@@ -4,9 +4,7 @@
 //! application carries only canonical capture identity and a bounded replay
 //! receipt suitable for validation and status reporting.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,9 +24,10 @@ use super::capture::{
 };
 use super::protocol::RemoteProtocolBodyV1;
 use super::protocol::{
-    REMOTE_PROTOCOL_VERSION_V1, REMOTE_REPLAY_USE_CASE_ID_V1, RemoteProtocolFailureV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_protocol_problem, remote_replay_result_contract_v1,
+    REMOTE_PROTOCOL_VERSION_V1, REMOTE_REPLAY_USE_CASE_ID_V1, RemoteClockPortV1,
+    RemoteProtocolExecutionErrorV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
+    remote_replay_result_contract_v1,
 };
 use crate::{
     ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
@@ -61,10 +60,7 @@ impl RemoteReplayRequestV1 {
 }
 
 impl RemoteProtocolBodyV1 for RemoteReplayRequestV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        _sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
+    fn validate_remote_protocol_body(&self) -> Result<(), ApplicationContractError> {
         self.validate()
     }
 }
@@ -307,6 +303,7 @@ pub struct RemoteReplayOperationReceiptV1 {
     pub pre_state_digest: ManifestDigest,
     pub terminal_state_digest: ManifestDigest,
     pub committed_effect_digest: ManifestDigest,
+    pub started_at: UtcMicros,
     pub committed_at: UtcMicros,
     pub budget: OperationBudgetUsage,
     pub transaction: Option<RemoteReplayCommitReceiptV1>,
@@ -315,6 +312,7 @@ pub struct RemoteReplayOperationReceiptV1 {
 impl RemoteReplayOperationReceiptV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
         if self.replay_attempt == 0
+            || self.started_at > self.committed_at
             || self.budget.units_consumed == 0
             || self.budget.bytes_consumed == 0
         {
@@ -390,6 +388,11 @@ pub trait RemoteReplayFrameLookupPortV1: Send + Sync {
 }
 
 pub trait RemoteReplayCurrentWriterPortV1: Send + Sync {
+    fn current_authority(
+        &self,
+        expected: &RemoteWriterFenceV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1>;
+
     fn current_writer(
         &self,
         frame: &RemoteReplayFrameV1,
@@ -422,53 +425,10 @@ pub struct RemoteReplayServiceV1 {
     policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
     transaction: Arc<dyn RemoteReplayTransactionPortV1>,
     spool: Arc<dyn RemoteReplaySpoolPortV1>,
-    clock: Arc<dyn RemoteReplayClockPortV1>,
-}
-
-pub trait RemoteReplayClockPortV1: Send + Sync {
-    fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1>;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemRemoteReplayClockV1;
-
-impl RemoteReplayClockPortV1 for SystemRemoteReplayClockV1 {
-    fn now(&self) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)?
-            .as_micros();
-        i64::try_from(micros)
-            .map(UtcMicros)
-            .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
-    }
+    clock: Arc<dyn RemoteClockPortV1>,
 }
 
 impl RemoteReplayServiceV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        authentication: Arc<dyn RemoteAuthorityAuthenticationPort + Send + Sync>,
-        credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
-        frames: Arc<dyn RemoteReplayFrameLookupPortV1>,
-        current_writer: Arc<dyn RemoteReplayCurrentWriterPortV1>,
-        policy: Arc<dyn RemoteReplayPolicyPortV1>,
-        policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
-        transaction: Arc<dyn RemoteReplayTransactionPortV1>,
-        spool: Arc<dyn RemoteReplaySpoolPortV1>,
-    ) -> Self {
-        Self::new_with_clock(
-            authentication,
-            credentials,
-            frames,
-            current_writer,
-            policy,
-            policy_evidence,
-            transaction,
-            spool,
-            Arc::new(SystemRemoteReplayClockV1),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_clock(
         authentication: Arc<dyn RemoteAuthorityAuthenticationPort + Send + Sync>,
@@ -479,7 +439,7 @@ impl RemoteReplayServiceV1 {
         policy_evidence: Arc<dyn RemoteReplayPolicyEvidencePortV1>,
         transaction: Arc<dyn RemoteReplayTransactionPortV1>,
         spool: Arc<dyn RemoteReplaySpoolPortV1>,
-        clock: Arc<dyn RemoteReplayClockPortV1>,
+        clock: Arc<dyn RemoteClockPortV1>,
     ) -> Self {
         Self {
             authentication,
@@ -630,14 +590,14 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1> {
         let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
-            known_fence: Some(request.expected_authority.clone()),
-            missing: BTreeSet::from([RemoteAuthorityUnavailableReasonV1::FenceUnverified]),
-            observed_at,
-        };
+        let observed_at = self.service.clock.now()?;
+        let server_authority = self
+            .service
+            .current_writer
+            .current_authority(&request.expected_authority)
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)?;
         match self.service.replay(&request, &credential) {
             Ok(outcome) => {
                 let authority = outcome.authority.clone();
@@ -649,15 +609,27 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                     )
                 });
                 RemoteProtocolResponseV1::new(request_id, authority, result)
-                    .expect("replay adapter preserves validated response identities")
+                    .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
             }
             Err(error) => {
-                let authority = match &error {
-                    RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
-                    | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
-                        state.as_ref().clone()
+                let authority = if matches!(
+                    &error,
+                    RemoteReplayServiceErrorV1::Credential(
+                        RemoteEnrollmentAuthorityErrorV1::GrantNotFound
+                    )
+                ) {
+                    CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+                        observed_at,
                     }
-                    _ => fallback_authority,
+                } else {
+                    match &error {
+                        RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
+                        | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
+                            state.as_ref().clone()
+                        }
+                        _ => server_authority,
+                    }
                 };
                 let failure = replay_protocol_failure(error);
                 RemoteProtocolResponseV1::new(
@@ -669,7 +641,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                         failure,
                     )),
                 )
-                .expect("replay adapter preserves validated problem identities")
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
             }
         }
     }
@@ -696,15 +668,12 @@ fn replay_effect_envelope(
     operation_receipt
         .validate()
         .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    if operation_receipt.committed_at < request.sent_at {
-        return Err(RemoteProtocolFailureV1::AuthorityUnavailable);
-    }
     let expected_state = operation_receipt.pre_state_digest.clone();
     let committed_state = operation_receipt.committed_effect_digest.clone();
     let deadline = Deadline::new(outcome.caller.expires_at)
         .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
     let execution = OperationReceipt::completed(
-        request.sent_at,
+        operation_receipt.started_at,
         operation_receipt.committed_at,
         deadline,
         operation_receipt.budget,
@@ -894,9 +863,9 @@ pub fn replay_remote_capture(
     presented_caller_credential: &OpaqueRemoteCredential,
     frame: &RemoteReplayFrameV1,
     current_writer: &RemoteWriterAuthorityV1,
-    clock: &dyn RemoteReplayClockPortV1,
+    clock: &dyn RemoteClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
-    let observed_at = clock.now()?;
+    let observed_at = remote_clock_now(clock)?;
     with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
         replay_remote_capture_attempt(
             authentication,
@@ -913,6 +882,14 @@ pub fn replay_remote_capture(
             clock,
         )
     })
+}
+
+fn remote_clock_now(
+    clock: &dyn RemoteClockPortV1,
+) -> Result<UtcMicros, RemoteReplayApplicationErrorV1> {
+    clock
+        .now()
+        .map_err(|_| RemoteReplayApplicationErrorV1::ClockUnavailable)
 }
 
 fn with_replay_attempt<T>(
@@ -946,7 +923,7 @@ fn replay_remote_capture_attempt(
     current_writer: &RemoteWriterAuthorityV1,
     replay_attempt: u64,
     observed_at: UtcMicros,
-    clock: &dyn RemoteReplayClockPortV1,
+    clock: &dyn RemoteClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
     validate_scope_and_fence(frame, current_writer, caller_credential)?;
     if let Err(error) = authenticate_remote_request(
@@ -972,7 +949,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Rejected,
                 replay_attempt,
-                clock.now()?,
+                remote_clock_now(clock)?,
                 Some(RemoteReplayFindingV1::EnrollmentRevoked),
                 None,
             )?;
@@ -1002,7 +979,7 @@ fn replay_remote_capture_attempt(
             .receipt
             .ok_or(RemoteReplayApplicationErrorV1::ReceiptMissing)?;
         receipt.validate_for(frame, current_writer)?;
-        let acknowledged_at = clock.now()?;
+        let acknowledged_at = remote_clock_now(clock)?;
         if receipt.committed_at > acknowledged_at {
             return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
         }
@@ -1034,7 +1011,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Rejected,
                 replay_attempt,
-                clock.now()?,
+                remote_clock_now(clock)?,
                 Some(RemoteReplayFindingV1::PolicyChanged),
                 None,
             )?;
@@ -1049,7 +1026,7 @@ fn replay_remote_capture_attempt(
                 RemoteReplayStateV1::Pending,
                 RemoteReplayStateV1::Quarantined,
                 replay_attempt,
-                clock.now()?,
+                remote_clock_now(clock)?,
                 Some(RemoteReplayFindingV1::PolicyChanged),
                 None,
             )?;
@@ -1074,7 +1051,7 @@ fn replay_remote_capture_attempt(
         ),
     };
     receipt.validate_for(frame, current_writer)?;
-    let admitted_at = clock.now()?;
+    let admitted_at = remote_clock_now(clock)?;
     if receipt.committed_at > admitted_at {
         return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
     }
@@ -1093,7 +1070,7 @@ fn replay_remote_capture_attempt(
         frame,
         disposition,
         replay_attempt,
-        clock.now()?,
+        remote_clock_now(clock)?,
         receipt.clone(),
     )?;
     let operation_receipt = replay_operation_receipt(&admitted, &terminal, Some(receipt.clone()))?;
@@ -1264,6 +1241,7 @@ fn replay_operation_receipt(
         pre_state_digest: first.pre_state_digest.clone(),
         terminal_state_digest: terminal.terminal_state_digest.clone(),
         committed_effect_digest,
+        started_at: first.committed_at,
         committed_at: terminal.committed_at,
         budget,
         transaction,

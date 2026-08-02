@@ -23,9 +23,9 @@ use tracedecay_application::remote::auth::OpaqueRemoteCredential;
 use tracedecay_application::remote::protocol::{
     REMOTE_PROTOCOL_VERSION_V1, RemoteAuthorityDiscoveryProtocolPortV1,
     RemoteAuthorityDiscoveryProtocolRequestV1, RemoteEnrollmentProtocolPortV1,
-    RemoteEnrollmentProtocolRequestV1, RemoteProtocolBodyV1, RemoteProtocolFailureV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    RemoteProtocolServiceV1, remote_protocol_problem,
+    RemoteEnrollmentProtocolRequestV1, RemoteProtocolBodyV1, RemoteProtocolExecutionErrorV1,
+    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
 };
 use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
@@ -114,6 +114,8 @@ pub enum RemoteHttpBoundaryError {
     UnsupportedProtocolVersion,
     #[error("remote request metadata is invalid")]
     InvalidRequest,
+    #[error("remote authority is unavailable")]
+    AuthorityUnavailable(RequestId),
 }
 
 /// Wire request body. Secret material is supplied separately through
@@ -245,11 +247,12 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
         Port: RemoteProtocolPortV1<Request>,
         Request: RemoteProtocolBodyV1,
     {
+        let request_id = request.request.request_id.clone();
         let admission = request.admit(authorization)?;
         let response = self
             .service
             .execute(admission.request, admission.credential)
-            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
         Ok(response.into())
     }
 
@@ -264,11 +267,12 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
     where
         Port: RemoteEnrollmentProtocolPortV1,
     {
+        let request_id = request.request.request_id.clone();
         let admission = request.admit_with_replacement(credentials)?;
         let response = self
             .service
             .execute_enrollment(admission.request, admission.current, admission.replacement)
-            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
         Ok(response.into())
     }
 
@@ -283,12 +287,26 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
     where
         Port: RemoteAuthorityDiscoveryProtocolPortV1,
     {
+        let request_id = request.request.request_id.clone();
         let admission = request.admit(authorization)?;
         let response = self
             .service
             .discover_authority(admission.request, admission.credential)
-            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
         Ok(response.into())
+    }
+}
+
+fn remote_execution_boundary_error(
+    error: RemoteProtocolExecutionErrorV1,
+    request_id: RequestId,
+) -> RemoteHttpBoundaryError {
+    match error {
+        RemoteProtocolExecutionErrorV1::InvalidRequest => RemoteHttpBoundaryError::InvalidRequest,
+        RemoteProtocolExecutionErrorV1::ClockUnavailable
+        | RemoteProtocolExecutionErrorV1::AuthorityUnavailable => {
+            RemoteHttpBoundaryError::AuthorityUnavailable(request_id)
+        }
     }
 }
 
@@ -366,7 +384,7 @@ where
     };
     match state.transport.execute(request, authorization) {
         Ok(response) => remote_protocol_response(response),
-        Err(_) => invalid_remote_request_response(),
+        Err(error) => remote_boundary_error_response(error),
     }
 }
 
@@ -388,7 +406,7 @@ where
     };
     match state.transport.execute_enrollment(request, credentials) {
         Ok(response) => remote_protocol_response(response),
-        Err(_) => invalid_remote_request_response(),
+        Err(error) => remote_boundary_error_response(error),
     }
 }
 
@@ -410,7 +428,7 @@ where
     };
     match state.transport.discover_authority(request, authorization) {
         Ok(response) => remote_protocol_response(response),
-        Err(_) => invalid_remote_request_response(),
+        Err(error) => remote_boundary_error_response(error),
     }
 }
 
@@ -478,6 +496,23 @@ fn invalid_remote_request_response() -> Response {
     ))
 }
 
+fn remote_boundary_error_response(error: RemoteHttpBoundaryError) -> Response {
+    match error {
+        RemoteHttpBoundaryError::AuthorityUnavailable(request_id) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(remote_protocol_problem(
+                remote_result_contract(),
+                request_id,
+                RemoteProtocolFailureV1::AuthorityUnavailable,
+            )),
+        )
+            .into_response(),
+        RemoteHttpBoundaryError::MissingOrInvalidAuthorization
+        | RemoteHttpBoundaryError::UnsupportedProtocolVersion
+        | RemoteHttpBoundaryError::InvalidRequest => invalid_remote_request_response(),
+    }
+}
+
 fn remote_result_contract() -> ResultContractRef {
     ResultContractRef::new(
         SchemaId::new("schema.tracedecay.remote.protocol-result.v1")
@@ -527,7 +562,6 @@ mod tests {
     impl RemoteProtocolBodyV1 for EmptyTestBody {
         fn validate_remote_protocol_body(
             &self,
-            _sent_at: UtcMicros,
         ) -> Result<(), tracedecay_application::ApplicationContractError> {
             Ok(())
         }
@@ -540,7 +574,8 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<Self::Output> {
+        ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+        {
             self.0.fetch_add(1, Ordering::SeqCst);
             let request_id = request.request_id;
             RemoteProtocolResponseV1::new(
@@ -555,7 +590,7 @@ mod tests {
                     RemoteProtocolFailureV1::AuthorityUnavailable,
                 )),
             )
-            .unwrap()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
         }
     }
 
@@ -673,7 +708,6 @@ mod tests {
     impl RemoteProtocolBodyV1 for TestQuery {
         fn validate_remote_protocol_body(
             &self,
-            _sent_at: UtcMicros,
         ) -> Result<(), tracedecay_application::ApplicationContractError> {
             if self.term.trim().is_empty() {
                 return Err(
@@ -704,9 +738,15 @@ mod tests {
             request: RemoteEnrollmentProtocolRequestV1,
             _grant_credential: OpaqueRemoteCredential,
             _enrollment_credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+        ) -> Result<
+            RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
             self.0.fetch_add(1, Ordering::SeqCst);
-            problem_route_response(request.request_id, RouteOutcome::Unavailable)
+            Ok(problem_route_response(
+                request.request_id,
+                RouteOutcome::Unavailable,
+            ))
         }
     }
 
@@ -716,8 +756,11 @@ mod tests {
             request: RemoteEnrollmentProtocolRequestV1,
             _grant_credential: OpaqueRemoteCredential,
             _enrollment_credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
-            problem_route_response(request.request_id, self.outcome)
+        ) -> Result<
+            RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
+            Ok(problem_route_response(request.request_id, self.outcome))
         }
     }
 
@@ -726,7 +769,10 @@ mod tests {
             &self,
             request: RemoteAuthorityDiscoveryProtocolRequestV1,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1> {
+        ) -> Result<
+            RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
             self.0.fetch_add(1, Ordering::SeqCst);
             let authority = available_authority();
             RemoteProtocolResponseV1::new(
@@ -734,7 +780,7 @@ mod tests {
                 authority.clone(),
                 Ok(success_envelope(request.request_id, authority)),
             )
-            .unwrap()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
         }
     }
 
@@ -743,8 +789,11 @@ mod tests {
             &self,
             request: RemoteAuthorityDiscoveryProtocolRequestV1,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1> {
-            problem_route_response(request.request_id, self.outcome)
+        ) -> Result<
+            RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
+            Ok(problem_route_response(request.request_id, self.outcome))
         }
     }
 
@@ -757,8 +806,9 @@ mod tests {
                     &self,
                     request: RemoteProtocolRequestV1<$request>,
                     _credential: OpaqueRemoteCredential,
-                ) -> RemoteProtocolResponseV1<Self::Output> {
-                    problem_route_response(request.request_id, self.outcome)
+                ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+                {
+                    Ok(problem_route_response(request.request_id, self.outcome))
                 }
             }
         };
@@ -778,9 +828,13 @@ mod tests {
                     &self,
                     request: RemoteProtocolRequestV1<$request>,
                     _credential: OpaqueRemoteCredential,
-                ) -> RemoteProtocolResponseV1<Self::Output> {
+                ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+                {
                     self.0.fetch_add(1, Ordering::SeqCst);
-                    problem_route_response(request.request_id, RouteOutcome::Unavailable)
+                    Ok(problem_route_response(
+                        request.request_id,
+                        RouteOutcome::Unavailable,
+                    ))
                 }
             }
         };
@@ -799,7 +853,8 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<TestQuery>,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<Self::Output> {
+        ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+        {
             let request_id = request.request_id;
             let result = match self.outcome {
                 RouteOutcome::Valid => Ok(success_envelope(
@@ -808,7 +863,8 @@ mod tests {
                 )),
                 outcome => problem_result(request_id.clone(), outcome),
             };
-            RemoteProtocolResponseV1::new(request_id, available_authority(), result).unwrap()
+            RemoteProtocolResponseV1::new(request_id, available_authority(), result)
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
         }
     }
 
@@ -1204,8 +1260,10 @@ mod tests {
     #[test]
     fn invalid_route_bodies_are_bad_requests_without_port_calls() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let mut invalid_enrollment = enrollment_request(UtcMicros(20));
+        invalid_enrollment.grant_revision = 0;
         assert_eq!(
-            enrollment_validation_status(&calls, enrollment_request(UtcMicros(10)), true),
+            enrollment_validation_status(&calls, invalid_enrollment, true),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -1240,7 +1298,7 @@ mod tests {
                 protocol_request(
                     "request.remote.backup-validation",
                     BackupRequestV1 {
-                        operation_id: "backup.remote".into(),
+                        operation_id: String::new(),
                         expected: recovery_expectation(),
                         expires_at_micros: 10,
                     },
