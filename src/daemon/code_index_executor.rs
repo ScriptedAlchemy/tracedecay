@@ -45,6 +45,11 @@ pub(super) fn mcp_search_request_termination(
 
 /// Builds the `Unavailable` search outcome, optionally naming the code
 /// generation the caller had already resolved.
+///
+/// Reaching here means no lane could serve: the coverage marker says every
+/// lane is down for `semantic_reason`, so the transport reports a typed
+/// failure immediately instead of waiting on an in-progress rebuild. A
+/// request that still had one ready lane never lands here.
 fn code_index_search_unavailable_for_generation(
     code_generation: Option<String>,
     reason: code_search::CodeIndexSearchUnavailableReasonV1,
@@ -56,6 +61,7 @@ fn code_index_search_unavailable_for_generation(
         semantic: code_search::CodeIndexSemanticStatusV1::Unavailable {
             reason: semantic_reason,
         },
+        coverage: code_search::CodeIndexSearchCoverageV1::unavailable(semantic_reason),
     })
 }
 
@@ -537,32 +543,46 @@ pub(super) fn code_index_search_executor(
                             ),
                         );
                     }
-                    let reason = match error {
+                    // The lane reason travels with the failure so a caller can
+                    // tell "this scope has no index" from "the index this
+                    // scope already had is being rebuilt". Only the latter is
+                    // worth retrying, and only the latter leaves the retained
+                    // lexical lane able to answer.
+                    let (reason, lane_reason) = match error {
                         QuerySemanticSearchExecutionErrorV1::Query(error) => match error {
                         QuerySearchExecutionErrorV1::AuthorityUnavailable
                         | QuerySearchExecutionErrorV1::Authority(
                             tracedecay_query::retrieval::QueryAuthorityErrorV1::AuthorityUnavailable,
-                        ) => code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-                        QuerySearchExecutionErrorV1::GenerationUnavailable => {
-                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                        }
+                        ) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable
+                                .as_str(),
+                        ),
+                        QuerySearchExecutionErrorV1::GenerationUnavailable => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                            code_search::lane_reason::GENERATION_REBUILDING,
+                        ),
                         QuerySearchExecutionErrorV1::InvalidScope(_)
-                        | QuerySearchExecutionErrorV1::InvalidPolicy(_) => {
-                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest
-                        }
+                        | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest.as_str(),
+                        ),
                         QuerySearchExecutionErrorV1::Retrieval(_)
-                        | QuerySearchExecutionErrorV1::Authority(_) => {
-                            code_search::CodeIndexSearchUnavailableReasonV1::Internal
-                        }
+                        | QuerySearchExecutionErrorV1::Authority(_) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal.as_str(),
+                        ),
                         },
-                        QuerySemanticSearchExecutionErrorV1::Semantic(_) => {
-                            code_search::CodeIndexSearchUnavailableReasonV1::Internal
-                        }
-                        QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
-                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
-                        }
+                        QuerySemanticSearchExecutionErrorV1::Semantic(_) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "semantic_unavailable",
+                        ),
+                        QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
+                            "semantic_unavailable",
+                        ),
                     };
-                    return code_index_search_unavailable(reason, "semantic_unavailable");
+                    return code_index_search_unavailable(reason, lane_reason);
                 }
             };
             if let Some(outcome) = search_terminated(
@@ -838,6 +858,11 @@ pub(super) fn code_index_search_executor(
                     "authorization_changed_during_publication",
                 );
             }
+            // Additive only: the generation-bound lanes all ran against the
+            // admitted generation here, so warm coverage restates what the
+            // existing candidates already mean. Ranking identity, fallback
+            // bytes, and the cursor are untouched.
+            let coverage = code_search::CodeIndexSearchCoverageV1::fused(&semantic);
             code_search::CodeIndexSearchOutcomeV1::Complete(
                 code_search::CodeIndexSearchCompletedV1 {
                     code_generation: executed.query.generation.as_str().to_owned(),
@@ -846,6 +871,7 @@ pub(super) fn code_index_search_executor(
                     display_by_anchor,
                     semantic,
                     next_cursor,
+                    coverage,
                 },
             )
         })
