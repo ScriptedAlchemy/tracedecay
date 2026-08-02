@@ -352,6 +352,7 @@ pub(crate) use service::invocation::{
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
     default_socket_path, enforce_forward_only_service_recovery, install_service,
+    install_service_under_lease,
     installed_service_socket_path, prepare_scoop_package_service,
     quiesce_installed_service_before_lease, refresh_installed_service,
     refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,

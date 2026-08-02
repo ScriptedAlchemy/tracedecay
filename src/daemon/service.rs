@@ -582,7 +582,11 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
     combine_operation_and_restore("daemon service install", operation_result, restore_result)
 }
 
-fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
+/// Install the managed service unit while the caller already holds the
+/// quiesced daemon lifecycle lease (forward-only post-update). The public
+/// [`install_service`] wrapper acquires that lease itself and would deadlock
+/// if called from a lease-holding context.
+pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     #[cfg(windows)]
     let new_windows_task = windows_task::service_state()? == DaemonServiceState::Missing;

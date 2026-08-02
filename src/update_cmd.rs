@@ -270,7 +270,10 @@ fn refresh_forward_only_daemon_service_after_update(
             // convergence gate below refuses anything less — so a missing
             // service unit must be installed here, not skipped. Skipping made
             // dogfood fail unconditionally on a host whose unit was removed.
-            let service_path = tracedecay::daemon::install_service(spec, true)?;
+            // The post-update already holds the lifecycle lease, so this must
+            // use the under-lease install (the public wrapper re-acquires and
+            // deadlocks against ourselves).
+            let service_path = tracedecay::daemon::install_service_under_lease(spec, true)?;
             eprintln!(
                 "\x1b[32m✔\x1b[0m Forward-only daemon service installed at {}",
                 service_path.display()
