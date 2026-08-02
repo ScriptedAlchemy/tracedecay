@@ -5,6 +5,8 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
     let first_admin = test_store_administration_for_profile(&profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "profile-host-replay-test");
     let profile_identity = first_admin
         .profile_identity()
         .expect("test profile identity")

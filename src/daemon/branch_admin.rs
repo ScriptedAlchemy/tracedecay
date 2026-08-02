@@ -805,7 +805,6 @@ impl StoreAdministration {
             .await;
     }
 
-    #[cfg(test)]
     pub(super) async fn wait_user_profile_host_admission_replay_idle(
         &self,
         broker_path: &Path,

@@ -318,6 +318,12 @@ async fn projectless_user_lcm_tools_call_response(
             "projectless LCM dispatch requires storage_scope=user".to_string(),
         );
     }
+    if let Err(error) =
+        await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
+            .await
+    {
+        return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+    }
     let user_session_db = match store_administration
         .registered_profile_session_database()
         .await
