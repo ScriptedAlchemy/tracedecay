@@ -1158,6 +1158,18 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
+    /// Mount admission did not free a permit within its deadline. The store is
+    /// healthy and the decode is merely queued behind other worktrees, so this
+    /// is retryable — unlike every other variant here.
+    #[error("code-index mount admission is warming: no permit within {waited_ms}ms; retry")]
+    MountAdmissionWarming { waited_ms: u64 },
+}
+
+impl CodeIndexSchedulerErrorV1 {
+    /// Whether retrying the same mount against this daemon can succeed.
+    pub(super) fn is_retryable(&self) -> bool {
+        matches!(self, Self::MountAdmissionWarming { .. })
+    }
 }
 
 struct AtomicFlagReset(Arc<AtomicBool>);
