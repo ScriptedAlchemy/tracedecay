@@ -466,7 +466,15 @@ impl DaemonEngine {
                         }
                     }
                 };
-                wait_for_project_open_publication(&project_path, publication).await
+                // Riding out an open is a park, not work: the admission slot is
+                // released for the wait's duration so a tool that needs no project
+                // owner is never shed by a queue of warming clients. The wait stays
+                // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
+                park_admission(wait_for_project_open_publication(
+                    &project_path,
+                    publication,
+                ))
+                .await
             }
             ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
             ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),

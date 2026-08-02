@@ -102,6 +102,7 @@ pub(crate) fn docstring_from_preceding_comments(
 
 /// Extract a docstring from the run of `#` comment siblings immediately
 /// preceding `node`.
+#[cfg(any(feature = "lang-bash", feature = "lang-ruby"))]
 pub(crate) fn docstring_from_hash_comments(source: &[u8], node: TsNode<'_>) -> Option<String> {
     let mut comments: Vec<String> = Vec::new();
     let mut prev = node.prev_named_sibling();

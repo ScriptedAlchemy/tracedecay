@@ -1046,7 +1046,10 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let _writer = self.gate.lock().await;
+        // Queueing for the writer is a park, not work: a background refresh or a
+        // generation rebuild can hold this gate for minutes. Surrender the
+        // admission slot while queued and take it back before running.
+        let _writer = super::park_admission(self.gate.lock()).await;
         operation().await
     }
 
@@ -1078,11 +1081,14 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let _writer = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return None,
-            writer = self.gate.lock() => writer,
-        };
+        let _writer = super::park_admission(async {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                writer = self.gate.lock() => Some(writer),
+            }
+        })
+        .await?;
         Some(operation().await)
     }
 

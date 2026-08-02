@@ -1974,6 +1974,89 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
     registry.shutdown().await;
 }
 
+/// The resolution-order defect: asking the ready gate first made every query
+/// queue on the single-flight decode of the generation being activated, so a
+/// query holding a perfectly servable generation still paid an O(store) sweep
+/// before it could reach the stale fallback. Await-new must never preempt
+/// serve-old.
+///
+/// This occupies the decode barrier exactly as activation of a new generation
+/// does — pinned slot empty, one decode in flight — and deliberately leaves the
+/// scheduler mutex FREE, so the ready gate is admitted and would park inside it.
+#[tokio::test]
+async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+
+    // Baseline: the ready path admits, byte-for-byte, before anything degrades.
+    let fresh = registry
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+        .expect("ready generation serves the fresh path");
+    assert!(!fresh.served_stale);
+    let fresh_generation = fresh.generation.clone();
+    let fresh_candidates = fresh.authorized.fallback.ordered_candidates.clone();
+    assert!(!fresh_candidates.is_empty(), "live main symbol is returned");
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (held_decode, decodes_before) = {
+        let scheduler = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            scheduler.hold_active_decode(),
+            scheduler.sealed_decode_count(),
+        )
+    };
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&scope)
+            .await
+            .is_some(),
+        "the last complete generation is still held and needs no decode"
+    );
+
+    let stale = tokio::time::timeout(
+        Duration::from_secs(30),
+        registry.execute_query_search(&scope, bundled_search_request("main")),
+    )
+    .await
+    .expect("a servable generation must never queue on the decode barrier")
+    .expect("search serves through the activation window");
+    assert!(
+        stale.served_stale,
+        "a fallback answer must be reported stale, never as current"
+    );
+    assert_eq!(
+        stale.generation, fresh_generation,
+        "the stale answer names the complete generation that actually answered"
+    );
+    assert_eq!(
+        stale.authorized.fallback.ordered_candidates, fresh_candidates,
+        "serving stale changes only the coverage marker, not ranking identity"
+    );
+    assert_eq!(
+        scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sealed_decode_count(),
+        decodes_before,
+        "the serving path must not enter the sealed decode at all"
+    );
+
+    drop(held_decode);
+    registry.shutdown().await;
+}
+
 /// Fail-closed: the fallback serves a *retained complete* generation, never a
 /// missing one. With no mounted worktree neither resolver can produce one, and
 /// the typed fail-fast is preserved rather than degraded into an empty answer.
