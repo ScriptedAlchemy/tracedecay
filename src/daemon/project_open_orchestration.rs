@@ -289,11 +289,9 @@ async fn begin_portable_project_open(
                 .await
             {
                 branch_admin::WriterAdmission::Completed(result) => result,
-                branch_admin::WriterAdmission::Cancelled => {
-                    return Err(project_open_cancellation_error());
-                }
+                branch_admin::WriterAdmission::Cancelled => Err(project_open_cancellation_error()),
                 branch_admin::WriterAdmission::Busy => {
-                    return Err(project_open_writer_busy_error(&open_project_path));
+                    Err(project_open_writer_busy_error(&open_project_path))
                 }
             }
         },
