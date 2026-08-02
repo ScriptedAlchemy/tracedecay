@@ -4,10 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkArtifactRefV1, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowPlacementReceiptV1, WorkflowRunCommandV1,
-    WorkflowRunEventContextV1, WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError,
-    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1,
+    ManifestDigest, RunId, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef,
+    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
+    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError,
+    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepInputV1, WorkflowStepOutputV1,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -166,7 +166,7 @@ pub struct WorkflowStepExecutionRequestV1 {
     pub definition_version: u64,
     pub step_id: WorkflowStepId,
     pub operation: WorkflowOperationRef,
-    pub inputs: Vec<WorkArtifactRefV1>,
+    pub inputs: Vec<WorkflowStepInputV1>,
     pub placement: WorkflowPlacementReceiptV1,
 }
 

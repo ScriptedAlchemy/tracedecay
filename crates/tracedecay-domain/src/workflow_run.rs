@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkCommandId, WorkflowDefinitionV1,
-    WorkflowOutputName, WorkflowOutputReferenceV1, WorkflowPlacementReceiptV1,
-    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepId,
+    ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
+    WorkflowDefinitionV1, WorkflowOutputName, WorkflowOutputReferenceV1,
+    WorkflowPlacementReceiptV1, WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1,
+    WorkflowStepId,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -50,9 +51,122 @@ pub struct WorkflowRunEventContextV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct WorkflowOutputArtifactV1 {
+    attempt_identity: WorkAttemptIdentityV1,
+    artifact: WorkArtifactRefV1,
+}
+
+impl WorkflowOutputArtifactV1 {
+    pub const fn new(attempt_identity: WorkAttemptIdentityV1, artifact: WorkArtifactRefV1) -> Self {
+        Self {
+            attempt_identity,
+            artifact,
+        }
+    }
+
+    pub fn attempt_identity(&self) -> &WorkAttemptIdentityV1 {
+        &self.attempt_identity
+    }
+
+    pub fn artifact(&self) -> &WorkArtifactRefV1 {
+        &self.artifact
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowStepOutputV1 {
-    pub output_name: WorkflowOutputName,
-    pub artifact: WorkArtifactRefV1,
+    output_name: WorkflowOutputName,
+    artifacts: Vec<WorkflowOutputArtifactV1>,
+}
+
+impl WorkflowStepOutputV1 {
+    pub fn new(
+        output_name: WorkflowOutputName,
+        mut artifacts: Vec<WorkflowOutputArtifactV1>,
+    ) -> Result<Self, WorkflowRunStateError> {
+        artifacts.sort_by(|left, right| left.attempt_identity.cmp(&right.attempt_identity));
+        let attempt_count = artifacts
+            .iter()
+            .map(|artifact| artifact.attempt_identity())
+            .collect::<BTreeSet<_>>()
+            .len();
+        let artifact_count = artifacts
+            .iter()
+            .map(|artifact| artifact.artifact().artifact_id())
+            .collect::<BTreeSet<_>>()
+            .len();
+        if artifacts.is_empty()
+            || attempt_count != artifacts.len()
+            || artifact_count != artifacts.len()
+        {
+            return Err(WorkflowRunStateError::InvalidStepOutputs);
+        }
+        Ok(Self {
+            output_name,
+            artifacts,
+        })
+    }
+
+    pub fn output_name(&self) -> &WorkflowOutputName {
+        &self.output_name
+    }
+
+    pub fn artifacts(&self) -> &[WorkflowOutputArtifactV1] {
+        &self.artifacts
+    }
+
+    fn validate(&self) -> Result<(), WorkflowRunStateError> {
+        if Self::new(self.output_name.clone(), self.artifacts.clone())? != *self {
+            return Err(WorkflowRunStateError::InvalidStepOutputs);
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowStepOutputV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            output_name: WorkflowOutputName,
+            artifacts: Vec<WorkflowOutputArtifactV1>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.output_name, wire.artifacts).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepInputV1 {
+    reference: WorkflowOutputReferenceV1,
+    artifacts: Vec<WorkflowOutputArtifactV1>,
+}
+
+impl WorkflowStepInputV1 {
+    fn from_output(
+        reference: WorkflowOutputReferenceV1,
+        output: &WorkflowStepOutputV1,
+    ) -> Result<Self, WorkflowRunStateError> {
+        output.validate()?;
+        Ok(Self {
+            reference,
+            artifacts: output.artifacts.clone(),
+        })
+    }
+
+    pub fn reference(&self) -> &WorkflowOutputReferenceV1 {
+        &self.reference
+    }
+
+    pub fn artifacts(&self) -> &[WorkflowOutputArtifactV1] {
+        &self.artifacts
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -197,7 +311,7 @@ impl WorkflowRunEventV1 {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowStepRunProjectionV1 {
     status: WorkflowStepStatusV1,
-    outputs: BTreeMap<WorkflowOutputName, WorkArtifactRefV1>,
+    outputs: BTreeMap<WorkflowOutputName, WorkflowStepOutputV1>,
     placement_receipt: Option<WorkflowPlacementReceiptV1>,
     effect_receipt: Option<WorkflowStepEffectReceiptV1>,
 }
@@ -207,7 +321,7 @@ impl WorkflowStepRunProjectionV1 {
         self.status
     }
 
-    pub fn outputs(&self) -> &BTreeMap<WorkflowOutputName, WorkArtifactRefV1> {
+    pub fn outputs(&self) -> &BTreeMap<WorkflowOutputName, WorkflowStepOutputV1> {
         &self.outputs
     }
 
@@ -405,7 +519,7 @@ impl WorkflowRunProjectionV1 {
                 step.status = WorkflowStepStatusV1::Succeeded;
                 step.outputs = outputs
                     .iter()
-                    .map(|output| (output.output_name.clone(), output.artifact.clone()))
+                    .map(|output| (output.output_name.clone(), output.clone()))
                     .collect();
                 step.effect_receipt = Some(effect_receipt.clone());
                 next.release_dependents();
@@ -499,9 +613,36 @@ impl WorkflowRunProjectionV1 {
         let declared = definition.outputs.iter().collect::<BTreeSet<_>>();
         let actual = outputs
             .iter()
-            .map(|output| &output.output_name)
+            .map(WorkflowStepOutputV1::output_name)
             .collect::<BTreeSet<_>>();
-        if outputs.len() != actual.len() || actual != declared {
+        let first_attempts = outputs.first().map(|output| {
+            output
+                .artifacts()
+                .iter()
+                .map(|artifact| artifact.attempt_identity())
+                .collect::<BTreeSet<_>>()
+        });
+        let artifact_sets_match = first_attempts.as_ref().is_none_or(|expected| {
+            outputs.iter().all(|output| {
+                output
+                    .artifacts()
+                    .iter()
+                    .map(|artifact| artifact.attempt_identity())
+                    .collect::<BTreeSet<_>>()
+                    == *expected
+            })
+        });
+        let artifact_count = first_attempts.as_ref().map_or(0, BTreeSet::len);
+        let width_is_valid = match definition.fan_out {
+            Some(fan_out) => artifact_count <= fan_out.max_width as usize,
+            None => artifact_count == 1,
+        };
+        if outputs.len() != actual.len()
+            || actual != declared
+            || outputs.iter().any(|output| output.validate().is_err())
+            || !artifact_sets_match
+            || !width_is_valid
+        {
             return Err(WorkflowRunStateError::InvalidStepOutputs);
         }
         Ok(())
@@ -661,7 +802,7 @@ impl WorkflowRunProjectionV1 {
     pub fn resolved_inputs(
         &self,
         step_id: &WorkflowStepId,
-    ) -> Result<Vec<WorkArtifactRefV1>, WorkflowRunStateError> {
+    ) -> Result<Vec<WorkflowStepInputV1>, WorkflowRunStateError> {
         let definition = self
             .definition
             .steps()
@@ -678,11 +819,11 @@ impl WorkflowRunProjectionV1 {
     fn resolve_input(
         &self,
         reference: &WorkflowOutputReferenceV1,
-    ) -> Result<WorkArtifactRefV1, WorkflowRunStateError> {
+    ) -> Result<WorkflowStepInputV1, WorkflowRunStateError> {
         self.steps
             .get(&reference.producer_step_id)
             .and_then(|step| step.outputs.get(&reference.output_name))
-            .cloned()
             .ok_or(WorkflowRunStateError::InputsUnavailable)
+            .and_then(|output| WorkflowStepInputV1::from_output(reference.clone(), output))
     }
 }
