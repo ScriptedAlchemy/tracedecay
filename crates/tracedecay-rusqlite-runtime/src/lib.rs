@@ -19,6 +19,7 @@ mod operation;
 mod persistence;
 pub mod read_consistency;
 pub mod reader;
+pub mod remote;
 pub mod remote_authority;
 pub mod remote_recovery;
 pub mod remote_replay;

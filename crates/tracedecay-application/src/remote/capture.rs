@@ -60,7 +60,8 @@ impl RemoteWriterAuthorityV1 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteOfflineCaptureCommandV1 {
     pub enrollment: EnrollmentCredentialRecordV1,
     pub writer: RemoteWriterAuthorityV1,
@@ -70,7 +71,8 @@ pub struct RemoteOfflineCaptureCommandV1 {
     pub captured_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AdmittedRemoteCaptureV1 {
     pub enrollment_id: EntityId,
     pub enrollment_revision: u64,
