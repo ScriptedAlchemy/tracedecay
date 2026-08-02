@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
+#[cfg(test)]
 use tokio::task::JoinHandle;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -25,8 +26,35 @@ pub(crate) enum RegisteredSchemaConvergenceStatus {
     },
 }
 
+type RegisteredSchemaConvergenceStatuses =
+    BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>;
+
+fn lock_registered_schema_convergence_statuses(
+    statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
+) -> MutexGuard<'_, RegisteredSchemaConvergenceStatuses> {
+    match statuses.lock() {
+        Ok(statuses) => statuses,
+        Err(poisoned) => {
+            crate::daemon::log_daemon_event(
+                "registered_schema_convergence_state",
+                &[
+                    ("outcome", "degraded".to_owned()),
+                    ("resource", "statuses".to_owned()),
+                    (
+                        "error",
+                        "mutex poisoned; recovering guarded state".to_owned(),
+                    ),
+                ],
+            );
+            statuses.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
+
 pub(super) struct RegisteredSchemaConvergenceMaintenance {
-    statuses: Arc<StdMutex<BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>>>,
+    statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
+    #[cfg(test)]
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
     #[cfg(test)]
     schedule_count: std::sync::atomic::AtomicUsize,
@@ -38,6 +66,7 @@ impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn new() -> Self {
         Self {
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
+            #[cfg(test)]
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(test)]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
@@ -51,17 +80,13 @@ impl RegisteredSchemaConvergenceMaintenance {
         &self,
         shard_id: &StoreShardIdV1,
     ) -> Option<RegisteredSchemaConvergenceStatus> {
-        self.statuses
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock_registered_schema_convergence_statuses(&self.statuses)
             .get(shard_id)
             .cloned()
     }
 
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
-        self.statuses
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock_registered_schema_convergence_statuses(&self.statuses)
             .entry(shard_id)
             .or_insert(RegisteredSchemaConvergenceStatus::Pending);
     }
@@ -74,10 +99,7 @@ impl RegisteredSchemaConvergenceMaintenance {
     ) {
         let shard_id = database.binding().shard_id.clone();
         {
-            let mut statuses = self
-                .statuses
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut statuses = lock_registered_schema_convergence_statuses(&self.statuses);
             if statuses.contains_key(&shard_id) {
                 return;
             }
@@ -89,7 +111,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         let gate = self
             .gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("registered schema convergence test gate lock remains healthy")
             .clone();
         let statuses = Arc::clone(&self.statuses);
         let task_shard_id = shard_id.clone();
@@ -140,14 +162,11 @@ impl RegisteredSchemaConvergenceMaintenance {
                     RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
             };
-            statuses
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(task_shard_id, status);
+            lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
         self.tasks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("registered schema convergence test task lock remains healthy")
             .insert(shard_id, task);
     }
 
@@ -161,17 +180,19 @@ impl RegisteredSchemaConvergenceMaintenance {
         *self
             .gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&state));
+            .expect("registered schema convergence test gate lock remains healthy") =
+            Some(Arc::clone(&state));
         RegisteredSchemaConvergenceTestGate { state }
     }
 }
 
+#[cfg(test)]
 impl Drop for RegisteredSchemaConvergenceMaintenance {
     fn drop(&mut self) {
         let tasks = self
             .tasks
             .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("registered schema convergence test task lock remains healthy");
         for (_, task) in std::mem::take(tasks) {
             task.abort();
         }
@@ -317,5 +338,40 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.registered_schema_convergence
             .schedule_count
             .load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::{BrainId, UserProfileId};
+
+    use super::*;
+
+    #[test]
+    fn poisoned_status_lock_recovers_once() {
+        let maintenance = RegisteredSchemaConvergenceMaintenance::new();
+        let statuses = Arc::clone(&maintenance.statuses);
+        let poison = std::thread::spawn(move || {
+            let _guard = statuses
+                .lock()
+                .expect("registered schema convergence status lock starts healthy");
+            panic!("poison registered schema convergence status lock");
+        });
+        assert!(poison.join().is_err());
+        assert!(maintenance.statuses.is_poisoned());
+
+        let shard_id = StoreShardIdV1::profile_sessions(
+            BrainId::try_from("brain.schema-convergence".to_owned())
+                .expect("canonical brain identity"),
+            UserProfileId::try_from("profile.schema-convergence".to_owned())
+                .expect("canonical profile identity"),
+        );
+        maintenance.defer(shard_id.clone());
+
+        assert!(!maintenance.statuses.is_poisoned());
+        assert_eq!(
+            maintenance.status(&shard_id),
+            Some(RegisteredSchemaConvergenceStatus::Pending)
+        );
     }
 }
