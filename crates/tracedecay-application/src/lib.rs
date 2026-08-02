@@ -45,6 +45,7 @@ pub mod work_execution;
 pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
+pub mod workflow_run;
 pub mod workflow_runtime;
 pub mod workflow_state;
 
@@ -241,5 +242,6 @@ pub use work_execution::*;
 pub use work_read::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;
+pub use workflow_run::*;
 pub use workflow_runtime::*;
 pub use workflow_state::*;
