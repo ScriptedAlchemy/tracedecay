@@ -1406,6 +1406,47 @@ async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready(
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn portable_shutdown_owners_share_one_absolute_deadline() {
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    let owners = ["maintenance", "http_application", "project_open"]
+        .into_iter()
+        .map(|name| {
+            let observed = Arc::clone(&observed);
+            super::super::shutdown_coordination::ShutdownOwner::with_deadline(
+                name,
+                || {},
+                move |owner_deadline| async move {
+                    observed
+                        .lock()
+                        .expect("portable owner deadline observations")
+                        .push(owner_deadline);
+                    if name == "maintenance" {
+                        return;
+                    }
+                    std::future::pending::<()>().await;
+                },
+            )
+        })
+        .collect();
+
+    let shutdown = super::super::bootstrap::join_portable_shutdown_owners(deadline, owners);
+    tokio::pin!(shutdown);
+    tokio::time::advance(tokio::time::Duration::from_secs(2)).await;
+    let receipt = shutdown.await;
+
+    assert_eq!(
+        observed
+            .lock()
+            .expect("portable owner deadline observations")
+            .as_slice(),
+        &[deadline, deadline, deadline]
+    );
+    assert_eq!(receipt.unfinished(), &["http_application", "project_open"]);
+    assert_eq!(receipt.deadline, deadline);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
     let temp = TempDir::new().expect("temp dir");

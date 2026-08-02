@@ -8,6 +8,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 
 pub(super) async fn cancel_project_server_startup_ingests(
@@ -30,13 +31,14 @@ pub(super) async fn cancel_project_server_startup_ingests(
 pub(super) async fn shutdown_project_servers(
     deadline: tokio::time::Instant,
     store_administration: &StoreAdministration,
-) -> usize {
+) -> ShutdownTaskReceipt {
     let servers = detach_project_servers(store_administration).await;
-    let (retirements, unfinished_servers) = tokio::join!(
+    let (mut retirements, servers) = tokio::join!(
         store_administration.join_project_server_retirements_until(deadline),
         shutdown_detached_project_servers(deadline, servers),
     );
-    retirements.saturating_add(unfinished_servers)
+    retirements.extend(servers);
+    retirements
 }
 
 pub(super) async fn detach_project_servers(
@@ -72,33 +74,23 @@ pub(super) async fn detach_project_servers(
 pub(super) async fn shutdown_detached_project_servers(
     deadline: tokio::time::Instant,
     servers: Vec<Arc<crate::mcp::McpServer>>,
-) -> usize {
-    let mut shutdowns = tokio::task::JoinSet::new();
-    let mut unfinished = 0usize;
-    for server in servers {
-        shutdowns.spawn(async move {
-            let graph = server.cg().await;
-            hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
+) -> ShutdownTaskReceipt {
+    join_shutdown_tasks_until(
+        deadline,
+        servers.into_iter().enumerate().map(|(ordinal, server)| {
+            (format!("project_server[{ordinal}]"), None, async move {
+                let graph = server.cg().await;
+                hook_v2_replay::shutdown_hook_v2_replay_consumer(
+                    &graph.hook_store_layout().data_root,
+                )
                 .await;
-            drop(graph);
-            server.shutdown().await;
-        });
-    }
-    while !shutdowns.is_empty() {
-        match tokio::time::timeout_at(deadline, shutdowns.join_next()).await {
-            Ok(Some(Ok(()))) => {}
-            Ok(Some(Err(_))) => {
-                unfinished = unfinished.saturating_add(1);
-            }
-            Ok(None) => break,
-            Err(_) => {
-                unfinished = unfinished.saturating_add(shutdowns.len());
-                shutdowns.abort_all();
-                return unfinished;
-            }
-        }
-    }
-    unfinished
+                drop(graph);
+                server.shutdown().await;
+                Ok(())
+            })
+        }),
+    )
+    .await
 }
 
 const PROJECT_SERVER_REQUEST_DRAIN_DEADLINE: Duration = Duration::from_secs(35);

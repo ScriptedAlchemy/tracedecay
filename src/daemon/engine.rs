@@ -8,6 +8,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+#[cfg(unix)]
 use super::shutdown_coordination::{ShutdownOwner, ShutdownReceipt, join_shutdown_owners};
 use super::*;
 
@@ -951,7 +952,10 @@ impl DaemonEngine {
         .await
     }
 
-    pub(super) async fn shutdown_servers(&self, deadline: tokio::time::Instant) -> usize {
+    pub(super) async fn shutdown_servers(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> store_shutdown::ShutdownTaskReceipt {
         shutdown_project_servers(deadline, &self.store_administration).await
     }
 
