@@ -22,7 +22,6 @@ pub(super) struct ShutdownTaskReceipt {
 }
 
 impl ShutdownTaskReceipt {
-    #[cfg(not(unix))]
     pub(super) fn timed_out(owner: impl Into<String>) -> Self {
         Self {
             outcomes: vec![ShutdownTaskOutcome {
@@ -147,7 +146,14 @@ impl StoreAdministration {
         &self,
         deadline: tokio::time::Instant,
     ) -> ShutdownTaskReceipt {
-        let retirements = std::mem::take(&mut *self.project_server_retirements.lock().await);
+        let mut retirements =
+            match tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await {
+                Ok(retirements) => retirements,
+                Err(_) => {
+                    return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
+                }
+            };
+        let retirements = std::mem::take(&mut *retirements);
         join_shutdown_tasks_until(
             deadline,
             retirements

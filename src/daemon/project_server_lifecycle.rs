@@ -32,7 +32,12 @@ pub(super) async fn shutdown_project_servers(
     deadline: tokio::time::Instant,
     store_administration: &StoreAdministration,
 ) -> ShutdownTaskReceipt {
-    let servers = detach_project_servers(store_administration).await;
+    let servers =
+        match tokio::time::timeout_at(deadline, detach_project_servers(store_administration)).await
+        {
+            Ok(servers) => servers,
+            Err(_) => return ShutdownTaskReceipt::timed_out("project_server_detach"),
+        };
     let (mut retirements, servers) = tokio::join!(
         store_administration.join_project_server_retirements_until(deadline),
         shutdown_detached_project_servers(deadline, servers),

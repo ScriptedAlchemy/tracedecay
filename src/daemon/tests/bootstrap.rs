@@ -1447,6 +1447,106 @@ async fn portable_shutdown_owners_share_one_absolute_deadline() {
     assert_eq!(receipt.deadline, deadline);
 }
 
+#[tokio::test(start_paused = true)]
+async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget() {
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let started_at = tokio::time::Instant::now();
+    let hard_backstop_deadline = started_at + super::super::DAEMON_SHUTDOWN_DEADLINE;
+    let shutdown_deadline =
+        hard_backstop_deadline - super::super::bootstrap::DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let lifecycle = DaemonLifecycle::default();
+    let activity = lifecycle.try_enter().expect("admit stuck client");
+    let client_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_by_client = Arc::clone(&client_dropped);
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async move {
+        let _activity = activity;
+        let _dropped = Dropped(dropped_by_client);
+        std::future::pending::<super::super::Result<()>>().await
+    });
+    tokio::task::yield_now().await;
+
+    let store_started_at = Arc::new(std::sync::Mutex::new(None));
+    let store_started_by_shutdown = Arc::clone(&store_started_at);
+    let shutdown = tokio::spawn(async move {
+        super::super::bootstrap::coordinate_portable_shutdown(
+            &lifecycle,
+            &mut clients,
+            shutdown_deadline,
+            Vec::new(),
+            async move {
+                *store_started_by_shutdown
+                    .lock()
+                    .expect("store shutdown start") = Some(tokio::time::Instant::now());
+                tokio::time::sleep_until(shutdown_deadline - tokio::time::Duration::from_secs(1))
+                    .await;
+                super::super::store_shutdown::ShutdownTaskReceipt::default()
+            },
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(
+        super::super::DAEMON_CLIENT_DRAIN_DEADLINE - tokio::time::Duration::from_millis(1),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    assert!(
+        !client_dropped.load(std::sync::atomic::Ordering::Acquire),
+        "stuck client must retain its two-second drain opportunity"
+    );
+    assert!(
+        store_started_at
+            .lock()
+            .expect("store shutdown start")
+            .is_none(),
+        "store retirement must wait until stuck clients are aborted and joined"
+    );
+
+    tokio::time::advance(tokio::time::Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        client_dropped.load(std::sync::atomic::Ordering::Acquire),
+        "stuck client must be aborted at the two-second drain bound"
+    );
+    let store_start = store_started_at
+        .lock()
+        .expect("store shutdown start")
+        .expect("store retirement must start after client abort");
+    assert_eq!(
+        store_start.duration_since(started_at),
+        super::super::DAEMON_CLIENT_DRAIN_DEADLINE
+    );
+    assert_eq!(
+        shutdown_deadline.duration_since(store_start),
+        super::super::DAEMON_SHUTDOWN_DEADLINE
+            - super::super::DAEMON_CLIENT_DRAIN_DEADLINE
+            - super::super::bootstrap::DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE
+    );
+
+    tokio::time::advance(
+        super::super::DAEMON_SHUTDOWN_DEADLINE
+            - super::super::DAEMON_CLIENT_DRAIN_DEADLINE
+            - tokio::time::Duration::from_secs(1),
+    )
+    .await;
+    let receipt = shutdown.await.expect("portable shutdown coordinator");
+
+    assert!(!receipt.in_flight_drained);
+    assert!(receipt.clients_drained);
+    assert!(receipt.background.unfinished().is_empty());
+    assert!(receipt.project_servers.is_clean());
+    assert!(tokio::time::Instant::now() < hard_backstop_deadline);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
     let temp = TempDir::new().expect("temp dir");

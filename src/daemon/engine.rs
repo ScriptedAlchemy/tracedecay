@@ -837,6 +837,7 @@ impl DaemonEngine {
         deadline: tokio::time::Instant,
     ) -> ShutdownReceipt {
         let project_open = project_open_tasks(&self.project_open_gates).await;
+        let startup_ingest_cancel = self.store_administration.clone();
         let project_open_cancel = project_open.clone();
         let project_open_join = project_open;
 
@@ -873,6 +874,9 @@ impl DaemonEngine {
         join_shutdown_owners(
             deadline,
             vec![
+                ShutdownOwner::new("project_server_startup_ingest", || {}, async move {
+                    cancel_project_server_startup_ingests(&startup_ingest_cancel).await;
+                }),
                 ShutdownOwner::with_deadline_result(
                     "project_open",
                     move || project_open_cancel.cancel(),
