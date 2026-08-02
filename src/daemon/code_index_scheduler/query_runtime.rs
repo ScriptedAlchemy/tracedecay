@@ -236,6 +236,11 @@ pub(in crate::daemon) struct ExecutedQuerySearchV1 {
     pub generation: CodeGenerationId,
     pub authorized: AuthorizedQueryFallbackV1,
     pub sanitized: SanitizedRetrievalRequestV1,
+    /// The generation-bound lanes answered from an older complete generation
+    /// because no already-current generation was admissible. Recall is sound
+    /// for `generation`; freshness is not. Callers must report the lanes as
+    /// `CodeIndexLaneStatusV1::Stale` rather than complete.
+    pub served_stale: bool,
 }
 
 #[derive(Debug, Error)]
@@ -267,10 +272,23 @@ impl CodeIndexSchedulerRegistryV1 {
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
-        let latest = self
-            .latest_complete_ready_for_scope(scope)
-            .await
-            .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?;
+        // Stale-while-revalidate. The ready gate admits only an *already
+        // current* generation, so it abstains for the whole window of any
+        // rebuild — freshness unknown, git metadata moved, staleness threshold
+        // elapsed. Every other callable code query keeps serving the last
+        // complete generation through that window, and search must not be the
+        // one lane that collapses. Fall back to the generation already held for
+        // this worktree and mark the lanes stale. Only when no complete
+        // generation exists at all does this stay a typed fail-fast.
+        let (latest, served_stale) = match self.latest_complete_ready_for_scope(scope).await {
+            Some(latest) => (latest, false),
+            None => (
+                self.latest_complete_serving_for_scope(scope)
+                    .await
+                    .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?,
+                true,
+            ),
+        };
         let authority = self
             .query_authority_for_scope(scope)
             .await
@@ -368,6 +386,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation,
             authorized,
             sanitized,
+            served_stale,
         })
     }
 }
