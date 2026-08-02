@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::client_identity::DaemonClientIdentity;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 use super::*;
@@ -102,6 +102,31 @@ pub(super) async fn projectless_tools_call_response(
         Ok(tool_call) => tool_call,
         Err(message) => {
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
+        }
+    };
+    let dispatch_control = match crate::mcp::tools::execution_policy_for_tool(tool_name)
+        .ok_or_else(|| {
+            TraceDecayError::mcp_tool_dispatch(
+                "tool_unavailable",
+                crate::mcp::tools::McpToolDispatchStage::SchemaValidation.as_str(),
+                false,
+                format!("projectless tool '{tool_name}' has no execution policy"),
+            )
+        })
+        .and_then(|policy| {
+            tracedecay_application::CancellationSignal::active(format!(
+                "cancellation.projectless.{tool_name}"
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("invalid projectless dispatch cancellation: {error}"),
+            })
+            .and_then(|cancellation| {
+                crate::mcp::tools::McpToolDispatchControl::new(tool_name, policy, cancellation)
+            })
+        }) {
+        Ok(control) => control,
+        Err(error) => {
+            return crate::mcp::server::tool_error_response(id, tool_name, &error);
         }
     };
     if tool_name == "tracedecay_admin_project" {
@@ -207,7 +232,7 @@ pub(super) async fn projectless_tools_call_response(
             )
             .await;
         return match crate::mcp::tools::handle_projectless_hook_runtime(
-            arguments,
+            arguments.clone(),
             &client_identity.profile_root,
             session_runtime_registry,
             global_db.as_ref(),
@@ -219,10 +244,17 @@ pub(super) async fn projectless_tools_call_response(
         .await
         {
             Ok(result) => {
-                refresh_wake.wake();
-                JsonRpcResponse::success(id, result.value)
+                complete_projectless_hook_runtime_tool(
+                    id,
+                    tool_name,
+                    &arguments,
+                    result,
+                    &refresh_wake,
+                    &dispatch_control,
+                )
+                .await
             }
-            Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+            Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
         };
     }
     if tool_name == "tracedecay_admin_cli" {
@@ -257,6 +289,7 @@ pub(super) async fn projectless_tools_call_response(
             arguments,
             client_identity,
             store_administration,
+            &dispatch_control,
         )
         .await;
     }
@@ -306,6 +339,7 @@ async fn projectless_user_lcm_tools_call_response(
     arguments: serde_json::Value,
     client_identity: &DaemonClientIdentity,
     store_administration: &StoreAdministration,
+    dispatch_control: &crate::mcp::tools::McpToolDispatchControl,
 ) -> crate::mcp::JsonRpcResponse {
     if arguments
         .get("storage_scope")
@@ -349,9 +383,16 @@ async fn projectless_user_lcm_tools_call_response(
     if tool_name == "tracedecay_message_search" {
         // Joining retained temporal projection is part of reopening the mounted
         // profile store. It does not ingest provider history or widen scope.
-        let _ = refresh_wake
-            .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-            .await;
+        if let Err(error) = crate::mcp::server::join_live_transcript_refresh(
+            tool_name,
+            crate::mcp::server::LiveTranscriptRefreshRoute::Profile(Some(&refresh_wake)),
+            &dispatch_control.deadline(),
+            &dispatch_control.cancellation(),
+        )
+        .await
+        {
+            return crate::mcp::server::tool_error_response(id, tool_name, &error);
+        }
     }
     let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
@@ -378,16 +419,76 @@ async fn projectless_user_lcm_tools_call_response(
     .await;
     match result {
         Ok(result) => {
-            if tool_name == "tracedecay_lcm_preflight"
-                && arguments
-                    .get("transcript_projection")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            {
-                let _ = refresh_wake
-                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                    .await;
-            } else if matches!(
+            complete_projectless_user_lcm_tool(
+                id,
+                tool_name,
+                &arguments,
+                result,
+                &refresh_wake,
+                dispatch_control,
+            )
+            .await
+        }
+        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
+    }
+}
+
+pub(super) async fn complete_projectless_hook_runtime_tool(
+    id: serde_json::Value,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    result: crate::mcp::tools::ToolResult,
+    refresh_wake: &crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    dispatch_control: &crate::mcp::tools::McpToolDispatchControl,
+) -> crate::mcp::JsonRpcResponse {
+    if crate::mcp::server::tool_result_has_semantic_error(&result) {
+        return JsonRpcResponse::success(id, result.value);
+    }
+    match crate::mcp::server::join_required_live_transcript_refresh(
+        tool_name,
+        arguments,
+        crate::mcp::server::LiveTranscriptRefreshRoute::Profile(Some(refresh_wake)),
+        &dispatch_control.deadline(),
+        &dispatch_control.cancellation(),
+    )
+    .await
+    {
+        Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+            JsonRpcResponse::success(id, result.value)
+        }
+        Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+            refresh_wake.wake();
+            JsonRpcResponse::success(id, result.value)
+        }
+        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
+    }
+}
+
+pub(super) async fn complete_projectless_user_lcm_tool(
+    id: serde_json::Value,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    result: crate::mcp::tools::ToolResult,
+    refresh_wake: &crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    dispatch_control: &crate::mcp::tools::McpToolDispatchControl,
+) -> crate::mcp::JsonRpcResponse {
+    if crate::mcp::server::tool_result_has_semantic_error(&result) {
+        return JsonRpcResponse::success(id, result.value);
+    }
+    match crate::mcp::server::join_required_live_transcript_refresh(
+        tool_name,
+        arguments,
+        crate::mcp::server::LiveTranscriptRefreshRoute::Profile(Some(refresh_wake)),
+        &dispatch_control.deadline(),
+        &dispatch_control.cancellation(),
+    )
+    .await
+    {
+        Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+            JsonRpcResponse::success(id, result.value)
+        }
+        Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+            if matches!(
                 tool_name,
                 "tracedecay_lcm_preflight"
                     | "tracedecay_lcm_compress"
@@ -397,7 +498,7 @@ async fn projectless_user_lcm_tools_call_response(
             }
             JsonRpcResponse::success(id, result.value)
         }
-        Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
+        Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
     }
 }
 

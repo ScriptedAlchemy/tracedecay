@@ -153,6 +153,7 @@ struct DispatchedToolCall {
     selected_owner: Option<crate::global_db::ProjectRegistryContext>,
     selected_scope: Option<tracedecay_application::ResolvedScope>,
     outcome: Result<ToolResult>,
+    started_at: Option<Instant>,
     elapsed_us: Option<u64>,
     route_admission_us: u64,
     handler_us: u64,
@@ -1190,6 +1191,7 @@ impl McpServer {
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
+                    started_at: dispatch_started,
                     elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
                     route_admission_us: elapsed_micros(route_started.elapsed()),
                     handler_us: 0,
@@ -1214,6 +1216,7 @@ impl McpServer {
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
+                    started_at: dispatch_started,
                     elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
                     route_admission_us: elapsed_micros(route_started.elapsed()),
                     handler_us: 0,
@@ -1255,6 +1258,7 @@ impl McpServer {
                 selected_owner,
                 selected_scope,
                 outcome: Err(error),
+                started_at: dispatch_started,
                 elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
                 route_admission_us: elapsed_micros(route_started.elapsed()),
                 handler_us: 0,
@@ -1275,6 +1279,7 @@ impl McpServer {
                         selected_owner,
                         selected_scope,
                         outcome: Err(error),
+                        started_at: dispatch_started,
                         elapsed_us: dispatch_started
                             .map(|started| elapsed_micros(started.elapsed())),
                         route_admission_us: elapsed_micros(route_started.elapsed()),
@@ -1301,6 +1306,7 @@ impl McpServer {
                     selected_owner,
                     selected_scope,
                     outcome: Err(error),
+                    started_at: dispatch_started,
                     elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
                     route_admission_us: elapsed_micros(route_started.elapsed()),
                     handler_us: 0,
@@ -1336,6 +1342,7 @@ impl McpServer {
             selected_owner,
             selected_scope,
             outcome,
+            started_at: dispatch_started,
             elapsed_us: dispatch_started.map(|started| elapsed_micros(started.elapsed())),
             route_admission_us: elapsed_micros(handler_started.duration_since(route_started)),
             handler_us: elapsed_micros(handler_started.elapsed()),
@@ -1768,19 +1775,92 @@ impl McpServer {
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
         dispatch: DispatchedToolCall,
+        dispatch_control: &McpToolDispatchControl,
     ) -> JsonRpcResponse {
         let DispatchedToolCall {
             cg,
             selected_owner,
             selected_scope,
             outcome,
-            elapsed_us,
+            started_at,
+            elapsed_us: handler_elapsed_us,
             ..
         } = dispatch;
         let request_id = id.clone();
 
         match outcome {
             Ok(mut result) => {
+                if !tool_result_has_semantic_error(&result)
+                    && live_transcript_refresh_required(&tool_name, &analytics_arguments)
+                {
+                    let profile_route = tool_name == "tracedecay_lcm_preflight"
+                        && analytics_arguments
+                            .get("storage_scope")
+                            .and_then(Value::as_str)
+                            == Some("user");
+                    let selected_refresh_wake = if selected_owner.is_some() && !profile_route {
+                        match self.retained_project_session_refresh_resolver.as_ref() {
+                            Some(resolve) => match resolve(Arc::clone(&cg)).await {
+                                Ok(wake) => Some(wake),
+                                Err(error) => {
+                                    let elapsed_us = started_at
+                                        .map(|started| elapsed_micros(started.elapsed()))
+                                        .or(handler_elapsed_us);
+                                    self.record_mcp_tool_error_analytics(
+                                        McpToolErrorAnalyticsRequest {
+                                            project_root: cg.project_root(),
+                                            session_id: analytics_session_id,
+                                            tool_name: &tool_name,
+                                            request_id: &request_id,
+                                            arguments: &analytics_arguments,
+                                            duration_us: elapsed_us,
+                                            error: &error,
+                                        },
+                                    );
+                                    return tool_error_response(id, &tool_name, &error);
+                                }
+                            },
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let route = if profile_route {
+                        LiveTranscriptRefreshRoute::Profile(self.user_session_refresh_wake.as_ref())
+                    } else if selected_owner.is_some() {
+                        LiveTranscriptRefreshRoute::Project(selected_refresh_wake.as_ref())
+                    } else {
+                        LiveTranscriptRefreshRoute::Project(
+                            self.project_session_refresh_wake.as_ref(),
+                        )
+                    };
+                    if let Err(error) = join_required_live_transcript_refresh(
+                        &tool_name,
+                        &analytics_arguments,
+                        route,
+                        &dispatch_control.deadline(),
+                        &dispatch_control.cancellation(),
+                    )
+                    .await
+                    {
+                        let elapsed_us = started_at
+                            .map(|started| elapsed_micros(started.elapsed()))
+                            .or(handler_elapsed_us);
+                        self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                            project_root: cg.project_root(),
+                            session_id: analytics_session_id,
+                            tool_name: &tool_name,
+                            request_id: &request_id,
+                            arguments: &analytics_arguments,
+                            duration_us: elapsed_us,
+                            error: &error,
+                        });
+                        return tool_error_response(id, &tool_name, &error);
+                    }
+                }
+                let elapsed_us = started_at
+                    .map(|started| elapsed_micros(started.elapsed()))
+                    .or(handler_elapsed_us);
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1807,17 +1887,12 @@ impl McpServer {
                 self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)
                     .await;
                 mark_semantic_tool_error(&mut result);
-                if selected_owner.is_none() {
-                    self.refresh_after_live_transcript_projection(
-                        &tool_name,
-                        &analytics_arguments,
-                        &result,
-                    )
-                    .await;
-                }
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
+                let elapsed_us = started_at
+                    .map(|started| elapsed_micros(started.elapsed()))
+                    .or(handler_elapsed_us);
                 self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                     project_root: cg.project_root(),
                     session_id: analytics_session_id,
@@ -1829,34 +1904,6 @@ impl McpServer {
                 });
                 tool_error_response(id, &tool_name, &error)
             }
-        }
-    }
-
-    async fn refresh_after_live_transcript_projection(
-        &self,
-        tool_name: &str,
-        arguments: &Value,
-        result: &ToolResult,
-    ) {
-        if tool_name != "tracedecay_lcm_preflight"
-            || arguments
-                .get("transcript_projection")
-                .and_then(Value::as_bool)
-                != Some(true)
-            || tool_result_has_semantic_error(result)
-        {
-            return;
-        }
-        let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
-        let wake = if user_scope {
-            self.user_session_refresh_wake.as_ref()
-        } else {
-            self.project_session_refresh_wake.as_ref()
-        };
-        if let Some(wake) = wake {
-            let _ = wake
-                .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                .await;
         }
     }
 
@@ -2019,6 +2066,7 @@ impl McpServer {
                     analytics_arguments,
                     analytics_session_id,
                     dispatch,
+                    &dispatch_control,
                 ),
             )
             .await

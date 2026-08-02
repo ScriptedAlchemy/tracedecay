@@ -141,7 +141,7 @@ pub(super) fn retained_project_session_refresh_resolver(
                 .await
                 .ok_or_else(|| {
                     TraceDecayError::session_refresh(
-                        "temporal_refresh_authority_unavailable",
+                        "temporal_refresh_unavailable",
                         true,
                         "selected project no longer has a mounted refresh owner",
                     )
@@ -151,7 +151,7 @@ pub(super) fn retained_project_session_refresh_resolver(
                 .await
                 .map_err(|error| {
                     TraceDecayError::session_refresh(
-                        "temporal_refresh_authority_unavailable",
+                        "temporal_refresh_unavailable",
                         true,
                         format!("selected project session authority is unavailable: {error}"),
                     )

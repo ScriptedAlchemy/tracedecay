@@ -1,3 +1,4 @@
+use crate::application::host_admission::HostAdmissionScope;
 use crate::application::host_admission::{HostAdmissionOutcome, SharedHostAdmissionBroker};
 use crate::automation::config_error;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
@@ -81,7 +82,15 @@ pub async fn handle_hook_runtime(
                     "user transcript ingest requires projectless daemon routing",
                 ));
             }
-            ingest_transcript(Some(cg), &args, None, global_db, session_authorities).await?
+            ingest_transcript(
+                Some(cg),
+                &args,
+                HostAdmissionScope::Project,
+                None,
+                global_db,
+                session_authorities,
+            )
+            .await?
         }
         "user_review" | "hermes_receipt" => {
             return Err(config_error(format!(
@@ -145,6 +154,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
             ingest_transcript(
                 None,
                 &args,
+                HostAdmissionScope::Profile,
                 Some(profile_root),
                 Some(global_db),
                 session_authorities,
@@ -169,10 +179,11 @@ pub(crate) async fn handle_projectless_hook_runtime(
     Ok(tool_json(None, &args, &output))
 }
 
-fn projectless_action_allowed(action: &str, args: &Value) -> bool {
-    matches!(action, "user_review" | "hermes_receipt")
-        || (action == "ingest_transcript"
-            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+fn projectless_action_allowed(action: &str, _args: &Value) -> bool {
+    matches!(
+        action,
+        "user_review" | "hermes_receipt" | "ingest_transcript"
+    )
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {

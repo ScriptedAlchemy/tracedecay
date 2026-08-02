@@ -365,21 +365,14 @@ pub(super) async fn accounting_receipt(
 pub(super) async fn ingest_transcript(
     cg: Option<&TraceDecay>,
     args: &Value,
+    admission_scope: HostAdmissionScope,
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let provider = required_str(args, "provider")?;
-    let user_scope = args
-        .get("user_scope")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let user_scope = admission_scope == HostAdmissionScope::Profile;
     let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
-    let admission_scope = if user_scope {
-        HostAdmissionScope::Profile
-    } else {
-        HostAdmissionScope::Project
-    };
     let facade = host_admission_facade(cg, admission_scope, session_authorities)?;
     let admission = facade.accept_replay(provider, admission_scope);
     match admission.status {

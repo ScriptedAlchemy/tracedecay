@@ -71,7 +71,8 @@ pub(crate) use lifecycle::{
     ProjectServerResponseLifecycle, StartupCatchUpMachineV1, VersionCheckState,
 };
 pub(crate) use live_transcript_refresh::{
-    LiveTranscriptRefreshJoin, LiveTranscriptRefreshRoute, join_required_live_transcript_refresh,
+    LiveTranscriptRefreshJoin, LiveTranscriptRefreshRoute, join_live_transcript_refresh,
+    join_required_live_transcript_refresh, live_transcript_refresh_required,
 };
 pub(crate) use protocol::*;
 use read_coalescing::*;

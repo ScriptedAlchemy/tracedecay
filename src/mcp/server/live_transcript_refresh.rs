@@ -44,7 +44,7 @@ async fn wait_for_refresh_publication(
     }
 }
 
-fn live_transcript_refresh_required(tool_name: &str, arguments: &Value) -> bool {
+pub(crate) fn live_transcript_refresh_required(tool_name: &str, arguments: &Value) -> bool {
     match tool_name {
         "tracedecay_hook_runtime" => {
             arguments.get("action").and_then(Value::as_str) == Some("ingest_transcript")
@@ -111,6 +111,15 @@ pub(crate) async fn join_required_live_transcript_refresh(
     if !live_transcript_refresh_required(tool_name, arguments) {
         return Ok(LiveTranscriptRefreshJoin::NotRequired);
     }
+    join_live_transcript_refresh(tool_name, route, deadline, cancellation).await
+}
+
+pub(crate) async fn join_live_transcript_refresh(
+    tool_name: &str,
+    route: LiveTranscriptRefreshRoute<'_>,
+    deadline: &tracedecay_application::Deadline,
+    cancellation: &tracedecay_application::CancellationSignal,
+) -> Result<LiveTranscriptRefreshJoin> {
     if cancellation.is_cancelled() {
         return Err(refresh_failure(
             tool_name,

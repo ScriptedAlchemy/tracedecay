@@ -36,6 +36,7 @@ mod lifecycle;
 mod logging;
 mod multi_root_journey;
 mod ownership;
+mod projectless_refresh;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;

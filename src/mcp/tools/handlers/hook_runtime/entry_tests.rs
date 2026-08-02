@@ -13,14 +13,11 @@ fn required_str_rejects_missing_and_empty_values() {
 #[test]
 fn projectless_runtime_rejects_project_database_actions() {
     assert!(!projectless_action_allowed("reset_counter", &json!({})));
-    assert!(!projectless_action_allowed(
+    assert!(projectless_action_allowed(
         "ingest_transcript",
         &json!({ "user_scope": false }),
     ));
-    assert!(projectless_action_allowed(
-        "ingest_transcript",
-        &json!({ "user_scope": true }),
-    ));
+    assert!(projectless_action_allowed("ingest_transcript", &json!({}),));
 }
 
 #[test]
