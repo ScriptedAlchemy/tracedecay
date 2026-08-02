@@ -172,8 +172,10 @@ facts/category but that only hurts the superposition fast-path, not correctness.
   panel / explicit MCP call, never automatic.
 - **Bank rebuild:** `rebuild_dirty_banks` re-averages superposition vectors;
   bounded by category count.
-- **Missing-vector repair:** status `repair` / `legacy_backfill_complete`
-  **adds** vectors to facts missing them — increases storage, never compacts.
+- **Missing-vector repair:** status `repair` **adds** vectors to facts missing
+  them — increases storage, never compacts. (The companion
+  `legacy_backfill_complete` flag was removed with the V1 memory backfill
+  pipeline; fresh stores have no V1 facts to backfill.)
 
 ---
 
