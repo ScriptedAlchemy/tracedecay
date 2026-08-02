@@ -383,9 +383,16 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
             })
             .unwrap_or_default();
         if !required.is_empty() {
-            return Some(format!("object with required keys: {}", required.join(", ")));
+            return Some(format!(
+                "object with required keys: {}",
+                required.join(", ")
+            ));
         }
-        if schema.get("properties").and_then(Value::as_object).is_some() {
+        if schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some()
+        {
             return Some("object — pass JSON via --args".to_string());
         }
         return None;
