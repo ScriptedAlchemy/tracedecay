@@ -26,7 +26,9 @@ use tracedecay_store::{
 
 use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
-use crate::{SqliteStoreSizeTelemetryPort, connection::OpenedDatabaseFile};
+use crate::SqliteStoreSizeTelemetryPort;
+#[cfg(unix)]
+use crate::connection::OpenedDatabaseFile;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
