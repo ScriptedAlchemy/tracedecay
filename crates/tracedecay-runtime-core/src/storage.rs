@@ -359,15 +359,32 @@ mod layout;
 mod manifest;
 mod paths_and_io;
 
-pub use identity::*;
-pub use layout::*;
-pub use manifest::*;
-pub use paths_and_io::*;
+pub use identity::{
+    enrollment_marker_path, has_enrollment_marker, read_enrollment_marker,
+    read_repository_identity_marker, remove_enrollment_marker, repository_identity_path,
+    write_enrollment_marker, write_repository_identity_marker,
+};
+pub(crate) use layout::has_path_local_profile_store;
+pub use layout::{
+    default_profile_project_id, default_profile_root, default_profile_sharded_layout,
+    matching_legacy_profile_layouts, path_local_profile_project_id, profile_sharded_data_root,
+    profile_sharded_layout, resolve_enrolled_layout_for_current_profile, resolve_layout,
+    resolve_layout_for_current_profile, resolve_lcm_payload_root, resolve_persisted_layout,
+    resolve_project_session_db_path, resolve_response_handle_root,
+    retire_identity_cutover_manifest,
+};
+pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
+pub use paths_and_io::{
+    acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
+    retry_transient_file_op, set_private_dir_permissions, try_acquire_sidecar_lock,
+    validate_project_id,
+};
 
 #[cfg(test)]
 use layout::matching_legacy_profile_layouts_with_git_resolver;
 #[cfg(test)]
 use paths_and_io::open_lock_file;
+use paths_and_io::validate_enrollment_marker;
 
 include!("storage/tests.rs");
 include!("storage/identity_tests.rs");
