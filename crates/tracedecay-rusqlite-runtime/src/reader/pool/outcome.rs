@@ -28,6 +28,10 @@ pub struct ReaderPoolSnapshot {
     pub available_health: u16,
     pub leased_general: u16,
     pub leased_health: u16,
+    /// Workers whose lease ended but whose snapshot rollback has not been
+    /// confirmed. They belong to neither `available_*` nor `leased_*`.
+    pub limbo_general: u16,
+    pub limbo_health: u16,
 }
 
 #[derive(Debug)]

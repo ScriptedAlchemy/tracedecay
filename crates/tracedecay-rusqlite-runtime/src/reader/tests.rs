@@ -1018,3 +1018,80 @@ fn foreground_reservation_leaves_background_at_least_one_worker() {
     drop(reserved);
     drop(held);
 }
+
+/// A snapshot end that outruns its 5ms grace leaves the worker neither
+/// available nor leased. That state has to be counted: an unaccounted worker
+/// silently shrinks the lane and lets shutdown declare quiescence with a
+/// rollback still in flight.
+#[test]
+fn a_deferred_snapshot_end_is_counted_replaceable_and_bounded() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        two_reader_budget(),
+        SlowExecutor {
+            delay: Duration::from_millis(400),
+        },
+    )
+    .unwrap();
+
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let cancel = Arc::clone(&probe.interruption);
+    let mut lease = pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap();
+    {
+        let mut snapshot = lease.begin_snapshot().unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            cancel.store(1, Ordering::SeqCst);
+        });
+        // The probe releases the caller while the worker is still inside the
+        // executor, so the snapshot end that follows cannot be acknowledged
+        // within its grace period.
+        let _ = snapshot.execute(read.clone(), &probe);
+    }
+    drop(lease);
+
+    let stranded = pool.snapshot();
+    assert_eq!(
+        stranded.limbo_general, 1,
+        "a worker that missed its snapshot-end grace must be counted as limbo"
+    );
+    assert_eq!(
+        stranded.leased_general, 0,
+        "the lease is over even though the worker has not come back"
+    );
+    assert!(
+        !pool.is_quiescent(),
+        "quiescence must not be reported while a rollback is in flight"
+    );
+
+    // One worker is stuck, but the lane must not run degraded: it can grow a
+    // replacement rather than serve `max_per_hot_shard - 1` until it resolves.
+    // Both waits are far shorter than the executor delay still running on the
+    // limbo worker, so neither acquisition can be satisfied by its return.
+    let replacement_probe = Probe::for_request(&read);
+    let first = pool
+        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .expect("the untouched worker must still serve");
+    let second = pool
+        .acquire(&read, &replacement_probe, Duration::from_millis(50))
+        .expect("the lane must replace the limbo worker instead of running short");
+    drop(first);
+    drop(second);
+
+    // The deferred return is bounded, so the limbo always resolves.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && !pool.is_quiescent() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let settled = pool.snapshot();
+    assert_eq!(
+        settled.limbo_general, 0,
+        "the limbo worker was never reclaimed or replaced"
+    );
+    assert!(
+        pool.is_quiescent(),
+        "the pool must reach quiescence once the deferred end resolves"
+    );
+}
