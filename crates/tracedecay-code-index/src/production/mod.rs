@@ -252,16 +252,19 @@ where
     E: Send,
     F: Fn(&T) -> Result<R, E> + Sync,
 {
-    if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
-        return items.iter().map(operation).collect();
-    }
-    let results: Vec<Result<R, E>> = crate::parallelism::install(|| {
-        items
+    // Always enter the indexing pool, even when the width is 1: the pool is
+    // what keeps the nested chunk-level fan-out inside the reservation
+    // instead of spilling onto rayon's global (all-cores) pool.
+    crate::parallelism::install(|| {
+        if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
+            return items.iter().map(&operation).collect();
+        }
+        let results: Vec<Result<R, E>> = items
             .par_iter()
             .map(&operation)
-            .collect::<Vec<Result<R, E>>>()
-    });
-    results.into_iter().collect()
+            .collect::<Vec<Result<R, E>>>();
+        results.into_iter().collect()
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
