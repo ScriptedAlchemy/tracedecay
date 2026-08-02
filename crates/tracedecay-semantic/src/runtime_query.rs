@@ -88,6 +88,7 @@ impl<R> CurrentSemanticQueryRuntimeV1<R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {
+    #[cfg(test)]
     pub fn new(
         pointer: SemanticGenerationPointerV1,
         runtime: Arc<SemanticRuntimeService<R>>,
