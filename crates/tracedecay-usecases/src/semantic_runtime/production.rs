@@ -29,12 +29,13 @@ use crate::config::SemanticResourceCeilings;
 use crate::retention::code_index_generations::{
     CodeGenerationRetentionModeV1, CodeGenerationRetentionReceiptV1,
     DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention,
-    plan_code_generation_retention, recover_code_generation_retention,
+    plan_next_code_generation_retention_cancellable, recover_code_generation_retention,
 };
 use crate::store::vector_generations::{
     DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
     DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
-    VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorProjectionCheckpointV1,
+    VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
+    VectorProjectionCheckpointV1,
 };
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
@@ -272,22 +273,22 @@ impl ProductionSemanticRuntimeV1 {
 
     async fn retain_code_generations(
         &self,
-        store: &DatabaseVectorGenerationStoreV1<'_>,
         inventory: &DatabaseLegacyVectorInventoryV1,
     ) -> Result<Option<CodeGenerationRetentionReceiptV1>, SemanticRuntimeScheduleFailureV1> {
-        let snapshot = inventory
-            .read_only_inventory()
+        let witness = inventory
+            .retention_witness()
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let vector_readable_sources = snapshot.retained_readable_sources();
+        let vector_readable_sources = witness.readable_sources().clone();
         let store_root = self.code_index_store_root.clone();
         let plan_root = store_root.clone();
         let planned_sources = vector_readable_sources.clone();
         let plan = tokio::task::spawn_blocking(move || {
             recover_code_generation_retention(&plan_root, &planned_sources)?;
-            plan_code_generation_retention(
+            plan_next_code_generation_retention_cancellable(
                 &plan_root,
                 &planned_sources,
                 DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+                &|| false,
             )
         })
         .await
@@ -297,45 +298,41 @@ impl ProductionSemanticRuntimeV1 {
             return Ok(None);
         }
 
-        // Hold the canonical vector writer lane while re-reading liveness and
-        // unlinking candidates. A vector publication cannot begin naming a
-        // previously unmarked source between the final mark check and sweep.
         let writer = self
             .database
             .begin_write_transaction("retain code-index generations")
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let current_sources = store
-            .read_legacy_inventory()
-            .await
-            .and_then(|inventory| {
-                inventory.read_only_inventory().map_err(|error| {
-                    crate::store::vector_generations::VectorGenerationStoreErrorV1::Storage(
-                        error.to_string(),
-                    )
-                })
-            })
-            .map(|inventory| inventory.retained_readable_sources())
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication);
-        let result = match current_sources {
-            Ok(current_sources) if current_sources == vector_readable_sources => {
-                execute_code_generation_retention(
-                    &store_root,
-                    plan,
-                    CodeGenerationRetentionModeV1::Apply,
-                    now_micros(),
-                )
-                .map(|report| report.receipt)
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)
+        match witness.validate(&writer).await {
+            Ok(()) => {}
+            Err(VectorGenerationStoreErrorV1::ConcurrentMutation) => {
+                writer
+                    .rollback()
+                    .await
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                return Ok(None);
             }
-            Ok(_) => Ok(None),
-            Err(error) => Err(error),
-        };
+            Err(_) => {
+                writer
+                    .rollback()
+                    .await
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                return Err(SemanticRuntimeScheduleFailureV1::Publication);
+            }
+        }
+        let result = execute_code_generation_retention(
+            &store_root,
+            plan,
+            CodeGenerationRetentionModeV1::Apply,
+            now_micros(),
+        );
         writer
             .rollback()
             .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         result
+            .map(|report| report.receipt)
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)
     }
 
     /// Restore a compatible immutable generation after daemon restart.
@@ -430,7 +427,7 @@ impl ProductionSemanticRuntimeV1 {
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let inventory = store.read_legacy_inventory().await;
         if let Ok(inventory) = inventory.as_ref()
-            && let Err(error) = self.retain_code_generations(&store, inventory).await
+            && let Err(error) = self.retain_code_generations(inventory).await
         {
             tracing::warn!(
                 event = "code_generation_retention",

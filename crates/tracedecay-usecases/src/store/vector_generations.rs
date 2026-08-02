@@ -29,12 +29,16 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe,
 };
 use tracedecay_semantic::legacy_migration::{
-    LegacyVectorInventoryEntryV1, LegacyVectorInventoryPortV1, LegacyVectorInventoryV1,
-    LegacyVectorMigrationOutcomeKindV1, LegacyVectorMigrationOwnerTransactionV1,
-    LegacyVectorMigrationReceiptV1, canonical_chunk_set_digest,
+    LegacyVectorInventoryEntryV1, LegacyVectorInventoryV1, LegacyVectorMigrationOutcomeKindV1,
+    LegacyVectorMigrationOwnerTransactionV1, LegacyVectorMigrationReceiptV1,
+    canonical_chunk_set_digest,
 };
 use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
+};
+
+pub use super::vector_generation_inventory::{
+    DatabaseLegacyVectorInventoryV1, VectorGenerationRetentionWitnessV1,
 };
 
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
@@ -1781,25 +1785,6 @@ impl ActiveVectorGenerationSnapshotV1 {
     }
 }
 
-/// Identity-only snapshot of the legacy state. The SQL adapter never returns
-/// legacy vector payloads to Rust.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DatabaseLegacyVectorInventoryV1 {
-    revision: i64,
-    inventory: LegacyVectorInventoryV1,
-}
-
-impl LegacyVectorInventoryPortV1 for DatabaseLegacyVectorInventoryV1 {
-    fn read_only_inventory(
-        &self,
-    ) -> Result<
-        LegacyVectorInventoryV1,
-        tracedecay_semantic::legacy_migration::LegacyVectorMigrationErrorV1,
-    > {
-        Ok(self.inventory.clone())
-    }
-}
-
 /// Read only the code-generation identities named by structurally readable
 /// vector generations, without opening a daemon runtime or deserializing vector
 /// payloads. This is the offline equivalent of
@@ -2378,17 +2363,17 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             }
         }
         drop(rows);
-        Ok(DatabaseLegacyVectorInventoryV1 {
-            revision: revision.ok_or_else(|| {
+        Ok(DatabaseLegacyVectorInventoryV1::new(
+            revision.ok_or_else(|| {
                 VectorGenerationStoreErrorV1::Storage(
                     "vector generation state row is missing".to_owned(),
                 )
             })?,
-            inventory: LegacyVectorInventoryV1 {
+            LegacyVectorInventoryV1 {
                 expected_active_generation,
                 entries,
             },
-        })
+        ))
     }
 
     /// Return a durable completed migration receipt, if atomic replacement
@@ -2444,7 +2429,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         mut replacement: FakeVectorGenerationStoreV1,
         transaction: &LegacyVectorMigrationOwnerTransactionV1,
     ) -> Result<LegacyVectorMigrationReceiptV1, VectorGenerationStoreErrorV1> {
-        if inventory.inventory.expected_active_generation
+        if inventory.inventory().expected_active_generation
             != transaction.expected_prior_active_generation
         {
             return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
@@ -2499,8 +2484,8 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             .map(parse_vector_generation_id)
             .transpose()?;
         drop(current_rows);
-        if current_revision != inventory.revision
-            || current_active != inventory.inventory.expected_active_generation
+        if current_revision != inventory.revision()
+            || current_active != inventory.inventory().expected_active_generation
         {
             writer.rollback().await.map_err(storage_error)?;
             return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
@@ -2547,7 +2532,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                             item.legacy_generation.as_digest().as_str(),
                             reason.as_str(),
                             receipt_json.clone(),
-                            inventory.revision
+                            inventory.revision()
                         ],
                     )
                     .await
@@ -2578,7 +2563,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
                 "UPDATE semantic_vector_generation_state_v1
                  SET revision = revision + 1, state_json = ?1
                  WHERE singleton = 1 AND revision = ?2",
-                params![state_json, inventory.revision],
+                params![state_json, inventory.revision()],
             )
             .await
             .map_err(storage_error)?;
@@ -4822,13 +4807,13 @@ mod tests {
             .read_legacy_inventory()
             .await
             .expect("identity-only inventory");
-        assert_eq!(inventory.inventory.entries.len(), 2);
+        assert_eq!(inventory.inventory().entries.len(), 2);
         assert!(matches!(
-            &inventory.inventory.entries[0],
+            &inventory.inventory().entries[0],
             LegacyVectorInventoryEntryV1::Readable { .. }
         ));
         assert!(matches!(
-            &inventory.inventory.entries[1],
+            &inventory.inventory().entries[1],
             LegacyVectorInventoryEntryV1::Unreadable { .. }
         ));
         let offline_sources = retained_readable_sources_from_read_only_database(&path)
@@ -4929,6 +4914,126 @@ mod tests {
         DatabaseVectorGenerationStoreV1::open(&database)
             .await
             .expect("replacement state is runtime-readable");
+    }
+
+    #[tokio::test]
+    async fn retention_witness_accepts_the_unchanged_vector_inventory() {
+        let temporary = tempfile::tempdir().expect("temporary project database");
+        let (database, _authority) =
+            open_project_database(&temporary, "retention witness unchanged").await;
+        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+            .await
+            .expect("vector store");
+        let inventory = store
+            .read_legacy_inventory()
+            .await
+            .expect("vector inventory");
+        let witness = inventory.retention_witness().expect("retention witness");
+        let writer = database
+            .begin_write_transaction("validate retention witness")
+            .await
+            .expect("writer transaction");
+
+        witness
+            .validate(&writer)
+            .await
+            .expect("unchanged inventory remains authorized");
+        writer
+            .rollback()
+            .await
+            .expect("rollback witness transaction");
+    }
+
+    #[tokio::test]
+    async fn retention_witness_rejects_revision_drift() {
+        let temporary = tempfile::tempdir().expect("temporary project database");
+        let (database, _authority) =
+            open_project_database(&temporary, "retention witness revision drift").await;
+        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+            .await
+            .expect("vector store");
+        let inventory = store
+            .read_legacy_inventory()
+            .await
+            .expect("vector inventory");
+        let witness = inventory.retention_witness().expect("retention witness");
+        database
+            .execute_write_engine(
+                "advance vector inventory revision",
+                "UPDATE semantic_vector_generation_state_v1
+                 SET revision = revision + 1
+                 WHERE singleton = 1",
+                (),
+            )
+            .await
+            .expect("advance revision");
+        let writer = database
+            .begin_write_transaction("validate stale retention witness")
+            .await
+            .expect("writer transaction");
+
+        let error = witness
+            .validate(&writer)
+            .await
+            .expect_err("revision drift must refuse retention");
+        assert!(matches!(
+            error,
+            VectorGenerationStoreErrorV1::ConcurrentMutation
+        ));
+        writer
+            .rollback()
+            .await
+            .expect("rollback witness transaction");
+    }
+
+    #[tokio::test]
+    async fn retention_witness_rejects_a_new_source_without_revision_drift() {
+        let temporary = tempfile::tempdir().expect("temporary project database");
+        let (database, _authority) =
+            open_project_database(&temporary, "retention witness source drift").await;
+        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
+            .await
+            .expect("vector store");
+        let inventory = store
+            .read_legacy_inventory()
+            .await
+            .expect("vector inventory");
+        let witness = inventory.retention_witness().expect("retention witness");
+        let vector_generation = manifest_digest('a');
+        let mut state: serde_json::Value =
+            serde_json::from_str(&state_document(&database).await).expect("decode state");
+        state["published"]["generations"][vector_generation.as_str()] = serde_json::json!({
+            "generation_id": vector_generation.as_str(),
+            "source_generation": "code-generation.foreign-pin",
+            "vectors": []
+        });
+        database
+            .execute_write_engine(
+                "install foreign vector pin without revision",
+                "UPDATE semantic_vector_generation_state_v1
+                 SET state_json = ?1
+                 WHERE singleton = 1",
+                params![state.to_string()],
+            )
+            .await
+            .expect("install foreign pin");
+        let writer = database
+            .begin_write_transaction("validate foreign retention witness")
+            .await
+            .expect("writer transaction");
+
+        let error = witness
+            .validate(&writer)
+            .await
+            .expect_err("a new readable source must refuse retention");
+        assert!(matches!(
+            error,
+            VectorGenerationStoreErrorV1::ConcurrentMutation
+        ));
+        writer
+            .rollback()
+            .await
+            .expect("rollback witness transaction");
     }
 
     #[tokio::test]
