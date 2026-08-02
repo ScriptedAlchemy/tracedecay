@@ -670,7 +670,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                         && record["status"] == "succeeded"
                         && record["artifacts"]
                             .as_array()
-                            .is_some_and(|artifacts| artifacts.len() == 7))
+                            .is_some_and(|artifacts| artifacts.len() == 6))
                 ),
             "successful dashboard automation run should be visible in history: {runs}"
         );

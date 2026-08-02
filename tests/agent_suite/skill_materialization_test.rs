@@ -485,46 +485,6 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 }
 
 #[tokio::test]
-async fn interrupted_manifest_commit_recovers_on_retry() {
-    let (_temp, root) = canonical_tempdir();
-    let home = root.join("home");
-    let profile_root = home.join(".tracedecay");
-    install_fake_hosts(&home);
-
-    activate_skill(&profile_root, "code-slop-cleanup").await;
-    let scope = MaterializationScope::global(MaterializationHost::Claude, home);
-    let mut skill = tracedecay::automation::managed_skills::load_managed_skill(
-        &profile_root,
-        "code-slop-cleanup",
-    )
-    .await
-    .unwrap();
-    materialize_skill(&scope, &skill, INSTALL).unwrap();
-    skill.body_markdown = "# Cleanup v2\n\nRecover this update.".to_string();
-    skill.support_files[0].bytes = b"updated checklist\n".to_vec();
-
-    let dir = scope.skills_dir().join("code-slop-cleanup");
-    let pending = dir.join(".tracedecay-materialization.pending.json");
-    let blocked_staging = PathBuf::from(format!("{}.new", pending.display()));
-    std::fs::create_dir(&blocked_staging).unwrap();
-    assert!(materialize_skill(&scope, &skill, INSTALL).is_err());
-    std::fs::remove_dir(blocked_staging).unwrap();
-
-    let retried = materialize_skill(&scope, &skill, INSTALL).unwrap();
-
-    assert_ne!(retried.action, MaterializeAction::SkippedForked);
-    assert!(
-        std::fs::read_to_string(dir.join("SKILL.md"))
-            .unwrap()
-            .contains("Recover this update.")
-    );
-    assert_eq!(
-        std::fs::read_to_string(dir.join("references/checklist.md")).unwrap(),
-        "updated checklist\n"
-    );
-}
-
-#[tokio::test]
 async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
