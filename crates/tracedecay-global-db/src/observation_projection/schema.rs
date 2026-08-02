@@ -232,7 +232,7 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
         "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
          ON observation_projection_dispositions (observation_id, receipt_id);",
     ] {
-        let transaction = conn.schema_migration_transaction().await?;
+        let transaction = conn.authorized_long_lease_transaction().await?;
         transaction.execute_schema_batch_step(sql).await?;
         transaction.commit().await?;
     }

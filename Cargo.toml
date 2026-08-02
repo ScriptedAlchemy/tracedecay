@@ -254,8 +254,8 @@ path = "tests/host_lifecycle_cli_acceptance.rs"
 required-features = ["test-transport"]
 
 [[test]]
-name = "migration_reindex_status_test"
-path = "tests/migration_reindex_status_test.rs"
+name = "graph_rebuild_status_test"
+path = "tests/graph_rebuild_status_test.rs"
 required-features = ["test-transport"]
 
 [[test]]

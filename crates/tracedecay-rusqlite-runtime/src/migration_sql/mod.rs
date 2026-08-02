@@ -1,7 +1,10 @@
-//! Temporary internal SQL transport for the one-shot consolidated migration.
+//! Internal SQL transport between the runtime and its writer/reader pools.
 //!
 //! Authority comes only from an already-attached writer and reader pool. This
 //! module exposes owned values, never a SQLite connection or filesystem path.
+//!
+//! The `MigrationSql*` prefix is historical: this is the ordinary write and
+//! read transport for every store operation, not a schema-version ladder.
 
 use std::{
     sync::{
@@ -414,14 +417,17 @@ impl MigrationSqlHandle {
         )
     }
 
-    /// Begins the only transaction mode permitted to run an explicitly
-    /// authorized schema step without the ordinary statement deadline.
+    /// Begins the only transaction mode whose lease renews on progress, and
+    /// the only one permitted to run an explicitly authorized schema step
+    /// without the ordinary statement deadline.
     ///
-    /// The mode is intentionally not configurable: callers must attach a live
-    /// write authority and opt into the schema-specific transaction and step
-    /// APIs. Shutdown and authority revocation remain progress-handler
-    /// cancellation conditions.
-    pub fn begin_schema_migration_immediate(
+    /// Reserved for schema installation and full-index bulk replacement — work
+    /// that legitimately outlives one lease while continuously committing
+    /// progress. The mode is intentionally not configurable: callers must
+    /// attach a live write authority and opt into the long-lease transaction
+    /// and step APIs. Shutdown, idleness, and authority revocation remain
+    /// progress-handler cancellation conditions.
+    pub fn begin_authorized_long_lease_immediate(
         &self,
     ) -> Result<MigrationSqlTransaction, MigrationSqlError> {
         if self.writer.is_none() {
@@ -429,12 +435,12 @@ impl MigrationSqlHandle {
         }
         if self.write_authority.is_none() {
             return Err(MigrationSqlError::AuthorityDenied(
-                "schema migration transaction requires attached write authority".to_owned(),
+                "long-lease transaction requires attached write authority".to_owned(),
             ));
         }
         self.begin_transaction(
             TransactionBehavior::Immediate,
-            MigrationSqlTransactionPolicy::SchemaMigration,
+            MigrationSqlTransactionPolicy::AuthorizedLongLease,
         )
     }
 
@@ -579,28 +585,13 @@ impl MigrationSqlTransaction {
         }
     }
 
-    /// Executes one schema statement without the ordinary statement deadline.
-    ///
-    /// This is accepted only on an authority-bound schema migration
-    /// transaction. The writer actor re-verifies that authority before,
-    /// repeatedly during, and after execution.
-    pub fn execute_schema_step(
-        &self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlExecuteResult, MigrationSqlError> {
-        match self.dispatch_with_policy(
-            MigrationSqlRequest::Execute(statement),
-            MigrationSqlStepPolicy::AuthorizedLongSchema,
-        )? {
-            MigrationSqlResult::Executed(result) => Ok(result),
-            _ => Err(MigrationSqlError::TransactionClosed),
-        }
-    }
-
     /// Executes one schema batch without the ordinary statement deadline.
     ///
     /// This is not a generic unbounded mode; it is accepted only by an
-    /// authority-bound schema migration transaction.
+    /// authority-bound long-lease transaction, and exists for durable schema
+    /// installation whose single statement can legitimately outrun the
+    /// ordinary statement deadline. The writer actor re-verifies authority
+    /// before, repeatedly during, and after execution.
     pub fn execute_schema_batch_step(
         &self,
         sql: String,
@@ -659,11 +650,10 @@ impl MigrationSqlTransaction {
     ) -> Result<MigrationSqlResult, MigrationSqlError> {
         validate_request(&request)?;
         if step_policy == MigrationSqlStepPolicy::AuthorizedLongSchema
-            && self.policy != MigrationSqlTransactionPolicy::SchemaMigration
+            && self.policy != MigrationSqlTransactionPolicy::AuthorizedLongLease
         {
             return Err(MigrationSqlError::AuthorityDenied(
-                "long schema steps require an authority-bound schema migration transaction"
-                    .to_owned(),
+                "long schema steps require an authority-bound long-lease transaction".to_owned(),
             ));
         }
         let sender = self

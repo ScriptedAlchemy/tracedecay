@@ -1,4 +1,4 @@
-//! What the writer thread receives, and how it runs one migration transaction.
+//! What the writer thread receives, and how it runs one write transaction.
 //!
 //! The handle side of the transport only sends [`WriterCommand`]s; everything
 //! that touches the writer's connection happens here, on the writer thread, so
@@ -113,9 +113,9 @@ pub(crate) fn run_writer_command(
             expired,
             authority,
         } => {
-            if policy == MigrationSqlTransactionPolicy::SchemaMigration && authority.is_none() {
+            if policy == MigrationSqlTransactionPolicy::AuthorizedLongLease && authority.is_none() {
                 let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
-                    "schema migration transaction requires attached write authority".to_owned(),
+                    "long-lease transaction requires attached write authority".to_owned(),
                 )));
                 return;
             }
@@ -388,10 +388,10 @@ fn run_transaction(
                     );
                 }
                 if step_policy == MigrationSqlStepPolicy::AuthorizedLongSchema
-                    && policy != MigrationSqlTransactionPolicy::SchemaMigration
+                    && policy != MigrationSqlTransactionPolicy::AuthorizedLongLease
                 {
                     let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
-                        "long schema steps require an authority-bound schema migration transaction"
+                        "long schema steps require an authority-bound long-lease transaction"
                             .to_owned(),
                     )));
                     continue;
@@ -461,7 +461,12 @@ fn run_transaction(
                 if succeeded {
                     let renewed_at = Instant::now();
                     idle_deadline = renewed_at + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
-                    if policy == MigrationSqlTransactionPolicy::SchemaMigration {
+                    // A long-lease transaction earns its next lease by
+                    // committing progress: full-index replacement writes far
+                    // more rows than one fixed lease can carry, but it never
+                    // stalls. Idleness, shutdown, and authority revocation
+                    // still cancel it, and `Ordinary` never renews.
+                    if policy == MigrationSqlTransactionPolicy::AuthorizedLongLease {
                         transaction_deadline = renewed_at + MIGRATION_SQL_TRANSACTION_LIMIT;
                     }
                 }

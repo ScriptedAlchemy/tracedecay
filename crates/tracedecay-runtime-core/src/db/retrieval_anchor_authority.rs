@@ -8,7 +8,7 @@ use tracedecay_store::{
     RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1,
 };
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::db::engine::{QueryExecutor, params};
 use crate::errors::{Result, TraceDecayError};
 
 const OPERATION: &str = "retrieval anchor authority";
@@ -81,66 +81,6 @@ async fn current_disposition(
         .transpose()?
         .map(|state| AnchorDispositionStateV1::parse(&state))
         .transpose()?)
-}
-
-#[allow(dead_code)]
-pub(crate) async fn publish_anchor_derivative(
-    connection: &(impl Executor + Sync),
-    derivative: &RetrievalAnchorDerivativeV1,
-) -> Result<AnchorDispositionAppendOutcomeV1> {
-    derivative.validate()?;
-    let owner = owner_json(derivative.owner())?;
-    if !AnchorDispositionStateV1::serves_derivatives(
-        current_disposition(connection, derivative.source_anchor_id(), &owner).await?,
-    ) {
-        return Err(authority_error(
-            "cannot publish lineage from an unavailable anchor",
-        ));
-    }
-    let changed = connection
-        .execute(
-            "INSERT OR IGNORE INTO retrieval_anchor_reverse_lineage (
-                source_anchor_id, owner_json, derivative_kind, derivative_id, direct_evidence
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                derivative.source_anchor_id().as_str(),
-                owner.as_str(),
-                derivative.kind().as_str(),
-                derivative.derivative_id(),
-                i64::from(derivative.is_direct_evidence()),
-            ],
-        )
-        .await
-        .map_err(database_error)?;
-    if changed == 1 {
-        return Ok(AnchorDispositionAppendOutcomeV1::Appended);
-    }
-    let mut rows = connection
-        .query(
-            "SELECT direct_evidence FROM retrieval_anchor_reverse_lineage
-             WHERE source_anchor_id = ?1 AND owner_json = ?2
-               AND derivative_kind = ?3 AND derivative_id = ?4",
-            params![
-                derivative.source_anchor_id().as_str(),
-                owner,
-                derivative.kind().as_str(),
-                derivative.derivative_id(),
-            ],
-        )
-        .await
-        .map_err(database_error)?;
-    let replayed = rows
-        .next()
-        .await
-        .map_err(database_error)?
-        .is_some_and(|row| {
-            row.get::<i64>(0).ok() == Some(i64::from(derivative.is_direct_evidence()))
-        });
-    if replayed {
-        Ok(AnchorDispositionAppendOutcomeV1::Replayed)
-    } else {
-        Err(authority_error("anchor derivative identity collision"))
-    }
 }
 
 pub(crate) async fn resolve_anchor_derivatives<O>(

@@ -5,7 +5,7 @@
 //! whose project identity no longer resolves to a live repository root.
 //!
 //! A project-root migration re-registers a repository under a new identity and
-//! silently strands the prior store on disk. `migrate registry-gc` removes the
+//! silently strands the prior store on disk. Registry GC removes the
 //! stale *registry row* but never the on-disk store *data*, so the payload
 //! accumulates invisibly (measured at ~41 GB in one dogfood profile). This
 //! module makes those stores a typed finding — carrying age and size — and
@@ -1020,7 +1020,7 @@ pub(crate) async fn sweep_orphan_stores(
 // is invisible to that walk no matter how large it grows. This is a distinct
 // failure mode from [`StoreDisposition::Orphaned`] (whose registry row still
 // exists; only its root vanished): here the row itself is gone, e.g. because
-// `migrate registry-gc` removed the stale identity row without also removing
+// registry GC removed the stale identity row without also removing
 // the on-disk payload it pointed at. The owner's audit measured this class at
 // 322 directories / 655 MB in one profile. This section is a bottom-up
 // counterpart: scan `profile_root/projects/*` (the layout every

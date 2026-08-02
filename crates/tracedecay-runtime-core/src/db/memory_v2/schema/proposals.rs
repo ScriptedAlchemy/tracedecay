@@ -1,46 +1,9 @@
-//! Proposal-log schema rebuilds, projection indexes, integrity triggers, and
-//! the V22 feedback-history repair seed.
+//! Proposal-log schema rebuilds, projection indexes, and integrity triggers.
 
-use crate::db::engine::params;
 use crate::errors::Result;
 
-use super::super::{
-    MemoryV2Executor, V1_COMPATIBILITY_SOURCE_STORE, db_error, db_message, now_micros,
-};
-use super::baseline::create_schema;
+use super::super::{MemoryV2Executor, db_error, db_message};
 use super::introspection::{proposal_schema_is_v22, table_exists, table_has_column};
-
-/// Captures only the already-processed V1 feedback frontier. The repair itself
-/// is deliberately daemon-driven in bounded batches after migration commits.
-pub(super) async fn seed_v22_feedback_history_repairs(
-    conn: &impl MemoryV2Executor,
-    operation: &str,
-) -> Result<()> {
-    if !table_exists(conn, "memory_v2_backfill_progress").await? {
-        return Ok(());
-    }
-    let seeded_at = now_micros()?;
-    conn.execute(
-        "INSERT INTO memory_v2_feedback_history_repair_progress(
-            owner_kind, project_id, source_store_id, owner_json,
-            feedback_frontier, feedback_cursor, phase,
-            started_at, updated_at, completed_at
-         )
-         SELECT owner_kind, project_id, source_store_id, owner_json,
-                CASE
-                    WHEN feedback_cursor < feedback_frontier THEN feedback_cursor
-                    ELSE feedback_frontier
-                END,
-                0, 'pending', ?1, ?1, NULL
-         FROM memory_v2_backfill_progress
-         WHERE source_store_id = ?2
-         ON CONFLICT(owner_kind, project_id, source_store_id) DO NOTHING",
-        params![seeded_at, V1_COMPATIBILITY_SOURCE_STORE],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| db_error(operation, error))
-}
 
 pub(super) async fn ensure_v22_proposal_schema(
     conn: &impl MemoryV2Executor,
@@ -184,82 +147,6 @@ async fn rebuild_v22_proposal_tables(conn: &impl MemoryV2Executor, operation: &s
          BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposal transitions cannot emit applying');
          END;",
-    )
-    .await
-    .map_err(|error| db_error(operation, error))
-}
-
-pub(super) async fn add_column_if_missing(
-    conn: &impl MemoryV2Executor,
-    table: &str,
-    column: &str,
-    definition: &str,
-    operation: &str,
-) -> Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM pragma_table_xinfo(?1) WHERE name = ?2 COLLATE NOCASE",
-            params![table, column],
-        )
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    if rows
-        .next()
-        .await
-        .map_err(|error| db_error(operation, error))?
-        .is_some()
-    {
-        return Ok(false);
-    }
-    drop(rows);
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition};"))
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    Ok(true)
-}
-
-/// `SQLite` cannot relax a table CHECK in place. Rebuild the immutable proposal
-/// transition log and its current-state projection together so v19 databases
-/// retain every transition while allowing an applied, assertion-less batch.
-pub(super) async fn rebuild_v20_proposal_transition_tables(
-    conn: &impl MemoryV2Executor,
-    operation: &str,
-) -> Result<()> {
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_update;
-         DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_no_delete;
-         DROP TRIGGER IF EXISTS memory_v2_proposal_transitions_require_origin;
-         DROP INDEX IF EXISTS idx_memory_v2_proposal_list;
-         ALTER TABLE memory_v2_proposal_current
-         RENAME TO memory_v2_proposal_current_v19;
-         ALTER TABLE memory_v2_proposal_transitions
-         RENAME TO memory_v2_proposal_transitions_v19;",
-    )
-    .await
-    .map_err(|error| db_error(operation, error))?;
-
-    create_schema(conn, operation).await?;
-    conn.execute_batch(
-        "INSERT INTO memory_v2_proposal_transitions(
-            transition_sequence, transition_id, proposal_id, owner_kind,
-            project_id, previous_state, current_state, reviewer_json,
-            validation_json, origin, promoted_fact_id, promoted_assertion_id,
-            promoted_event_id, transition_json, occurred_at
-         )
-         SELECT transition_sequence, transition_id, proposal_id, owner_kind,
-                project_id, previous_state, current_state, reviewer_json,
-                validation_json, origin, promoted_fact_id, promoted_assertion_id,
-                promoted_event_id, transition_json, occurred_at
-         FROM memory_v2_proposal_transitions_v19;
-         INSERT INTO memory_v2_proposal_current(
-            proposal_id, owner_kind, project_id, state, revision,
-            last_transition_id, updated_at
-         )
-         SELECT proposal_id, owner_kind, project_id, state, revision,
-                last_transition_id, updated_at
-         FROM memory_v2_proposal_current_v19;
-         DROP TABLE memory_v2_proposal_current_v19;
-         DROP TABLE memory_v2_proposal_transitions_v19;",
     )
     .await
     .map_err(|error| db_error(operation, error))

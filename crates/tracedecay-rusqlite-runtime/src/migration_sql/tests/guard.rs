@@ -134,7 +134,7 @@ fn pinned_batch_allows_named_savepoint_rollback_and_release() {
 }
 
 #[test]
-fn pinned_batch_allows_schema_migration_ddl() {
+fn pinned_batch_allows_schema_install_ddl() {
     let fixture = fixture('a', 'a');
     let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
@@ -165,7 +165,7 @@ fn pinned_batch_allows_schema_migration_ddl() {
 }
 
 #[test]
-fn unpinned_batch_allows_schema_migration_ddl() {
+fn unpinned_batch_allows_schema_install_ddl() {
     let fixture = fixture('a', 'a');
     let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel

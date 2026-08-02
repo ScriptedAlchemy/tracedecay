@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_schema_transaction_exposes_long_schema_steps() {
+    async fn only_long_lease_transaction_exposes_long_schema_steps() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(
             &directory.path().join("engine.sqlite3"),
@@ -240,11 +240,14 @@ mod tests {
         assert!(matches!(error, Error::InvalidOperation(_)));
         ordinary.rollback().await.unwrap();
 
-        let migration = connection.schema_migration_transaction().await.unwrap();
-        migration
+        let long_lease = connection
+            .authorized_long_lease_transaction()
+            .await
+            .unwrap();
+        long_lease
             .execute_schema_batch_step("CREATE TABLE allowed (id INTEGER)")
             .await
             .unwrap();
-        migration.commit().await.unwrap();
+        long_lease.commit().await.unwrap();
     }
 }

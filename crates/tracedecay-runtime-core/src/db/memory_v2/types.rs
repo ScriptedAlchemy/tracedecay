@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{
-    FactAssertionId, FactAssertionKindV1, FactEventId, FactId, FactOwnerV1, PayloadAccessState,
-    PayloadReferenceV1, UtcMicros,
-};
+use tracedecay_domain::{FactEventId, PayloadAccessState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct CapturedMemoryV2Frontiers {
@@ -41,28 +38,9 @@ pub(super) struct OwnerKey {
     pub(super) json: String,
 }
 
-#[allow(dead_code)]
+/// The lineage state the live purge path compares against: the current payload
+/// access and the CAS identity of the last recorded event.
 pub(super) struct CurrentFactState {
     pub(super) access: PayloadAccessState,
     pub(super) last_event_id: FactEventId,
-    pub(super) active_assertion_id: Option<FactAssertionId>,
-    pub(super) active_kind: Option<FactAssertionKindV1>,
-    pub(super) active_payload_reference: Option<PayloadReferenceV1>,
-}
-
-/// Usage counters carried from `memory_facts` into the canonical projection.
-/// Unlike feedback, retrieval history has no legacy event log to replay, so
-/// the cutover must preserve these counters or every migrated store silently
-/// loses its ranking usage signal.
-#[derive(Serialize)]
-#[allow(dead_code)]
-pub(super) struct StoredAssertionHeaderV1<'a> {
-    pub(super) assertion_id: &'a FactAssertionId,
-    pub(super) fact_id: &'a FactId,
-    pub(super) owner: &'a FactOwnerV1,
-    pub(super) kind: &'a FactAssertionKindV1,
-    pub(super) payload_reference: &'a PayloadReferenceV1,
-    pub(super) evidence: &'a [tracedecay_domain::FactEvidenceRefV1],
-    pub(super) asserted_at: UtcMicros,
-    pub(super) actor_id: Option<&'a tracedecay_domain::ActorId>,
 }

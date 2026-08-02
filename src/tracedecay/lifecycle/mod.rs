@@ -443,27 +443,19 @@ impl TraceDecay {
         }
     }
 
-    async fn latest_schema_version() -> Result<u32> {
-        Ok(crate::db::migrations::LATEST_VERSION)
-    }
-
+    /// Refuses a read-only store that is not at the one schema shape this
+    /// binary creates. There is no upgrade path to name: the store was written
+    /// by an incompatible binary, so the only remedy is a fresh one.
     pub async fn ensure_schema_current(&self) -> Result<()> {
         let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
-        let latest = Self::latest_schema_version().await?;
-        if current < latest {
+        let supported = crate::db::migrations::SCHEMA_VERSION;
+        if current != supported {
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "read-only TraceDecay database schema is v{current}, but this binary requires \
-                     v{latest}; open the project with write access to run migrations before serving \
-                     it read-only"
-                ),
-            });
-        }
-        if current > latest {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "TraceDecay database schema v{current} is newer than this binary supports \
-                     (v{latest}); upgrade tracedecay before serving this store"
+                    "TraceDecay database schema v{current} is not the v{supported} shape this \
+                     binary creates; this store was created by an incompatible binary and cannot \
+                     be upgraded in place. Remove the store directory and let this binary create \
+                     a fresh one."
                 ),
             });
         }
@@ -658,7 +650,7 @@ impl TraceDecay {
         // A structured marker owned by a live process describes work in
         // flight, not a crash. Only abandoned, legacy, or malformed dirty
         // markers enter recovery and contend for the writer's lock.
-        let (db, migrated) = match Self::run_open_health_recovery(
+        let db = match Self::run_open_health_recovery(
             project_root,
             open_options.clone(),
             &store_layout,
@@ -673,7 +665,7 @@ impl TraceDecay {
         )
         .await?
         {
-            OpenHealthOutcome::Ready { db, migrated } => (db, migrated),
+            OpenHealthOutcome::Ready { db } => db,
             OpenHealthOutcome::Recovered(result) => return *result,
         };
 
@@ -733,17 +725,8 @@ impl TraceDecay {
                 .await;
         }
 
-        if migrated.is_some_and(|from| {
-            crate::db::migrations::graph_reindex_required(
-                from,
-                crate::db::migrations::LATEST_VERSION,
-            )
-        }) {
-            ts.mark_migration_reindex_pending().await?;
-        }
-
         ts.register_project_store_in_global_registry().await?;
-        ts.schedule_migration_reindex_if_needed().await?;
+        ts.schedule_graph_rebuild_if_needed().await?;
         Ok(ts)
     }
 

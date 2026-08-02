@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::mcp::McpServer;
 use tracedecay::tracedecay::{
-    MigrationReindexAvailabilityV1, MigrationReindexStatusV1, TraceDecay, TraceDecayOpenOptions,
+    GraphRebuildAvailabilityV1, GraphRebuildStatusV1, TraceDecay, TraceDecayOpenOptions,
 };
 use tracedecay_store::ProjectId;
 
@@ -26,14 +26,14 @@ fn git(project: &Path, args: &[&str]) {
 
 async fn wait_for_status(
     graph: &TraceDecay,
-    predicate: impl Fn(&MigrationReindexStatusV1) -> bool,
-) -> MigrationReindexStatusV1 {
+    predicate: impl Fn(&GraphRebuildStatusV1) -> bool,
+) -> GraphRebuildStatusV1 {
     tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             let status = graph
-                .migration_reindex_status()
+                .graph_rebuild_status()
                 .await
-                .expect("read migration re-index status");
+                .expect("read graph rebuild status");
             if predicate(&status) {
                 return status;
             }
@@ -41,14 +41,14 @@ async fn wait_for_status(
         }
     })
     .await
-    .expect("migration re-index reaches expected state")
+    .expect("graph rebuild reaches expected state")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
+async fn graph_rebuild_is_nonblocking_resumable_and_honestly_reported() {
     std::fs::create_dir_all("target").expect("repo-local target directory");
     let root = tempfile::Builder::new()
-        .prefix("migration-reindex-")
+        .prefix("graph-rebuild-")
         .tempdir_in("target")
         .expect("repo-local temporary fixture");
     let project = root.path().join("project");
@@ -61,7 +61,7 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         )
         .expect("filler source");
     }
-    std::fs::write(project.join("src/lib.rs"), "pub fn before_migration() {}\n")
+    std::fs::write(project.join("src/lib.rs"), "pub fn before_rebuild() {}\n")
         .expect("initial source");
     git(&project, &["init", "-q", "-b", "main"]);
     git(&project, &["add", "."]);
@@ -86,11 +86,11 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     let runtime = HostAdmissionTestRuntimeV1::project(
         &profile,
         &project,
-        ProjectId::new("project.migration-reindex").expect("project id"),
+        ProjectId::new("project.graph-rebuild").expect("project id"),
     )
     .await
     .expect("registered project runtime");
-    TraceDecay::configure_migration_reindex_for_test(0, 0, false);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
     let initialized = runtime
         .initialize_project_graph_for_test(&project, options.clone())
         .await
@@ -106,34 +106,26 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     feature_seed.close();
     git(&project, &["checkout", "-q", "main"]);
 
-    initialized
-        .db()
-        .execute_write_batch(
-            "prepare compatible migration fixture",
-            "PRAGMA user_version = 24",
-        )
-        .await
-        .expect("downgrade compatible schema");
     initialized.close();
-    TraceDecay::configure_migration_reindex_for_test(0, 0, false);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
     let compatible = runtime
         .open_project_graph_for_test(&project, options.clone())
         .await
-        .expect("open v24 graph");
+        .expect("reopen the freshly indexed graph");
     assert!(matches!(
         compatible
-            .migration_reindex_status()
+            .graph_rebuild_status()
             .await
-            .expect("read compatible migration status"),
-        MigrationReindexStatusV1::Current { .. }
+            .expect("read current generation status"),
+        GraphRebuildStatusV1::Current { .. }
     ));
     assert_eq!(
-        TraceDecay::migration_reindex_extractions_for_test(),
+        TraceDecay::graph_rebuild_extractions_for_test(),
         0,
-        "v24/v25 auxiliary migrations must not trigger graph extraction"
+        "a current graph generation must not trigger extraction"
     );
 
-    std::fs::write(project.join("src/lib.rs"), "pub fn after_migration() {}\n")
+    std::fs::write(project.join("src/lib.rs"), "pub fn after_rebuild() {}\n")
         .expect("updated source");
     compatible
         .db()
@@ -143,20 +135,19 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     compatible
         .db()
         .execute_write_batch(
-            "prepare graph-invalidating migration fixture",
-            "DELETE FROM metadata WHERE key = 'migration_reindex_state_v1';
-             PRAGMA user_version = 16;",
+            "prepare stale graph generation fixture",
+            "DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1';",
         )
         .await
-        .expect("downgrade fixture schema");
+        .expect("clear the rebuild marker");
     compatible.close();
 
-    TraceDecay::configure_migration_reindex_for_test(1, 750, false);
+    TraceDecay::configure_graph_rebuild_for_test(1, 750, false);
     let admission_started = Instant::now();
     let opened = runtime
         .open_project_graph_for_test(&project, options.clone())
         .await
-        .expect("open migrated project");
+        .expect("open the stale-generation project");
     let admission_elapsed = admission_started.elapsed();
     assert!(
         admission_elapsed.as_millis().saturating_mul(4) < u128::from(full_index.duration_ms),
@@ -165,11 +156,11 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     );
     assert!(matches!(
         opened
-            .migration_reindex_status()
+            .graph_rebuild_status()
             .await
-            .expect("read pending migration status"),
-        MigrationReindexStatusV1::Indexing {
-            availability: MigrationReindexAvailabilityV1::Stale,
+            .expect("read pending rebuild status"),
+        GraphRebuildStatusV1::Indexing {
+            availability: GraphRebuildAvailabilityV1::Stale,
             ..
         }
     ));
@@ -186,13 +177,13 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         runtime.open_project_branch_for_test(&project, "feature", options.clone()),
     )
     .await
-    .expect("live migration marker must not block a peer branch")
+    .expect("live rebuild marker must not block a peer branch")
     .expect("peer branch opens while rebuild owns the store marker");
     peer.close();
 
     assert_eq!(
         opened
-            .get_nodes_by_name("before_migration")
+            .get_nodes_by_name("before_rebuild")
             .await
             .expect("read old generation")
             .len(),
@@ -200,25 +191,25 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     );
     assert!(
         opened
-            .get_nodes_by_name("after_migration")
+            .get_nodes_by_name("after_rebuild")
             .await
             .expect("new generation remains hidden")
             .is_empty()
     );
 
     let failed = wait_for_status(&opened, |status| {
-        matches!(status, MigrationReindexStatusV1::Failed { .. })
+        matches!(status, GraphRebuildStatusV1::Failed { .. })
     })
     .await;
     assert!(matches!(
         failed,
-        MigrationReindexStatusV1::Failed {
+        GraphRebuildStatusV1::Failed {
             retryable: true,
             ..
         }
     ));
     assert_eq!(
-        TraceDecay::migration_reindex_extractions_for_test(),
+        TraceDecay::graph_rebuild_extractions_for_test(),
         CHECKPOINT_BATCH_SIZE
     );
     let mut active_sync_lock_name = opened
@@ -230,7 +221,7 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     let checkpoint_root = opened
         .db_path()
         .with_file_name(active_sync_lock_name)
-        .with_extension("migration-reindex-checkpoint-v1");
+        .with_extension("graph-rebuild-checkpoint-v1");
     assert!(
         std::fs::read_dir(&checkpoint_root)
             .expect("checkpoint directory")
@@ -239,15 +230,15 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         "the interrupted worker must leave a durable checkpoint batch"
     );
 
-    TraceDecay::configure_migration_reindex_for_test(0, 0, true);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, true);
     opened
         .db()
         .execute_write_batch(
-            "simulate lost migration marker",
-            "DELETE FROM metadata WHERE key = 'migration_reindex_state_v1'",
+            "simulate a lost rebuild marker",
+            "DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1'",
         )
         .await
-        .expect("delete migration state");
+        .expect("delete the rebuild state");
     opened.close();
     let markerless = runtime
         .open_project_graph_for_test(&project, options.clone())
@@ -255,57 +246,57 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
         .expect("reopen markerless migrated generation");
     assert!(matches!(
         markerless
-            .migration_reindex_status()
+            .graph_rebuild_status()
             .await
             .expect("read markerless status"),
-        MigrationReindexStatusV1::Indexing {
+        GraphRebuildStatusV1::Indexing {
             completed_files: 0,
-            availability: MigrationReindexAvailabilityV1::Stale,
+            availability: GraphRebuildAvailabilityV1::Stale,
             ..
         }
     ));
     markerless.close();
 
-    TraceDecay::configure_migration_reindex_for_test(0, 0, false);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
     let resumed = runtime
         .open_project_graph_for_test(&project, options.clone())
         .await
-        .expect("resume interrupted migration");
+        .expect("resume the interrupted rebuild");
     wait_for_status(&resumed, |status| {
-        matches!(status, MigrationReindexStatusV1::Current { .. })
+        matches!(status, GraphRebuildStatusV1::Current { .. })
     })
     .await;
     assert_eq!(
-        TraceDecay::migration_reindex_extractions_for_test(),
+        TraceDecay::graph_rebuild_extractions_for_test(),
         FILE_COUNT - CHECKPOINT_BATCH_SIZE,
         "resume must extract only files absent from the durable checkpoint"
     );
     assert!(
         resumed
-            .get_nodes_by_name("before_migration")
+            .get_nodes_by_name("before_rebuild")
             .await
             .expect("old generation replaced")
             .is_empty()
     );
     assert_eq!(
         resumed
-            .get_nodes_by_name("after_migration")
+            .get_nodes_by_name("after_rebuild")
             .await
             .expect("new generation published")
             .len(),
         1
     );
 
-    TraceDecay::configure_migration_reindex_for_test(0, 0, true);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, true);
     resumed
         .db()
         .execute_write_batch(
-            "prepare unavailable migration generation",
+            "prepare an unavailable graph generation",
             "DELETE FROM edges;
              DELETE FROM unresolved_refs;
              DELETE FROM nodes;
              DELETE FROM files;
-             DELETE FROM metadata WHERE key = 'migration_reindex_state_v1';
+             DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1';
              UPDATE metadata SET value = '16'
              WHERE key = 'graph_generation_schema_version';",
         )
@@ -315,14 +306,14 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
     let unavailable = runtime
         .open_project_graph_for_test(&project, options)
         .await
-        .expect("open unavailable graph generation");
+        .expect("open the unavailable graph generation");
     assert!(matches!(
         unavailable
-            .migration_reindex_status()
+            .graph_rebuild_status()
             .await
             .expect("read unavailable status"),
-        MigrationReindexStatusV1::Indexing {
-            availability: MigrationReindexAvailabilityV1::Unavailable,
+        GraphRebuildStatusV1::Indexing {
+            availability: GraphRebuildAvailabilityV1::Unavailable,
             ..
         }
     ));
@@ -347,13 +338,13 @@ async fn migration_reindex_is_nonblocking_resumable_and_honestly_reported() {
             .expect("status JSON text"),
     )
     .expect("parse status JSON");
-    assert_eq!(payload["migration_reindex"]["state"], "indexing");
-    assert_eq!(payload["migration_reindex"]["availability"], "unavailable");
+    assert_eq!(payload["graph_rebuild"]["state"], "indexing");
+    assert_eq!(payload["graph_rebuild"]["availability"], "unavailable");
     assert!(
-        payload["migration_reindex_warning"]
+        payload["graph_rebuild_warning"]
             .as_str()
             .is_some_and(|warning| warning.contains("counts are not authoritative"))
     );
 
-    TraceDecay::configure_migration_reindex_for_test(0, 0, false);
+    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
 }
