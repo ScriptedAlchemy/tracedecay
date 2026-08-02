@@ -20,10 +20,6 @@ use super::{
     MigrationManifest, MigrationPlanOptions, MigrationProtocol, MigrationRollbackReport,
     MigrationRollbackState, save_manifest_with_writer as write_checkpoint, validate_migration_id,
 };
-/// `crate::migrate::manifest::*` used to expose the final-v2 vocabulary
-/// alongside the manifest plan, so this module keeps re-exporting it.
-pub use crate::final_v2::*;
-
 /// Satisfies the extracted checkpoint port with the root's owner-private store
 /// IO, so the manifest package never chooses permissions or temp-file policy.
 struct PrivateStoreCheckpointWriter;

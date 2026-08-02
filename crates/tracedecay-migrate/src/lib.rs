@@ -24,7 +24,6 @@
 
 pub mod consolidate;
 pub mod durability;
-pub mod final_v2;
 pub mod hermes;
 pub mod inventory;
 pub mod manifest;
@@ -34,5 +33,3 @@ mod profile_identity;
 pub mod registry;
 pub mod root_seam;
 mod session_runtime;
-
-pub use final_v2::*;
