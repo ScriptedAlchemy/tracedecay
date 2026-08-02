@@ -1019,6 +1019,55 @@ fn foreground_reservation_leaves_background_at_least_one_worker() {
     drop(held);
 }
 
+/// Occupancy alone cannot tell a busy lane from a starving one. The pool has
+/// to report blocked acquisitions too, and release the count on every exit
+/// path — including the saturated one, which is exactly when it is read.
+#[test]
+fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let held = (0..2)
+        .map(|_| pool.acquire(&read, &probe, Duration::from_secs(2)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(pool.snapshot().waiting_general, 0);
+
+    let blocked = {
+        let pool = pool.clone();
+        let binding = store.binding.clone();
+        std::thread::spawn(move || {
+            let read = request(&binding, OperationPriorityV1::Foreground);
+            let probe = Probe::for_request(&read);
+            pool.acquire(&read, &probe, Duration::from_millis(500))
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && pool.snapshot().waiting_general == 0 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        pool.snapshot().waiting_general,
+        1,
+        "an acquisition blocked on a full lane must be visible as a waiter"
+    );
+    assert_eq!(pool.snapshot().waiting_health, 0);
+
+    // The waiter gives up on its own bound; the count must not leak.
+    assert!(matches!(
+        blocked.join().unwrap(),
+        Err(ReaderAcquireError::Saturated { .. })
+    ));
+    assert_eq!(
+        pool.snapshot().waiting_general,
+        0,
+        "a saturated acquisition must release its waiter count"
+    );
+    drop(held);
+}
+
 /// A snapshot end that outruns its 5ms grace leaves the worker neither
 /// available nor leased. That state has to be counted: an unaccounted worker
 /// silently shrinks the lane and lets shutdown declare quiescence with a

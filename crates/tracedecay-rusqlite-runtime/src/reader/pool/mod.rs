@@ -123,6 +123,13 @@ pub(super) struct PoolState {
     /// and let a shutdown declare quiescence with work still in flight.
     pub(super) limbo_general: u16,
     pub(super) limbo_health: u16,
+    /// Acquisitions currently blocked waiting for capacity in each lane.
+    ///
+    /// Occupancy alone cannot distinguish a lane that is merely busy from one
+    /// that is turning callers away: a full lane with no waiters is working,
+    /// a full lane with waiters is the saturation users report.
+    pub(super) waiting_general: u16,
+    pub(super) waiting_health: u16,
 }
 
 impl PoolState {
@@ -154,6 +161,20 @@ impl PoolState {
         }
     }
 
+    const fn waiting(&self, lane: ReaderLane) -> u16 {
+        match lane {
+            ReaderLane::General => self.waiting_general,
+            ReaderLane::ReservedHealth => self.waiting_health,
+        }
+    }
+
+    const fn waiting_mut(&mut self, lane: ReaderLane) -> &mut u16 {
+        match lane {
+            ReaderLane::General => &mut self.waiting_general,
+            ReaderLane::ReservedHealth => &mut self.waiting_health,
+        }
+    }
+
     pub(super) fn available(&mut self, lane: ReaderLane) -> &mut VecDeque<AvailableWorker> {
         match lane {
             ReaderLane::General => &mut self.general,
@@ -180,6 +201,49 @@ impl PoolState {
             ReaderLane::General => &mut self.leased_general,
             ReaderLane::ReservedHealth => &mut self.leased_health,
         }
+    }
+}
+
+/// Counts one acquisition as a waiter for as long as it is blocked.
+///
+/// The count is armed the first time the acquisition has to wait and released
+/// on every exit path, including the interrupted and saturated ones. Declaring
+/// it before the state guard inside the loop means the guard is always dropped
+/// first, so re-locking here can never deadlock.
+struct WaitingGuard<'pool, E: ReaderQueryExecutor> {
+    inner: &'pool PoolInner<E>,
+    lane: ReaderLane,
+    counted: bool,
+}
+
+impl<'pool, E: ReaderQueryExecutor> WaitingGuard<'pool, E> {
+    const fn new(inner: &'pool PoolInner<E>, lane: ReaderLane) -> Self {
+        Self {
+            inner,
+            lane,
+            counted: false,
+        }
+    }
+
+    const fn arm(&mut self, state: &mut PoolState) {
+        if !self.counted {
+            self.counted = true;
+            *state.waiting_mut(self.lane) += 1;
+        }
+    }
+}
+
+impl<E: ReaderQueryExecutor> Drop for WaitingGuard<'_, E> {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state.waiting_mut(self.lane) = state.waiting(self.lane).saturating_sub(1);
     }
 }
 
@@ -285,6 +349,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 leased_health: 0,
                 limbo_general: 0,
                 limbo_health: 0,
+                waiting_general: 0,
+                waiting_health: 0,
             }),
             capacity_changed: Condvar::new(),
         });
@@ -415,6 +481,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             leased_health: state.leased_health,
             limbo_general: state.limbo_general,
             limbo_health: state.limbo_health,
+            waiting_general: state.waiting_general,
+            waiting_health: state.waiting_health,
         }
     }
 
@@ -530,6 +598,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     {
         let lane = admission.lane;
         let lease_ceiling = self.lease_ceiling(admission);
+        let mut waiting = WaitingGuard::new(&self.inner, lane);
         let started = Instant::now();
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
@@ -573,6 +642,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     });
                 }
                 let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+                waiting.arm(&mut state);
                 let (_state, wait_result) = self
                     .inner
                     .capacity_changed
@@ -669,6 +739,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 });
             }
             let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+            waiting.arm(&mut state);
             let (_state, wait_result) = self
                 .inner
                 .capacity_changed
