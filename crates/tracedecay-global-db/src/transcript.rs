@@ -310,10 +310,8 @@ impl RegisteredGlobalDb {
         provider: &str,
         session_id: &str,
     ) -> Result<Option<SessionRecord>, TranscriptPersistenceError> {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            TranscriptPersistenceError::storage("open transcript session snapshot", error)
-        })?;
-        let mut rows = snapshot
+        let mut rows = self
+            .read_connection()
             .query(
                 "SELECT provider, session_id, project_key, project_path, title, started_at,
                         ended_at, transcript_path, metadata_json, parent_session_id,
@@ -861,10 +859,10 @@ impl RegisteredGlobalDb {
         &self,
         path: &str,
     ) -> Result<Option<ParseOffset>, TranscriptPersistenceError> {
-        let snapshot = self.read_snapshot().await.map_err(|error| {
-            TranscriptPersistenceError::storage("open transcript parse offset snapshot", error)
-        })?;
-        get_parse_offset(&snapshot, path).await
+        // Per-transcript point lookup on the shared registered reader pool: take
+        // one short-held query lease rather than pinning a snapshot worker for
+        // the whole read.
+        get_parse_offset(self.read_connection(), path).await
     }
 
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) -> Result<(), String> {

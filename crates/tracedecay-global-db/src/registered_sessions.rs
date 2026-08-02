@@ -27,13 +27,15 @@ impl RegisteredGlobalDb {
         provider: Option<&str>,
     ) -> Result<SessionIngestHealth, String> {
         let mut health = SessionIngestHealth::default();
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session ingest health snapshot: {error}"))?;
+        // Store-scale scan interleaved with per-row filesystem metadata reads.
+        // Holding one pinned snapshot across the whole walk parks a general
+        // reader worker for the entire scan; page with short-held query leases
+        // instead. The filesystem side of this health estimate is already read
+        // live, so a per-page read boundary matches what the result means.
         let mut after_path = String::new();
         loop {
-            let mut rows = snapshot
+            let mut rows = self
+                .read_connection()
                 .query(
                     "SELECT paths.transcript_path,
                             COALESCE(offsets.byte_offset, 0),
@@ -121,11 +123,11 @@ impl RegisteredGlobalDb {
         provider: &str,
         message_id: &str,
     ) -> Result<bool, String> {
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session message lookup snapshot: {error}"))?;
-        let mut rows = snapshot
+        // Single-statement point lookup: a pinned read snapshot would hold a
+        // general reader lease across BEGIN/pin/query/ROLLBACK, and this runs
+        // once per ingested message. Use one short-held query lease instead.
+        let mut rows = self
+            .read_connection()
             .query(
                 "SELECT EXISTS(
                     SELECT 1 FROM session_messages
@@ -146,11 +148,8 @@ impl RegisteredGlobalDb {
     }
 
     pub async fn session_message_count(&self) -> Result<i64, String> {
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session message count snapshot: {error}"))?;
-        let mut rows = snapshot
+        let mut rows = self
+            .read_connection()
             .query("SELECT COUNT(*) FROM session_messages", ())
             .await
             .map_err(|error| format!("failed to count session messages: {error}"))?;
@@ -167,11 +166,8 @@ impl RegisteredGlobalDb {
         &self,
         project_key: &str,
     ) -> Result<i64, String> {
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin project message count snapshot: {error}"))?;
-        let mut rows = snapshot
+        let mut rows = self
+            .read_connection()
             .query(
                 "SELECT COUNT(*)
                  FROM session_messages m
@@ -200,11 +196,8 @@ impl RegisteredGlobalDb {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session activity snapshot: {error}"))?;
-        let mut rows = snapshot
+        let mut rows = self
+            .read_connection()
             .query(
                 "SELECT timestamp, ordinal, kind, tool_names, metadata_json
                  FROM session_messages
@@ -239,8 +232,8 @@ impl RegisteredGlobalDb {
     }
 
     pub async fn latest_session_activity_secs(&self) -> Option<i64> {
-        let snapshot = self.read_snapshot().await.ok()?;
-        let mut rows = snapshot
+        let mut rows = self
+            .read_connection()
             .query(
                 "WITH latest_seconds AS (
                     SELECT timestamp FROM session_messages

@@ -11,6 +11,24 @@ const UNSAFE_KINDS: &[&str] = &[
     "unsafe_block",
 ];
 
+/// Whether `source` could possibly contain a site of `kind`.
+///
+/// Deliberately over-approximates: it only has to be true whenever
+/// [`line_matches_unsafe_kind`] could be true for some line, so the real
+/// per-line matcher stays the single source of truth for what counts.
+fn source_may_contain_unsafe_kind(source: &str, kind: &str) -> bool {
+    match kind {
+        "unwrap" => source.contains(".unwrap"),
+        "expect" => source.contains(".expect"),
+        "panic" => source.contains("panic!("),
+        "todo" => source.contains("todo!("),
+        "unimplemented" => source.contains("unimplemented!("),
+        "unsafe_block" => source.contains("unsafe"),
+        // An unrecognised kind never matches a line either.
+        _ => false,
+    }
+}
+
 fn line_matches_unsafe_kind(line: &str, kind: &str) -> bool {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("///") {
@@ -133,6 +151,17 @@ pub(crate) async fn handle_unsafe_patterns(
         let Ok(source) = crate::sync::read_source_file(&abs_path) else {
             continue;
         };
+        // Cheap raw pre-filter before the tree-sitter mask and the per-file
+        // store read. Masking only blanks content, so a keyword absent from the
+        // raw source cannot appear in the masked copy — skipping here is
+        // equivalent, and spares most files in a repository two expensive
+        // steps that could never produce a match.
+        if !kinds
+            .iter()
+            .any(|kind| source_may_contain_unsafe_kind(&source, kind))
+        {
+            continue;
+        }
         // Blank comments and string/char literals for Rust files so an
         // `unsafe`/`unwrap`/`panic!` mentioned inside a comment or string is not
         // reported as a real risk site. Detection runs on the masked copy;
@@ -146,12 +175,19 @@ pub(crate) async fn handle_unsafe_patterns(
         } else {
             source.clone()
         };
-        let nodes = cg.get_nodes_by_file(&file.path).await?;
+        // Masking can erase every raw hit (all of them in comments or string
+        // literals), so the file's nodes are fetched only once a real match
+        // survives.
+        let mut nodes: Option<Vec<crate::types::Node>> = None;
 
         for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
             let line_no = (idx as u32) + 1;
             for kind in &kinds {
                 if line_matches_unsafe_kind(masked_line, kind) {
+                    let nodes = match nodes {
+                        Some(ref nodes) => nodes,
+                        None => nodes.insert(cg.get_nodes_by_file(&file.path).await?),
+                    };
                     let enclosing = nodes
                         .iter()
                         .filter(|n| n.start_line <= line_no && line_no <= n.end_line)
@@ -197,7 +233,54 @@ pub(crate) async fn handle_unsafe_patterns(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod unsafe_pattern_detection_tests {
-    use super::{contains_unsafe_block_start, line_matches_unsafe_kind};
+    use super::{
+        contains_unsafe_block_start, line_matches_unsafe_kind, source_may_contain_unsafe_kind,
+    };
+
+    /// The whole-file pre-filter exists only to skip work, so it must never be
+    /// narrower than the per-line matcher: any line the matcher accepts has to
+    /// keep its file in the scan.
+    #[test]
+    fn prefilter_never_excludes_a_line_the_matcher_accepts() {
+        let lines = [
+            "    let x = value.unwrap();",
+            "    let x = value.expect(\"why\");",
+            "    panic!(\"boom\");",
+            "    todo!();",
+            "    unimplemented!();",
+            "    unsafe { *ptr as usize }",
+            "    let y = 1 + 1;",
+            "",
+        ];
+        let kinds = [
+            "unwrap",
+            "expect",
+            "panic",
+            "todo",
+            "unimplemented",
+            "unsafe_block",
+        ];
+
+        for line in lines {
+            for kind in kinds {
+                if line_matches_unsafe_kind(line, kind) {
+                    assert!(
+                        source_may_contain_unsafe_kind(line, kind),
+                        "prefilter would drop a real {kind} site: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An unrecognised kind matches nothing, so it must not force a scan.
+    #[test]
+    fn prefilter_rejects_unknown_kinds() {
+        assert!(!source_may_contain_unsafe_kind(
+            "let x = value.unwrap();",
+            "not_a_kind"
+        ));
+    }
 
     #[test]
     fn detects_unsafe_block_inside_safe_fn() {

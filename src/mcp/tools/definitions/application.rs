@@ -707,7 +707,11 @@ fn callable_code_scope_schema() -> serde_json::Value {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 512,
-                "description": "Exact immutable code-index generation identity."
+                "default": tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL,
+                "description": format!(
+                    "Exact immutable code-index generation identity. Pass '{}' to bind the latest complete generation when you are not pinning a specific one.",
+                    tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL
+                )
             },
             "path_prefix": {
                 "type": ["string", "null"],
