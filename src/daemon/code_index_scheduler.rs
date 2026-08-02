@@ -1393,7 +1393,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
-    fn request_background_reconcile(&self) {
+    pub(super) fn request_background_reconcile(&self) {
         {
             let mut hints = self
                 .hints

@@ -257,6 +257,66 @@ impl CodeIndexSchedulerRegistryV1 {
         registry
     }
 
+    /// The bounded background-reconcile admission, so a test can occupy it and
+    /// hold the worker at its dequeue point while asserting on the pending wake.
+    #[cfg(test)]
+    pub(super) fn background_reconcile_admission(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.background_reconcile_admission)
+    }
+
+    /// The pending-wake slot for one exact scope's worktree, in unix micros;
+    /// `0` means no wake is outstanding.
+    #[cfg(test)]
+    pub(super) async fn pending_wake_micros_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<u64> {
+        let mounted = self.mounted.lock().await;
+        mounted
+            .values()
+            .find(|worktree| {
+                worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+            })
+            .map(|worktree| worktree.pending_wake_micros.load(Ordering::Acquire))
+    }
+
+    /// Clear the pending-wake slot so a test starts from a known due window.
+    #[cfg(test)]
+    pub(super) async fn clear_pending_wake_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        for worktree in mounted.values() {
+            if worktree.repository_id == scope.repository_id
+                && worktree.worktree_id == scope.worktree_id
+            {
+                worktree.pending_wake_micros.store(0, Ordering::Release);
+            }
+        }
+    }
+
+    /// Drop the retained serving generation, reproducing a mount whose restore
+    /// produced nothing servable.
+    #[cfg(test)]
+    pub(super) async fn clear_serving_generation_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) {
+        let mounted = self.mounted.lock().await;
+        for worktree in mounted.values() {
+            if worktree.repository_id == scope.repository_id
+                && worktree.worktree_id == scope.worktree_id
+            {
+                *worktree
+                    .serving_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+        }
+    }
+
     fn pack_trigger(trigger: CodeIndexCadenceTriggerV1) -> u64 {
         match trigger {
             CodeIndexCadenceTriggerV1::Mount => 1,
@@ -392,6 +452,21 @@ impl CodeIndexSchedulerRegistryV1 {
             cadence_outcome,
             overflow_reconciled,
         );
+        // A successful publication is the terminal outcome operators need to see
+        // to know a rebuild window actually closed, so it is `info`, not `debug`:
+        // the cadence receipt below is debug-level and was invisible in the
+        // journal during the live search outage. Identifiers and counters only —
+        // no project path.
+        if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
+            tracing::info!(
+                event = "code_index_generation_published",
+                generation_id = evidence.generation_id.as_str(),
+                reextracted_files = evidence.reextracted_files,
+                changed_chunks = evidence.changed_chunks,
+                service_micros = receipt.service_micros(),
+                "code-index published a new generation"
+            );
+        }
         // Bounded, redacted cadence observability: labels and durations only.
         // The project root stays out of telemetry.
         tracing::debug!(
@@ -708,6 +783,25 @@ impl CodeIndexSchedulerRegistryV1 {
                         outcome,
                     );
                 } else {
+                    // A reconcile that never reaches a terminal outcome is the
+                    // failure mode that leaves search stale indefinitely, and it
+                    // used to be entirely silent. Surface it: bounded, redacted,
+                    // no project path beyond what cadence events already carry.
+                    match &result {
+                        Ok((Err(error), _)) => tracing::warn!(
+                            event = "code_index_reconcile_failed",
+                            path = "background_worker",
+                            error = %error,
+                            "code-index background reconcile failed; the served generation stays stale"
+                        ),
+                        Err(error) => tracing::warn!(
+                            event = "code_index_reconcile_failed",
+                            path = "background_worker",
+                            error = %error,
+                            "code-index background reconcile task did not complete"
+                        ),
+                        Ok((Ok(_), _)) => {}
+                    }
                     // No terminal outcome, so no receipt is owed. Give the
                     // arrival back or the next pass would measure from its own
                     // dequeue and under-report the wait this wake really took.
@@ -1273,7 +1367,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 // sanctioned slow path in Principle 6, and the inline ladder is
                 // what converges it. Dequeue instant for that path below.
                 let started_micros = now_micros().0;
-                let outcome = scheduler.ensure_fresh_for_query().ok()?;
+                let outcome = match scheduler.ensure_fresh_for_query() {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // Cold open is the one sanctioned slow path, and this is
+                        // its only remedy. When it fails the scope has nothing
+                        // servable at all, so the failure must not be swallowed.
+                        tracing::warn!(
+                            event = "code_index_reconcile_failed",
+                            path = "query_admission_cold_open",
+                            error = %error,
+                            "code-index cold-open reconcile failed; no generation is servable"
+                        );
+                        return None;
+                    }
+                };
                 // Await-new must never preempt serve-old. A reconcile installs
                 // the generation it publishes directly, so this normally hits;
                 // when it abstains the active generation is mid-decode
@@ -1446,11 +1554,16 @@ impl CodeIndexSchedulerRegistryV1 {
             matched?
         };
         let latest = self.latest_complete_fresh(&root).await?;
-        if Self::latest_matches_scope(&latest, scope) {
-            Some(latest)
-        } else {
-            None
-        }
+        // Relaxed identity gate, not the exact one. `latest_complete_fresh` is
+        // itself a serve-old-first ladder: it returns whatever complete
+        // generation is retained and only *requests* the reconcile. Post-checking
+        // the exact reference here discarded that retained generation the moment
+        // HEAD moved, so grep/context/callers went `Unavailable` after every
+        // restart-following-a-commit even though a complete generation was in
+        // hand. Attribution is generation-bound (see
+        // [`Self::latest_matches_scope_identity`]), and the ladder has already
+        // scheduled the rebuild that will replace this generation.
+        Self::latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
     /// Resolve one exact scope and admit only an already-current generation.
@@ -1539,7 +1652,105 @@ impl CodeIndexSchedulerRegistryV1 {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
-        Self::latest_matches_scope(&latest, scope).then_some(latest)
+        // Relaxed identity gate: this arm is stale by construction, so a moved
+        // reference is exactly the condition it exists to survive.
+        Self::latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// Ask the background worker for a reconcile on behalf of a query admission
+    /// that found nothing servable, then return whether a wake was posted.
+    ///
+    /// This never reconciles inline and never parks: it runs only the ladder's
+    /// cheap checks (`request_fresh_for_query_background`) and hands the O(store)
+    /// remedy to the worker. It exists because the search path had no remedy at
+    /// all — the freshness ladder lives in `latest_complete_fresh`, which search
+    /// deliberately does not call, so a search that resolved to nothing returned
+    /// its typed failure forever without ever asking anyone to rebuild.
+    ///
+    /// A quiet repository must not turn every read into a wake, so two
+    /// suppressions apply. First, an already-pending, unclaimed wake *is* the
+    /// remedy this admission would ask for, so it is reused rather than
+    /// duplicated — that is what keeps a rebuild window's worth of failing
+    /// searches from becoming a wake storm and from each fabricating its own
+    /// cadence arrival. Second, when a generation is servable the ladder's own
+    /// suppression decides, exactly as it does on the grep/context/callers path.
+    pub(in crate::daemon) async fn request_query_background_reconcile(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
+            let Ok(mounted) = self.mounted.try_lock() else {
+                return false;
+            };
+            let mut matched = None;
+            for worktree in mounted.values() {
+                if worktree.repository_id != scope.repository_id
+                    || worktree.worktree_id != scope.worktree_id
+                {
+                    continue;
+                }
+                if matched.is_some() {
+                    return false;
+                }
+                matched = Some((
+                    Arc::clone(&worktree.scheduler),
+                    Arc::clone(&worktree.serving_generation),
+                    Arc::clone(&worktree.wake),
+                    Arc::clone(&worktree.pending_wake_micros),
+                    Arc::clone(&worktree.pending_wake_trigger),
+                ));
+            }
+            let Some(matched) = matched else {
+                return false;
+            };
+            matched
+        };
+        // Debounce on the existing pending-wake slot: a wake already posted and
+        // not yet claimed by the worker covers this admission too.
+        if pending_wake_micros.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // A reconcile (or another query) owns the scheduler. Never
+                    // queue on it from a query; schedule the follow-up pass
+                    // instead, exactly as the grep/context/callers ladder does,
+                    // so a busy refresh cannot strand cadence.
+                    Self::note_wake(
+                        &pending_wake_micros,
+                        &pending_wake_trigger,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::BusyFollowUp,
+                    );
+                    return true;
+                }
+            };
+            let nothing_servable = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+                && scheduler.latest_complete_already_decoded().is_none();
+            // Nothing is servable at all, so the ladder's suppression cannot
+            // apply: a reconcile is the only thing that can ever make this scope
+            // answerable, and no other caller on this path will ask for it.
+            if nothing_servable {
+                scheduler.request_background_reconcile();
+            } else if !scheduler.request_fresh_for_query_background() {
+                return false;
+            }
+            Self::note_wake(
+                &pending_wake_micros,
+                &pending_wake_trigger,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            );
+            true
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub(in crate::daemon) async fn semantic_evaluation_snapshot_for_scope(
@@ -1584,14 +1795,49 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(CodeIndexSemanticEvaluationPublicationLeaseV1 { _guard: guard })
     }
 
+    /// The exact scope gate: repository, worktree, **and** reference must all
+    /// equal the admitted scope.
+    ///
+    /// This is the gate for anything reported as *current*. A generation sealed
+    /// under a different reference is not current for this scope and must never
+    /// be presented as fresh.
     pub(super) fn latest_matches_scope(
+        latest: &LatestCompleteCodeIndexV1,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        Self::latest_matches_scope_identity(latest, scope)
+            && latest.generation.snapshot().reference == scope.reference
+    }
+
+    /// The relaxed scope gate for the **stale** serving arms: the structural
+    /// identity (repository + worktree) must still match exactly, but a moved
+    /// `reference` is tolerated.
+    ///
+    /// Why this exists: `serving_generation` is in-memory and reseeded at mount
+    /// from the restored sealed generation. That generation was sealed under
+    /// whatever HEAD was current when it was published, so the ordinary
+    /// develop-then-restart cycle (commit, then restart the daemon) leaves every
+    /// restored generation with a reference the admitted scope has already moved
+    /// past. Under the exact gate that made serve-stale die with the process and
+    /// collapsed search — the one lane with no other fallback — for the entire
+    /// rebuild window, which is precisely the invariant
+    /// `docs/SERVING-PATH-PERFORMANCE.md` forbids ("await-new never preempts
+    /// serve-old").
+    ///
+    /// Attribution stays sound because it is never derived from the admitted
+    /// scope. Every hydration path builds its `RetrievalScope` from
+    /// `latest.generation.snapshot()` — the generation's own sealed identity —
+    /// so a relaxed admission answers *as the generation it actually is*, under
+    /// its own repository/worktree/reference and its own snapshot digest. The
+    /// caller is required to mark the answer stale; it is a different, older
+    /// revision of the same worktree, not a current one.
+    pub(super) fn latest_matches_scope_identity(
         latest: &LatestCompleteCodeIndexV1,
         scope: &tracedecay_application::ResolvedScope,
     ) -> bool {
         let snapshot = latest.generation.snapshot();
         snapshot.repository == scope.repository_id
             && snapshot.worktree.as_ref() == Some(&scope.worktree_id)
-            && snapshot.reference == scope.reference
     }
 
     /// The per-worktree scheduler handle, cloned out of the registry map. Test
