@@ -1,16 +1,28 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use rusqlite::Savepoint;
 use serde_json::json;
 use tempfile::TempDir;
+use tracedecay_application::RequestId;
+use tracedecay_application::remote::protocol::{
+    RemoteClockPortV1, RemoteProtocolExecutionErrorV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1,
+};
 use tracedecay_application::remote::{
     capture::{
         AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
         RemoteCapturePortV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
     },
     replay::{
-        RemoteReplayFrameLookupPortV1, RemoteReplaySpoolPortV1, RemoteReplayStateV1,
-        RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1, RemoteReplayTransitionV1,
+        RemoteReplayFrameLookupPortV1, RemoteReplayOutcomeV1, RemoteReplayRequestV1,
+        RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
+        RemoteReplayTransactionErrorV1, RemoteReplayTransactionOutcomeV1,
+        RemoteReplayTransactionPortV1, RemoteReplayTransitionV1,
+    },
+    replay_node::{
+        RemoteNodeReplayCommandV1, RemoteNodeReplayErrorV1, RemoteNodeReplayServiceV1,
+        RemoteReplayTransportErrorV1, RemoteReplayTransportPortV1,
     },
 };
 use tracedecay_domain::{
@@ -132,6 +144,29 @@ impl RemoteSpoolKeyringV1 for TestKeyring {
         revision: u64,
     ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
         Ok((revision == self.0.revision()).then(|| Arc::clone(&self.0)))
+    }
+}
+
+struct TestClock;
+
+impl RemoteClockPortV1 for TestClock {
+    fn now(&self) -> Result<UtcMicros, RemoteProtocolExecutionErrorV1> {
+        Ok(UtcMicros(20))
+    }
+}
+
+#[derive(Default)]
+struct UnreachableTransport {
+    request: Mutex<Option<RemoteProtocolRequestV1<RemoteReplayRequestV1>>>,
+}
+
+impl RemoteReplayTransportPortV1 for UnreachableTransport {
+    fn replay(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteReplayOutcomeV1>, RemoteReplayTransportErrorV1> {
+        *self.request.lock().unwrap() = Some(request.clone());
+        Err(RemoteReplayTransportErrorV1::AuthorityUnreachable)
     }
 }
 
@@ -389,5 +424,75 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
     assert_eq!(
         storage.load_replay_frame(&receipt.event_id),
         Err(RemoteCapturePersistenceErrorV1::Corruption)
+    );
+}
+
+#[test]
+fn authority_commit_rejects_a_node_sequence_gap_without_a_local_spool_row() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let writer = writer();
+    storage
+        .publish_authority(
+            &tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone()),
+            &writer,
+            UtcMicros(10),
+        )
+        .unwrap();
+    let mut capture = admitted();
+    capture.sequence = RemoteCaptureSequenceV1 {
+        sequence: 2,
+        previous_event_id: Some(
+            "remote.event.sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+        ),
+    };
+    let frame = RemoteReplayFrameV1 {
+        event_id:
+            "remote.event.sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_owned(),
+        capture,
+    };
+
+    assert_eq!(
+        storage.commit(&frame, &writer, UtcMicros(20)),
+        Err(RemoteReplayTransactionErrorV1::SequenceGap)
+    );
+}
+
+#[test]
+fn node_replay_sends_the_decrypted_frame_and_keeps_transport_failure_pending() {
+    let fixture = fixture();
+    let storage = Arc::new(storage(&fixture));
+    let capture = admitted();
+    let captured = storage.capture_pending(&capture).unwrap();
+    let transport = Arc::new(UnreachableTransport::default());
+    let service = RemoteNodeReplayServiceV1::new(
+        Arc::clone(&storage) as Arc<dyn RemoteReplayFrameLookupPortV1>,
+        Arc::clone(&storage) as Arc<dyn RemoteReplaySpoolPortV1>,
+        Arc::clone(&transport) as Arc<dyn RemoteReplayTransportPortV1>,
+        Arc::new(TestClock),
+    );
+
+    assert_eq!(
+        service.replay(RemoteNodeReplayCommandV1 {
+            request_id: RequestId::new("request.remote.node-replay").unwrap(),
+            event_id: captured.event_id.clone(),
+            expected_authority: capture.writer.authority.fence.clone(),
+        }),
+        Err(RemoteNodeReplayErrorV1::Transport(
+            RemoteReplayTransportErrorV1::AuthorityUnreachable
+        ))
+    );
+    let request = transport.request.lock().unwrap().clone().unwrap();
+    assert_eq!(request.body.frame.capture, capture);
+    assert_eq!(request.body.replay_attempt, 1);
+    assert_eq!(
+        storage.state(&captured.event_id).unwrap(),
+        RemoteReplaySpoolStateV1 {
+            state: RemoteReplayStateV1::Pending,
+            receipt: None,
+            last_attempt: 1,
+        }
     );
 }

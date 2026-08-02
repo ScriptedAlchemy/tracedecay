@@ -535,10 +535,14 @@ mod tests {
     use axum::body::Body;
     use axum::extract::FromRequest;
     use axum::http::Request;
+    use tracedecay_application::remote::capture::{
+        AdmittedRemoteCaptureV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+    };
     use tracedecay_application::remote::protocol::{
         CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolFailureV1,
         RemoteProtocolPortV1, remote_protocol_problem,
     };
+    use tracedecay_application::remote::replay::RemoteReplayFrameV1;
     use tracedecay_application::{
         ApplicationEnvelope, ApplicationResult, AuthorityReceipt, CapabilityGrantId, Deadline,
         DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, OperationReceipt,
@@ -547,11 +551,15 @@ mod tests {
     };
     use tracedecay_domain::{
         AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1,
-        CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, ManifestDigest,
-        ProjectId, ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1,
-        RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
-        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros,
-        WorktreeId,
+        CurrentRemoteAuthorityV1, DurableObservationV1, EnrollmentCredentialRecordV1, EntityId,
+        ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+        ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId,
+        ProviderId, RefId, RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1,
+        RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, RepositoryId,
+        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId,
+        UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{SchemaId, SortContractId};
 
@@ -975,6 +983,77 @@ mod tests {
         }
     }
 
+    fn replay_request() -> RemoteReplayRequestV1 {
+        let payload = serde_json::json!({"kind": "assistant_message", "body": "sanitized"});
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.remote").unwrap(),
+                ComponentVersion::new("sanitizer.remote.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                ObservationSourceIdentityV1::for_provider(
+                    ProviderId::new("provider.remote").unwrap(),
+                    SessionId::new("session.remote").unwrap(),
+                )
+                .unwrap(),
+                ObservationScopeV1::Project {
+                    project_id: ProjectId::new("project.remote").unwrap(),
+                },
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                ObservationSourceRangeV1::new(0, 1).unwrap(),
+                ObservationOrderingDomainV1::SqliteRowId,
+                ObservationId::new("observation.remote").unwrap(),
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.remote").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let writer = RemoteWriterAuthorityV1 {
+            project_id: ProjectId::new("project.remote").unwrap(),
+            scope: RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.remote").unwrap(),
+                repository_id: RepositoryId::new("repository.remote").unwrap(),
+                worktree_id: WorktreeId::new("worktree.remote").unwrap(),
+                reference: Some(RefId::new("refs/heads/main").unwrap()),
+                snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote").unwrap(),
+            },
+            authority: match available_authority() {
+                CurrentRemoteAuthorityStateV1::Available(authority) => authority,
+                _ => unreachable!("test authority is available"),
+            },
+        };
+        RemoteReplayRequestV1 {
+            frame: RemoteReplayFrameV1 {
+                event_id:
+                    "remote.event.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                capture: AdmittedRemoteCaptureV1 {
+                    enrollment_id: EntityId::new("enrollment.remote").unwrap(),
+                    enrollment_revision: 1,
+                    node_id: BrainNodeId::new("node.remote").unwrap(),
+                    writer,
+                    policy_revision: 1,
+                    sequence: RemoteCaptureSequenceV1 {
+                        sequence: 1,
+                        previous_event_id: None,
+                    },
+                    observation,
+                    captured_at: UtcMicros(10),
+                },
+            },
+            replay_attempt: 1,
+        }
+    }
+
     fn query_request() -> RemoteHttpRequestV1<TestQuery> {
         RemoteHttpRequestV1 {
             request: RemoteProtocolRequestV1::new(
@@ -1269,12 +1348,11 @@ mod tests {
         assert_eq!(
             validation_status(
                 &calls,
-                protocol_request(
-                    "request.remote.replay-validation",
-                    RemoteReplayRequestV1 {
-                        event_id: "short".into(),
-                    },
-                ),
+                protocol_request("request.remote.replay-validation", {
+                    let mut request = replay_request();
+                    request.frame.event_id = "short".into();
+                    request
+                }),
                 true,
             ),
             StatusCode::BAD_REQUEST
@@ -1412,12 +1490,7 @@ mod tests {
         assert_eq!(
             validation_status(
                 &calls,
-                protocol_request(
-                    "request.remote.valid-replay",
-                    RemoteReplayRequestV1 {
-                        event_id: "remote.event.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                    },
-                ),
+                protocol_request("request.remote.valid-replay", replay_request(),),
                 true,
             ),
             StatusCode::SERVICE_UNAVAILABLE

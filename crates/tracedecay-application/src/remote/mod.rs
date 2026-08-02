@@ -7,6 +7,8 @@ pub mod protocol;
 pub mod query;
 pub mod recovery;
 pub mod replay;
+pub mod replay_contract;
+pub mod replay_node;
 pub mod status;
 
 #[cfg(test)]

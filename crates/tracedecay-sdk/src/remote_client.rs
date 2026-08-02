@@ -11,11 +11,17 @@ use reqwest::blocking::Client as HttpClient;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
-use tracedecay_application::RequestId;
+use serde::de::DeserializeOwned;
 use tracedecay_application::remote::protocol::{
     RemoteAuthorityDiscoveryProtocolRequestV1, RemoteEnrollmentProtocolRequestV1,
-    RemoteProtocolBodyV1, RemoteProtocolRequestV1,
+    RemoteProtocolBodyV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
+use tracedecay_application::remote::query::RemoteQueryRequestV1;
+use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::replay_node::{
+    RemoteReplayTransportErrorV1, RemoteReplayTransportPortV1,
+};
+use tracedecay_application::{ApplicationEnvelope, RequestId};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 
 const MAX_CREDENTIAL_BYTES: usize = 4_096;
@@ -212,6 +218,21 @@ impl EnrolledRemoteClient {
             .and_then(decode_wire_response)
     }
 
+    pub fn replay(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteReplayOutcomeV1>, RemoteClientError> {
+        self.execute("replay", request)
+            .and_then(decode_success_response)
+    }
+
+    pub fn query(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
+    ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
+        self.execute("query", request)
+    }
+
     pub fn execute_enrollment(
         &self,
         request: &RemoteEnrollmentProtocolRequestV1,
@@ -240,6 +261,20 @@ impl EnrolledRemoteClient {
             .json::<serde_json::Value>()
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))
             .and_then(decode_wire_response)
+    }
+}
+
+impl RemoteReplayTransportPortV1 for EnrolledRemoteClient {
+    fn replay(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteReplayOutcomeV1>, RemoteReplayTransportErrorV1> {
+        EnrolledRemoteClient::replay(self, request).map_err(|error| match error {
+            RemoteClientError::Configuration(_) | RemoteClientError::Protocol(_) => {
+                RemoteReplayTransportErrorV1::InvalidResponse
+            }
+            RemoteClientError::Transport(_) => RemoteReplayTransportErrorV1::Unavailable,
+        })
     }
 }
 
@@ -280,6 +315,24 @@ fn decode_wire_response(
     value: serde_json::Value,
 ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
     serde_json::from_value(value.get("response").cloned().unwrap_or(value))
+        .map_err(|error| RemoteClientError::Protocol(error.to_string()))
+}
+
+fn decode_success_response<T>(
+    wire: RemoteProtocolWireResponseV1,
+) -> Result<RemoteProtocolResponseV1<T>, RemoteClientError>
+where
+    T: DeserializeOwned,
+{
+    let result =
+        serde_json::from_value::<Result<ApplicationEnvelope<T>, serde_json::Value>>(wire.result)
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))?
+            .map_err(|_| {
+                RemoteClientError::Protocol(
+                    "Remote Brain returned an application problem".to_owned(),
+                )
+            })?;
+    RemoteProtocolResponseV1::new(wire.request_id, wire.authority, Ok(result))
         .map_err(|error| RemoteClientError::Protocol(error.to_string()))
 }
 

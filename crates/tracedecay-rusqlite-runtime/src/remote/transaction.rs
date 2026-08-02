@@ -29,7 +29,8 @@ impl RemoteReplayTransactionPortV1 for RemoteSqliteStorageV1 {
         let existing = transaction
             .query(
                 MigrationSqlStatement::new(
-                    "SELECT event_id, replay_receipt_json
+                    "SELECT event_id, replay_receipt_json, enrollment_id, node_id,
+                            capture_sequence, previous_event_id
                      FROM remote_observations_v1
                      WHERE observation_id = ?1 OR event_id = ?2"
                         .to_owned(),
@@ -46,7 +47,13 @@ impl RemoteReplayTransactionPortV1 for RemoteSqliteStorageV1 {
                 return Err(RemoteReplayTransactionErrorV1::IdempotencyConflict);
             }
             let row = &existing.rows[0];
-            if transaction_row_text(row, 0)? != frame.event_id {
+            if transaction_row_text(row, 0)? != frame.event_id
+                || transaction_row_text(row, 2)? != frame.capture.enrollment_id.as_str()
+                || transaction_row_text(row, 3)? != frame.capture.node_id.as_str()
+                || transaction_row_u64(row, 4)? != frame.capture.sequence.sequence
+                || transaction_row_optional_text(row, 5)?
+                    != frame.capture.sequence.previous_event_id.as_deref()
+            {
                 return Err(RemoteReplayTransactionErrorV1::IdempotencyConflict);
             }
             let receipt: RemoteReplayCommitReceiptV1 =
@@ -60,6 +67,7 @@ impl RemoteReplayTransactionPortV1 for RemoteSqliteStorageV1 {
                 .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
             return Ok(RemoteReplayTransactionOutcomeV1::Duplicate(receipt));
         }
+        validate_capture_predecessor(&transaction, frame)?;
         let sequence_rows = transaction
             .query(
                 MigrationSqlStatement::new(
@@ -108,13 +116,21 @@ impl RemoteReplayTransactionPortV1 for RemoteSqliteStorageV1 {
             .execute(
                 MigrationSqlStatement::new(
                     "INSERT INTO remote_observations_v1 (
-                        observation_id, event_id, sequence, observation_json,
+                        observation_id, event_id, enrollment_id, node_id,
+                        capture_sequence, previous_event_id, sequence, observation_json,
                         runtime_binding_json, writer_fence_json, replay_receipt_json, committed_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
                         .to_owned(),
                     vec![
                         text(frame.capture.observation.observation_id().as_str()),
                         text(&frame.event_id),
+                        text(frame.capture.enrollment_id.as_str()),
+                        text(frame.capture.node_id.as_str()),
+                        MigrationSqlValue::Integer(
+                            i64::try_from(frame.capture.sequence.sequence)
+                                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+                        ),
+                        optional_text(frame.capture.sequence.previous_event_id.as_deref()),
                         MigrationSqlValue::Integer(
                             i64::try_from(commit_sequence)
                                 .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
@@ -133,6 +149,48 @@ impl RemoteReplayTransactionPortV1 for RemoteSqliteStorageV1 {
             .commit()
             .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
         Ok(RemoteReplayTransactionOutcomeV1::Admitted(receipt))
+    }
+}
+
+fn validate_capture_predecessor(
+    transaction: &crate::migration_sql::MigrationSqlTransaction,
+    frame: &RemoteReplayFrameV1,
+) -> Result<(), RemoteReplayTransactionErrorV1> {
+    if frame.capture.sequence.sequence == 1 {
+        return Ok(());
+    }
+    let predecessor_sequence = frame
+        .capture
+        .sequence
+        .sequence
+        .checked_sub(1)
+        .ok_or(RemoteReplayTransactionErrorV1::SequenceGap)?;
+    let rows = transaction
+        .query(
+            MigrationSqlStatement::new(
+                "SELECT event_id FROM remote_observations_v1
+                 WHERE enrollment_id = ?1 AND capture_sequence = ?2"
+                    .to_owned(),
+                vec![
+                    text(frame.capture.enrollment_id.as_str()),
+                    MigrationSqlValue::Integer(
+                        i64::try_from(predecessor_sequence)
+                            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?,
+                    ),
+                ],
+            )
+            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?,
+        )
+        .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
+    let expected = frame
+        .capture
+        .sequence
+        .previous_event_id
+        .as_deref()
+        .ok_or(RemoteReplayTransactionErrorV1::SequenceGap)?;
+    match rows.rows.as_slice() {
+        [row] if transaction_row_text(row, 0)? == expected => Ok(()),
+        _ => Err(RemoteReplayTransactionErrorV1::SequenceGap),
     }
 }
 
@@ -173,6 +231,29 @@ fn transaction_row_text(
 ) -> Result<&str, RemoteReplayTransactionErrorV1> {
     match row.values.get(index) {
         Some(MigrationSqlValue::Text(value)) => Ok(value),
+        _ => Err(RemoteReplayTransactionErrorV1::CanonicalEffect),
+    }
+}
+
+fn transaction_row_u64(
+    row: &crate::migration_sql::MigrationSqlRow,
+    index: usize,
+) -> Result<u64, RemoteReplayTransactionErrorV1> {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Integer(value)) => {
+            u64::try_from(*value).map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)
+        }
+        _ => Err(RemoteReplayTransactionErrorV1::CanonicalEffect),
+    }
+}
+
+fn transaction_row_optional_text(
+    row: &crate::migration_sql::MigrationSqlRow,
+    index: usize,
+) -> Result<Option<&str>, RemoteReplayTransactionErrorV1> {
+    match row.values.get(index) {
+        Some(MigrationSqlValue::Text(value)) => Ok(Some(value)),
+        Some(MigrationSqlValue::Null) => Ok(None),
         _ => Err(RemoteReplayTransactionErrorV1::CanonicalEffect),
     }
 }

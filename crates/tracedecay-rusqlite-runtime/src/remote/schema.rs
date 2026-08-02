@@ -62,12 +62,17 @@ CREATE TABLE remote_spool_frames_v1 (
 CREATE TABLE remote_observations_v1 (
     observation_id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
+    enrollment_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    capture_sequence INTEGER NOT NULL CHECK (capture_sequence > 0),
+    previous_event_id TEXT,
     sequence INTEGER NOT NULL CHECK (sequence > 0),
     observation_json TEXT NOT NULL,
     runtime_binding_json TEXT NOT NULL,
     writer_fence_json TEXT NOT NULL,
     replay_receipt_json TEXT NOT NULL,
-    committed_at INTEGER NOT NULL
+    committed_at INTEGER NOT NULL,
+    UNIQUE (enrollment_id, capture_sequence)
 ) STRICT;
 
 CREATE TABLE remote_recovery_journal_v1 (
