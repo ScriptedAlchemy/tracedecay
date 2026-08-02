@@ -1572,10 +1572,13 @@ fn uninstall_permissions(settings: &mut serde_json::Value) -> bool {
     let filtered: Vec<serde_json::Value> = arr
         .into_iter()
         .filter(|v| {
+            // Every known namespace, read from `tool_name` rather than
+            // restated here: a partial list silently orphans permission
+            // entries written under the namespace it forgot.
             !v.as_str().is_some_and(|s| {
-                s.starts_with("mcp__tracedecay__")
-                    || s.starts_with("mcp__plugin_tracedecay_graph__")
-                    || s.starts_with("mcp__plugin_tracedecay_tracedecay__")
+                crate::tool_name::ALL_TOOL_PREFIXES
+                    .iter()
+                    .any(|prefix| s.starts_with(prefix))
             })
         })
         .collect();
@@ -1851,7 +1854,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
 
     let stale: Vec<&&str> = installed
         .iter()
-        .filter(|p| p.starts_with("mcp__tracedecay__") && !expected.contains(&p.to_string()))
+        .filter(|p| p.starts_with(LEGACY_TOOL_PERM_PREFIX) && !expected.contains(&p.to_string()))
         .collect();
     if !stale.is_empty() {
         dc.warn(&format!(
