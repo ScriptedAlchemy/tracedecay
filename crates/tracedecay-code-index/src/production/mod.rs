@@ -551,6 +551,18 @@ impl CodeIndexPublishedGenerationV1 {
         self.validated.get().is_some()
     }
 
+    /// Whether this generation's parser-backed exact admission has already been
+    /// computed.
+    ///
+    /// [`Self::admitted_chunks`] re-canonicalizes and re-hashes every chunk on
+    /// its first call, so whoever calls it first pays an O(store) sweep. This
+    /// lets an activation path prove it warmed that memo instead of leaving the
+    /// cost to the first query. Like [`Self::is_validated`] it reports memo
+    /// state only and never short-circuits a gate.
+    pub fn is_exact_admission_warm(&self) -> bool {
+        self.admitted.get().is_some()
+    }
+
     /// Build the production generation-bound affected-test authority.
     ///
     /// Test candidates are deliberately conservative: each callable symbol in

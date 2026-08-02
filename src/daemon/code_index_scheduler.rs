@@ -10,7 +10,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock, Weak,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
@@ -153,19 +153,181 @@ impl SharedCodeIndexBytePoolV1 {
 /// How many non-active sealed generations stay decoded for repeat pinned or
 /// cursor-paged reads. Pinned reads target one generation for the life of a
 /// paged query, so a small cache converts a per-page rescan into a single load.
+///
+/// The ACTIVE generation is never counted against this bound: it lives in its
+/// own pinned slot (see [`DecodedGenerationStateV1::active`]) because it serves
+/// every unpinned query and must not be evictable by cursor traffic over
+/// superseded generations.
 const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
 
-#[derive(Clone)]
-struct DaemonCodeIndexPublicationStoreV1 {
-    active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
-    /// Already-loaded, already-verified non-active generations, newest last.
+/// Which sealed generation one decode lease covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DecodeSubjectV1 {
+    /// The generation named by the durable active-publication pointer.
+    Active,
+    /// One immutable non-active generation, addressed by identity.
+    Generation(CodeGenerationId),
+}
+
+/// Decoded-generation cache state.
+///
+/// Guarded by [`DecodedGenerationCacheV1::state`]. The lock is only ever held
+/// for pointer-sized bookkeeping — never across a decode.
+#[derive(Default)]
+struct DecodedGenerationStateV1 {
+    /// The pinned active generation.
+    ///
+    /// Held outside the LRU deque: every unpinned query serves from it, so LRU
+    /// pressure from pinned or cursor-paged reads of older generations must
+    /// never be able to drop it and force a re-decode on the request path.
+    active: Option<Arc<CodeIndexPublishedGenerationV1>>,
+    /// Bumped by every successful publication. A decode that started before a
+    /// publication landed must not install its now-superseded result.
+    active_epoch: u64,
+    /// Already-decoded, already-verified NON-active generations, newest last.
     ///
     /// Decoding a sealed generation re-reads every generation file in the store
     /// and fully re-validates each one, so serving a pinned generation per page
     /// repeated that whole scan per access. A published generation is immutable
     /// and content-addressed by its sealed filename, so a generation that
     /// loaded once can be served again without redoing the load-time checks.
-    decoded: Arc<Mutex<VecDeque<Arc<CodeIndexPublishedGenerationV1>>>>,
+    decoded: VecDeque<Arc<CodeIndexPublishedGenerationV1>>,
+    /// Decodes currently running. A caller that wants one of these parks on the
+    /// condvar instead of starting a second sweep over the same bytes.
+    in_flight: Vec<DecodeSubjectV1>,
+}
+
+impl DecodedGenerationStateV1 {
+    fn is_in_flight(&self, subject: &DecodeSubjectV1) -> bool {
+        self.in_flight.iter().any(|pending| pending == subject)
+    }
+
+    fn forget(&mut self, generation_id: &CodeGenerationId) {
+        self.decoded
+            .retain(|cached| cached.manifest().generation_id != *generation_id);
+    }
+
+    /// Serve an already-decoded non-active generation, refreshing its recency.
+    fn cached(
+        &mut self,
+        generation_id: &CodeGenerationId,
+    ) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
+        let position = self
+            .decoded
+            .iter()
+            .position(|cached| cached.manifest().generation_id == *generation_id)?;
+        let generation = self.decoded.remove(position)?;
+        self.decoded.push_back(Arc::clone(&generation));
+        Some(generation)
+    }
+}
+
+/// Single-flight decode barrier for sealed code generations.
+///
+/// Decoding a sealed generation is O(store): it re-reads the sealed bytes,
+/// re-mints every file's exact-extraction authority (a canonical SHA-256 over
+/// every chunk), and repeats the full canonical validation sweep. On a
+/// 149K-node store that is tens of seconds of pure CPU, so it belongs at
+/// activation time, once per generation, and never on a request.
+///
+/// The barrier provides three properties the previous `Mutex<Option<_>>` could
+/// not:
+///
+/// - the decode NEVER runs while the cache lock is held, so a reader that only
+///   needs an already-decoded generation is not queued behind an unrelated
+///   decode;
+/// - concurrent callers wanting the SAME generation share one decode — the
+///   first claims a lease, the rest park on the condvar — so a request that
+///   arrives mid-decode joins the in-flight work instead of duplicating it;
+/// - only success is published. A failed decode leaves no memo, so the next
+///   caller re-runs the complete check and observes the same error. The
+///   fail-closed gate is unchanged.
+#[derive(Default)]
+struct DecodedGenerationCacheV1 {
+    state: Mutex<DecodedGenerationStateV1>,
+    ready: Condvar,
+    /// Sealed-bytes decodes actually performed by this process. Test probe for
+    /// "the serving path did not re-decode".
+    decodes: AtomicU64,
+}
+
+impl DecodedGenerationCacheV1 {
+    fn poisoned() -> CodeIndexPublicationStoreErrorV1 {
+        CodeIndexPublicationStoreErrorV1::Unavailable(
+            "daemon decoded-generation lock is poisoned".to_owned(),
+        )
+    }
+
+    fn lock_state(
+        &self,
+    ) -> Result<MutexGuard<'_, DecodedGenerationStateV1>, CodeIndexPublicationStoreErrorV1> {
+        self.state.lock().map_err(|_| Self::poisoned())
+    }
+
+    fn note_decode(&self) {
+        self.decodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn decode_count(&self) -> u64 {
+        self.decodes.load(Ordering::Relaxed)
+    }
+
+    /// Retain an already-decoded non-active generation under the LRU bound.
+    ///
+    /// The active generation is pinned in its own slot and is deliberately not
+    /// admitted here, so cursor traffic over superseded generations can never
+    /// evict the generation every unpinned query serves from.
+    fn remember(
+        &self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut state = self.lock_state()?;
+        let generation_id = generation.manifest().generation_id.clone();
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.manifest().generation_id == generation_id)
+        {
+            return Ok(());
+        }
+        state.forget(&generation_id);
+        state.decoded.push_back(generation);
+        while state.decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
+            state.decoded.pop_front();
+        }
+        Ok(())
+    }
+}
+
+/// RAII claim on the single in-flight decode for one subject.
+///
+/// Dropping the lease releases the claim and wakes every parked caller, so a
+/// panicking or erroring decode can never strand waiters.
+struct DecodeLeaseV1<'cache> {
+    cache: &'cache DecodedGenerationCacheV1,
+    subject: DecodeSubjectV1,
+    /// The active-slot epoch observed when this lease was claimed.
+    epoch: u64,
+}
+
+impl Drop for DecodeLeaseV1<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .cache
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.in_flight.retain(|pending| *pending != self.subject);
+        }
+        self.cache.ready.notify_all();
+    }
+}
+
+#[derive(Clone)]
+struct DaemonCodeIndexPublicationStoreV1 {
+    cache: Arc<DecodedGenerationCacheV1>,
     active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
@@ -180,8 +342,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
-            active: Arc::new(Mutex::new(None)),
-            decoded: Arc::new(Mutex::new(VecDeque::new())),
+            cache: Arc::new(DecodedGenerationCacheV1::default()),
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
@@ -226,6 +387,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(())
     }
 
+    /// Serve one sealed generation by identity, decoding it at most once.
+    ///
+    /// The active generation answers from its pinned slot. Any other generation
+    /// is served from the decoded LRU, or decoded exactly once under a lease —
+    /// concurrent pinned or cursor-paged readers of the same generation join the
+    /// in-flight decode instead of each rescanning the store.
     fn load_generation(
         &self,
         generation_id: &CodeGenerationId,
@@ -235,10 +402,49 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(Some(active));
         }
-        if let Some(cached) = self.cached_generation(generation_id)? {
-            return Ok(Some(cached));
+        let subject = DecodeSubjectV1::Generation(generation_id.clone());
+        let lease = loop {
+            let mut state = self.cache.lock_state()?;
+            if let Some(cached) = state.cached(generation_id) {
+                return Ok(Some(cached));
+            }
+            if state.is_in_flight(&subject) {
+                // Another caller already owns this O(store) decode. Park on it
+                // rather than starting a second sweep over the same bytes.
+                let _parked = self
+                    .cache
+                    .ready
+                    .wait(state)
+                    .map_err(|_| DecodedGenerationCacheV1::poisoned())?;
+                continue;
+            }
+            let epoch = state.active_epoch;
+            state.in_flight.push(subject.clone());
+            drop(state);
+            break DecodeLeaseV1 {
+                cache: &self.cache,
+                subject: subject.clone(),
+                epoch,
+            };
+        };
+        // Decoded with NO cache lock held: unrelated readers and publishers keep
+        // making progress while this runs.
+        let matched = self.scan_sealed_generations(generation_id);
+        if let Ok(Some(generation)) = matched.as_ref() {
+            self.cache.remember(Arc::clone(generation))?;
         }
+        drop(lease);
+        matched
+    }
 
+    /// Read every sealed generation file until the requested identity matches.
+    ///
+    /// Fail-closed: filename/content digest mismatch, duplicate identity claims,
+    /// and decode failures all error instead of serving.
+    fn scan_sealed_generations(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let mut paths = std::fs::read_dir(&self.generations_root)
             .map_err(Self::unavailable)?
             .filter_map(Result::ok)
@@ -279,6 +485,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             {
                 continue;
             }
+            self.cache.note_decode();
             let generation =
                 CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
             if generation.manifest().generation_id != *generation_id {
@@ -290,61 +497,66 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 ));
             }
         }
-        if let Some(generation) = matched.as_ref() {
-            self.remember_generation(Arc::clone(generation))?;
-        }
         Ok(matched)
     }
 
-    /// Serve an already-loaded non-active generation.
+    /// Serve the active generation, decoding it at most once per publication.
     ///
-    /// Entries only ever enter through `load_generation`, which performs the
-    /// full sealed-bytes digest, format, decode, and validation sequence, so a
-    /// hit here is a generation whose load-time checks already passed.
-    fn cached_generation(
-        &self,
-        generation_id: &CodeGenerationId,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        let decoded = self.decoded.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "daemon decoded-generation lock is poisoned".to_owned(),
-            )
-        })?;
-        Ok(decoded
-            .iter()
-            .find(|generation| generation.manifest().generation_id == *generation_id)
-            .map(Arc::clone))
-    }
-
-    fn remember_generation(
-        &self,
-        generation: Arc<CodeIndexPublishedGenerationV1>,
-    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let mut decoded = self.decoded.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "daemon decoded-generation lock is poisoned".to_owned(),
-            )
-        })?;
-        let generation_id = generation.manifest().generation_id.clone();
-        decoded.retain(|cached| cached.manifest().generation_id != generation_id);
-        decoded.push_back(generation);
-        while decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
-            decoded.pop_front();
-        }
-        Ok(())
-    }
-
+    /// The first caller claims the decode lease and pays the O(store) sweep with
+    /// no cache lock held; every caller that arrives while it runs parks on the
+    /// condvar and is handed the same `Arc`. Nothing is memoized on failure, so
+    /// a corrupt or unreadable store still errors every request.
     fn load_active_shared(
         &self,
     ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
-        let mut active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "daemon publication lock is poisoned".to_owned(),
-            )
-        })?;
-        if let Some(generation) = active.as_ref() {
-            return Ok(Some(Arc::clone(generation)));
+        let lease = loop {
+            let mut state = self.cache.lock_state()?;
+            if let Some(generation) = state.active.as_ref() {
+                return Ok(Some(Arc::clone(generation)));
+            }
+            if state.is_in_flight(&DecodeSubjectV1::Active) {
+                // Another caller already owns this O(store) decode. Park on it
+                // rather than starting a second sweep over the same bytes.
+                let _parked = self
+                    .cache
+                    .ready
+                    .wait(state)
+                    .map_err(|_| DecodedGenerationCacheV1::poisoned())?;
+                continue;
+            }
+            let epoch = state.active_epoch;
+            state.in_flight.push(DecodeSubjectV1::Active);
+            drop(state);
+            break DecodeLeaseV1 {
+                cache: &self.cache,
+                subject: DecodeSubjectV1::Active,
+                epoch,
+            };
+        };
+        let decoded = self.decode_active_generation();
+        if let Ok(Some(generation)) = decoded.as_ref() {
+            let mut state = self.cache.lock_state()?;
+            if state.active_epoch == lease.epoch {
+                state.forget(&generation.manifest().generation_id);
+                state.active = Some(Arc::clone(generation));
+            } else if let Some(active) = state.active.as_ref() {
+                // A publication landed while this decode ran. The newer active
+                // generation wins; the superseded decode is never installed.
+                let active = Arc::clone(active);
+                drop(state);
+                drop(lease);
+                return Ok(Some(active));
+            }
         }
+        drop(lease);
+        decoded
+    }
+
+    /// Read, verify, and decode the generation named by the durable active
+    /// pointer. Never called with the decoded-generation cache lock held.
+    fn decode_active_generation(
+        &self,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let pointer_bytes = match std::fs::read(&self.active_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -369,6 +581,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(None);
         }
+        self.cache.note_decode();
         let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
             .map_err(Self::unavailable)?;
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
@@ -384,15 +597,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
-        let generation = Arc::new(generation);
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
-        *active = Some(Arc::clone(&generation));
-        Ok(Some(generation))
+        Ok(Some(Arc::new(generation)))
     }
 
     fn active_encoded_bytes(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.active_encoded_bytes)
+    }
+
+    /// Sealed-bytes decodes this process has performed against this store.
+    #[cfg(test)]
+    fn sealed_decode_count(&self) -> u64 {
+        self.cache.decode_count()
     }
 }
 
@@ -419,12 +636,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
         let _ = self.load_active_shared()?;
-        let mut active = self.active.lock().map_err(|_| {
-            CodeIndexPublicationStoreErrorV1::Unavailable(
-                "daemon publication lock is poisoned".to_owned(),
-            )
-        })?;
-        if active
+        let mut state = self.cache.lock_state()?;
+        if state
+            .active
             .as_ref()
             .map(|current| &current.manifest().generation_id)
             != expected_active_generation
@@ -493,7 +707,14 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX),
             Ordering::Release,
         );
-        *active = Some(Arc::new(generation));
+        // The published generation is already decoded and validated in memory,
+        // so activation costs nothing: no request ever re-reads these bytes.
+        // Bumping the epoch retires any decode that started against the prior
+        // pointer so it cannot install itself over this newer generation.
+        let generation_id = generation.manifest().generation_id.clone();
+        state.active_epoch = state.active_epoch.wrapping_add(1);
+        state.forget(&generation_id);
+        state.active = Some(Arc::new(generation));
         Ok(())
     }
 }
@@ -670,6 +891,38 @@ impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
         self.record_index
             .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
+    }
+
+    /// Build every per-generation serving derivation now, off the request path.
+    ///
+    /// A sealed generation is immutable, so its exact-admission sweep, record
+    /// lookup indices, lane owners, and test-attribution join are pure functions
+    /// of it. Each is memoized behind a `OnceLock` that would otherwise be
+    /// initialized by whichever request arrives first — charging one query an
+    /// O(store) canonical sweep over every chunk. Warming them where the
+    /// generation is activated makes the FIRST query O(result), like every later
+    /// one.
+    ///
+    /// Failures are deliberately discarded: this is a pre-warm, not a gate. Only
+    /// success is memoized, so every serving path still runs — and still fails
+    /// closed on — the exact same checks.
+    pub(in crate::daemon) fn warm_serving_caches(&self) {
+        let _ = self.generation.admitted_chunks();
+        let _ = self.generation.test_attribution_authority();
+        let _ = self.record_index();
+        let _ = self.production_query_owners();
+    }
+
+    /// Whether the record lookup indices are already built for this generation.
+    #[cfg(test)]
+    fn record_index_is_warm(&self) -> bool {
+        self.record_index.get().is_some()
+    }
+
+    /// Whether the exact/lexical/graph lane owners are already built.
+    #[cfg(test)]
+    fn query_owners_are_warm(&self) -> bool {
+        self.query_owners.get().is_some()
     }
 
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
@@ -1400,6 +1653,31 @@ impl CodeIndexWorktreeSchedulerV1 {
             })
     }
 
+    /// Decode, validate, mint, and warm the active generation eagerly.
+    ///
+    /// Activation — mount with an existing sealed store, or reconcile
+    /// completion — is where a generation's O(store) derivations belong. Run
+    /// this on a blocking worker at those points and the first query finds the
+    /// decoded generation, its exact-admission sweep, its record indices, and
+    /// its lane owners already built. A query that arrives while this is still
+    /// running joins the in-flight decode through the publication store's
+    /// single-flight barrier instead of starting a second one.
+    ///
+    /// Best-effort by construction: nothing here is a gate, and every failure
+    /// simply leaves the work for the serving path, which still fails closed.
+    fn prime_serving_caches(&self) {
+        if let Some(latest) = self.latest_complete() {
+            latest.warm_serving_caches();
+        }
+    }
+
+    /// Sealed-bytes decodes this process performed against this worktree's
+    /// store. Test probe for "the serving path did not re-decode".
+    #[cfg(test)]
+    fn sealed_decode_count(&self) -> u64 {
+        self.publication.sealed_decode_count()
+    }
+
     fn generation(
         &self,
         generation_id: &CodeGenerationId,
@@ -1721,6 +1999,8 @@ impl RestoreFreshnessWitnessV1 {
     }
 }
 
+#[cfg(test)]
+mod activation_tests;
 #[cfg(test)]
 mod memory_tests;
 #[cfg(test)]
