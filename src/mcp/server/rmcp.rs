@@ -62,6 +62,13 @@ pub(crate) struct RmcpConnectionAdapter {
     memory_request_scope: String,
     timings_enabled: bool,
     initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
+    /// The accepted connection's admission slot, captured on the connection task.
+    ///
+    /// `rmcp` runs the request loop on a task it spawns, which does not inherit
+    /// the connection's task-local, so each dispatch re-enters this scope. That
+    /// is what lets a tool call parked on a generation decode hand its admission
+    /// slot back instead of starving tools that need no generation at all.
+    admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
 }
 
 impl RmcpConnectionAdapter {
@@ -78,10 +85,24 @@ impl RmcpConnectionAdapter {
             memory_request_scope,
             timings_enabled,
             initialize_response_decorator,
+            admission: crate::daemon::current_connection_admission(),
         })
     }
 
     async fn dispatch(
+        &self,
+        context: RequestContext<RoleServer>,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<JsonRpcResponse, ErrorData> {
+        crate::daemon::in_connection_admission(
+            self.admission.clone(),
+            self.dispatch_admitted(context, method, params),
+        )
+        .await
+    }
+
+    async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
         method: &str,
