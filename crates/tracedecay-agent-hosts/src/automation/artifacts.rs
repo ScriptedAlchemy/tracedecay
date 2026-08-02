@@ -15,7 +15,7 @@ use super::backend::{
 use super::outcomes::load_outcomes_snapshot;
 use super::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
-    prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_manifest,
+    prepare_run_artifact, publish_run_artifact_chain, read_published_artifact_chain,
 };
 use crate::errors::Result;
 
@@ -54,23 +54,9 @@ impl<'a> ImprovementArtifactWriter<'a> {
         Ok(artifact_ref)
     }
 
-    async fn finish(mut self, identity: &Value) -> Result<Vec<AutomationRunArtifact>> {
-        let manifest_payload = serde_json::json!({
-            "schema_version": 1,
-            "run_id": self.run_id,
-            "identity": identity,
-            "artifacts": self.artifacts.clone(),
-        });
-        let (manifest, bytes) = prepare_run_artifact(
-            self.run_id,
-            AutomationRunArtifactKind::Manifest,
-            &manifest_payload,
-            Some("canonical atomic artifact manifest".to_string()),
-            self.created_at,
-        )?;
-        self.artifacts.push(manifest.clone());
-        self.pending.push((manifest, bytes));
-        publish_run_artifact_chain(self.dashboard_root, self.run_id, self.pending).await?;
+    async fn finish(self, identity: &Value) -> Result<Vec<AutomationRunArtifact>> {
+        publish_run_artifact_chain(self.dashboard_root, self.run_id, self.pending, identity)
+            .await?;
         Ok(self.artifacts)
     }
 }
@@ -92,7 +78,7 @@ pub(crate) async fn write_improvement_artifacts(
     let outcomes = load_outcomes_snapshot(dashboard_root)
         .await
         .unwrap_or_default();
-    let manifest_identity = serde_json::json!({
+    let publication_identity = serde_json::json!({
         "sha256": sha256_json(&serde_json::json!({
             "task": task_key,
             "prompt_version": prompt_version,
@@ -109,7 +95,7 @@ pub(crate) async fn write_improvement_artifacts(
         })),
     });
     if let Some(artifacts) =
-        read_published_artifact_manifest(dashboard_root, run_id, Some(&manifest_identity)).await?
+        read_published_artifact_chain(dashboard_root, run_id, Some(&publication_identity)).await?
     {
         return Ok(artifacts);
     }
@@ -206,5 +192,5 @@ pub(crate) async fn write_improvement_artifacts(
         )
         .await?;
 
-    writer.finish(&manifest_identity).await
+    writer.finish(&publication_identity).await
 }
