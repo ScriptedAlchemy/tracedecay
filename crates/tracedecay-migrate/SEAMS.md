@@ -166,7 +166,7 @@ follow `global_db` (seam 1) rather than needing a design of their own.
 
 ## 7. `test-transport` is not forwarded to the kernel
 
-`memory_cutover.rs:56` and `:62` call
+`memory_cutover.rs:50` and `:56` call
 `storage::set_durable_atomic_write_fault_for_test`, which
 `tracedecay-runtime-core` gates behind `#[cfg(any(test, feature =
 "test-transport"))]`. This crate's `test-transport` feature currently forwards

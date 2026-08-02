@@ -188,19 +188,19 @@ refuse a lock while a branch-admin mutation is unfinished.
 
 ### 6. Test coverage parked behind cfgs
 
-Two `cfg` flags were added (declared in the crate's `[lints.rust]
-unexpected_cfgs` check-cfg list) because the types they need live above the
-kernel. Nothing sets them, so these tests do not run anywhere right now:
+One `cfg` flag was added (declared in the crate's `[lints.rust]
+unexpected_cfgs` check-cfg list) because the types it needs live above the
+kernel. Nothing sets it, so this test does not run anywhere right now:
 
 - `tracedecay_graph_query_tests` — `db/coverage.rs`
   `temp_table_lifecycle_uses_the_database_writer` needs
   `graph::queries::GraphQueryManager`.
-- `tracedecay_memory_application_tests` — `store/memory/memory_cutover_test.rs`
-  `cutover_preserves_legacy_usage_telemetry_and_search_ranking` and
-  `dashboard_vector_points_report_v1_entity_link_connections` need
-  `application::memory::MemoryApplication` / `MemoryOperationContext`.
 
-Both should be re-homed into the crate that owns the missing type.
+It should be re-homed into the crate that owns the missing type.
+
+(A second flag, `tracedecay_memory_application_tests`, gated
+`store/memory/memory_cutover_test.rs`; that file went away with the
+legacy-memory cutover removal, and the flag with it.)
 
 ### 7. Visibility promotion is now the kernel's public surface
 

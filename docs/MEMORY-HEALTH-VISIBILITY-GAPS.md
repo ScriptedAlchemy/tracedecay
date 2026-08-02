@@ -132,7 +132,6 @@ trust_{0_025,025_050,050_075,075_100}_count,
 below_default_recall_threshold_count,// facts below DEFAULT_MIN_TRUST (0.3)
 helpful_count, unhelpful_count,
 missing_vector_count,               // facts missing/legacy HRR vectors
-legacy_backfill_complete,
 repair: { missing_vectors_repaired, banks_rebuilt }
 ```
 

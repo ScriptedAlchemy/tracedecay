@@ -28,25 +28,6 @@ impl MemoryCategory {
         }
     }
 
-    /// Strict inverse of [`MemoryCategory::as_str`].
-    ///
-    /// Unlike the [`FromStr`] implementation this accepts only the exact
-    /// canonical labels: no aliases, no case folding, no separator rewriting.
-    /// Durable projections that round-trip a stored label must use this so a
-    /// non-canonical spelling stays a parse failure rather than becoming a
-    /// silently reinterpreted category.
-    pub(crate) fn from_canonical_label(value: &str) -> Option<Self> {
-        match value {
-            "general" => Some(Self::General),
-            "user_pref" => Some(Self::UserPref),
-            "project" => Some(Self::Project),
-            "tool" => Some(Self::Tool),
-            "decision" => Some(Self::Decision),
-            "code_area" => Some(Self::CodeArea),
-            _ => None,
-        }
-    }
-
     pub fn from_proposal_label(value: &str) -> Result<Self, ParseMemoryCategoryError> {
         if let Ok(category) = value.parse::<Self>() {
             return Ok(category);
