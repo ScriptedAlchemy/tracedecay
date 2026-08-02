@@ -412,6 +412,16 @@ mod tests {
 
     static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    async fn migrate_legacy_hermes_stores_to(
+        user_home: &Path,
+        profile_root: &Path,
+    ) -> LegacyHermesMigrationReport {
+        tracedecay_sessions::host_ports::hermes_profile_pin::register(
+            tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root,
+        );
+        super::migrate_legacy_hermes_stores_to(user_home, profile_root).await
+    }
+
     struct PinnedMigrationEnvironment {
         _lock: std::sync::MutexGuard<'static, ()>,
         _root: tempfile::TempDir,
@@ -1682,7 +1692,7 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session", &legacy_project)]).await;
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
@@ -1752,7 +1762,7 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session", &legacy_alias)]).await;
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
@@ -1797,7 +1807,7 @@ mod tests {
             .await;
         drop(source_runtime);
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
@@ -1833,6 +1843,7 @@ mod tests {
         let hermes = user_home.join(".hermes");
         let project = temp.path().join("project");
         mark_real_project(&project);
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let legacy_shard = profile_root.join("projects/legacy-hermes-identity");
         let source = legacy_shard.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
         fs::create_dir_all(&legacy_shard).unwrap();
@@ -1901,6 +1912,7 @@ mod tests {
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
         let hermes = user_home.join(".hermes");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let legacy_shard = profile_root.join("projects/legacy-hermes-projectless");
         let source = legacy_shard.join(tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME);
         fs::create_dir_all(&legacy_shard).unwrap();
@@ -2274,6 +2286,7 @@ mod tests {
             .insert_external_payload(payload_ref, payload)
             .await;
         drop(source_runtime);
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let layout =
             tracedecay_runtime_core::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = registered_project_target(&profile_root, &project).await;

@@ -1019,43 +1019,46 @@ mod tests {
             .unwrap();
         let global = maintenance_registry.profile_database().await.unwrap();
 
-        let pause = profile
-            .join("migration-inventory")
-            .join(".pause-registry-retirement");
-        let paused = profile
-            .join("migration-inventory")
-            .join(".registry-retirement-paused");
-        std::fs::write(&pause, b"pause").unwrap();
-        let profile_for_retirement = profile.clone();
-        let global_for_retirement = Arc::clone(&global);
-        let interrupted = tokio::spawn(async move {
-            let mut report = HealthPassReport::default();
-            retire_completed_consolidation_manifests(
-                &profile_for_retirement,
-                &global_for_retirement,
-                &mut report,
-            )
-            .await;
-            report
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !paused.is_file() && !interrupted.is_finished() {
-                tokio::task::yield_now().await;
+        #[cfg(feature = "test-transport")]
+        {
+            let pause = profile
+                .join("migration-inventory")
+                .join(".pause-registry-retirement");
+            let paused = profile
+                .join("migration-inventory")
+                .join(".registry-retirement-paused");
+            std::fs::write(&pause, b"pause").unwrap();
+            let profile_for_retirement = profile.clone();
+            let global_for_retirement = Arc::clone(&global);
+            let interrupted = tokio::spawn(async move {
+                let mut report = HealthPassReport::default();
+                retire_completed_consolidation_manifests(
+                    &profile_for_retirement,
+                    &global_for_retirement,
+                    &mut report,
+                )
+                .await;
+                report
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !paused.is_file() && !interrupted.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("registry retirement did not reach cancellation point");
+            if interrupted.is_finished() {
+                let report = interrupted.await.unwrap();
+                panic!(
+                    "registry retirement exited before cancellation point: {:?}",
+                    report.warnings
+                );
             }
-        })
-        .await
-        .expect("registry retirement did not reach cancellation point");
-        if interrupted.is_finished() {
-            let report = interrupted.await.unwrap();
-            panic!(
-                "registry retirement exited before cancellation point: {:?}",
-                report.warnings
-            );
+            interrupted.abort();
+            assert!(interrupted.await.unwrap_err().is_cancelled());
+            std::fs::remove_file(pause).unwrap();
+            std::fs::remove_file(paused).unwrap();
         }
-        interrupted.abort();
-        assert!(interrupted.await.unwrap_err().is_cancelled());
-        std::fs::remove_file(pause).unwrap();
-        std::fs::remove_file(paused).unwrap();
         for project_id in [source_id, target_id] {
             let root = profile.join("projects").join(project_id);
             assert!(root.join(crate::storage::STORE_MANIFEST_FILENAME).is_file());

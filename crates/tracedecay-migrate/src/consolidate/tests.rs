@@ -900,6 +900,7 @@ fn make_fixture(temp: TempDir) -> Fixture {
 /// by the real builder and the template builder.
 async fn build_fixture_tree(project: &Path, profile: &Path) {
     init_repo(project);
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile).unwrap();
     create_shard(
         profile,
         project,
@@ -969,6 +970,7 @@ async fn fixture_from_template() -> Option<Fixture> {
     let temp = TempDir::new().ok()?;
     let project = temp.path().join("repo");
     let profile = temp.path().join("profile");
+    tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile).ok()?;
     copy_fixture_tree(&template.join("repo"), &project).ok()?;
     copy_fixture_tree(&template.join("profile"), &profile).ok()?;
     apply_fixture_fixups(&project, &profile).await?;

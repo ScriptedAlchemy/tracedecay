@@ -1368,7 +1368,7 @@ async fn retire_legacy_registry_owners(
         .map_err(|error| config_error(format!("could not begin registry cleanup: {error}")))?;
     let conn = &transaction;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-transport"))]
     {
         let ledger_root = _profile_root.join(LEDGER_DIR);
         let injected_failure = ledger_root.join(".fail-registry-retirement-once");

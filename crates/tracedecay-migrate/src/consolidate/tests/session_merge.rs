@@ -240,13 +240,19 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
     }
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
-    apply_with_stop(
+    let stopped = apply_with_stop(
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
     )
     .await
     .unwrap_err();
+    assert!(
+        stopped
+            .to_string()
+            .contains("synthetic interruption after DatabasesMerged"),
+        "{stopped}"
+    );
 
     let graph_path = report
         .destination_data_root

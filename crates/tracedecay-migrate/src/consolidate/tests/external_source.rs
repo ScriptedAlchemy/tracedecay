@@ -308,13 +308,19 @@ async fn final_verification_rejects_missing_external_source_state() {
     .await;
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
-    apply_with_stop(
+    let stopped = apply_with_stop(
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
     )
     .await
     .unwrap_err();
+    assert!(
+        stopped
+            .to_string()
+            .contains("synthetic interruption after DatabasesMerged"),
+        "{stopped}"
+    );
     let destination_graph = report
         .destination_data_root
         .join(tracedecay_runtime_core::config::DB_FILENAME);
