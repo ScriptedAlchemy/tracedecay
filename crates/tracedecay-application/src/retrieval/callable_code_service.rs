@@ -30,7 +30,14 @@ use super::{
     TypeHierarchyRecord,
 };
 
-const UNPINNED_LATEST_GENERATION_SENTINEL: &str = "code-generation:unpinned-latest.v1";
+/// The `scope.generation` value that asks for the latest complete generation
+/// instead of pinning an exact one.
+///
+/// Every callable-code surface requires an explicit generation identity, so a
+/// caller with no generation in hand has nothing valid to send. This sentinel
+/// is that caller's entry point, and it is exported so the published tool
+/// schemas can name it rather than leaving it as folklore.
+pub const UNPINNED_LATEST_GENERATION_SENTINEL: &str = "code-generation:unpinned-latest.v1";
 
 pub type CallableCodeQueryFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<CodeQueryPage<T>>> + Send + 'a>>;
