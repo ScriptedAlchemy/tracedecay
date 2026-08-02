@@ -1734,24 +1734,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         cached.clear();
     }
 
-    /// Decode, validate, mint, and warm the active generation eagerly.
-    ///
-    /// Activation — mount with an existing sealed store, or reconcile
-    /// completion — is where a generation's O(store) derivations belong. Run
-    /// this on a blocking worker at those points and the first query finds the
-    /// decoded generation, its exact-admission sweep, its record indices, and
-    /// its lane owners already built. A query that arrives while this is still
-    /// running joins the in-flight decode through the publication store's
-    /// single-flight barrier instead of starting a second one.
-    ///
-    /// Best-effort by construction: nothing here is a gate, and every failure
-    /// simply leaves the work for the serving path, which still fails closed.
-    fn prime_serving_caches(&self) {
-        if let Ok(Some(latest)) = self.try_latest_complete() {
-            let _ = latest.warm_serving_caches();
-        }
-    }
-
     /// Sealed-bytes decodes this process performed against this worktree's
     /// store. Test probe for "the serving path did not re-decode".
     #[cfg(test)]

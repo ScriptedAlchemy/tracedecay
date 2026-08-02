@@ -107,7 +107,11 @@ fn activation_warms_the_generation_so_the_first_query_never_redecodes() {
 
     // Cold process view: a brand-new scheduler over an existing sealed store.
     let scheduler = open(project.path(), store.path());
-    scheduler.prime_serving_caches();
+    scheduler
+        .latest_complete()
+        .expect("restored generation")
+        .warm_serving_caches()
+        .expect("warm serving authority");
     let decodes_after_activation = scheduler.sealed_decode_count();
     assert_eq!(
         decodes_after_activation, 1,
@@ -333,7 +337,11 @@ fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
     }
 
     let scheduler = open(project.path(), store.path());
-    scheduler.prime_serving_caches();
+    scheduler
+        .latest_complete()
+        .expect("restored generation")
+        .warm_serving_caches()
+        .expect("warm serving authority");
     let active = scheduler
         .latest_complete()
         .expect("restored generation")

@@ -206,12 +206,24 @@ impl LatestCompleteCodeIndexV1 {
 
         let record_entries = self
             .generation
-            .snapshot()
-            .files
+            .chunks()
+            .chunks()
             .len()
-            .saturating_add(self.generation.chunks().chunks().len().saturating_mul(3))
-            .saturating_add(self.generation.symbols().symbols.len())
-            .saturating_add(self.generation.edges().len().saturating_mul(2));
+            .checked_mul(3)
+            .and_then(|entries| entries.checked_add(self.generation.snapshot().files.len()))
+            .and_then(|entries| entries.checked_add(self.generation.symbols().symbols.len()))
+            .and_then(|entries| {
+                self.generation
+                    .edges()
+                    .len()
+                    .checked_mul(2)
+                    .and_then(|edges| entries.checked_add(edges))
+            })
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "record-index resident entry count exceeds usize".to_owned(),
+                )
+            })?;
         let record_bytes = conservative_lane_reservation(
             self.generation.sealed_bytes,
             record_entries,
@@ -226,7 +238,10 @@ impl LatestCompleteCodeIndexV1 {
             .generation
             .edges()
             .len()
-            .saturating_add(self.generation.symbols().symbols.len());
+            .checked_add(self.generation.symbols().symbols.len())
+            .ok_or_else(|| {
+                RetrievalPortError::Contract("graph resident entry count exceeds usize".to_owned())
+            })?;
         let graph_bytes = conservative_lane_reservation(
             self.generation.sealed_bytes,
             graph_entries,

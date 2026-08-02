@@ -223,7 +223,12 @@ impl<R: Read> Read for DigestingReaderV1<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
         self.hasher.update(&buffer[..read]);
-        self.bytes_read = self.bytes_read.saturating_add(read as u64);
+        let read_bytes = u64::try_from(read)
+            .map_err(|_| std::io::Error::other("sealed generation read length exceeds u64"))?;
+        self.bytes_read = self
+            .bytes_read
+            .checked_add(read_bytes)
+            .ok_or_else(|| std::io::Error::other("sealed generation byte count exceeds u64"))?;
         Ok(read)
     }
 }
