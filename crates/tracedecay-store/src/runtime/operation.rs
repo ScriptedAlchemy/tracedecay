@@ -6,10 +6,10 @@ use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 use crate::{
     AnchoredObservationWrite, ConfigurationCommitV1, DiagnosticGenerationSupersessionV1,
     EvidenceAssemblyWriteV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationCursorAdvance,
-    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1, SessionSummaryPublicationRequestV1,
-    SessionTemporalProjectionBatchV1, SourceCommitV1, TransactionalInboxReceiptV1,
-    TransactionalOutboxEntryV1,
+    RemoteObservationReplayWriteV1, RetrievalAnchorDerivativeV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1, SourceCommitV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::identity::{canonical_id, validate_canonical_id};
@@ -767,6 +767,7 @@ pub enum RepositoryWritePayloadV1 {
     Configuration(Box<ConfigurationCommitV1>),
     Fact(Box<FactWriteBatch>),
     Observation(Box<AnchoredObservationWrite>),
+    RemoteObservation(Box<RemoteObservationReplayWriteV1>),
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
     DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
@@ -788,6 +789,7 @@ impl RepositoryWritePayloadV1 {
             Self::Configuration(_) => "commit configuration",
             Self::Fact(_) => "commit fact lineage",
             Self::Observation(_) => "commit observation",
+            Self::RemoteObservation(_) => "commit remote observation",
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
             Self::Diagnostics(_) => "publish diagnostics",
             Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
@@ -811,7 +813,9 @@ impl RepositoryWritePayloadV1 {
     fn family_name(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "profile",
-            Self::Observation(_) | Self::ObservationCursorAdvance(_) => "observation",
+            Self::Observation(_)
+            | Self::RemoteObservation(_)
+            | Self::ObservationCursorAdvance(_) => "observation",
             Self::Fact(_)
             | Self::Diagnostics(_)
             | Self::DiagnosticSupersession(_)
@@ -830,6 +834,9 @@ impl RepositoryWritePayloadV1 {
             Self::Configuration(_) => matches!(scope, StoreShardScopeV1::Profile),
             Self::Observation(write) => {
                 observation_scope_matches(write.observation().scope(), scope)
+            }
+            Self::RemoteObservation(write) => {
+                observation_scope_matches(write.anchored_write().observation().scope(), scope)
             }
             Self::ObservationCursorAdvance(advance) => {
                 observation_scope_matches(advance.next_cursor().scope(), scope)
@@ -930,6 +937,7 @@ impl RepositoryWritePayloadV1 {
             | Self::Diagnostics(_)
             | Self::SessionProjection(_)
             | Self::SessionSummary(_) => Ok(()),
+            Self::RemoteObservation(write) => write.validate(),
         }
     }
 }
@@ -988,6 +996,9 @@ impl RepositoryOperationEnvelopeV1 {
                 operation: self.payload.family_name(),
                 shard_family: "memory",
             });
+        }
+        if let RepositoryWritePayloadV1::RemoteObservation(write) = &self.payload {
+            write.validate_for_metadata(&self.metadata)?;
         }
         if let RepositoryWritePayloadV1::EvidenceAssembly(write) = &self.payload {
             let exact_owner = write.owner.owner.profile_id() == &self.metadata.shard_id.profile_id

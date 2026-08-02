@@ -13,6 +13,7 @@ use tracedecay_domain::{
     RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1,
     RemoteWriterFenceV1, UtcMicros, canonical_json_bytes, canonical_sha256,
 };
+use tracedecay_store::{RemoteObservationReplayPartsV1, RemoteObservationReplayWriteV1};
 
 use super::auth::{
     OpaqueRemoteCredential, RemoteAuthenticationError, RemoteAuthorityAuthenticationPort,
@@ -37,6 +38,7 @@ pub use super::replay_contract::{
     RemoteReplayCommitReceiptV1, RemoteReplayFindingV1, RemoteReplayFrameV1,
     RemoteReplayOperationReceiptV1, RemoteReplayRequestV1, RemoteReplaySpoolStateV1,
     RemoteReplayStateV1, RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
+    canonical_remote_event_id_v1,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -581,6 +583,36 @@ pub trait RemoteReplayTransactionPortV1: Send + Sync {
         current_writer: &RemoteWriterAuthorityV1,
         committed_at: UtcMicros,
     ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>;
+}
+
+pub fn canonical_remote_observation_write_v1(
+    frame: &RemoteReplayFrameV1,
+    current_writer: &RemoteWriterAuthorityV1,
+) -> Result<RemoteObservationReplayWriteV1, RemoteReplayApplicationErrorV1> {
+    frame.validate()?;
+    current_writer
+        .validate()
+        .map_err(|_| RemoteReplayApplicationErrorV1::FenceMismatch)?;
+    let frame_digest = canonical_sha256(&frame.capture)
+        .map_err(|_| RemoteReplayApplicationErrorV1::InvalidFrame)?;
+    RemoteObservationReplayWriteV1::new(
+        RemoteObservationReplayPartsV1 {
+            event_id: frame.event_id.clone(),
+            frame_digest,
+            enrollment_id: frame.capture.enrollment_id.clone(),
+            enrollment_revision: frame.capture.enrollment_revision,
+            node_id: frame.capture.node_id.clone(),
+            policy_revision: frame.capture.policy_revision,
+            capture_sequence: frame.capture.sequence.sequence,
+            previous_event_id: frame.capture.sequence.previous_event_id.clone(),
+            writer_project_id: current_writer.project_id.clone(),
+            writer_scope: current_writer.scope.clone(),
+            current_writer: current_writer.authority.clone(),
+            captured_at: frame.capture.captured_at,
+        },
+        frame.capture.anchored_write.clone(),
+    )
+    .map_err(|_| RemoteReplayApplicationErrorV1::InvalidFrame)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

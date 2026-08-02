@@ -8,20 +8,20 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
-    AnchoredObservationWrite, CommandDigestV1, ConsistencyModeV1, DurabilityClassV1,
-    IdempotencyIdentityV1, ObservationCommitReceipt, ObservationPersistOutcome,
-    ObservationProjectionStatus, ObservationProjectionStore, ObservationReadOperationV1,
-    ObservationReadResultV1, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationStoreResult, OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
-    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionRebuildOutcome,
-    ProjectionStoreResult, RepositoryOperationEnvelopeV1, RepositoryReadOperationV1,
-    RepositoryReadResultV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1,
-    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation,
-    StoredObservationRowV1,
+    AnchoredObservationWrite, ConsistencyModeV1, DurabilityClassV1, IdempotencyIdentityV1,
+    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStatus,
+    ObservationProjectionStore, ObservationReadOperationV1, ObservationReadResultV1,
+    ObservationReplayRequest, ObservationStore, ObservationStoreError, ObservationStoreResult,
+    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint,
+    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionStoreResult,
+    RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    canonical_observation_runtime_command_v1,
 };
 
 use tracedecay_runtime_core::db::DatabaseAuthority;
@@ -129,14 +129,17 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
                 existing.commit_receipt().clone(),
             ));
         }
+        let payload = RepositoryWritePayloadV1::Observation(Box::new(write));
+        let command = canonical_observation_runtime_command_v1(&payload)
+            .map_err(|error| runtime_storage_error("persist observation", error.to_string()))?;
         let idempotency_key = format!(
             "observation.{}",
-            canonical_runtime_digest(&runtime_observation_command(&write))?
+            canonical_runtime_digest(&command.command)?
         );
         let outcome = submit_runtime_write(
             runtime,
             authority,
-            RepositoryWritePayloadV1::Observation(Box::new(write)),
+            payload,
             idempotency_key,
             "submit anchored observation",
         )
@@ -487,7 +490,9 @@ async fn submit_runtime_write(
     idempotency_key: String,
     operation: &'static str,
 ) -> ObservationStoreResult<RuntimeSubmitOutcomeV1> {
-    let command = runtime_command_value(&payload)?;
+    let runtime_command = canonical_observation_runtime_command_v1(&payload)
+        .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
+    let command = runtime_command.command;
     let command_digest = canonical_sha256(&command)
         .map_err(|error| runtime_storage_error(operation, error.to_string()))?;
     let digest_suffix = command_digest
@@ -506,12 +511,14 @@ async fn submit_runtime_write(
         shard_id: binding.shard_id.clone(),
         incarnation: binding.incarnation,
         authority_epoch: binding.authority_epoch,
-        idempotency: IdempotencyIdentityV1 {
-            key: StoreIdempotencyKeyV1::new(idempotency_key)
-                .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
-            command_digest: CommandDigestV1::new(command_digest.as_str())
-                .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
-        },
+        idempotency: runtime_command
+            .idempotency
+            .unwrap_or(IdempotencyIdentityV1 {
+                key: StoreIdempotencyKeyV1::new(idempotency_key)
+                    .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
+                command_digest: tracedecay_store::CommandDigestV1::new(command_digest.as_str())
+                    .map_err(|error| runtime_storage_error(operation, error.to_string()))?,
+            }),
         durability: DurabilityClassV1::Full,
         priority: OperationPriorityV1::Foreground,
         admission_bytes: u64::try_from(
@@ -565,38 +572,6 @@ async fn submit_runtime_write(
         )
         .await
         .map_err(|error| runtime_storage_error(operation, format!("{error:?}")))
-}
-
-fn runtime_command_value(
-    payload: &RepositoryWritePayloadV1,
-) -> ObservationStoreResult<serde_json::Value> {
-    match payload {
-        RepositoryWritePayloadV1::Observation(write) => Ok(runtime_observation_command(write)),
-        RepositoryWritePayloadV1::ObservationCursorAdvance(advance) => Ok(serde_json::json!({
-            "kind": "observation_cursor_advance",
-            "expected_cursor": advance.expected_cursor(),
-            "next_cursor": advance.next_cursor(),
-            "coverage": advance.coverage(),
-            "reason": advance.reason().as_str(),
-            "sanitization_receipt": advance.sanitization_receipt(),
-        })),
-        _ => Err(runtime_storage_error(
-            "build observation runtime request",
-            "payload is not owned by the observation authority",
-        )),
-    }
-}
-
-fn runtime_observation_command(write: &AnchoredObservationWrite) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "observation",
-        "observation": write.observation(),
-        "expected_cursor": write.expected_cursor(),
-        "next_cursor": write.next_cursor(),
-        "retrieval_anchor": write.retrieval_anchor(),
-        "projection_generation": write.projection_generation(),
-        "repository_provenance": write.repository_provenance_attachment(),
-    })
 }
 
 fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult<String> {

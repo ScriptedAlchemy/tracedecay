@@ -1,8 +1,7 @@
 //! Registered SQLite authority for Remote Brain state and encrypted capture spool.
 //!
-//! Runtime attachment is deliberately read-only with respect to schema. Only
-//! [`install_remote_schema_v1`] may create these tables, so callers can expose
-//! a typed migration-required state instead of mutating a live store.
+//! Runtime attachment is deliberately read-only with respect to schema, so callers expose a
+//! typed migration-required state instead of mutating a live store.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +21,7 @@ use tracedecay_application::remote::{
         AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
         RemoteCapturePortV1, RemoteCaptureReceiptV1, RemoteWriterAuthorityV1,
     },
-    replay::{RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1},
+    replay::{RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1, canonical_remote_event_id_v1},
 };
 use tracedecay_domain::{
     BrainId, BrainNodeId, CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1,
@@ -48,22 +47,21 @@ mod enrollment;
 mod replay_authority;
 mod schema;
 mod status;
-mod transaction;
 
 pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
 use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
 };
-pub use schema::{REMOTE_SCHEMA_V1, install_remote_schema_v1, validate_remote_schema};
+pub use schema::{REMOTE_SCHEMA, validate_remote_schema};
 pub use status::RemoteStorageStatusSnapshotV1;
 
 #[derive(Debug, Error)]
 pub enum RemoteSqliteStorageErrorV1 {
     #[error("remote Brain schema migration is required")]
     MigrationRequired,
-    #[error("remote Brain schema version {actual} is unsupported")]
-    UnsupportedSchema { actual: i64 },
+    #[error("remote Brain store schema is incompatible and requires an explicit reset")]
+    ResetRequired,
     #[error("remote Brain encryption key revision must be non-zero")]
     InvalidKeyRevision,
     #[error("remote Brain encryption key must contain exactly 32 bytes")]
@@ -133,7 +131,7 @@ impl RemoteSqliteStorageV1 {
         let writer_json =
             serde_json::to_string(writer).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         self.handle.execute(MigrationSqlStatement::new(
-            "INSERT INTO remote_authorities_v1 (
+            "INSERT INTO remote_authorities (
                     brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(brain_id) DO UPDATE SET
@@ -141,7 +139,7 @@ impl RemoteSqliteStorageV1 {
                     authority_state_json = excluded.authority_state_json,
                     writer_json = excluded.writer_json,
                     updated_at = excluded.updated_at
-                 WHERE excluded.updated_at >= remote_authorities_v1.updated_at"
+                 WHERE excluded.updated_at >= remote_authorities.updated_at"
                 .to_owned(),
             vec![
                 text(brain_id),
@@ -167,7 +165,7 @@ impl RemoteSqliteStorageV1 {
         let admission_json =
             serde_json::to_string(admission).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let result = self.handle.execute(MigrationSqlStatement::new(
-            "INSERT INTO remote_enrollment_grants_v1 (
+            "INSERT INTO remote_enrollment_grants (
                 grant_id, grant_json, admission_json, consumed_at
              ) VALUES (?1, ?2, ?3, NULL)
              ON CONFLICT(grant_id) DO NOTHING"
@@ -258,7 +256,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT grant_json, consumed_at
-             FROM remote_enrollment_grants_v1 WHERE grant_id = ?1",
+             FROM remote_enrollment_grants WHERE grant_id = ?1",
             vec![text(grant_id.as_str())],
         )
         .map_err(map_enrollment_error)?;
@@ -277,7 +275,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT admission_json, consumed_at
-             FROM remote_enrollment_grants_v1 WHERE grant_id = ?1",
+             FROM remote_enrollment_grants WHERE grant_id = ?1",
             vec![text(grant_id.as_str())],
         )
         .map_err(map_enrollment_error)?;
@@ -304,7 +302,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
             .query(
                 MigrationSqlStatement::new(
                     "SELECT grant_json, admission_json, consumed_at
-                     FROM remote_enrollment_grants_v1 WHERE grant_id = ?1"
+                     FROM remote_enrollment_grants WHERE grant_id = ?1"
                         .to_owned(),
                     vec![text(grant.grant_id.as_str())],
                 )
@@ -353,7 +351,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         transaction
             .execute(
                 MigrationSqlStatement::new(
-                    "INSERT INTO remote_enrollments_v1 (
+                    "INSERT INTO remote_enrollments (
                         enrollment_id, brain_id, node_id, revision, credential_fingerprint,
                         enrollment_json, commit_receipt_json
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
@@ -377,7 +375,7 @@ impl RemoteEnrollmentAuthorityPortV1 for RemoteSqliteStorageV1 {
         let consumed = transaction
             .execute(
                 MigrationSqlStatement::new(
-                    "UPDATE remote_enrollment_grants_v1 SET consumed_at = ?1
+                    "UPDATE remote_enrollment_grants SET consumed_at = ?1
                      WHERE grant_id = ?2 AND consumed_at IS NULL"
                         .to_owned(),
                     vec![
@@ -405,7 +403,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
         load_enrollment(
             &self.handle,
-            "SELECT enrollment_json FROM remote_enrollments_v1 WHERE enrollment_id = ?1",
+            "SELECT enrollment_json FROM remote_enrollments WHERE enrollment_id = ?1",
             vec![text(enrollment_id.as_str())],
         )
     }
@@ -420,7 +418,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
             .map_err(|_| RemoteEnrollmentAuthorityErrorV1::IdentityConflict)?;
         load_enrollment(
             &self.handle,
-            "SELECT enrollment_json FROM remote_enrollments_v1
+            "SELECT enrollment_json FROM remote_enrollments
              WHERE brain_id = ?1 AND node_id = ?2 AND revision = ?3",
             vec![
                 text(brain_id.as_str()),
@@ -436,7 +434,7 @@ impl RemoteEnrollmentCredentialLookupPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
         let rows = query(
             &self.handle,
-            "SELECT commit_receipt_json FROM remote_enrollments_v1 WHERE enrollment_id = ?1",
+            "SELECT commit_receipt_json FROM remote_enrollments WHERE enrollment_id = ?1",
             vec![text(enrollment_id.as_str())],
         )
         .map_err(map_enrollment_error)?;
@@ -454,7 +452,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT authority_state_json, runtime_binding_json
-             FROM remote_authorities_v1 WHERE brain_id = ?1",
+             FROM remote_authorities WHERE brain_id = ?1",
             vec![text(writer.authority.fence.brain_id.as_str())],
         )
         .map_err(map_persistence_error)?;
@@ -476,7 +474,8 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteCaptureReceiptV1, RemoteCapturePersistenceErrorV1> {
         let digest =
             canonical_sha256(command).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-        let event_id = frame_event_id(&digest);
+        let event_id = canonical_remote_event_id_v1(command)
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
         let enrollment_id = command.enrollment_id.as_str();
         let sequence = i64::try_from(command.sequence.sequence)
             .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
@@ -486,7 +485,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
             .map_err(map_persistence_error)?;
         let existing = transaction
             .query(statement(
-                "SELECT event_id, frame_digest FROM remote_spool_frames_v1
+                "SELECT event_id, frame_digest FROM remote_spool_frames
                  WHERE enrollment_id = ?1 AND sequence = ?2",
                 vec![text(enrollment_id), MigrationSqlValue::Integer(sequence)],
             )?)
@@ -508,7 +507,7 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         let encrypted = self.encrypt_frame(&event_id, command)?;
         transaction
             .execute(statement(
-                "INSERT INTO remote_spool_frames_v1 (
+                "INSERT INTO remote_spool_frames (
                     event_id, enrollment_id, sequence, previous_event_id, frame_digest,
                     key_revision, nonce, ciphertext, state, captured_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
@@ -545,7 +544,7 @@ impl RemoteReplayFrameLookupPortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT key_revision, nonce, ciphertext, frame_digest
-             FROM remote_spool_frames_v1 WHERE event_id = ?1",
+             FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
         )
         .map_err(map_persistence_error)?;
@@ -560,7 +559,9 @@ impl RemoteReplayFrameLookupPortV1 for RemoteSqliteStorageV1 {
         let capture = self.decrypt_frame(event_id, revision, nonce, ciphertext)?;
         let actual_digest =
             canonical_sha256(&capture).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-        if actual_digest.as_str() != expected_digest || event_id != frame_event_id(&actual_digest) {
+        let canonical_event_id = canonical_remote_event_id_v1(&capture)
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        if actual_digest.as_str() != expected_digest || event_id != canonical_event_id {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         Ok(RemoteReplayFrameV1 {
@@ -578,7 +579,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT state, receipt_json, last_attempt
-             FROM remote_spool_frames_v1 WHERE event_id = ?1",
+             FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
         )
         .map_err(map_persistence_error)?;
@@ -599,7 +600,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         let rows = transaction
             .query(statement(
                 "SELECT state, receipt_json, last_attempt, attempt_started_at
-                 FROM remote_spool_frames_v1 WHERE event_id = ?1",
+                 FROM remote_spool_frames WHERE event_id = ?1",
                 vec![text(&transition.event_id)],
             )?)
             .map_err(map_persistence_error)?;
@@ -644,7 +645,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
             .len();
         let result = transaction
             .execute(statement(
-                "UPDATE remote_spool_frames_v1
+                "UPDATE remote_spool_frames
                  SET state = ?1, receipt_json = ?2, finding = ?3,
                      attempt_started_at = CASE WHEN ?4 = 1 THEN NULL ELSE attempt_started_at END
                  WHERE event_id = ?5 AND state = ?6 AND last_attempt = ?7
@@ -696,7 +697,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         let rows = transaction
             .query(statement(
                 "SELECT last_attempt, attempt_started_at
-                 FROM remote_spool_frames_v1 WHERE event_id = ?1",
+                 FROM remote_spool_frames WHERE event_id = ?1",
                 vec![text(event_id)],
             )?)
             .map_err(map_persistence_error)?;
@@ -710,7 +711,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
             .ok_or(RemoteCapturePersistenceErrorV1::Overflow)?;
         let result = transaction
             .execute(statement(
-                "UPDATE remote_spool_frames_v1
+                "UPDATE remote_spool_frames
                  SET last_attempt = ?1, attempt_started_at = ?2
                  WHERE event_id = ?3 AND last_attempt = ?4 AND attempt_started_at IS NULL",
                 vec![
@@ -742,7 +743,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
         let result = self
             .handle
             .execute(statement(
-                "UPDATE remote_spool_frames_v1 SET attempt_started_at = NULL
+                "UPDATE remote_spool_frames SET attempt_started_at = NULL
                  WHERE event_id = ?1 AND last_attempt = ?2 AND attempt_started_at IS NOT NULL",
                 vec![
                     text(event_id),
@@ -785,7 +786,7 @@ fn validate_previous_frame(
         .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
     let rows = transaction
         .query(statement(
-            "SELECT event_id FROM remote_spool_frames_v1
+            "SELECT event_id FROM remote_spool_frames
              WHERE enrollment_id = ?1 AND sequence = ?2",
             vec![
                 text(command.enrollment_id.as_str()),
@@ -802,16 +803,6 @@ fn validate_previous_frame(
         return Err(RemoteCapturePersistenceErrorV1::SequenceGap);
     }
     Ok(())
-}
-
-fn frame_event_id(digest: &ManifestDigest) -> String {
-    format!(
-        "remote.event.{}",
-        digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .unwrap_or(digest.as_str())
-    )
 }
 
 fn query(

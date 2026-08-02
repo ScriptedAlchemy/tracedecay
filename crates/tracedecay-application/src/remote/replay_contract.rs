@@ -51,7 +51,10 @@ pub struct RemoteReplayFrameV1 {
 
 impl RemoteReplayFrameV1 {
     pub fn validate(&self) -> Result<(), RemoteReplayApplicationErrorV1> {
+        let event_identity_matches = canonical_remote_event_id_v1(&self.capture)
+            .is_ok_and(|event_id| event_id == self.event_id);
         if !valid_remote_event_id(&self.event_id)
+            || !event_identity_matches
             || self.capture.enrollment_revision == 0
             || self.capture.policy_revision == 0
         {
@@ -66,6 +69,19 @@ impl RemoteReplayFrameV1 {
             .validate()
             .map_err(|_| RemoteReplayApplicationErrorV1::InvalidFrame)
     }
+}
+
+pub fn canonical_remote_event_id_v1(
+    capture: &AdmittedRemoteCaptureV1,
+) -> Result<String, ApplicationContractError> {
+    let digest = canonical_sha256(capture)?;
+    Ok(format!(
+        "remote.event.{}",
+        digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .unwrap_or(digest.as_str())
+    ))
 }
 
 fn valid_remote_event_id(event_id: &str) -> bool {

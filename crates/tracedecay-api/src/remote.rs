@@ -542,7 +542,9 @@ mod tests {
         CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolFailureV1,
         RemoteProtocolPortV1, remote_protocol_problem,
     };
-    use tracedecay_application::remote::replay::RemoteReplayFrameV1;
+    use tracedecay_application::remote::replay::{
+        RemoteReplayFrameV1, canonical_remote_event_id_v1,
+    };
     use tracedecay_application::{
         ApplicationEnvelope, ApplicationResult, AuthorityReceipt, CapabilityGrantId, Deadline,
         DisclosureClass, EvidenceCoverage, EvidenceDomain, EvidencePacket, OperationReceipt,
@@ -553,13 +555,17 @@ mod tests {
         AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1,
         CurrentRemoteAuthorityV1, DurableObservationV1, EnrollmentCredentialRecordV1, EntityId,
         ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
-        ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId,
-        ProviderId, RefId, RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1,
-        RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1, RepositoryId,
-        RepositoryStateSnapshotId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-        SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId,
-        UtcMicros, WorktreeId,
+        ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+        ProjectionGenerationId, ProviderId, RefId, RemoteAuthorityUnavailableReasonV1,
+        RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationWrite, build_observation_resolution_authorization_v1,
+        build_observation_retrieval_anchor_v2,
     };
     use tracedecay_tool_catalog::{SchemaId, SortContractId};
 
@@ -1031,25 +1037,46 @@ mod tests {
                 _ => unreachable!("test authority is available"),
             },
         };
-        RemoteReplayRequestV1 {
-            frame: RemoteReplayFrameV1 {
-                event_id:
-                    "remote.event.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .into(),
-                capture: AdmittedRemoteCaptureV1 {
-                    enrollment_id: EntityId::new("enrollment.remote").unwrap(),
-                    enrollment_revision: 1,
-                    node_id: BrainNodeId::new("node.remote").unwrap(),
-                    writer,
-                    policy_revision: 1,
-                    sequence: RemoteCaptureSequenceV1 {
-                        sequence: 1,
-                        previous_event_id: None,
-                    },
-                    observation,
-                    captured_at: UtcMicros(10),
-                },
+        let identity = observation.identity();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            identity.position().end(),
+        )
+        .unwrap();
+        let projection_generation = ProjectionGenerationId::new("projection.remote").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(&observation, "remote-test.v1").unwrap();
+        let retrieval_anchor = build_observation_retrieval_anchor_v2(
+            &observation,
+            projection_generation.clone(),
+            UtcMicros(10),
+            authorization,
+        )
+        .unwrap();
+        let capture = AdmittedRemoteCaptureV1 {
+            enrollment_id: EntityId::new("enrollment.remote").unwrap(),
+            enrollment_revision: 1,
+            node_id: BrainNodeId::new("node.remote").unwrap(),
+            writer,
+            policy_revision: 1,
+            sequence: RemoteCaptureSequenceV1 {
+                sequence: 1,
+                previous_event_id: None,
             },
+            anchored_write: AnchoredObservationWrite::new(
+                ObservationWrite::new(observation, None, next_cursor).unwrap(),
+                retrieval_anchor,
+                projection_generation,
+            )
+            .unwrap(),
+            captured_at: UtcMicros(10),
+        };
+        let event_id = canonical_remote_event_id_v1(&capture).unwrap();
+        RemoteReplayRequestV1 {
+            frame: RemoteReplayFrameV1 { event_id, capture },
             replay_attempt: 1,
         }
     }

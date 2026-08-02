@@ -19,7 +19,7 @@ impl RemoteSqliteStorageV1 {
             "SELECT
                 SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN state = 'quarantined' THEN 1 ELSE 0 END)
-             FROM remote_spool_frames_v1",
+             FROM remote_spool_frames",
             Vec::new(),
         )?;
         let row = one_row(rows)?;
@@ -27,7 +27,7 @@ impl RemoteSqliteStorageV1 {
         let quarantined_spool_items = count(&row, 1)?;
         let recovery = query(
             &self.handle,
-            "SELECT state FROM remote_recovery_journal_v1
+            "SELECT state FROM remote_recovery_journal
              WHERE state NOT IN ('available', 'published', 'rolled_back_before_publication')",
             Vec::new(),
         )?;

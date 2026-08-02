@@ -13,7 +13,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationReadOperationV1, ObservationReadResultV1, ProjectionRebuildProgressV1,
-    ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
+    ProjectionRebuildStateV1, RemoteObservationReplayWriteV1, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
 use super::support::{decode, encode, invalid};
@@ -33,6 +33,117 @@ use rows::{
 pub struct ObservationExecutor;
 
 impl ObservationExecutor {
+    pub fn execute_remote_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        replay: &RemoteObservationReplayWriteV1,
+    ) -> rusqlite::Result<()> {
+        replay.validate().map_err(invalid)?;
+        let anchored = replay.anchored_write();
+        let observation_id = anchored.observation().observation_id().as_str();
+        let sequence = i64::try_from(replay.capture_sequence())
+            .map_err(|_| invalid("remote sequence overflow"))?;
+        let idempotency = replay.idempotency_identity().map_err(invalid)?;
+        let writer_fence_json = encode(&replay.current_writer().fence)?;
+        let existing = savepoint
+            .query_row(
+                "SELECT event_id, frame_digest, enrollment_id, enrollment_revision, node_id,
+                        policy_revision, capture_sequence, previous_event_id, observation_id,
+                        writer_fence_json, captured_at, idempotency_key, command_digest
+                 FROM remote_observation_events
+                 WHERE event_id = ?1 OR observation_id = ?2
+                    OR (enrollment_id = ?3 AND node_id = ?4 AND capture_sequence = ?5)",
+                params![
+                    replay.event_id(),
+                    observation_id,
+                    replay.enrollment_id().as_str(),
+                    replay.node_id().as_str(),
+                    sequence,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 != replay.event_id()
+                || existing.1 != replay.frame_digest().as_str()
+                || existing.2 != replay.enrollment_id().as_str()
+                || u64::try_from(existing.3).ok() != Some(replay.enrollment_revision())
+                || existing.4 != replay.node_id().as_str()
+                || u64::try_from(existing.5).ok() != Some(replay.policy_revision())
+                || existing.6 != sequence
+                || existing.7.as_deref() != replay.previous_event_id()
+                || existing.8 != observation_id
+                || existing.9 != writer_fence_json
+                || existing.10 != replay.captured_at().0
+                || existing.11 != idempotency.key.as_str()
+                || existing.12 != idempotency.command_digest.as_str()
+            {
+                return Err(invalid("remote observation event identity collision"));
+            }
+            return self.execute_write(savepoint, anchored);
+        }
+        if replay.capture_sequence() > 1 {
+            let predecessor = savepoint
+                .query_row(
+                    "SELECT event_id FROM remote_observation_events
+                     WHERE enrollment_id = ?1 AND node_id = ?2 AND capture_sequence = ?3",
+                    params![
+                        replay.enrollment_id().as_str(),
+                        replay.node_id().as_str(),
+                        sequence - 1,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if predecessor.as_deref() != replay.previous_event_id() {
+                return Err(invalid("remote observation sequence gap"));
+            }
+        }
+
+        self.execute_write(savepoint, anchored)?;
+        savepoint.execute(
+            "INSERT INTO remote_observation_events (
+                event_id, frame_digest, enrollment_id, enrollment_revision, node_id,
+                policy_revision, capture_sequence, previous_event_id, observation_id,
+                writer_fence_json, captured_at, idempotency_key, command_digest
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                replay.event_id(),
+                replay.frame_digest().as_str(),
+                replay.enrollment_id().as_str(),
+                i64::try_from(replay.enrollment_revision())
+                    .map_err(|_| invalid("remote enrollment revision overflow"))?,
+                replay.node_id().as_str(),
+                i64::try_from(replay.policy_revision())
+                    .map_err(|_| invalid("remote policy revision overflow"))?,
+                sequence,
+                replay.previous_event_id(),
+                observation_id,
+                writer_fence_json,
+                replay.captured_at().0,
+                idempotency.key.as_str(),
+                idempotency.command_digest.as_str(),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn execute_write(
         &mut self,
         savepoint: &Savepoint<'_>,

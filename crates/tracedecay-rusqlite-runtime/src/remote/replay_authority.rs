@@ -21,7 +21,7 @@ impl RemoteReplayCurrentWriterPortV1 for RemoteSqliteStorageV1 {
         let rows = query(
             &self.handle,
             "SELECT authority_state_json, writer_json, runtime_binding_json
-             FROM remote_authorities_v1 WHERE brain_id = ?1",
+             FROM remote_authorities WHERE brain_id = ?1",
             vec![text(frame.capture.writer.authority.fence.brain_id.as_str())],
         )
         .map_err(map_persistence_error)?;

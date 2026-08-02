@@ -7,7 +7,7 @@ pub(super) fn load_authority_state(
     let rows = query(
         handle,
         "SELECT authority_state_json, runtime_binding_json
-         FROM remote_authorities_v1 WHERE brain_id = ?1",
+         FROM remote_authorities WHERE brain_id = ?1",
         vec![text(brain_id.as_str())],
     )?;
     let row = one_row(rows)?;

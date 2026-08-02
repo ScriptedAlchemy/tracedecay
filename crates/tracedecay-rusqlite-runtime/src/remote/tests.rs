@@ -17,8 +17,6 @@ use tracedecay_application::remote::{
     replay::{
         RemoteReplayFrameLookupPortV1, RemoteReplayOutcomeV1, RemoteReplayRequestV1,
         RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
-        RemoteReplayTransactionErrorV1, RemoteReplayTransactionOutcomeV1,
-        RemoteReplayTransactionPortV1, RemoteReplayTransitionV1,
     },
     replay_node::{
         RemoteNodeReplayCommandV1, RemoteNodeReplayErrorV1, RemoteNodeReplayServiceV1,
@@ -28,14 +26,16 @@ use tracedecay_application::remote::{
 use tracedecay_domain::{
     ComponentVersion, DurableObservationV1, EntityId, LocatorDigest, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
+    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, AnchoredObservationWrite, ObservationWrite, RepositoryWritePayloadV1,
+    RuntimeReadOutcomeV1, RuntimeReadRequestV1, StorageRuntimeErrorV1, StoreIncarnationV1,
+    VerifiedStoreLocatorV1, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 
 use crate::{
@@ -170,8 +170,16 @@ impl RemoteReplayTransportPortV1 for UnreachableTransport {
     }
 }
 
+fn install_remote_schema_fixture(fixture: &Fixture) {
+    let transaction = fixture.handle.begin_schema_migration_immediate().unwrap();
+    transaction
+        .execute_schema_batch_step(REMOTE_SCHEMA.to_owned())
+        .unwrap();
+    transaction.commit().unwrap();
+}
+
 fn storage(fixture: &Fixture) -> RemoteSqliteStorageV1 {
-    install_remote_schema_v1(&fixture.handle).unwrap();
+    install_remote_schema_fixture(fixture);
     RemoteSqliteStorageV1::attach(
         fixture.handle.clone(),
         fixture.binding.clone(),
@@ -248,6 +256,26 @@ fn observation() -> DurableObservationV1 {
 }
 
 fn admitted() -> AdmittedRemoteCaptureV1 {
+    let observation = observation();
+    let identity = observation.identity();
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        identity.generation(),
+        identity.ordering_domain(),
+        identity.position().end(),
+    )
+    .unwrap();
+    let projection_generation = ProjectionGenerationId::new("projection.remote").unwrap();
+    let authorization =
+        build_observation_resolution_authorization_v1(&observation, "remote-test.v1").unwrap();
+    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+        &observation,
+        projection_generation.clone(),
+        UtcMicros(10),
+        authorization,
+    )
+    .unwrap();
     AdmittedRemoteCaptureV1 {
         enrollment_id: EntityId::new("enrollment.remote").unwrap(),
         enrollment_revision: 1,
@@ -258,23 +286,45 @@ fn admitted() -> AdmittedRemoteCaptureV1 {
             sequence: 1,
             previous_event_id: None,
         },
-        observation: observation(),
+        anchored_write: AnchoredObservationWrite::new(
+            ObservationWrite::new(observation, None, next_cursor).unwrap(),
+            retrieval_anchor,
+            projection_generation,
+        )
+        .unwrap(),
         captured_at: UtcMicros(10),
     }
 }
 
 #[test]
 fn runtime_attachment_requires_explicit_remote_migration() {
-    let fixture = fixture();
+    let canonical = fixture();
     assert!(matches!(
-        validate_remote_schema(&fixture.handle),
+        validate_remote_schema(&canonical.handle),
         Err(RemoteSqliteStorageErrorV1::MigrationRequired)
     ));
 
-    install_remote_schema_v1(&fixture.handle).unwrap();
+    install_remote_schema_fixture(&canonical);
+    assert!(validate_remote_schema(&canonical.handle).is_ok());
 
-    assert!(validate_remote_schema(&fixture.handle).is_ok());
-    install_remote_schema_v1(&fixture.handle).unwrap();
+    let incompatible = fixture();
+    let transaction = incompatible
+        .handle
+        .begin_schema_migration_immediate()
+        .unwrap();
+    transaction
+        .execute_schema_batch_step(
+            "CREATE TABLE remote_observations_v1 (
+                event_id TEXT PRIMARY KEY
+            ) STRICT;"
+                .to_owned(),
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    assert!(matches!(
+        validate_remote_schema(&incompatible.handle),
+        Err(RemoteSqliteStorageErrorV1::ResetRequired)
+    ));
 }
 
 #[test]
@@ -296,7 +346,7 @@ fn spool_key_rejects_zero_revision_and_wrong_size() {
 }
 
 #[test]
-fn capture_is_encrypted_idempotent_and_replay_commits_once() {
+fn capture_is_encrypted_and_idempotent() {
     let fixture = fixture();
     let storage = storage(&fixture);
     let writer = writer();
@@ -329,7 +379,7 @@ fn capture_is_encrypted_idempotent_and_replay_commits_once() {
     );
     let ciphertext = query(
         &fixture.handle,
-        "SELECT ciphertext FROM remote_spool_frames_v1 WHERE event_id = ?1",
+        "SELECT ciphertext FROM remote_spool_frames WHERE event_id = ?1",
         vec![text(&first.event_id)],
     )
     .unwrap();
@@ -341,54 +391,6 @@ fn capture_is_encrypted_idempotent_and_replay_commits_once() {
         !bytes
             .windows(b"plaintext-must-not-appear-in-spool".len())
             .any(|window| window == b"plaintext-must-not-appear-in-spool")
-    );
-
-    let frame = storage.load_replay_frame(&first.event_id).unwrap();
-    let committed = storage.commit(&frame, &writer, UtcMicros(20)).unwrap();
-    let receipt = match committed {
-        RemoteReplayTransactionOutcomeV1::Admitted(receipt) => receipt,
-        RemoteReplayTransactionOutcomeV1::Duplicate(_) => panic!("first commit was duplicate"),
-    };
-    assert!(matches!(
-        storage.commit(&frame, &writer, UtcMicros(21)).unwrap(),
-        RemoteReplayTransactionOutcomeV1::Duplicate(duplicate) if duplicate == receipt
-    ));
-
-    let attempt = storage
-        .begin_replay_attempt(&first.event_id, UtcMicros(22))
-        .unwrap();
-    storage
-        .transition(RemoteReplayTransitionV1 {
-            event_id: first.event_id.clone(),
-            from: RemoteReplayStateV1::Pending,
-            to: RemoteReplayStateV1::Admitted,
-            replay_attempt: attempt,
-            observed_at: UtcMicros(23),
-            finding: None,
-            receipt: Some(receipt.clone()),
-        })
-        .unwrap();
-    storage
-        .transition(RemoteReplayTransitionV1 {
-            event_id: first.event_id.clone(),
-            from: RemoteReplayStateV1::Admitted,
-            to: RemoteReplayStateV1::Acknowledged,
-            replay_attempt: attempt,
-            observed_at: UtcMicros(24),
-            finding: None,
-            receipt: Some(receipt),
-        })
-        .unwrap();
-    assert_eq!(
-        storage.state(&first.event_id).unwrap().state,
-        RemoteReplayStateV1::Acknowledged
-    );
-    assert_eq!(
-        storage
-            .status(&writer.authority.fence.brain_id)
-            .unwrap()
-            .pending_spool_items,
-        0
     );
 }
 
@@ -412,7 +414,7 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
         .handle
         .execute(
             MigrationSqlStatement::new(
-                "UPDATE remote_spool_frames_v1 SET ciphertext = ?1 WHERE event_id = ?2".to_owned(),
+                "UPDATE remote_spool_frames SET ciphertext = ?1 WHERE event_id = ?2".to_owned(),
                 vec![
                     MigrationSqlValue::Blob(vec![0; 32]),
                     text(&receipt.event_id),
@@ -424,39 +426,6 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
     assert_eq!(
         storage.load_replay_frame(&receipt.event_id),
         Err(RemoteCapturePersistenceErrorV1::Corruption)
-    );
-}
-
-#[test]
-fn authority_commit_rejects_a_node_sequence_gap_without_a_local_spool_row() {
-    let fixture = fixture();
-    let storage = storage(&fixture);
-    let writer = writer();
-    storage
-        .publish_authority(
-            &tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(writer.authority.clone()),
-            &writer,
-            UtcMicros(10),
-        )
-        .unwrap();
-    let mut capture = admitted();
-    capture.sequence = RemoteCaptureSequenceV1 {
-        sequence: 2,
-        previous_event_id: Some(
-            "remote.event.sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                .to_owned(),
-        ),
-    };
-    let frame = RemoteReplayFrameV1 {
-        event_id:
-            "remote.event.sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .to_owned(),
-        capture,
-    };
-
-    assert_eq!(
-        storage.commit(&frame, &writer, UtcMicros(20)),
-        Err(RemoteReplayTransactionErrorV1::SequenceGap)
     );
 }
 

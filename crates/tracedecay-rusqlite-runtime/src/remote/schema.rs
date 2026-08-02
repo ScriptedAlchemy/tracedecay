@@ -1,15 +1,18 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
-const REMOTE_SCHEMA_VERSION_V1: i64 = 1;
+const REQUIRED_REMOTE_TABLES: &[&str] = &[
+    "remote_authorities",
+    "remote_enrollment_grants",
+    "remote_enrollments",
+    "remote_observation_events",
+    "remote_recovery_journal",
+    "remote_spool_frames",
+];
 
-pub const REMOTE_SCHEMA_V1: &str = "
-CREATE TABLE remote_schema_versions_v1 (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    version INTEGER NOT NULL CHECK (version > 0)
-) STRICT;
-INSERT INTO remote_schema_versions_v1 (singleton, version) VALUES (1, 1);
-
-CREATE TABLE remote_authorities_v1 (
+pub const REMOTE_SCHEMA: &str = "
+CREATE TABLE remote_authorities (
     brain_id TEXT PRIMARY KEY,
     runtime_binding_json TEXT NOT NULL,
     authority_state_json TEXT NOT NULL,
@@ -17,14 +20,14 @@ CREATE TABLE remote_authorities_v1 (
     updated_at INTEGER NOT NULL
 ) STRICT;
 
-CREATE TABLE remote_enrollment_grants_v1 (
+CREATE TABLE remote_enrollment_grants (
     grant_id TEXT PRIMARY KEY,
     grant_json TEXT NOT NULL,
     admission_json TEXT NOT NULL,
     consumed_at INTEGER
 ) STRICT;
 
-CREATE TABLE remote_enrollments_v1 (
+CREATE TABLE remote_enrollments (
     enrollment_id TEXT PRIMARY KEY,
     brain_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
@@ -36,7 +39,7 @@ CREATE TABLE remote_enrollments_v1 (
     UNIQUE (brain_id, node_id, revision)
 ) STRICT;
 
-CREATE TABLE remote_spool_frames_v1 (
+CREATE TABLE remote_spool_frames (
     event_id TEXT PRIMARY KEY,
     enrollment_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK (sequence > 0),
@@ -59,23 +62,24 @@ CREATE TABLE remote_spool_frames_v1 (
     UNIQUE (enrollment_id, sequence)
 ) STRICT;
 
-CREATE TABLE remote_observations_v1 (
-    observation_id TEXT PRIMARY KEY,
-    event_id TEXT NOT NULL UNIQUE,
+CREATE TABLE remote_observation_events (
+    event_id TEXT PRIMARY KEY,
+    frame_digest TEXT NOT NULL,
     enrollment_id TEXT NOT NULL,
+    enrollment_revision INTEGER NOT NULL CHECK (enrollment_revision > 0),
     node_id TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
     capture_sequence INTEGER NOT NULL CHECK (capture_sequence > 0),
-    previous_event_id TEXT,
-    sequence INTEGER NOT NULL CHECK (sequence > 0),
-    observation_json TEXT NOT NULL,
-    runtime_binding_json TEXT NOT NULL,
-    writer_fence_json TEXT NOT NULL,
-    replay_receipt_json TEXT NOT NULL,
-    committed_at INTEGER NOT NULL,
-    UNIQUE (enrollment_id, capture_sequence)
+    previous_event_id TEXT REFERENCES remote_observation_events(event_id),
+    observation_id TEXT NOT NULL UNIQUE REFERENCES observations(observation_id),
+    writer_fence_json TEXT NOT NULL CHECK (json_valid(writer_fence_json)),
+    captured_at INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    command_digest TEXT NOT NULL,
+    UNIQUE (enrollment_id, node_id, capture_sequence)
 ) STRICT;
 
-CREATE TABLE remote_recovery_journal_v1 (
+CREATE TABLE remote_recovery_journal (
     operation_id TEXT PRIMARY KEY,
     operation_kind TEXT NOT NULL CHECK (operation_kind IN ('backup', 'restore', 'failover')),
     state TEXT NOT NULL,
@@ -85,51 +89,86 @@ CREATE TABLE remote_recovery_journal_v1 (
 ) STRICT;
 ";
 
-/// Installs V1 only from an explicit migration path holding write authority.
-pub fn install_remote_schema_v1(
-    handle: &MigrationSqlHandle,
-) -> Result<(), RemoteSqliteStorageErrorV1> {
-    if remote_schema_version(handle)?.is_some() {
-        return validate_remote_schema(handle);
-    }
-    let transaction = handle.begin_schema_migration_immediate()?;
-    transaction.execute_schema_batch_step(REMOTE_SCHEMA_V1.to_owned())?;
-    transaction.commit()?;
-    validate_remote_schema(handle)
-}
-
 pub fn validate_remote_schema(
     handle: &MigrationSqlHandle,
 ) -> Result<(), RemoteSqliteStorageErrorV1> {
-    match remote_schema_version(handle)? {
-        None => Err(RemoteSqliteStorageErrorV1::MigrationRequired),
-        Some(REMOTE_SCHEMA_VERSION_V1) => Ok(()),
-        Some(actual) => Err(RemoteSqliteStorageErrorV1::UnsupportedSchema { actual }),
+    let tables = remote_tables(handle)?;
+    if tables.is_empty() {
+        return Err(RemoteSqliteStorageErrorV1::MigrationRequired);
     }
+    let required = REQUIRED_REMOTE_TABLES
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if tables != required {
+        return Err(RemoteSqliteStorageErrorV1::ResetRequired);
+    }
+    for sql in [
+        "SELECT brain_id, runtime_binding_json, authority_state_json, writer_json, updated_at
+         FROM remote_authorities LIMIT 0",
+        "SELECT grant_id, grant_json, admission_json, consumed_at
+         FROM remote_enrollment_grants LIMIT 0",
+        "SELECT enrollment_id, brain_id, node_id, revision, credential_fingerprint,
+                enrollment_json, commit_receipt_json
+         FROM remote_enrollments LIMIT 0",
+        "SELECT event_id, enrollment_id, sequence, previous_event_id, frame_digest,
+                key_revision, nonce, ciphertext, state, last_attempt, attempt_started_at,
+                receipt_json, finding, captured_at
+         FROM remote_spool_frames LIMIT 0",
+        "SELECT event_id, frame_digest, enrollment_id, enrollment_revision, node_id,
+                policy_revision, capture_sequence, previous_event_id, observation_id,
+                writer_fence_json, captured_at, idempotency_key, command_digest
+         FROM remote_observation_events LIMIT 0",
+        "SELECT operation_id, operation_kind, state, request_json, receipt_json, updated_at
+         FROM remote_recovery_journal LIMIT 0",
+    ] {
+        handle
+            .query(
+                MigrationSqlStatement::new(sql.to_owned(), Vec::new())?,
+                READ_WAIT,
+            )
+            .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    }
+    Ok(())
 }
 
-fn remote_schema_version(
+fn remote_tables(
     handle: &MigrationSqlHandle,
-) -> Result<Option<i64>, RemoteSqliteStorageErrorV1> {
-    let tables = query(
-        handle,
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        vec![text("remote_schema_versions_v1")],
+) -> Result<BTreeSet<String>, RemoteSqliteStorageErrorV1> {
+    let names = REQUIRED_REMOTE_TABLES
+        .iter()
+        .copied()
+        .chain([
+            "remote_schema_versions_v1",
+            "remote_observations_v1",
+            "remote_authorities_v1",
+            "remote_enrollment_grants_v1",
+            "remote_enrollments_v1",
+            "remote_spool_frames_v1",
+            "remote_recovery_journal_v1",
+        ])
+        .collect::<Vec<_>>();
+    let placeholders = (1..=names.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = handle.query(
+        MigrationSqlStatement::new(
+            format!(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name IN ({placeholders})"
+            ),
+            names.into_iter().map(text).collect(),
+        )?,
+        READ_WAIT,
     )?;
-    if tables.rows.is_empty() {
-        return Ok(None);
-    }
-    let versions = query(
-        handle,
-        "SELECT version FROM remote_schema_versions_v1 WHERE singleton = 1",
-        Vec::new(),
-    )?;
-    match versions.rows.as_slice() {
-        [] => Ok(None),
-        [row] => match row.values.as_slice() {
-            [MigrationSqlValue::Integer(version)] => Ok(Some(*version)),
-            _ => Err(RemoteSqliteStorageErrorV1::Corruption),
-        },
-        _ => Err(RemoteSqliteStorageErrorV1::Corruption),
-    }
+    rows.rows
+        .iter()
+        .map(|row| {
+            row_text(row, 0)
+                .map(str::to_owned)
+                .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+        })
+        .collect()
 }
