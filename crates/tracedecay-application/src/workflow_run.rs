@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     ManifestDigest, RunId, WorkArtifactRefV1, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowRunCommandV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
-    WorkflowRunProjectionV1, WorkflowRunStateError, WorkflowStepId, WorkflowStepOutputV1,
+    WorkflowOperationRef, WorkflowPlacementReceiptV1, WorkflowRunCommandV1,
+    WorkflowRunEventContextV1, WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError,
+    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -84,6 +85,7 @@ pub struct WorkflowAdmissionSnapshotV1 {
     pub configuration_digest: ManifestDigest,
     pub catalog_digest: ManifestDigest,
     pub topology_digest: ManifestDigest,
+    pub provider_registry_digest: ManifestDigest,
 }
 
 impl<P> WorkflowRunService<P>
@@ -110,8 +112,13 @@ where
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
-        let event =
-            WorkflowRunEventV1::admitted(run_id, definition, admission.topology_digest, context)?;
+        let event = WorkflowRunEventV1::admitted(
+            run_id,
+            definition,
+            admission.topology_digest,
+            admission.provider_registry_digest,
+            context,
+        )?;
         Ok(self
             .storage
             .append(&WorkflowRunAppendRequestV1 {
@@ -160,21 +167,43 @@ pub struct WorkflowStepExecutionRequestV1 {
     pub step_id: WorkflowStepId,
     pub operation: WorkflowOperationRef,
     pub inputs: Vec<WorkArtifactRefV1>,
+    pub placement: WorkflowPlacementReceiptV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStepExecutionResultV1 {
+    pub outputs: Vec<WorkflowStepOutputV1>,
+    pub effect_receipt: WorkflowStepEffectReceiptV1,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowStepExecutionError {
     #[error("workflow step execution failed")]
-    Failed,
+    Failed {
+        effect_receipt: Box<WorkflowStepEffectReceiptV1>,
+    },
     #[error("workflow step execution authority is unavailable")]
-    Unavailable,
+    Unavailable {
+        effect_receipt: Box<WorkflowStepEffectReceiptV1>,
+    },
+}
+
+impl WorkflowStepExecutionError {
+    pub fn into_effect_receipt(self) -> WorkflowStepEffectReceiptV1 {
+        match self {
+            Self::Failed { effect_receipt } | Self::Unavailable { effect_receipt } => {
+                *effect_receipt
+            }
+        }
+    }
 }
 
 pub trait WorkflowStepExecutionPort: Send + Sync {
     fn execute(
         &self,
         request: &WorkflowStepExecutionRequestV1,
-    ) -> Result<Vec<WorkflowStepOutputV1>, WorkflowStepExecutionError>;
+    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError>;
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -213,6 +242,7 @@ where
         run_id: &RunId,
         expected_sequence: u64,
         step_id: &WorkflowStepId,
+        placement: WorkflowPlacementReceiptV1,
         contexts: WorkflowStepEventContextsV1,
     ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
         let projection = self.storage.projection(run_id)?;
@@ -230,6 +260,7 @@ where
         let started_event = projection.next_event(
             WorkflowRunCommandV1::StartStep {
                 step_id: step_id.clone(),
+                placement: placement.clone(),
             },
             contexts.started,
         )?;
@@ -247,17 +278,24 @@ where
             step_id: step_id.clone(),
             operation: definition_step.operation,
             inputs,
+            placement,
         };
-        let outputs = match self.executor.execute(&request) {
-            Ok(outputs) => outputs,
-            Err(_) => {
-                return self.fail_started_step(&started, step_id, contexts.failed);
+        let result = match self.executor.execute(&request) {
+            Ok(result) => result,
+            Err(error) => {
+                return self.fail_started_step(
+                    &started,
+                    step_id,
+                    error.into_effect_receipt(),
+                    contexts.failed,
+                );
             }
         };
         match started.next_event(
             WorkflowRunCommandV1::CompleteStep {
                 step_id: step_id.clone(),
-                outputs,
+                outputs: result.outputs,
+                effect_receipt: result.effect_receipt.clone(),
             },
             contexts.completed,
         ) {
@@ -270,7 +308,7 @@ where
                     .into_projection(),
             )),
             Err(WorkflowRunStateError::InvalidStepOutputs) => {
-                self.fail_started_step(&started, step_id, contexts.failed)
+                self.fail_started_step(&started, step_id, result.effect_receipt, contexts.failed)
             }
             Err(error) => Err(error.into()),
         }
@@ -280,11 +318,13 @@ where
         &self,
         started: &WorkflowRunProjectionV1,
         step_id: &WorkflowStepId,
+        effect_receipt: WorkflowStepEffectReceiptV1,
         context: WorkflowRunEventContextV1,
     ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
         let failed = started.next_event(
             WorkflowRunCommandV1::FailStep {
                 step_id: step_id.clone(),
+                effect_receipt,
             },
             context,
         )?;

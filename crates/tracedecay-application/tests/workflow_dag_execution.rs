@@ -5,15 +5,17 @@ use tracedecay_application::{
     WorkflowAdmissionSnapshotV1, WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1,
     WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
     WorkflowStepEventContextsV1, WorkflowStepExecutionError, WorkflowStepExecutionOutcomeV1,
-    WorkflowStepExecutionPort, WorkflowStepExecutionRequestV1, WorkflowStepExecutionService,
-    work_executable_catalog_digest,
+    WorkflowStepExecutionPort, WorkflowStepExecutionRequestV1, WorkflowStepExecutionResultV1,
+    WorkflowStepExecutionService, work_executable_catalog_digest,
 };
+use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RunId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkCommandId,
+    ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
+    WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
     WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowOutputReferenceV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
-    WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepId, WorkflowStepOutputV1,
-    WorkflowStepV1,
+    WorkflowOutputReferenceV1, WorkflowPlacementReceiptV1, WorkflowRunEventContextV1,
+    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
+    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1, WorkflowStepV1,
 };
 
 fn id<T>(value: &str) -> T
@@ -38,6 +40,25 @@ fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventCont
 
 fn artifact(name: &str, digest_byte: char, byte_length: u64) -> WorkArtifactRefV1 {
     WorkArtifactRefV1::new(id::<WorkArtifactId>(name), digest(digest_byte), byte_length).unwrap()
+}
+
+fn placement(run_id: &RunId, step_id: &str) -> WorkflowPlacementReceiptV1 {
+    WorkflowPlacementReceiptV1::new(
+        run_id.clone(),
+        id::<WorkflowStepId>(step_id),
+        WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow.test"),
+            id::<WorkProviderRouteId>("route.workflow.test.v1"),
+        )
+        .unwrap(),
+        WorkProviderBackendV1::CodexAppServer,
+        "model.workflow.test".to_owned(),
+        digest('b'),
+        digest('c'),
+        digest('8'),
+        safe_work_topology_policy_v1().placement,
+    )
+    .unwrap()
 }
 
 fn definition() -> WorkflowDefinitionV1 {
@@ -135,7 +156,7 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
     fn execute(
         &self,
         request: &WorkflowStepExecutionRequestV1,
-    ) -> Result<Vec<WorkflowStepOutputV1>, WorkflowStepExecutionError> {
+    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError> {
         self.requests.lock().unwrap().push(request.clone());
         let output = if request.step_id.as_str() == "prepare" {
             WorkflowStepOutputV1 {
@@ -148,7 +169,19 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
                 artifact: self.report.clone(),
             }
         };
-        Ok(vec![output])
+        let outputs = vec![output];
+        Ok(WorkflowStepExecutionResultV1 {
+            effect_receipt: WorkflowStepEffectReceiptV1::new(
+                request.run_id.clone(),
+                request.step_id.clone(),
+                request.placement.placement_digest().clone(),
+                WorkflowStepEffectOutcomeV1::Completed,
+                digest('9'),
+                &outputs,
+            )
+            .unwrap(),
+            outputs,
+        })
     }
 }
 
@@ -166,6 +199,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
                 topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
             },
             context("command.workflow.dag.admit", '1', 1),
         )
@@ -189,6 +223,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
             &run_id,
             1,
             &id::<WorkflowStepId>("prepare"),
+            placement(&run_id, "prepare"),
             WorkflowStepEventContextsV1 {
                 started: context("command.workflow.dag.prepare.start", '2', 2),
                 completed: context("command.workflow.dag.prepare.complete", '3', 3),
@@ -205,6 +240,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
             &run_id,
             3,
             &id::<WorkflowStepId>("review"),
+            placement(&run_id, "review"),
             WorkflowStepEventContextsV1 {
                 started: context("command.workflow.dag.review.start", '5', 4),
                 completed: context("command.workflow.dag.review.complete", '6', 5),
@@ -230,6 +266,7 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
                 topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
             },
             WorkflowRunServiceError::PolicyDigestMismatch,
         ),
@@ -239,6 +276,7 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
                 configuration_digest: digest('9'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
                 topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
             },
             WorkflowRunServiceError::ConfigurationDigestMismatch,
         ),
@@ -248,6 +286,7 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
                 configuration_digest: digest('b'),
                 catalog_digest: digest('9'),
                 topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
             },
             WorkflowRunServiceError::CatalogDigestMismatch,
         ),
