@@ -27,6 +27,13 @@ const REPO_ROOT_FROM_CRATE: &str = "../..";
 #[path = "../../src/version/build_identity.rs"]
 mod build_identity;
 
+// The product version this crate stamps into host-visible artifacts comes from
+// the root package, not from this sub-crate. Compiling the crate's own parser
+// here keeps the baked value and the constant's drift test on one
+// implementation.
+#[path = "src/product_version/root_manifest.rs"]
+mod root_manifest;
+
 /// Recursively collects every file under `root`, relative to `root`, using
 /// forward-slash separators. Returns sorted paths so codegen is deterministic.
 fn collect_files_relative(root: &Path) -> Vec<String> {
@@ -281,7 +288,38 @@ fn bake_build_identity() {
     );
 }
 
+/// Bakes the root package's version into `TRACEDECAY_PRODUCT_VERSION`.
+///
+/// `env!("CARGO_PKG_VERSION")` is resolved per compiled crate, so inside this
+/// library it is this crate's own version rather than the version of the
+/// `tracedecay` product a user installed. Everything this crate stamps into a
+/// place a host can see — plugin manifests, plugin cache paths, staleness
+/// warnings, provenance headers — is compared against that product version, so
+/// it is read here from the one place that authors it: the root package's
+/// `version` in the workspace-root `Cargo.toml`.
+///
+/// An unresolvable root manifest is fatal on purpose. Falling back to this
+/// crate's `CARGO_PKG_VERSION` is exactly the silent mismatch this exists to
+/// prevent, and the surrounding script already requires the repository root
+/// for the shared `plugin/` tree.
+fn bake_product_version() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(&manifest_dir).join(REPO_ROOT_FROM_CRATE);
+    let manifest_path = root_manifest::manifest_path(&repo_root);
+    println!("cargo::rerun-if-changed={}", manifest_path.display());
+    println!("cargo::rerun-if-changed=src/product_version/root_manifest.rs");
+    let Some(version) = root_manifest::resolve(&repo_root) else {
+        panic!(
+            "{} must declare the `{}` package's version; it is the product version this crate stamps",
+            manifest_path.display(),
+            root_manifest::ROOT_PACKAGE_NAME,
+        );
+    };
+    println!("cargo::rustc-env=TRACEDECAY_PRODUCT_VERSION={version}");
+}
+
 fn main() {
     bake_build_identity();
+    bake_product_version();
     generate_plugin_bundle();
 }
