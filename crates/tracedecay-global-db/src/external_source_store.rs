@@ -202,11 +202,7 @@ impl RuntimeExternalSourceStore {
             ))
             .map_err(invalid)?,
         );
-        let idempotency_key = canonical_sha256(&(
-            "tracedecay.host-observation.idempotency.v1",
-            observation.observation_id(),
-        ))
-        .map_err(invalid)?;
+        let idempotency_key = host_observation_idempotency(observation.observation_id())?;
         let native_object = SourceNativeObjectIdV1::new(
             canonical_sha256(&(
                 "tracedecay.host-observation.native-object.v1",
@@ -640,6 +636,12 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, RuntimeExternal
         .map_err(invalid)
 }
 
+fn host_observation_idempotency<T: serde::Serialize + ?Sized>(
+    material: &T,
+) -> Result<ManifestDigest, RuntimeExternalSourceErrorV1> {
+    canonical_sha256(&("tracedecay.host-observation.idempotency.v1", material)).map_err(invalid)
+}
+
 struct ExternalSourceRuntimeProbe {
     cancellation: tracedecay_store::RuntimeCancellationIdentityV1,
     deadline: tracedecay_store::RuntimeDeadlineV1,
@@ -670,4 +672,19 @@ impl tracedecay_store::RuntimeRequestProbeV1 for ExternalSourceRuntimeProbe {
 
 fn invalid(error: impl std::fmt::Display) -> RuntimeExternalSourceErrorV1 {
     RuntimeExternalSourceErrorV1::Invalid(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_observation_idempotency_preserves_persisted_framing() {
+        assert_eq!(
+            host_observation_idempotency("observation.fixture")
+                .unwrap()
+                .as_str(),
+            "sha256:fc24322522dbedaa19d0135034a190db386d40498b4f3dcae55b00388a837ea3"
+        );
+    }
 }
