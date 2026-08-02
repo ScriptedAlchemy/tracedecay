@@ -276,7 +276,7 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
     std::fs::remove_dir(&project).expect("remove project directory");
     reset_project_root_canonicalization_count();
 
-    let error = match broker.prepare_refresh(
+    let Err(error) = broker.prepare_refresh(
         "rust",
         vec![LspDocument {
             language: "rust".to_owned(),
@@ -284,9 +284,8 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
             relative_path: "src/lib.rs".to_owned(),
             text: "fn removed_root() {}".to_owned(),
         }],
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("removed project root must fail closed"),
+    ) else {
+        panic!("removed project root must fail closed");
     };
 
     assert!(
@@ -320,9 +319,8 @@ fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
         vec![adapter("rust", command.to_string_lossy(), "rs", "marker")],
     );
 
-    let error = match broker.prepare_refresh("rust", documents) {
-        Err(error) => error,
-        Ok(_) => panic!("queue saturation must reject before analyzer startup"),
+    let Err(error) = broker.prepare_refresh("rust", documents) else {
+        panic!("queue saturation must reject before analyzer startup");
     };
 
     assert!(error.to_string().contains("analyzer root queue saturated"));
