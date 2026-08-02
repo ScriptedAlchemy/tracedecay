@@ -1210,6 +1210,24 @@ impl Database {
             .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
     }
 
+    /// Starts a query-only snapshot on the reserved health-reader lane.
+    /// Health aggregates use this lane so they remain available when general
+    /// readers are saturated by background graph work.
+    pub(crate) async fn begin_engine_health_read_snapshot(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseEngineReadSnapshot> {
+        self.inner
+            .conn
+            .health_read_snapshot()
+            .await
+            .map(|snapshot| DatabaseEngineReadSnapshot { snapshot })
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to begin health read snapshot: {error}"),
+                operation: operation.to_string(),
+            })
+    }
+
     pub async fn begin_memory_read_transaction(
         &self,
         operation: &str,

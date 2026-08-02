@@ -10,6 +10,20 @@
 
 use super::*;
 
+/// Bounds how long a foreground request waits for a route's background open.
+/// The open task itself is deliberately left running after the deadline.
+pub(super) async fn wait_for_project_open_publication<Publication, Output>(
+    project_path: &Path,
+    publication: Publication,
+) -> Result<Output>
+where
+    Publication: std::future::Future<Output = Result<Output>>,
+{
+    timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication)
+        .await
+        .map_err(|_| project_warming_error(project_path))?
+}
+
 pub(super) async fn start_lifecycle_project_open<OpenOperation, OpenFuture>(
     tasks: &ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
@@ -332,9 +346,9 @@ pub(super) async fn portable_project_server_for_request(
     {
         return Ok(server);
     }
-    // Match the Unix path: only a request queued behind an unrelated writer
-    // gets the retry deadline.
-    let contended = store_administration.writer_is_busy();
+    // Foreground requests must never pin a connection while a cold project
+    // warm-up runs. The open task remains tracked and continues in the
+    // background after this bounded wait expires.
     let claim = Box::pin(begin_portable_project_open(
         lifecycle,
         store_administration.clone(),
@@ -388,13 +402,7 @@ pub(super) async fn portable_project_server_for_request(
                     }
                 }
             };
-            if contended {
-                timeout(PROJECT_OPEN_REQUEST_DEADLINE, publication)
-                    .await
-                    .map_err(|_| project_warming_error(&canonical_project_path))?
-            } else {
-                publication.await
-            }
+            wait_for_project_open_publication(&canonical_project_path, publication).await
         }
         ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
         ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),

@@ -83,8 +83,27 @@ impl McpServer {
         // requests", not "peer is gone". Stop watching for cancellations and
         // keep serving the in-flight response. Cancel only on actual peer loss
         // (read/write I/O failure) or explicit shutdown/cancel paths.
-        let mut peer_input_closed = false;
+        let mut peer_close_check: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        > = None;
         loop {
+            if let Some(peer_close_check) = peer_close_check.as_mut() {
+                tokio::select! {
+                    response = &mut handling => return Ok((response, false)),
+                    () = &mut shutdown_requested => {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        return Ok((None, true));
+                    }
+                    () = peer_close_check => {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        return Ok((None, true));
+                    }
+                }
+            }
             tokio::select! {
                 response = &mut handling => return Ok((response, false)),
                 () = &mut shutdown_requested => {
@@ -93,11 +112,13 @@ impl McpServer {
                     }
                     return Ok((None, true));
                 }
-                incoming = transport.read_line(), if !peer_input_closed => {
+                incoming = transport.read_line() => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
                         Ok(None) => {
-                            peer_input_closed = true;
+                            peer_close_check = Some(Box::pin(
+                                transport.peer_fully_closed_after_eof(),
+                            ));
                             continue;
                         }
                         Err(error) => {
@@ -134,6 +155,99 @@ impl McpServer {
                     if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
+                        return Ok((None, true));
+                    }
+                    pending_lines.push_back(line);
+                }
+            }
+        }
+    }
+
+    /// Runs a non-live-cancellable request while still observing connection
+    /// teardown.  A request-side EOF is only a half-close until the transport
+    /// reports the peer's write side closed; this keeps one-shot CLI responses
+    /// intact while dropping abandoned handlers and their admission permits.
+    async fn handle_non_cancellable_application_request(
+        &self,
+        request: &JsonRpcRequest,
+        timings_enabled: bool,
+        connection: &mut ConnectionRouteState,
+        transport: &mut impl crate::mcp::transport::McpTransport,
+        pending_lines: &mut VecDeque<String>,
+        mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    ) -> Result<(Option<JsonRpcResponse>, bool)> {
+        let connection_scope = connection.memory_request_scope().to_owned();
+        let handling = Box::pin(self.handle_request_for_connection(
+            request,
+            timings_enabled,
+            connection,
+            false,
+        ));
+        tokio::pin!(handling);
+        let mut peer_close_check: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        > = None;
+        loop {
+            if let Some(peer_close_check) = peer_close_check.as_mut() {
+                tokio::select! {
+                    response = &mut handling => return Ok((response, false)),
+                    () = &mut shutdown_requested => {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(
+                                id,
+                                &connection_scope,
+                            );
+                        }
+                        return Ok((None, true));
+                    }
+                    () = peer_close_check => {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(
+                                id,
+                                &connection_scope,
+                            );
+                        }
+                        return Ok((None, true));
+                    }
+                }
+            }
+            tokio::select! {
+                response = &mut handling => return Ok((response, false)),
+                () = &mut shutdown_requested => {
+                    if let Some(id) = request.id.as_ref() {
+                        let _ = self.cancel_application_surface_request(
+                            id,
+                            &connection_scope,
+                        );
+                    }
+                    return Ok((None, true));
+                }
+                incoming = transport.read_line() => {
+                    let line = match incoming {
+                        Ok(Some(line)) => line,
+                        Ok(None) => {
+                            peer_close_check = Some(Box::pin(
+                                transport.peer_fully_closed_after_eof(),
+                            ));
+                            continue;
+                        }
+                        Err(error) => {
+                            if let Some(id) = request.id.as_ref() {
+                                let _ = self.cancel_application_surface_request(
+                                    id,
+                                    &connection_scope,
+                                );
+                            }
+                            return Err(error.into());
+                        }
+                    };
+                    if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
+                        if let Some(id) = request.id.as_ref() {
+                            let _ = self.cancel_application_surface_request(
+                                id,
+                                &connection_scope,
+                            );
                         }
                         return Ok((None, true));
                     }
@@ -416,13 +530,49 @@ impl McpServer {
                             peer_closed = closed;
                             response
                         } else {
-                            Box::pin(self.handle_request_for_connection(
-                                &request,
-                                timings_override.unwrap_or_else(|| self.timings_enabled()),
-                                &mut connection_route,
-                                false,
-                            ))
-                            .await
+                            let external_shutdown_requested = async {
+                                if listen_for_process_signals {
+                                    #[cfg(unix)]
+                                    {
+                                        if let Some(sigterm) = sigterm.as_mut() {
+                                            tokio::select! {
+                                                _ = tokio::signal::ctrl_c() => {}
+                                                _ = sigterm.recv() => {}
+                                            }
+                                        } else {
+                                            let _ = tokio::signal::ctrl_c().await;
+                                        }
+                                    }
+                                    #[cfg(not(unix))]
+                                    {
+                                        let _ = tokio::signal::ctrl_c().await;
+                                    }
+                                } else if let Some(lifecycle) = request_lifecycle {
+                                    lifecycle.wait_for_draining().await;
+                                } else {
+                                    std::future::pending::<()>().await;
+                                }
+                            };
+                            tokio::pin!(external_shutdown_requested);
+                            let shutdown_requested = async {
+                                tokio::select! {
+                                    () = &mut external_shutdown_requested => {}
+                                    () = self.project_server_lifecycle.request_abort().cancelled() => {}
+                                }
+                            };
+                            tokio::pin!(shutdown_requested);
+                            let (response, closed) = self
+                                .handle_non_cancellable_application_request(
+                                    &request,
+                                    timings_override.unwrap_or_else(|| self.timings_enabled()),
+                                    &mut connection_route,
+                                    transport,
+                                    &mut pending_lines,
+                                    shutdown_requested.as_mut(),
+                                )
+                                .await?;
+                            peer_closed = closed;
+                            response
                         }
                     }
                     Err(e) => Some(JsonRpcResponse::error(

@@ -100,6 +100,38 @@ fn daemon_admission_preserves_reserved_health_capacity() {
     assert!(!super::super::is_reserved_control_request(&bulk_request));
 }
 
+/// MCP discovery must never be rejected as bulk traffic.
+///
+/// A rejected `tools/call` costs one call; a rejected `initialize` or
+/// `tools/list` costs the client its entire tracedecay tool registry for the
+/// whole session, because hosts cache the catalog from that one exchange.
+#[test]
+fn mcp_discovery_requests_are_reserved_control_traffic() {
+    for (id, method) in [(1, "initialize"), (2, "tools/list")] {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+        })
+        .to_string();
+        assert!(
+            super::super::is_reserved_control_request(&request),
+            "{method} must be admitted as reserved control traffic"
+        );
+    }
+    for method in ["notifications/initialized", "initialized"] {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+        })
+        .to_string();
+        assert!(
+            super::super::is_reserved_control_request(&notification),
+            "{method} must be admitted as reserved control traffic"
+        );
+    }
+}
+
 #[test]
 fn daemon_shutdown_requires_a_response_id() {
     let notification = serde_json::json!({
@@ -458,6 +490,123 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     assert!(response.get("result").is_some());
     drop(general);
     server.await.expect("Doctor server task");
+}
+
+/// A saturated daemon must still hand out its tool catalog.
+///
+/// Observed live: a daemon pinned at capacity answered `tracedecay_status`
+/// (reserved) on every attempt while rejecting `tools/list` with
+/// `bulk_capacity_reached` on every attempt, so no new client could obtain any
+/// tracedecay tool at all for as long as the load lasted.
+#[tokio::test]
+async fn tools_list_answers_under_general_saturation() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let profile = TempDir::new().expect("profile");
+    let client_identity = test_client_identity_for(profile.path().join("client"));
+    let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "tools-list-saturation");
+
+    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
+    let general = match admission.try_admit() {
+        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+            panic!("general client rejected")
+        }
+    };
+    let reserved = match admission.try_admit() {
+        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+            panic!("discovery client rejected")
+        }
+    };
+    assert_eq!(
+        reserved.class(),
+        super::super::DaemonClientAdmissionClass::ReservedControl
+    );
+
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept discovery client");
+        let lifecycle = DaemonLifecycle::default();
+        super::super::serve_windows_broker_client_with_class(
+            stream,
+            TOKEN,
+            &lifecycle,
+            store_administration,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            super::super::DaemonPerClientAdmission::default(),
+            reserved.class(),
+            None,
+        )
+        .await
+        .expect("serve discovery client");
+    });
+
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect discovery client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+        .to_line()
+        .expect("auth preface");
+    writer
+        .write_all(preface.as_bytes())
+        .await
+        .expect("write preface");
+    writer.write_all(b"\n").await.expect("preface newline");
+    writer
+        .write_all(
+            DaemonHandshake {
+                client_identity,
+                ..test_handshake_defaults()
+            }
+            .to_line()
+            .expect("handshake")
+            .as_bytes(),
+        )
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "tools/list",
+    });
+    writer
+        .write_all(request.to_string().as_bytes())
+        .await
+        .expect("write tools/list");
+    writer.write_all(b"\n").await.expect("tools/list newline");
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
+        .await
+        .expect("read tools/list response");
+    let response: serde_json::Value =
+        serde_json::from_str(&response).expect("tools/list JSON-RPC response");
+
+    assert_eq!(response["id"], 21);
+    assert!(
+        response.get("error").is_none(),
+        "saturated daemon rejected discovery: {response}"
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list carried no tool array: {response}"));
+    assert!(
+        tools.len() > 100,
+        "saturated daemon served a degraded catalog of {} tools",
+        tools.len()
+    );
+    drop(general);
+    server.await.expect("discovery server task");
 }
 
 #[cfg(unix)]

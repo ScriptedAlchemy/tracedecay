@@ -52,8 +52,9 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
 
 fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, |cores| cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES))
+    std::thread::available_parallelism().map_or(1, |cores| {
+        cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1372,6 +1373,41 @@ impl CodeIndexSchedulerRegistryV1 {
             matched?
         };
         let latest = self.latest_complete_ready(&root).await?;
+        Self::latest_matches_scope(&latest, scope).then_some(latest)
+    }
+
+    /// Resolve one exact scope and serve the last complete generation already
+    /// held for that worktree, without running the freshness ladder.
+    ///
+    /// This is the stale-while-revalidate arm of query admission. The
+    /// per-worktree `serving_generation` is seeded at mount from the restored
+    /// generation and rewritten by every publication, so the read is O(1) and
+    /// never blocks on reconcile, gix status, or the scheduler mutex. A caller
+    /// that takes this arm is serving an older complete generation and must
+    /// mark its lanes stale; it must never present the result as current.
+    pub(in crate::daemon) async fn latest_complete_serving_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let mut matched = None;
+            for worktree in mounted.values() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(Arc::clone(&worktree.serving_generation));
+                }
+            }
+            matched?
+        };
+        let latest = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
         Self::latest_matches_scope(&latest, scope).then_some(latest)
     }
 
