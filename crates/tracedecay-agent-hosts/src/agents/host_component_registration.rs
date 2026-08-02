@@ -1460,10 +1460,15 @@ fn project_registration_state(
     let Ok(document) = serde_json::from_slice::<serde_json::Value>(contents) else {
         return State::Corrupt;
     };
+    // Each pointer must name the key that the host's own project-local
+    // installer writes. A pointer that disagrees with the installer makes
+    // `verify` observe `Missing` immediately after a successful apply, which
+    // rolls the whole transaction back and reports it as a storage failure.
     let current = match integration_id {
         "codex" => document.get("name").and_then(serde_json::Value::as_str) == Some("tracedecay"),
-        "opencode" => document.pointer("/mcp/tracedecay").is_some(),
-        "kimi" | "roo-code" | "kilo" => document.pointer("/mcpServers/tracedecay").is_some(),
+        // Kilo registers under `mcp` (not `mcpServers`), same as OpenCode.
+        "opencode" | "kilo" => document.pointer("/mcp/tracedecay").is_some(),
+        "kimi" | "roo-code" => document.pointer("/mcpServers/tracedecay").is_some(),
         _ => false,
     };
     if current {
@@ -1993,6 +1998,60 @@ mod tests {
             ),
             State::Current
         );
+    }
+
+    /// The pointer each host is classified by must match the key its own
+    /// `install_local` writes. When the two disagree, a successful apply is
+    /// observed as `Missing` by `verify`, the transaction rolls back, and the
+    /// operator sees "atomic filesystem operation failed" for a host that was
+    /// registered correctly. Driving the real installer keeps the two in step.
+    #[test]
+    fn project_registration_state_matches_what_each_installer_writes() {
+        use crate::agents::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        let integrations: Vec<Box<dyn crate::agents::AgentIntegration>> = vec![
+            Box::new(crate::agents::KiloIntegration),
+            Box::new(crate::agents::KimiIntegration),
+            Box::new(crate::agents::RooCodeIntegration),
+            Box::new(crate::agents::OpenCodeIntegration),
+        ];
+        for integration in integrations {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let context = crate::agents::InstallContext {
+                home: home.path().to_path_buf(),
+                tracedecay_bin: "/usr/bin/tracedecay".to_string(),
+                tool_permissions: Vec::new(),
+                project_root: Some(project.path().to_path_buf()),
+                dashboard: false,
+            };
+            integration
+                .install_local(&context, project.path())
+                .unwrap_or_else(|error| {
+                    panic!("{} local install failed: {error}", integration.id())
+                });
+            let path =
+                project_local_registration_path(integration.id(), home.path(), project.path())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} must expose a project-local registration path",
+                            integration.id()
+                        )
+                    });
+            let contents = fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "read {} registration {}: {error}",
+                    integration.id(),
+                    path.display()
+                )
+            });
+            assert_eq!(
+                project_registration_state(integration.id(), &contents),
+                State::Current,
+                "{} project-local registration must be observed as current after install_local",
+                integration.id()
+            );
+        }
     }
 
     #[test]
