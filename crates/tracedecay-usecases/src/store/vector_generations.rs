@@ -1673,6 +1673,15 @@ impl FakeVectorGenerationStoreV1 {
             .map(PublishedVectorGenerationV1::checkpoint)
     }
 
+    /// The checkpoint of one staged build, which is how a resumed run learns
+    /// how many of its batches are already durable.
+    pub fn staged_checkpoint(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+    ) -> Option<&VectorProjectionCheckpointV1> {
+        self.staged.get(build_id).map(|staged| &staged.checkpoint)
+    }
+
     pub fn active_generation(&self) -> Option<&PublishedVectorGenerationV1> {
         self.active_generation_id()
             .and_then(|id| self.published.generations.get(id))
@@ -2582,6 +2591,16 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
         let (_, state, _) = self.load_state().await?;
         Ok(state.active_generation_id().cloned())
+    }
+
+    /// The checkpoint of one staged build, or `None` when no build is staged
+    /// under that identity yet.
+    pub async fn staged_checkpoint(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+    ) -> Result<Option<VectorProjectionCheckpointV1>, VectorGenerationStoreErrorV1> {
+        let (_, state, _) = self.load_state().await?;
+        Ok(state.staged_checkpoint(build_id).cloned())
     }
 
     pub async fn active_checkpoint(
@@ -5913,41 +5932,25 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Peak-RSS probe for a whole-corpus vector generation.
-    ///
-    /// Ignored by default: it is a measurement, not an assertion about the
-    /// host. Run it with `--ignored --nocapture` before and after a storage
-    /// change to compare the reported high-water mark.
-    #[tokio::test]
-    #[ignore = "memory probe; run explicitly"]
-    async fn probe_peak_resident_bytes_for_a_whole_corpus_generation() {
-        let chunks: usize = std::env::var("VECTOR_RSS_PROBE_CHUNKS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(5_000);
-        #[expect(non_snake_case, reason = "probe keeps the constant-style names")]
-        let CHUNKS = chunks;
-        const DIMENSIONS: u32 = 768;
-        let temporary = tempfile::tempdir().expect("temporary project database");
-        let (database, _authority) = open_project_database(&temporary, "vector rss probe").await;
-        let mut key = admitted_embedding().embedding_key().clone();
-        key.dimensions = DIMENSIONS;
-        let embedding = key.admit().expect("admitted probe embedding");
-        let projection_key = embedding.projection_key().clone();
-        let source: CodeGenerationId = id("code-generation.rss-probe");
-
-        let mut chunk_ids = Vec::with_capacity(CHUNKS);
-        let mut vectors = Vec::with_capacity(CHUNKS);
-        let mut decisions = Vec::with_capacity(CHUNKS);
-        let mut changed = Vec::with_capacity(CHUNKS);
-        for index in 0..CHUNKS {
+    /// Build one prepared batch covering `range` of the probe corpus.
+    fn probe_prepared_batch(
+        embedding: &AdmittedEmbeddingProjectionKeyV1,
+        projection_key: &ProjectionKeyV1,
+        source: &CodeGenerationId,
+        dimensions: u32,
+        range: std::ops::Range<usize>,
+    ) -> PreparedVectorGenerationV1 {
+        let mut vectors = Vec::with_capacity(range.len());
+        let mut decisions = Vec::with_capacity(range.len());
+        let mut changed = Vec::with_capacity(range.len());
+        for index in range {
             let chunk_id: CodeSearchChunkId = id(&format!("chunk.v1.probe-{index:06}"));
             let chunk_digest: ContentDigest = id(&format!("sha256:{index:064x}"));
-            let values = (0..DIMENSIONS)
+            let values = (0..dimensions)
                 .map(|dimension| (index as f32 + dimension as f32) * 1.0e-4)
                 .collect::<Vec<_>>();
             let output_digest = tracedecay_semantic::projector::vector_output_digest(
-                &projection_key,
+                projection_key,
                 &chunk_id,
                 &chunk_digest,
                 &values,
@@ -5972,12 +5975,11 @@ mod tests {
                 projection_key: projection_key.clone(),
                 source_generation: source.clone(),
                 source_manifest_digest: manifest_digest('0'),
-                chunk_id: chunk_id.clone(),
+                chunk_id,
                 chunk_digest,
                 values,
                 output_digest,
             });
-            chunk_ids.push(chunk_id);
         }
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: None,
@@ -5991,7 +5993,6 @@ mod tests {
         for vector in &mut vectors {
             vector.source_manifest_digest = changes.manifest_digest.clone();
         }
-        let source_manifest_digest = changes.manifest_digest.clone();
         let mut request = ProjectionBatchRequestV1 {
             request_digest: manifest_digest('0'),
             changes,
@@ -6004,16 +6005,60 @@ mod tests {
                 .expect("request digest");
         let receipt = tracedecay_code_index::projection::build_batch_receipt(&request, &decisions)
             .expect("batch receipt");
-        let prepared = PreparedVectorGenerationV1 {
+        PreparedVectorGenerationV1 {
             embedding_key: embedding.clone(),
             request,
             receipt,
             vectors,
             tombstones: vec![],
-        };
+        }
+    }
+
+    /// Scale probe for a whole-corpus vector generation committed in batches.
+    ///
+    /// Reports peak RSS and, per commit, the size of the state document the
+    /// mutation binds. The document size is the number that used to grow with
+    /// the corpus until it hit `MAX_REQUEST_BYTES`; with the metadata
+    /// externalized it should stay flat no matter how many batches land.
+    ///
+    /// Ignored by default: it is a measurement, not an assertion about the
+    /// host. Run it with `--ignored --nocapture`, optionally with
+    /// `VECTOR_RSS_PROBE_CHUNKS` and `VECTOR_RSS_PROBE_BATCH`.
+    #[tokio::test]
+    #[ignore = "memory probe; run explicitly"]
+    async fn probe_peak_resident_bytes_for_a_whole_corpus_generation() {
+        let chunks: usize = std::env::var("VECTOR_RSS_PROBE_CHUNKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5_000);
+        let batch: usize = std::env::var("VECTOR_RSS_PROBE_BATCH")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(chunks)
+            .max(1);
+        #[expect(non_snake_case, reason = "probe keeps the constant-style names")]
+        let CHUNKS = chunks;
+        const DIMENSIONS: u32 = 768;
+        let temporary = tempfile::tempdir().expect("temporary project database");
+        let (database, _authority) = open_project_database(&temporary, "vector rss probe").await;
+        let mut key = admitted_embedding().embedding_key().clone();
+        key.dimensions = DIMENSIONS;
+        let embedding = key.admit().expect("admitted probe embedding");
+        let projection_key = embedding.projection_key().clone();
+        let source: CodeGenerationId = id("code-generation.rss-probe");
+
+        let mut chunk_ids = (0..CHUNKS)
+            .map(|index| id::<CodeSearchChunkId>(&format!("chunk.v1.probe-{index:06}")))
+            .collect::<Vec<_>>();
         chunk_ids.sort();
+        // The plan's watermark is the corpus's, not any one batch's, so
+        // splitting the run never moves the generation identity.
+        let whole =
+            probe_prepared_batch(&embedding, &projection_key, &source, DIMENSIONS, 0..CHUNKS);
+        let source_manifest_digest = whole.request.changes.manifest_digest.clone();
+        drop(whole);
         let plan = VectorGenerationPlanV1 {
-            target_projection_key: projection_key,
+            target_projection_key: projection_key.clone(),
             source_generation: source.clone(),
             source_manifest_digest,
             expected_chunk_ids: chunk_ids.into(),
@@ -6025,20 +6070,37 @@ mod tests {
             .await
             .expect("open store");
         let build = store.begin_generation(plan).await.expect("build identity");
-        store
-            .commit_batch(&build, None, prepared)
-            .await
-            .expect("commit whole corpus");
+        let mut checkpoint = None;
+        let mut widest_document = 0_usize;
+        let mut commits = 0_usize;
+        let mut start = 0;
+        while start < CHUNKS {
+            let end = (start + batch).min(CHUNKS);
+            let prepared =
+                probe_prepared_batch(&embedding, &projection_key, &source, DIMENSIONS, start..end);
+            checkpoint = Some(
+                store
+                    .commit_batch(&build, checkpoint.as_ref(), prepared)
+                    .await
+                    .expect("commit batch"),
+            );
+            widest_document = widest_document.max(state_document(&database).await.len());
+            commits += 1;
+            start = end;
+        }
         let publication = store
             .publish_generation(&build, None)
             .await
-            .expect("publish whole corpus");
+            .expect("publish corpus");
+        widest_document = widest_document.max(state_document(&database).await.len());
         let peak = peak_resident_bytes();
         println!(
-            "vector-generation RSS probe: chunks={CHUNKS} dimensions={DIMENSIONS} \
-             float_payload_bytes={} peak_rss_bytes={peak} peak_rss_gib={:.2} \
-             baseline_rss_bytes={baseline} generation={}",
+            "vector-generation scale probe: chunks={CHUNKS} batch={batch} commits={commits} \
+             dimensions={DIMENSIONS} float_payload_bytes={} widest_state_document_bytes={} \
+             peak_rss_bytes={peak} peak_rss_gib={:.2} baseline_rss_bytes={baseline} \
+             generation={}",
             CHUNKS * DIMENSIONS as usize * size_of::<f32>(),
+            widest_document,
             peak as f64 / (1024.0 * 1024.0 * 1024.0),
             publication.generation_id.as_digest(),
         );
