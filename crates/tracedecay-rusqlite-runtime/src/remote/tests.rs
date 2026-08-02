@@ -282,6 +282,13 @@ fn capture_is_encrypted_idempotent_and_replay_commits_once() {
         RemoteCaptureDispositionV1::AlreadyPending
     );
     assert_eq!(
+        storage
+            .status(&writer.authority.fence.brain_id)
+            .unwrap()
+            .pending_spool_items,
+        1
+    );
+    assert_eq!(
         storage.load_replay_frame(&first.event_id).unwrap().capture,
         capture
     );
@@ -340,5 +347,12 @@ fn capture_is_encrypted_idempotent_and_replay_commits_once() {
     assert_eq!(
         storage.state(&first.event_id).unwrap().state,
         RemoteReplayStateV1::Acknowledged
+    );
+    assert_eq!(
+        storage
+            .status(&writer.authority.fence.brain_id)
+            .unwrap()
+            .pending_spool_items,
+        0
     );
 }

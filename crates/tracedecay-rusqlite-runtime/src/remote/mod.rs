@@ -47,6 +47,7 @@ mod crypto;
 mod enrollment;
 mod replay_authority;
 mod schema;
+mod status;
 mod transaction;
 
 pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
@@ -55,6 +56,7 @@ use enrollment::{
     map_enrollment_error,
 };
 pub use schema::{REMOTE_SCHEMA_V1, install_remote_schema_v1, validate_remote_schema};
+pub use status::RemoteStorageStatusSnapshotV1;
 
 #[derive(Debug, Error)]
 pub enum RemoteSqliteStorageErrorV1 {
