@@ -1,8 +1,5 @@
-//! Legacy-memory cutover advance and the compatibility memory-status probe.
+//! The compatibility memory-status probe.
 
-use crate::db::{
-    Database, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome, MemoryV2CutoverReceipt,
-};
 use crate::memory::encoding::HolographicEncoder;
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -10,26 +7,16 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, CompatibilityLegacyMemoryCutoverCommandV1,
-    CompatibilityLegacyMemoryCutoverProgressV1, CompatibilityMemoryAlgebraV1,
+    CompatibilityFeedbackRepairProgressV1, CompatibilityMemoryAlgebraV1,
     CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1, FactCompatibilityResult,
-    FactCompatibilityStoreError, FactStoreResult,
+    FactStoreResult,
 };
 
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_now,
-    compatibility_source_store_id, nonnegative_u64, row_i64, row_string, storage_error,
-    storage_message,
+    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
+    compatibility_source_store_id, nonnegative_u64, row_i64, storage_error, storage_message,
 };
-
-const COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE: i64 = 500;
-
-/// Upper bound on empty backfill-phase transitions drained inside one cutover
-/// pass. The phase walk is feedback → oplog → facts → `awaiting_cutover`, so a
-/// small bound comfortably covers draining every empty phase in a single tick
-/// while still guaranteeing the loop terminates.
-const COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN: usize = 8;
 
 async fn compatibility_owner_status_counts_tx(
     transaction: &Transaction<'_>,
@@ -297,42 +284,6 @@ pub(super) async fn compatibility_memory_status_tx(
         row_i64(&bank_row, 0, COMPATIBILITY_READ_OPERATION)?,
         "bank count",
     )?;
-    let mut backfill_rows = transaction
-        .query(
-            "SELECT phase, owner_json FROM memory_v2_backfill_progress
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
-            params![key.kind, key.project_id.as_str(), source_store_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let legacy_backfill_complete = match backfill_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
-    {
-        None => {
-            drop(backfill_rows);
-            let mut source_rows = transaction
-                .query("SELECT EXISTS(SELECT 1 FROM memory_facts LIMIT 1)", ())
-                .await
-                .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-            let row = source_rows
-                .next()
-                .await
-                .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
-                .ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_READ_OPERATION,
-                        "compatibility source-presence result is missing",
-                    )
-                })?;
-            row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)? == 0
-        }
-        Some(row) => {
-            row_string(&row, 1, COMPATIBILITY_READ_OPERATION)? == key.json
-                && row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? == "cutover_complete"
-        }
-    };
     let projection_state = if missing_vector_count == 0 && !dirty_banks {
         CompatibilityProjectionStateV1::Ready
     } else {
@@ -356,7 +307,6 @@ pub(super) async fn compatibility_memory_status_tx(
         helpful_count,
         unhelpful_count,
         missing_vector_count,
-        legacy_backfill_complete,
         projection_state,
         CompatibilityMemoryRepairStatsV1::new(0, 0),
         CompatibilityMemoryFeedbackFunnelV1::new(
@@ -369,102 +319,4 @@ pub(super) async fn compatibility_memory_status_tx(
     )
     .map(|status| status.with_feedback_history_repair(feedback_repair))
     .map_err(Into::into)
-}
-
-pub(super) async fn advance_compatibility_legacy_memory_cutover_tx(
-    db: &Database,
-    request: &CompatibilityLegacyMemoryCutoverCommandV1,
-) -> FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1> {
-    let source_store_id = compatibility_source_store_id()?;
-    // A store that never held V1 legacy memory has nothing to cut over.
-    // Running the ladder anyway would insert an all-zero backfill row and a
-    // cutover receipt describing a migration that never happened, and every
-    // later pass would then re-read that manufactured state. Report the
-    // cutover complete without writing anything.
-    if db
-        .memory_v2_cutover_is_vacuous(request.owner(), &source_store_id)
-        .await
-        .map_err(|error| {
-            FactCompatibilityStoreError::Store(storage_error(COMPATIBILITY_WRITE_OPERATION, error))
-        })?
-    {
-        return Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete);
-    }
-    let frontiers = db
-        .load_or_capture_memory_v2_frontiers(request.owner(), &source_store_id)
-        .await
-        .map_err(|error| {
-            FactCompatibilityStoreError::Store(storage_error(COMPATIBILITY_WRITE_OPERATION, error))
-        })?;
-    // Drain empty backfill phases within a single cutover pass so a fresh
-    // (or fully imported) owner reaches finalization on one tick instead of
-    // spending an idle tick per empty phase. The bounded feedback → oplog →
-    // facts → awaiting_cutover walk means at most a handful of empty-phase
-    // transitions before a batch does real work or the frontier is drained;
-    // real work still commits exactly one bounded batch per pass.
-    let mut total_processed = 0_u64;
-    for _ in 0..COMPATIBILITY_LEGACY_CUTOVER_MAX_EMPTY_PHASE_DRAIN {
-        match db
-            .backfill_memory_v2_batch(
-                request.owner(),
-                &source_store_id,
-                frontiers,
-                COMPATIBILITY_LEGACY_CUTOVER_BATCH_SIZE,
-            )
-            .await
-            .map_err(|error| {
-                FactCompatibilityStoreError::Store(storage_error(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    error,
-                ))
-            })? {
-            MemoryV2BackfillBatchOutcome::Advanced { processed } => {
-                total_processed = total_processed.saturating_add(processed as u64);
-                if processed > 0 {
-                    return Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
-                        processed: total_processed,
-                    });
-                }
-                // Empty phase transition; keep draining within this pass.
-            }
-            MemoryV2BackfillBatchOutcome::AwaitingCutover => {
-                let receipt = MemoryV2CutoverReceipt::new(
-                    request.receipt_id().clone(),
-                    request.owner().clone(),
-                    source_store_id,
-                    frontiers,
-                    compatibility_now()?,
-                )
-                .map_err(|error| {
-                    FactCompatibilityStoreError::Store(storage_error(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        error,
-                    ))
-                })?;
-                return match db
-                    .finalize_memory_v2_cutover(&receipt)
-                    .await
-                    .map_err(|error| {
-                        FactCompatibilityStoreError::Store(storage_error(
-                            COMPATIBILITY_WRITE_OPERATION,
-                            error,
-                        ))
-                    })? {
-                    MemoryV2CutoverOutcome::TailPending(_) => {
-                        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
-                            processed: total_processed,
-                        })
-                    }
-                    MemoryV2CutoverOutcome::Complete => {
-                        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete)
-                    }
-                };
-            }
-        }
-    }
-    // The bounded phase walk did not settle this pass; report incomplete so
-    // the daemon retries rather than spinning here unbounded.
-    Ok(CompatibilityLegacyMemoryCutoverProgressV1::Incomplete {
-        processed: total_processed,
-    })
 }
