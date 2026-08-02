@@ -88,6 +88,17 @@ fn version_flag_matches_the_version_the_library_reports() {
     assert_eq!(reported_version(), build_version());
 }
 
+/// `tracedecay-agent-hosts` stamps this version into every plugin manifest,
+/// plugin cache path, and staleness warning a host can see, but `env!` resolves
+/// per compiled crate, so its own `CARGO_PKG_VERSION` is the sub-crate's. Its
+/// `PRODUCT_VERSION` is baked from the root package instead; if that wiring
+/// ever breaks, hosts silently compare deployed plugins against a version no
+/// release ever had.
+#[test]
+fn the_agent_host_bundles_are_stamped_with_this_packages_version() {
+    assert_eq!(tracedecay_agent_hosts::PRODUCT_VERSION, PACKAGE_VERSION);
+}
+
 /// Build metadata is ignored for precedence, so release comparisons, upgrade
 /// checks, and release-plz all still see the published version.
 #[test]

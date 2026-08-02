@@ -206,10 +206,7 @@ fn deploy_stamps_version_and_binary_path() {
         &std::fs::read_to_string(deploy_dir.join(".claude-plugin/plugin.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        plugin["version"].as_str().unwrap(),
-        env!("CARGO_PKG_VERSION")
-    );
+    assert_eq!(plugin["version"].as_str().unwrap(), crate::PRODUCT_VERSION);
 
     let hooks = std::fs::read_to_string(deploy_dir.join("hooks/hooks.json")).unwrap();
     assert!(
@@ -280,7 +277,7 @@ fn registered_cache_refresh_replaces_same_version_stale_bundle() {
     let home = tempfile::tempdir().unwrap();
     let cache_dir = home.path().join(format!(
         ".claude/plugins/cache/tracedecay/tracedecay/{}",
-        env!("CARGO_PKG_VERSION")
+        crate::PRODUCT_VERSION
     ));
     write_rendered_plugin_bundle(&cache_dir, "/old/bin/tracedecay").unwrap();
     let hooks_path = cache_dir.join("hooks/hooks.json");
@@ -295,7 +292,7 @@ fn registered_cache_refresh_replaces_same_version_stale_bundle() {
     let mut registry = json!({ "plugins": {} });
     registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
         "installPath": cache_dir,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::PRODUCT_VERSION,
         "scope": "user"
     }]);
     std::fs::write(
@@ -336,7 +333,7 @@ fn registered_cache_refresh_refuses_registry_path_outside_cache_root() {
     let mut registry = json!({ "plugins": {} });
     registry["plugins"][PLUGIN_IDENTIFIER] = json!([{
         "installPath": outside,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::PRODUCT_VERSION,
         "scope": "user"
     }]);
     std::fs::write(

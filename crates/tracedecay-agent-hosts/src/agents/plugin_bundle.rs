@@ -49,7 +49,7 @@ pub(crate) fn stamp_manifest_version_with(
     mutate: impl FnOnce(&mut serde_json::Value),
 ) -> Result<String> {
     let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
+    manifest["version"] = serde_json::json!(crate::PRODUCT_VERSION);
     mutate(&mut manifest);
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
@@ -591,7 +591,7 @@ mod tests {
 
         let stamped = stamp_manifest_version(raw).unwrap();
         let stamped: serde_json::Value = serde_json::from_str(&stamped).unwrap();
-        assert_eq!(stamped["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(stamped["version"], crate::PRODUCT_VERSION);
 
         let rewired = set_mcp_command(raw, "/abs/tracedecay").unwrap();
         let rewired: serde_json::Value = serde_json::from_str(&rewired).unwrap();

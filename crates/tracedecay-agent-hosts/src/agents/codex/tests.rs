@@ -488,7 +488,7 @@ fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
     .unwrap();
     let plugin_dir = home.path().join(format!(
         ".codex/plugins/cache/my-marketplace/tracedecay/{}",
-        env!("CARGO_PKG_VERSION")
+        crate::PRODUCT_VERSION
     ));
     install_codex_plugin_bundle(&plugin_dir, TEST_BIN, InstallScope::Global, home.path()).unwrap();
     let hooks_path = plugin_dir.join("hooks/hooks.json");

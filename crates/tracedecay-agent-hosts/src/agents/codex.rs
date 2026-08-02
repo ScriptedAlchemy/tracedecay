@@ -509,7 +509,7 @@ fn codex_cached_marketplace_name(home: &Path) -> String {
 
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
-        .join(env!("CARGO_PKG_VERSION"))
+        .join(crate::PRODUCT_VERSION)
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
@@ -2194,10 +2194,10 @@ fn doctor_check_plugin_dir(
         ));
     }
     match manifest.get("version").and_then(|value| value.as_str()) {
-        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
+        Some(crate::PRODUCT_VERSION) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
             "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
-            env!("CARGO_PKG_VERSION")
+            crate::PRODUCT_VERSION
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
     }

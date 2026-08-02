@@ -19,7 +19,10 @@ pub mod agents;
 pub mod analytics;
 pub mod automation;
 pub mod ports;
+pub mod product_version;
 pub mod tool_name;
+
+pub use product_version::PRODUCT_VERSION;
 pub(crate) use tracedecay_usecases as application;
 pub(crate) use tracedecay_usecases::request_identity;
 
