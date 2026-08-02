@@ -1,7 +1,17 @@
-use std::{collections::BTreeSet, io::Read, ops::Deref, sync::Arc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    io::Read,
+    ops::Deref,
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use sha2::{Digest as _, Sha256};
-use tracedecay_code_index::production::{CodeIndexCapturedFileV1, CodeIndexPublishedGenerationV1};
+use tracedecay_code_index::production::{
+    CodeIndexCapturedFileV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+};
 use tracedecay_domain::{
     ProjectId, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, WorktreeId,
 };
@@ -19,6 +29,142 @@ pub(super) enum GenerationDecodeAdmissionV1 {
 pub(super) enum DecodeSubjectV1 {
     Active,
     Generation(tracedecay_domain::CodeGenerationId),
+}
+
+pub(super) const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
+
+#[derive(Default)]
+pub(super) struct DecodedGenerationStateV1 {
+    pub(super) active: Option<Arc<ResidentPublishedGenerationV1>>,
+    pub(super) active_epoch: u64,
+    decoded: VecDeque<Arc<ResidentPublishedGenerationV1>>,
+    pub(super) in_flight: Vec<DecodeSubjectV1>,
+}
+
+impl DecodedGenerationStateV1 {
+    pub(super) fn is_in_flight(&self, subject: &DecodeSubjectV1) -> bool {
+        self.in_flight.iter().any(|pending| pending == subject)
+    }
+
+    pub(super) fn forget(&mut self, generation_id: &tracedecay_domain::CodeGenerationId) {
+        self.decoded
+            .retain(|cached| cached.manifest().generation_id != *generation_id);
+    }
+
+    pub(super) fn cached(
+        &mut self,
+        generation_id: &tracedecay_domain::CodeGenerationId,
+    ) -> Option<Arc<ResidentPublishedGenerationV1>> {
+        let position = self
+            .decoded
+            .iter()
+            .position(|cached| cached.manifest().generation_id == *generation_id)?;
+        let generation = self.decoded.remove(position)?;
+        self.decoded.push_back(Arc::clone(&generation));
+        Some(generation)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct DecodedGenerationCacheV1 {
+    pub(super) state: Mutex<DecodedGenerationStateV1>,
+    pub(super) ready: Condvar,
+    decodes: AtomicU64,
+}
+
+impl DecodedGenerationCacheV1 {
+    pub(super) fn poisoned() -> CodeIndexPublicationStoreErrorV1 {
+        CodeIndexPublicationStoreErrorV1::Unavailable(
+            "daemon decoded-generation lock is poisoned".to_owned(),
+        )
+    }
+
+    pub(super) fn lock_state(
+        &self,
+    ) -> Result<MutexGuard<'_, DecodedGenerationStateV1>, CodeIndexPublicationStoreErrorV1> {
+        self.state.lock().map_err(|_| Self::poisoned())
+    }
+
+    pub(super) fn note_decode(&self) {
+        self.decodes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(super) fn decode_count(&self) -> u64 {
+        self.decodes.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn remember(
+        &self,
+        generation: Arc<ResidentPublishedGenerationV1>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let mut state = self.lock_state()?;
+        let generation_id = generation.manifest().generation_id.clone();
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| active.manifest().generation_id == generation_id)
+        {
+            return Ok(());
+        }
+        state.forget(&generation_id);
+        state.decoded.push_back(generation);
+        while state.decoded.len() > DECODED_GENERATION_CACHE_CAPACITY {
+            state.decoded.pop_front();
+        }
+        Ok(())
+    }
+
+    pub(super) fn reclaim_inactive(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.decoded.clear();
+    }
+}
+
+pub(super) struct DecodeLeaseV1<'cache> {
+    pub(super) cache: &'cache DecodedGenerationCacheV1,
+    pub(super) subject: DecodeSubjectV1,
+    pub(super) epoch: u64,
+}
+
+impl Drop for DecodeLeaseV1<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .cache
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.in_flight.retain(|pending| *pending != self.subject);
+        }
+        self.cache.ready.notify_all();
+    }
+}
+
+#[cfg(test)]
+pub(super) struct HeldActiveDecodeV1 {
+    pub(super) cache: Arc<DecodedGenerationCacheV1>,
+    pub(super) restore: Option<Arc<ResidentPublishedGenerationV1>>,
+}
+
+#[cfg(test)]
+impl Drop for HeldActiveDecodeV1 {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .cache
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state
+                .in_flight
+                .retain(|pending| *pending != DecodeSubjectV1::Active);
+            if state.active.is_none() {
+                state.active = self.restore.take();
+            }
+        }
+        self.cache.ready.notify_all();
+    }
 }
 
 pub(super) struct CapturedCandidateV1 {
