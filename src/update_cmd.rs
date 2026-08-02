@@ -266,7 +266,16 @@ fn refresh_forward_only_daemon_service_after_update(
             })
         }
         None => {
-            eprintln!("TraceDecay daemon service is not installed; skipping daemon restart.");
+            // Forward-only maintenance targets RunningEnabled, and the
+            // convergence gate below refuses anything less — so a missing
+            // service unit must be installed here, not skipped. Skipping made
+            // dogfood fail unconditionally on a host whose unit was removed.
+            let service_path = tracedecay::daemon::install_service(spec, true)?;
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Forward-only daemon service installed at {}",
+                service_path.display()
+            );
+            print_daemon_transport_location(&spec.socket_path);
             Ok(())
         }
     }
