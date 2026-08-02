@@ -47,7 +47,7 @@
 //!   `family.write()`, which excludes every `Owner` and `Content` holder of the
 //!   same store as well as every other `Destructive` holder. That is precisely
 //!   the protection the git-watch sync comment asked for ("prevents branch-store
-//!   GC from selecting or unlinking the SQLite family while a watcher sync owns
+//!   GC from selecting or unlinking the `SQLite` family while a watcher sync owns
 //!   it"), and it survives the split.
 //! * **Daemon scope still excludes everything.** A `Daemon` acquisition takes
 //!   `daemon.write()`, which no store-scoped acquisition can hold concurrently.
@@ -61,7 +61,7 @@
 //!   sync adds no writer that did not already exist.
 //! * **Nothing that used to be excluded becomes concurrent across a
 //!   `Destructive` boundary.** `Destructive` is the only class that can unlink
-//!   or rekey a SQLite family, and it remains totally exclusive.
+//!   or rekey a `SQLite` family, and it remains totally exclusive.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWrite
 /// What one writer acquisition is allowed to do to a store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StoreWriterClass {
-    /// May unlink, select, or rekey the store's SQLite family (branch-store GC,
+    /// May unlink, select, or rekey the store's `SQLite` family (branch-store GC,
     /// owner removal). Totally exclusive on its store.
     Destructive,
     /// Mutates the daemon's owner/scheduler bookkeeping for the store (project
@@ -106,7 +106,6 @@ impl WriterScope {
             class,
         }
     }
-
 }
 
 /// The three lanes of one store family. Held by `Arc` from the registry and by
