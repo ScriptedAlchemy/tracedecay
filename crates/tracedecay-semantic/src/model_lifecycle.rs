@@ -1629,8 +1629,9 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{self, Receiver, SyncSender};
+    use std::time::Duration;
     #[cfg(feature = "semantic-fastembed")]
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::super::manifest::{
         ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
