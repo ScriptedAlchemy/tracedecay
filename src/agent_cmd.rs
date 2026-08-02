@@ -4978,12 +4978,15 @@ mod tests {
         );
         assert!(
             registration.injected_after_apply,
-            "the failure must be injected after stale export replacement"
+            "the failure must be injected after stale export replacement: {:?}",
+            result.as_ref().err()
         );
 
         assert_eq!(
             std::fs::read(&manifest_path).unwrap(),
-            manifest_bytes.as_bytes()
+            manifest_bytes.as_bytes(),
+            "rollback must restore the ownership manifest: {:?}",
+            result.as_ref().err()
         );
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
         assert_eq!(std::fs::read(&current_path).unwrap(), current_bytes);

@@ -82,12 +82,23 @@ pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
 
     for entry in exported {
         if path_is_direct_child(&entry.path, agents_dir) {
-            fs::remove_file(&entry.path).ok();
+            remove_managed_agent_file(&entry.path);
         }
     }
-    fs::remove_file(&manifest_path).ok();
+    remove_managed_agent_file(&manifest_path);
     fs::remove_dir(agents_dir).ok();
     Ok(())
+}
+
+/// Delete a generated export through the host-config write-intent recorder.
+///
+/// `~/.codex/agents` is declared registration surface, so rollback compares
+/// every path's observed state against the backup and accepts a difference
+/// only when a recorded intent attributes it. A raw `remove_file` leaves the
+/// deletion unattributable, which made rollback refuse with `StalePreview` and
+/// strand the journal.
+fn remove_managed_agent_file(path: &Path) {
+    crate::agents::safe_remove_host_file(path).ok();
 }
 
 /// Every generated-agent path that a Codex lifecycle operation may mutate.
@@ -129,7 +140,7 @@ fn remove_stale_managed_agents(agents_dir: &Path) -> Result<()> {
 
     for path in manifest_paths(agents_dir)? {
         if !keep.contains(&path) {
-            fs::remove_file(path).ok();
+            remove_managed_agent_file(&path);
         }
     }
     Ok(())
