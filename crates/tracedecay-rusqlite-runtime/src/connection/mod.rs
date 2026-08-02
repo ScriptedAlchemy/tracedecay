@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::ffi::CString;
 use std::{
     fmt,
     fs::{File, OpenOptions},
@@ -90,8 +92,45 @@ impl OpenedDatabaseFile {
         }
     }
 
+    /// Selects the pathname used by a writer connection.
+    ///
+    /// Linux can resolve SQLite's WAL sidecars from `/proc/self/fd/*` while
+    /// retaining the pinned-file ABA fence. macOS (and other non-Linux Unix
+    /// hosts) cannot reliably create fresh WAL sidecars from `/dev/fd/*`, so
+    /// writers use the verified canonical pathname while the pinned descriptor
+    /// remains alive for the worker lifetime.
+    #[cfg(any(unix, windows))]
+    pub(crate) fn writer_open_path(
+        &self,
+        canonical_path: &Path,
+    ) -> Result<PathBuf, OpenedDatabaseFileError> {
+        #[cfg(unix)]
+        {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                return self.worker_open_path(canonical_path);
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            {
+                return Ok(canonical_path.to_path_buf());
+            }
+        }
+        #[cfg(windows)]
+        {
+            Ok(canonical_path.to_path_buf())
+        }
+    }
+
     #[cfg(not(any(unix, windows)))]
     pub(crate) fn worker_open_path(
+        &self,
+        _canonical_path: &Path,
+    ) -> Result<PathBuf, OpenedDatabaseFileError> {
+        Err(OpenedDatabaseFileError::Unsupported)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn writer_open_path(
         &self,
         _canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
@@ -116,6 +155,27 @@ impl OpenedDatabaseFile {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         let _ = &self.file;
+        Ok(())
+    }
+
+    pub(crate) fn verify_connection(
+        &self,
+        connection: &Connection,
+        canonical_path: &Path,
+    ) -> Result<(), OpenedDatabaseFileError> {
+        // Check the pathname identity first. If it changes during this stat,
+        // HAS_MOVED below still observes the SQLite handle's different inode.
+        self.verify_current_path(canonical_path)?;
+        #[cfg(unix)]
+        if sqlite_connection_has_moved(connection)? {
+            return Err(OpenedDatabaseFileError::Replaced);
+        }
+        #[cfg(unix)]
+        {
+            // Recheck after the file-control syscall; both checks must agree
+            // before any writer policy can create or mutate sidecars.
+            self.verify_current_path(canonical_path)?;
+        }
         Ok(())
     }
 
@@ -236,6 +296,30 @@ fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     Ok(u64::from_le_bytes(bytes).max(1))
 }
 
+#[cfg(unix)]
+fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDatabaseFileError> {
+    let database_name = CString::new("main").expect("static SQLite database name");
+    let mut moved = 0_i32;
+    // SAFETY: `connection` owns a live SQLite handle, `database_name` is a
+    // NUL-terminated database name, and `moved` is writable storage for the
+    // integer required by SQLITE_FCNTL_HAS_MOVED.
+    let result = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            connection.handle(),
+            database_name.as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&mut moved as *mut i32).cast(),
+        )
+    };
+    match result {
+        rusqlite::ffi::SQLITE_OK => Ok(moved != 0),
+        // VFS implementations predating HAS_MOVED report NOTFOUND. The
+        // pinned dev/inode check remains authoritative in that case.
+        rusqlite::ffi::SQLITE_NOTFOUND => Ok(false),
+        _ => Err(OpenedDatabaseFileError::Inspect),
+    }
+}
+
 #[cfg(windows)]
 fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     use std::mem::MaybeUninit;
@@ -305,6 +389,12 @@ pub(crate) enum ConnectionMode {
 }
 
 #[derive(Debug)]
+pub(crate) enum WriterOpenError {
+    Policy(ConnectionPolicyError),
+    Identity(OpenedDatabaseFileError),
+}
+
+#[derive(Debug)]
 pub struct ConnectionPolicyError {
     stage: &'static str,
     source: rusqlite::Error,
@@ -333,6 +423,36 @@ impl std::error::Error for ConnectionPolicyError {
 }
 
 pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, ConnectionPolicyError> {
+    let (connection, fresh_writer) = open_raw(path, mode)?;
+    finish_open(connection, mode, fresh_writer)
+}
+
+pub(crate) fn open_writer(
+    path: &Path,
+    opened_database: Option<&OpenedDatabaseFile>,
+    canonical_path: &Path,
+) -> Result<Connection, WriterOpenError> {
+    let (connection, fresh_writer) =
+        open_raw(path, ConnectionMode::Writer).map_err(WriterOpenError::Policy)?;
+    if let Some(opened_database) = opened_database {
+        opened_database
+            .verify_connection(&connection, canonical_path)
+            .map_err(WriterOpenError::Identity)?;
+    }
+    let connection = finish_open(connection, ConnectionMode::Writer, fresh_writer)
+        .map_err(WriterOpenError::Policy)?;
+    if let Some(opened_database) = opened_database {
+        opened_database
+            .verify_connection(&connection, canonical_path)
+            .map_err(WriterOpenError::Identity)?;
+    }
+    Ok(connection)
+}
+
+fn open_raw(
+    path: &Path,
+    mode: ConnectionMode,
+) -> Result<(Connection, bool), ConnectionPolicyError> {
     let fresh_writer = mode == ConnectionMode::Writer
         && std::fs::metadata(path).is_ok_and(|metadata| metadata.len() == 0);
     let flags = match mode {
@@ -343,6 +463,14 @@ pub(crate) fn open(path: &Path, mode: ConnectionMode) -> Result<Connection, Conn
     let connection =
         Connection::open_with_flags(path, flags).map_err(|source| policy("open", source))?;
 
+    Ok((connection, fresh_writer))
+}
+
+fn finish_open(
+    connection: Connection,
+    mode: ConnectionMode,
+    fresh_writer: bool,
+) -> Result<Connection, ConnectionPolicyError> {
     apply_pragmas(&connection, mode, fresh_writer)?;
     assert_compile_options(&connection)?;
     apply_limits(&connection, mode)?;
