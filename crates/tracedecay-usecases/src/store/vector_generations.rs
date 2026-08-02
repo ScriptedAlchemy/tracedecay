@@ -5,7 +5,6 @@
 //! using a revisioned compare-and-swap so generation publication and the
 //! active pointer become visible together. No separate vector database or
 //! approximate index is introduced.
-#![allow(dead_code)] // Plan 25/31 semantic vector storage — test oracle + staged persistence
 #![forbid(unsafe_code)]
 
 use std::{
@@ -777,58 +776,6 @@ impl FakeVectorGenerationStoreV1 {
         Ok(())
     }
 
-    fn commit_legacy_vector_migration(
-        &mut self,
-        transaction: &LegacyVectorMigrationOwnerTransactionV1,
-    ) -> Result<LegacyVectorMigrationReceiptV1, VectorGenerationStoreErrorV1> {
-        transaction
-            .validate()
-            .map_err(|error| VectorGenerationStoreErrorV1::LegacyMigration(error.to_string()))?;
-        if self.published.active_generation != transaction.expected_prior_active_generation {
-            return Err(VectorGenerationStoreErrorV1::StaleActiveGeneration);
-        }
-        for rebuilt in transaction
-            .receipt
-            .items
-            .iter()
-            .filter_map(|item| item.rebuilt_generation.as_ref())
-        {
-            if !self.published.generations.contains_key(rebuilt) {
-                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-            }
-        }
-        if let Some(next_active) = &transaction.next_active_generation
-            && !self.published.generations.contains_key(next_active)
-        {
-            return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
-        }
-
-        let mut next = self.published.clone();
-        match next
-            .legacy_migration_receipts
-            .get(&transaction.receipt.receipt_digest)
-        {
-            Some(existing) if existing != &transaction.receipt => {
-                return Err(VectorGenerationStoreErrorV1::ImmutableGenerationConflict);
-            }
-            Some(_) => {}
-            None => {
-                next.legacy_migration_receipts.insert(
-                    transaction.receipt.receipt_digest.clone(),
-                    transaction.receipt.clone(),
-                );
-            }
-        }
-        next.active_generation
-            .clone_from(&transaction.next_active_generation);
-        if self.fail_before_publication_swap {
-            self.fail_before_publication_swap = false;
-            return Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure);
-        }
-        self.published = next;
-        Ok(transaction.receipt.clone())
-    }
-
     /// Bind scratch-built generations to a validated migration receipt.
     ///
     /// The legacy active pointer belongs to the live state, not this scratch
@@ -1022,6 +969,7 @@ impl LegacyVectorInventoryPortV1 for DatabaseLegacyVectorInventoryV1 {
 /// payloads. This is the offline equivalent of
 /// [`DatabaseVectorGenerationStoreV1::read_legacy_inventory`] followed by
 /// [`LegacyVectorInventoryV1::retained_readable_sources`].
+#[cfg(test)]
 pub(crate) fn retained_readable_sources_from_read_only_database(
     database_path: &Path,
 ) -> Result<BTreeSet<CodeGenerationId>, VectorGenerationStoreErrorV1> {
@@ -1921,13 +1869,6 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
     ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
         let (_, state) = self.load_state().await?;
         Ok(state.active_generation_id().cloned())
-    }
-
-    pub(crate) async fn active_generation(
-        &self,
-    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        let (_, state) = self.load_state().await?;
-        Ok(state.active_generation().cloned())
     }
 
     pub(crate) async fn active_generation_for(
