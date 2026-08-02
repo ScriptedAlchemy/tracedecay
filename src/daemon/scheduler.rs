@@ -400,8 +400,9 @@ impl DaemonEngine {
 
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
+        let scope = super::branch_admin::owner_writer_scope(&key);
         self.store_administration
-            .with_writer(|| async move {
+            .with_writer_in(scope, || async move {
                 if !self.lifecycle.accepting() {
                     return;
                 }
@@ -429,8 +430,9 @@ impl DaemonEngine {
     ) -> crate::dashboard::AutomationSchedulerReconcileOutcome {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
+        let scope = super::branch_admin::owner_writer_scope(&key);
         self.store_administration
-            .with_writer(|| async move {
+            .with_writer_in(scope, || async move {
                 self.reconcile_automation_scheduler_locked(key, project_path, handshake)
                     .await
             })
@@ -729,8 +731,9 @@ impl DaemonEngine {
     ) -> bool {
         let transition = self.maintenance_transition_gate(key).await;
         let _transition = transition.lock().await;
+        let scope = super::branch_admin::owner_writer_scope(key);
         self.store_administration
-            .with_writer(|| async {
+            .with_writer_in(scope, || async {
                 {
                     let mut schedulers = self
                         .store_administration

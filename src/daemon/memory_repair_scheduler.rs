@@ -172,8 +172,9 @@ impl DaemonEngine {
     ) -> MemoryRepairSchedulerReconcileOutcome {
         let transition = self.maintenance_transition_gate(&key).await;
         let _transition = transition.lock().await;
+        let scope = super::branch_admin::owner_writer_scope(&key);
         self.store_administration
-            .with_writer(|| async move {
+            .with_writer_in(scope, || async move {
                 self.reconcile_memory_repair_scheduler_locked(key, project_path, handshake)
                     .await
             })
