@@ -116,6 +116,10 @@ const VECTOR_EVALUATION_STATE_SLICE_TABLE_V1: &str = "semantic_vector_evaluation
 const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
 /// Slices bound per statement.
 const VECTOR_STATE_SLICE_STATEMENT_ROWS: usize = 32;
+/// Slices read per statement. A single query may materialize neither more rows
+/// nor more bytes than the runtime allows, and a whole-corpus collection
+/// exceeds both, so reads page through the ordinals in bounded groups.
+const VECTOR_STATE_SLICE_READ_ROWS: usize = 128;
 /// Addresses resolved per read statement.
 const VECTOR_STATE_ADDRESS_STATEMENT_ROWS: usize = 64;
 const VECTOR_EVALUATION_STATE_SCHEMA_V1: &str = "
@@ -3712,6 +3716,14 @@ async fn write_vector_payloads(
     Ok(())
 }
 
+fn referenced_payload_addresses(state: &FakeVectorGenerationStoreV1) -> BTreeSet<ContentDigest> {
+    let mut referenced = BTreeSet::new();
+    state.visit_vectors(&mut |vector| {
+        referenced.insert(vector.output_digest.clone());
+    });
+    referenced
+}
+
 /// Delete payload rows the committed state no longer references.
 ///
 /// Retiring a generation is what makes its floats unreachable, so reclamation
@@ -3732,11 +3744,9 @@ async fn prune_unreferenced_vector_payloads(
         ))
         .await
         .map_err(storage_error)?;
-    let mut referenced = BTreeSet::new();
-    state.visit_vectors(&mut |vector| {
-        referenced.insert(vector.output_digest.clone());
-    });
-    let referenced = referenced.into_iter().collect::<Vec<_>>();
+    let referenced = referenced_payload_addresses(state)
+        .into_iter()
+        .collect::<Vec<_>>();
     for group in referenced.chunks(VECTOR_PAYLOAD_STATEMENT_ROWS) {
         let tuples = (1..=group.len())
             .map(|index| format!("(?{index})"))
@@ -3756,11 +3766,18 @@ async fn prune_unreferenced_vector_payloads(
             .await
             .map_err(storage_error)?;
     }
+    // `NOT EXISTS` against the scratch table's primary key is one index probe
+    // per payload row. The `NOT IN` form this replaced degraded into a scan of
+    // the reference set for every row, which at whole-corpus sizes ran past the
+    // runtime's per-statement execution limit and failed the publish outright.
     transaction
         .execute_engine(
             &format!(
                 "DELETE FROM {payload_table}
-                 WHERE output_digest NOT IN (SELECT output_digest FROM {scratch_table})"
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM {scratch_table}
+                     WHERE {scratch_table}.output_digest = {payload_table}.output_digest
+                 )"
             ),
             (),
         )
@@ -3906,35 +3923,54 @@ async fn hydrate_generation_slices(
     Ok(())
 }
 
+/// Read one collection's slices in ordinal order.
+///
+/// Paged by ordinal rather than read as one statement: a whole-corpus
+/// collection has more slices than a single query may materialize, and the
+/// runtime refuses such a statement outright rather than truncating it. Paging
+/// keeps every statement bounded no matter how large the collection grows.
 async fn read_state_slices(
     database: &Database,
     slice_table: &str,
     address: &ContentDigest,
 ) -> Result<Vec<Vec<u8>>, VectorGenerationStoreErrorV1> {
-    let mut rows = database
-        .engine_conn()
-        .query(
-            &format!(
-                "SELECT ordinal, payload
-                 FROM {slice_table}
-                 WHERE collection_digest = ?1
-                 ORDER BY ordinal"
-            ),
-            params![address.as_str()],
-        )
-        .await
-        .map_err(storage_error)?;
+    let connection = database.engine_conn();
+    let sql = format!(
+        "SELECT ordinal, payload
+         FROM {slice_table}
+         WHERE collection_digest = ?1 AND ordinal >= ?2 AND ordinal < ?3
+         ORDER BY ordinal"
+    );
     let mut slices = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage_error)? {
-        let ordinal = row.get::<i64>(0).map_err(storage_error)?;
-        if usize::try_from(ordinal).ok() != Some(slices.len()) {
-            return Err(VectorGenerationStoreErrorV1::Storage(format!(
-                "externalized state collection {address} has a gap in its slices"
-            )));
+    loop {
+        let start = i64::try_from(slices.len()).map_err(storage_error)?;
+        let end = start
+            .checked_add(i64::try_from(VECTOR_STATE_SLICE_READ_ROWS).map_err(storage_error)?)
+            .ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Storage(
+                    "externalized state collection is implausibly large".to_owned(),
+                )
+            })?;
+        let mut rows = connection
+            .query(&sql, params![address.as_str(), start, end])
+            .await
+            .map_err(storage_error)?;
+        let mut read = 0_usize;
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let ordinal = row.get::<i64>(0).map_err(storage_error)?;
+            if usize::try_from(ordinal).ok() != Some(slices.len()) {
+                return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                    "externalized state collection {address} has a gap in its slices"
+                )));
+            }
+            slices.push(row.get::<Vec<u8>>(1).map_err(storage_error)?);
+            read += 1;
         }
-        slices.push(row.get::<Vec<u8>>(1).map_err(storage_error)?);
+        drop(rows);
+        if read < VECTOR_STATE_SLICE_READ_ROWS {
+            break;
+        }
     }
-    drop(rows);
     if slices.is_empty() {
         return Err(VectorGenerationStoreErrorV1::Storage(format!(
             "externalized state collection {address} is missing from the store"
@@ -4039,8 +4075,10 @@ async fn prune_unreferenced_state_slices(
         .execute_engine(
             &format!(
                 "DELETE FROM {slice_table}
-                 WHERE collection_digest NOT IN
-                     (SELECT collection_digest FROM {scratch_table})"
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM {scratch_table}
+                     WHERE {scratch_table}.collection_digest = {slice_table}.collection_digest
+                 )"
             ),
             (),
         )
