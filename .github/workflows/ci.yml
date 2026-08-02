@@ -390,6 +390,23 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
+      # `ort-sys` (via fastembed -> ort, enabled by `--all-features`) downloads a
+      # prebuilt ONNX Runtime in its build script and then emits an absolute
+      # `cargo:rustc-link-search` into the *runner-local* ORT cache directory
+      # (`%LOCALAPPDATA%\...\dfbin\<target>\<hash>`). That directory is NOT one of
+      # the paths rust-cache stores, but the build-script output that points at it
+      # IS (it lives under `target/`). So a restored cache replays a link search
+      # path that does not exist on this fresh runner, cargo still considers the
+      # build script fresh and never re-downloads, and codegen fails with
+      # `could not find native static library 'onnxruntime'`. Clippy does not
+      # resolve native libs, which is why only the archive step trips over it.
+      # Evicting just this one package forces the build script to rerun and
+      # re-download into this runner, keeping the link path and the binaries
+      # consistent. Keep this before the first cargo invocation of the job.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        shell: pwsh
+        run: cargo clean -p ort-sys --locked
+
       - name: Lint Windows-only Rust paths
         shell: pwsh
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
