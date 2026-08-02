@@ -133,7 +133,7 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
                         result = &mut open =>
                             result.map(|owner| Some((owner, pending_lines))),
                         () = &mut peer_full_close => Ok(None),
-                        _ = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
+                        () = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
                             Err(TraceDecayError::Config {
                                 message: format!(
                                     "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
