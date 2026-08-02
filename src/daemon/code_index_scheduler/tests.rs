@@ -3955,6 +3955,12 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "external"]);
+    // Query admission schedules the reconcile instead of running it inline, so
+    // the out-of-band commit lands on the background worker. The abstention
+    // still reports the freshest *sealed* generation; it just no longer forces
+    // the rebuild that seals it onto whichever request arrived first.
+    let _ = registry.semantic_mcp_abstention(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
     assert_eq!(
@@ -4533,6 +4539,13 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
         Some(initial.clone()),
         "an out-of-band commit is not reflected until the freshness ladder runs"
     );
+
+    // Query admission runs the ladder's *checks* inline but never its rebuild:
+    // the reconcile is handed to the background worker so no request pays
+    // O(store) for it. The commit therefore lands a moment later, not on the
+    // first query, and the unpinned query then serves it.
+    let _ = registry.latest_complete_fresh(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
 
     // An unpinned query resolves the serving generation through the ladder.
     let operation =

@@ -225,6 +225,39 @@ timeout. Cold-open of a large store under load is the one sanctioned slow
 path, and it converges via freshness witnesses (skip redundant re-index)
 rather than by serving stale data.
 
+Per-group wraps are not enough on their own, because a group can simply have no
+wrap. `dispatch_deadline_horizon_micros` returns `None` for anything that is
+neither an application-surface operation nor a controlled read, so every graph,
+info, analysis, health, and session tool — `tracedecay_context` included —
+reached its handler carrying no deadline at all. A live Codex `context` call
+hung for **900 seconds** against a daemon grinding a failing semantic publish
+loop, and the client's own timeout, not the daemon, ended it.
+
+The bound is therefore universal and lives at the single dispatch choke point
+in `mcp::tools::handlers`, beneath the per-group wraps rather than beside them:
+the carried admission deadline when one is present and shorter, otherwise
+`TOOL_DISPATCH_CEILING`. A tool added tomorrow inherits it without opting in,
+and no handler can opt out. The ceiling also clamps a carried deadline longer
+than itself, so carrying a distant deadline is not an escape hatch. The few
+tools whose requested work *is* a long job (running a test suite, an admin
+index) carry `LONG_RUNNING_TOOL_DISPATCH_CEILING` instead — still bounded, and
+still far below the 900 seconds that motivated this.
+
+That ceiling is only the backstop. The hold it catches was real work on the
+request path: `latest_complete_fresh` ran the freshness ladder's *remedy*
+(`ensure_fresh_for_query`, a full O(store) reconcile and publish) inline on
+whichever request won the scheduler lock. Serve-old-first already protected the
+losers of that lock; the winner still paid. Query admission now runs the
+ladder's cheap checks inline and hands the rebuild to the background worker,
+answering from the retained generation exactly as the busy path always did. The
+git authority is still proven inline with an O(1) probe, so a vanished `.git`
+still fails closed rather than serving bytes under an identity nothing can
+confirm, and a cold open with nothing servable still reconciles inline — the one
+sanctioned slow path. The visible contract change is that an out-of-band commit
+lands on the next background pass instead of being forced onto the first query
+to notice it, which is what "serving never couples to indexing recency"
+requires.
+
 ## Status map (2026-08-01)
 
 | Principle | State |
@@ -238,6 +271,8 @@ rather than by serving stale data.
 | 4 idna/remote-normalization memoization | merged |
 | 5 paging/bounded heaps/batch IN | merged (20-finding wave) |
 | 6 carried-deadline central wrap (git, memory) | merged |
+| 6 universal dispatch ceiling (every tools/call group) | merged |
+| 6 query-admission reconcile moved off the request path | merged |
 | CI perf gate (self-index + 6-worker load, budget verdicts) | merged |
 
 First post-wave measurement (2026-08-01, release build, 96-core host): index
