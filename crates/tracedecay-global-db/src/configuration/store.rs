@@ -767,6 +767,20 @@ impl OwnedGlobalDbConfigurationControlStore {
         Arc::clone(&self.db)
     }
 
+    /// Revalidate the current daemon/maintenance scope before any mutation.
+    ///
+    /// The retained registered database may outlive its admission scope. Use
+    /// the runtime-core authority check against the exact database path rather
+    /// than opening or shadowing another database handle.
+    fn require_active_mutation_scope(db: &RegisteredGlobalDb) -> Result<(), ConfigurationError> {
+        tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+            db.db_path(),
+            "configuration control mutation",
+        )
+        .map(|_| ())
+        .map_err(|_| ConfigurationError::Unavailable)
+    }
+
     pub fn record_component_activation(
         &self,
         component: String,
@@ -776,6 +790,7 @@ impl OwnedGlobalDbConfigurationControlStore {
     ) -> ConfigurationOperationFuture<'_, ()> {
         let db = self.database();
         Box::pin(async move {
+            Self::require_active_mutation_scope(db.as_ref())?;
             let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
             store
                 .record_component_activation(
@@ -796,6 +811,15 @@ impl OwnedGlobalDbConfigurationControlStore {
 /// registered store inside the future and delegate. Only the argument list and
 /// the delegated call differ, so they are all the macro takes.
 macro_rules! forward_to_registered {
+    ($self:ident, [$($owned:ident),* $(,)?], mutating, |$store:ident| $call:expr) => {{
+        let db = $self.database();
+        $(let $owned = $owned.clone();)*
+        Box::pin(async move {
+            OwnedGlobalDbConfigurationControlStore::require_active_mutation_scope(db.as_ref())?;
+            let $store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
+            $call.await
+        })
+    }};
     ($self:ident, [$($owned:ident),* $(,)?], |$store:ident| $call:expr) => {{
         let db = $self.database();
         $(let $owned = $owned.clone();)*
@@ -816,7 +840,7 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         operation: &ProtectedChange,
     ) -> ConfigurationOperationFuture<'_, ()> {
-        forward_to_registered!(self, [plan, operation], |store| store
+        forward_to_registered!(self, [plan, operation], mutating, |store| store
             .save_plan(&plan, &operation))
     }
 
@@ -833,9 +857,12 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         mutation: &DirectConfigurationMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(self, [authority, mutation, expected_revision], |store| {
-            store.commit_direct(&authority, &mutation, &expected_revision)
-        })
+        forward_to_registered!(
+            self,
+            [authority, mutation, expected_revision],
+            mutating,
+            |store| { store.commit_direct(&authority, &mutation, &expected_revision) }
+        )
     }
 
     fn commit_protected(
@@ -845,8 +872,12 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(self, [authority, request, plan, evidence], |store| store
-            .commit_protected(&authority, &request, &plan, &evidence))
+        forward_to_registered!(
+            self,
+            [authority, request, plan, evidence],
+            mutating,
+            |store| store.commit_protected(&authority, &request, &plan, &evidence)
+        )
     }
 
     fn dry_run_rollback(
@@ -855,7 +886,7 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         rollback: &ConfigurationRollbackRequest,
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'_, ProtectedChangePlan> {
-        forward_to_registered!(self, [authority, rollback], |store| store
+        forward_to_registered!(self, [authority, rollback], mutating, |store| store
             .dry_run_rollback(&authority, &rollback, now))
     }
 
@@ -866,8 +897,12 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan: &ProtectedChangePlan,
         evidence: &ScopeRevalidationEvidenceV1,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
-        forward_to_registered!(self, [authority, request, plan, evidence], |store| store
-            .apply_rollback(&authority, &request, &plan, &evidence))
+        forward_to_registered!(
+            self,
+            [authority, request, plan, evidence],
+            mutating,
+            |store| store.apply_rollback(&authority, &request, &plan, &evidence)
+        )
     }
 
     fn audit(
@@ -896,8 +931,12 @@ impl CredentialWritePort for OwnedGlobalDbConfigurationControlStore {
         write: &WriteOnlyCredentialMutation,
         expected_revision: &ConfigurationRevisionId,
     ) -> ConfigurationOperationFuture<'_, CredentialReferenceMetadataV1> {
-        forward_to_registered!(self, [authority, write, expected_revision], |store| store
-            .write_reference(&authority, &write, &expected_revision))
+        forward_to_registered!(
+            self,
+            [authority, write, expected_revision],
+            mutating,
+            |store| store.write_reference(&authority, &write, &expected_revision)
+        )
     }
 }
 
