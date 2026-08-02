@@ -10,7 +10,6 @@ mod proposals;
 mod upgrades;
 
 pub(in crate::db) use baseline::create_schema;
-pub(in crate::db::memory_v2) use introspection::v22_feedback_history_schema_installed;
 #[cfg(test)]
 pub(in crate::db::memory_v2) use introspection::{
     proposal_schema_is_v22, table_exists, table_has_column,

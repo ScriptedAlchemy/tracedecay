@@ -276,7 +276,6 @@ async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPay
         helpful_count: as_usize(typed_status.helpful_count())?,
         unhelpful_count: as_usize(typed_status.unhelpful_count())?,
         missing_vector_count: as_usize(typed_status.missing_vector_count())?,
-        legacy_backfill_complete: typed_status.legacy_backfill_complete(),
         repair: MemoryRepairStats {
             missing_vectors_repaired: as_usize(typed_status.repair().missing_vectors_repaired())?,
             banks_rebuilt: as_usize(typed_status.repair().banks_rebuilt())?,

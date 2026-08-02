@@ -221,26 +221,25 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
             return false;
         }
     };
-    let vector_readable_sources =
-        match DatabaseVectorGenerationStoreV1::open_legacy_migration(graph.db()).await {
-            Ok(store) => match store.read_legacy_inventory().await {
-                Ok(inventory) => match inventory.read_only_inventory() {
-                    Ok(inventory) => inventory.retained_readable_sources(),
-                    Err(_) => {
-                        log_code_generation_retention_degraded("vector_inventory_unreadable");
-                        return false;
-                    }
-                },
+    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
+        Ok(store) => match store.read_legacy_inventory().await {
+            Ok(inventory) => match inventory.read_only_inventory() {
+                Ok(inventory) => inventory.retained_readable_sources(),
                 Err(_) => {
-                    log_code_generation_retention_degraded("vector_inventory_read_failed");
+                    log_code_generation_retention_degraded("vector_inventory_unreadable");
                     return false;
                 }
             },
             Err(_) => {
-                log_code_generation_retention_degraded("vector_generation_store_unavailable");
+                log_code_generation_retention_degraded("vector_inventory_read_failed");
                 return false;
             }
-        };
+        },
+        Err(_) => {
+            log_code_generation_retention_degraded("vector_generation_store_unavailable");
+            return false;
+        }
+    };
 
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let report = tokio::task::spawn_blocking(move || {

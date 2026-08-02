@@ -278,7 +278,6 @@ pub(super) async fn merge(conn: &impl Executor) -> Result<()> {
          DELETE FROM observation_projection_rebuild_dispositions;
          DELETE FROM observation_projection_rebuild_workflow_facts;
          DELETE FROM observation_projection_rebuilds;
-         DELETE FROM observation_projection_migrations;
          DELETE FROM observation_workflow_facts;
          DELETE FROM observation_projection_checkpoints;
          DELETE FROM projection_queue;

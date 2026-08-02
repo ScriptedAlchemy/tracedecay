@@ -180,33 +180,3 @@ impl CompatibilityMemoryRepairCommandV1 {
         self.actor.as_ref()
     }
 }
-
-/// Daemon-owned, bounded advancement of the persisted V1 raw-memory cutover.
-///
-/// The implementation captures its source frontier once, advances at most one
-/// fixed-size batch, and persists the cursor/quarantine state. Callers retry
-/// only while the returned progress is incomplete; they never query V1 rows
-/// themselves.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityLegacyMemoryCutoverCommandV1 {
-    owner: FactOwnerV1,
-    receipt_id: ProvenanceId,
-}
-
-impl CompatibilityLegacyMemoryCutoverCommandV1 {
-    pub fn new(owner: FactOwnerV1, receipt_id: ProvenanceId) -> FactStoreResult<Self> {
-        owner.validate()?;
-        receipt_id.validate()?;
-        Ok(Self { owner, receipt_id })
-    }
-
-    pub fn owner(&self) -> &FactOwnerV1 {
-        &self.owner
-    }
-
-    /// Stable identity for the persisted cutover receipt. Retries of one
-    /// daemon job must retain it so a completed cutover can replay safely.
-    pub fn receipt_id(&self) -> &ProvenanceId {
-        &self.receipt_id
-    }
-}

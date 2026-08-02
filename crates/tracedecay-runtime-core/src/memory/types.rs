@@ -369,7 +369,6 @@ pub struct MemoryStatus {
     pub helpful_count: usize,
     pub unhelpful_count: usize,
     pub missing_vector_count: usize,
-    pub legacy_backfill_complete: bool,
     pub repair: MemoryRepairStats,
     /// Adoption-funnel numbers for the fact store's feedback loop: how many
     /// facts get seen (retrieved) vs. how many ever get rated. Surfaced so a

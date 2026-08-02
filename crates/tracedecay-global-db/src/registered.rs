@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
@@ -84,8 +83,11 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
-    /// Migrates an already-published runtime before validating and exposing
-    /// the registered global database facade. No path is reopened.
+    /// Creates the registered schema at its final shape (or verifies an
+    /// existing store already carries it) before validating and exposing the
+    /// registered global database facade. No path is reopened, and no store is
+    /// stepped forward from an older shape: a store at any other shape is a
+    /// typed refusal from [`super::ensure_registered_schema`].
     pub async fn migrate_and_attach(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
@@ -240,20 +242,6 @@ impl RegisteredGlobalDb {
             connection: &self.write_connection,
             authority: &self.authority,
         })
-    }
-
-    pub async fn advance_projection_version_migration_until_cancelled(
-        &self,
-        cancelled: &AtomicBool,
-    ) -> tracedecay_runtime_core::errors::Result<bool> {
-        self.authority
-            .require_active_write_scope("advance observation projection migration")?;
-        super::observation_projection::advance_projection_version_migration_until_cancelled_with_engine(
-                &self.write_connection,
-                cancelled,
-            )
-            .await
-            .map_err(|error| registered_error("advance observation projection migration", error))
     }
 
     pub async fn begin_write_transaction(

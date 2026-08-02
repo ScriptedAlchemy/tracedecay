@@ -28,8 +28,7 @@ pub use curation::{
     CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
     CompatibilityFactRepairVectorV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityLegacyMemoryCutoverCommandV1,
-    CompatibilityMemoryRepairCommandV1,
+    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
 };
 pub use dashboard::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,

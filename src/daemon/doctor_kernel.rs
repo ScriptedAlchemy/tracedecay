@@ -1203,7 +1203,7 @@ pub async fn collect_code_generation_retention_findings(
     if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
         return DoctorStorageFamilyReadV1::Unknown;
     }
-    let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
+    let Ok(store) = DatabaseVectorGenerationStoreV1::open(graph).await else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     let Ok(inventory) = store.read_legacy_inventory().await else {

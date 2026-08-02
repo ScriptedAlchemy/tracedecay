@@ -16,7 +16,7 @@ pub use fact_commands::{
 };
 pub use merge::{
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1,
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityMemoryRepairCommandV1,
+    CompatibilityMemoryRepairCommandV1,
 };
 pub use operations::{
     CompatibilityFactAddAliasV1, CompatibilityFactCurationBatchV1,

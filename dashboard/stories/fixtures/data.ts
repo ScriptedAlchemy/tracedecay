@@ -3143,7 +3143,6 @@ function memoryStatusPayload(): Record<string, unknown> {
       fact_count: 173,
       below_default_recall_threshold_count: 4,
       missing_vector_count: 0,
-      legacy_backfill_complete: true,
       repair: { banks_rebuilt: 0, missing_vectors_repaired: 0 },
       // The four coarse trust bands. KnowledgePage reads these as its FALLBACK
       // trust distribution, because on a real store the overview's ten-bucket

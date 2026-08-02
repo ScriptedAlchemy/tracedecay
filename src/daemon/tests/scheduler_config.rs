@@ -551,49 +551,6 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
 }
 
 #[cfg(unix)]
-#[test]
-fn memory_repair_retries_only_incomplete_progress() {
-    use tracedecay_store::{
-        CompatibilityFeedbackRepairProgressV1, CompatibilityLegacyMemoryCutoverProgressV1,
-    };
-
-    assert_eq!(
-        super::super::memory_repair_tick_outcome(
-            CompatibilityFeedbackRepairProgressV1::Incomplete {
-                processed: 1,
-                remaining: Some(1),
-            }
-        )
-        .expect("incomplete repair must retry"),
-        super::super::MemoryRepairTickOutcome::Incomplete,
-    );
-    assert_eq!(
-        super::super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::Complete {
-            processed: 1
-        })
-        .expect("complete repair must stop"),
-        super::super::MemoryRepairTickOutcome::Complete,
-    );
-    assert_eq!(
-        super::super::memory_repair_tick_outcome(
-            CompatibilityFeedbackRepairProgressV1::NotRequired
-        )
-        .expect("unneeded repair must stop"),
-        super::super::MemoryRepairTickOutcome::NotRequired,
-    );
-    assert!(
-        super::super::memory_repair_tick_outcome(CompatibilityFeedbackRepairProgressV1::Unknown)
-            .is_err()
-    );
-    assert!(super::super::legacy_memory_cutover_should_retry(
-        CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { processed: 1 },
-    ));
-    assert!(!super::super::legacy_memory_cutover_should_retry(
-        CompatibilityLegacyMemoryCutoverProgressV1::Complete,
-    ));
-}
-
-#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn daemon_memory_repair_scheduler_starts_without_automation_configuration() {
     let dir = TempDir::new().expect("temp dir");

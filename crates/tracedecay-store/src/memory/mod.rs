@@ -50,9 +50,8 @@ pub use compatibility::{
     CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1, CompatibilityFactSourceV1,
     CompatibilityFactTargetV1, CompatibilityFactUnavailableV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1, CompatibilityFactV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityLegacyMemoryCutoverCommandV1,
-    CompatibilityMemoryRepairCommandV1, FactProposalPromotionStateV1, PromoteFactProposal,
-    PromoteFactProposalOutcome,
+    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
+    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use error::{
     FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
@@ -70,9 +69,8 @@ pub use telemetry::{
     CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackDetailsAvailabilityV1,
     CompatibilityFactFeedbackHistoryEntryV1, CompatibilityFactFeedbackHistoryV1,
     CompatibilityFactStatusV1, CompatibilityFactTelemetryV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityLegacyMemoryCutoverProgressV1, CompatibilityMemoryAlgebraV1,
-    CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
+    CompatibilityMemoryAlgebraV1, CompatibilityMemoryFeedbackFunnelV1,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
 };
 pub use traits::{FactCompatibilityStore, FactProposalStore, FactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};

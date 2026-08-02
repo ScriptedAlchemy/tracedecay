@@ -73,28 +73,7 @@ async fn rebuild_projection_until_cancelled_with_engine(
     projection_rebuild_progress_on(conn).await
 }
 
-pub(super) async fn resume_projection_rebuild_with_engine(
-    conn: &Connection,
-    cancelled: &AtomicBool,
-) -> ProjectionStoreResult<Option<bool>> {
-    let Some(job) = read_optional_rebuild_job(conn).await? else {
-        return Ok(None);
-    };
-    let frontier = decode_sequence(job.frontier, "resume projection rebuild frontier")?;
-    rebuild_projection_until_cancelled_with_engine(conn, frontier, cancelled)
-        .await
-        .map(|outcome| Some(outcome.is_complete()))
-}
-
-pub(super) async fn projection_rebuild_pending(
-    conn: &impl QueryExecutor,
-) -> ProjectionStoreResult<bool> {
-    read_optional_rebuild_job(conn)
-        .await
-        .map(|job| job.is_some())
-}
-
-pub(super) async fn prepare_projection_rebuild_with_engine(
+async fn prepare_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<()> {
@@ -696,9 +675,7 @@ fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<us
 /// on to read or write further rows through the same connection and observe
 /// them — a cursor left open past that point would otherwise pin the
 /// connection's read snapshot and hide those subsequent writes.
-pub(super) async fn read_observation_frontier(
-    conn: &impl QueryExecutor,
-) -> ProjectionStoreResult<u64> {
+async fn read_observation_frontier(conn: &impl QueryExecutor) -> ProjectionStoreResult<u64> {
     let mut rows = conn
         .query("SELECT COALESCE(MAX(sequence), 0) FROM observations", ())
         .await
