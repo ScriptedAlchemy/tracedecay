@@ -1662,6 +1662,125 @@ mod discovery_tests {
         }
     }
 
+    struct PagedWorkflowJobDiscoveryClient {
+        workflow_job_pages: Vec<Vec<u8>>,
+        requested_pages: Mutex<Vec<u32>>,
+    }
+
+    impl ProductionCiDiscoveryReadPortV1 for PagedWorkflowJobDiscoveryClient {
+        fn read_workflow_runs_for_head<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _head_sha: &'a str,
+            _page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
+        }
+
+        fn read_workflow_jobs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _run_id: u64,
+            page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            self.requested_pages.lock().unwrap().push(page);
+            let outcome = usize::try_from(page.saturating_sub(1))
+                .ok()
+                .and_then(|index| self.workflow_job_pages.get(index))
+                .cloned()
+                .map_or(
+                    GitHubCiTransportOutcomeV1::Unavailable,
+                    GitHubCiTransportOutcomeV1::Response,
+                );
+            Box::pin(async move { outcome })
+        }
+
+        fn read_check_runs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _check_suite_id: u64,
+            _page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
+        }
+    }
+
+    struct ConfiguredDiscoveryClient {
+        record: GitHubCiProviderRecordV1,
+        requests: Mutex<Vec<&'static str>>,
+    }
+
+    impl ProductionCiDiscoveryReadPortV1 for ConfiguredDiscoveryClient {
+        fn read_workflow_runs_for_head<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _head_sha: &'a str,
+            page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            self.requests.lock().unwrap().push("workflow-runs");
+            let outcome = (page == 1)
+                .then(|| {
+                    serde_json::to_vec(&serde_json::json!({
+                        "total_count": 1,
+                        "workflow_runs": [self.record.workflow_run.clone()],
+                    }))
+                    .ok()
+                    .map_or(
+                        GitHubCiTransportOutcomeV1::Unavailable,
+                        GitHubCiTransportOutcomeV1::Response,
+                    )
+                })
+                .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+
+        fn read_workflow_jobs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _run_id: u64,
+            page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            self.requests.lock().unwrap().push("workflow-jobs");
+            let outcome = (page == 1)
+                .then(|| {
+                    serde_json::to_vec(&serde_json::json!({
+                        "total_count": 1,
+                        "jobs": [self.record.workflow_job.clone()],
+                    }))
+                    .ok()
+                    .map_or(
+                        GitHubCiTransportOutcomeV1::Unavailable,
+                        GitHubCiTransportOutcomeV1::Response,
+                    )
+                })
+                .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+
+        fn read_check_runs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _check_suite_id: u64,
+            page: u32,
+        ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
+            self.requests.lock().unwrap().push("check-runs");
+            let outcome = (page == 1)
+                .then(|| {
+                    serde_json::to_vec(&serde_json::json!({
+                        "total_count": 1,
+                        "check_runs": [self.record.check_run.clone()],
+                    }))
+                    .ok()
+                    .map_or(
+                        GitHubCiTransportOutcomeV1::Unavailable,
+                        GitHubCiTransportOutcomeV1::Response,
+                    )
+                })
+                .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+    }
+
     #[tokio::test]
     async fn denied_context_performs_zero_ci_discovery_reads() {
         let fixture =
@@ -1705,6 +1824,41 @@ mod discovery_tests {
 
         assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Stale);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_ci_discovery_reads_workflow_jobs_in_both_consensus_scans() {
+        let fixture =
+            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let client = ConfiguredDiscoveryClient {
+            record: fixture.ci_provider_record.clone(),
+            requests: Mutex::new(Vec::new()),
+        };
+
+        let outcome = discover_production_ci_failure_request_with_v1(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config(&fixture),
+            &scope,
+            &client,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.request().map(|request| &request.run),
+            Some(&fixture.ci.run)
+        );
+        assert_eq!(
+            *client.requests.lock().unwrap(),
+            vec![
+                "workflow-runs",
+                "workflow-jobs",
+                "check-runs",
+                "workflow-runs",
+                "workflow-jobs",
+                "check-runs",
+            ]
+        );
     }
 
     #[test]
@@ -2116,6 +2270,44 @@ mod discovery_tests {
             &config(&fixture),
             &scope,
             &client,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn discovery_collects_every_bounded_workflow_job_page_in_order() {
+        let fixture =
+            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let first = fixture.ci_provider_record.workflow_job.clone();
+        let mut second = first.clone();
+        second.id += 1;
+        let client = PagedWorkflowJobDiscoveryClient {
+            workflow_job_pages: vec![
+                serde_json::to_vec(&serde_json::json!({
+                    "total_count": 2,
+                    "jobs": [first],
+                }))
+                .unwrap(),
+                serde_json::to_vec(&serde_json::json!({
+                    "total_count": 2,
+                    "jobs": [second],
+                }))
+                .unwrap(),
+            ],
+            requested_pages: Mutex::new(Vec::new()),
+        };
+
+        let records = collect_workflow_jobs(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config(&fixture),
+            &scope,
+            &client,
+            fixture.ci_provider_record.workflow_run.id,
         )
         .await
         .unwrap();
