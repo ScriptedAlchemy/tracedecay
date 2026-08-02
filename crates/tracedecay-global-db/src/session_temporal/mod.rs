@@ -97,6 +97,18 @@ impl RegisteredGlobalDb {
         })?;
         GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key).await
     }
+
+    pub async fn load_preprovisioned_session_cursor_key_provider_result(
+        &self,
+    ) -> Result<GlobalDbCursorKeyProvider, cursor_keys::GlobalDbCursorKeyProviderError> {
+        let read = self.read_snapshot().await.map_err(|source| {
+            cursor_keys::GlobalDbCursorKeyProviderError::Storage {
+                operation: "load pre-provisioned session cursor authentication key",
+                source,
+            }
+        })?;
+        GlobalDbCursorKeyProvider::from_registered_active(&read).await
+    }
 }
 
 /// Transitional PR8 rendering adapter over one registry-owned session shard.

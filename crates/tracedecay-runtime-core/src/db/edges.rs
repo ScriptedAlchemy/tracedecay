@@ -53,6 +53,104 @@ pub(super) fn bulk_edges_by_endpoint_page_sql(endpoint_column: &str, kind_count:
     )
 }
 
+#[derive(Clone, Debug)]
+pub struct EdgesByEndpointPage {
+    pub edges: Vec<Edge>,
+    pub has_more: bool,
+    pub rows_read: usize,
+}
+
+pub(super) async fn read_edges_by_endpoint_page_controlled<C, F>(
+    conn: &C,
+    endpoint_column: &'static str,
+    node_ids: &[String],
+    kinds: &[EdgeKind],
+    limit: usize,
+    mut checkpoint: F,
+) -> Result<EdgesByEndpointPage>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if node_ids.is_empty() || limit == 0 {
+        return Ok(EdgesByEndpointPage {
+            edges: Vec::new(),
+            has_more: false,
+            rows_read: 0,
+        });
+    }
+    let query_limit = limit
+        .checked_add(1)
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "edge page limit overflowed".to_owned(),
+            operation: "get_incoming_edges_bulk_page".to_owned(),
+        })?;
+    let (mut values, sql) = if let [node_id] = node_ids {
+        (
+            vec![Value::Text(node_id.clone())],
+            single_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+        )
+    } else {
+        let encoded =
+            serde_json::to_string(node_ids).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to encode bounded edge endpoints: {error}"),
+                operation: "get_incoming_edges_bulk_page".to_owned(),
+            })?;
+        (
+            vec![Value::Text(encoded)],
+            bulk_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+        )
+    };
+    values.extend(
+        kinds
+            .iter()
+            .map(|kind| Value::Text(kind.as_str().to_owned())),
+    );
+    values.push(Value::Integer(i64::MIN));
+    values.push(Value::Integer(i64::try_from(query_limit).map_err(
+        |error| TraceDecayError::Database {
+            message: format!("invalid edge page limit: {error}"),
+            operation: "get_incoming_edges_bulk_page".to_owned(),
+        },
+    )?));
+    checkpoint()?;
+    let mut rows = conn
+        .query(&sql, params_from_iter(values))
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to query bounded incoming edges: {error}"),
+            operation: "get_incoming_edges_bulk_page".to_owned(),
+        })?;
+    let mut edges = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read bounded incoming edge: {error}"),
+            operation: "get_incoming_edges_bulk_page".to_owned(),
+        })?
+    {
+        if !edges.is_empty() && edges.len() % 64 == 0 {
+            checkpoint()?;
+        }
+        edges.push(
+            row_to_edge(&row).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to map bounded incoming edge: {error}"),
+                operation: "get_incoming_edges_bulk_page".to_owned(),
+            })?,
+        );
+    }
+    checkpoint()?;
+    let rows_read = edges.len();
+    let has_more = rows_read > limit;
+    edges.truncate(limit);
+    Ok(EdgesByEndpointPage {
+        edges,
+        has_more,
+        rows_read,
+    })
+}
+
 pub(super) async fn read_edges_by_endpoint_controlled<C, F>(
     conn: &C,
     endpoint_column: &'static str,
@@ -100,6 +198,20 @@ where
 }
 
 impl DatabaseEngineReadSnapshot {
+    pub async fn get_incoming_edges_bulk_page_controlled<F>(
+        &self,
+        target_ids: &[String],
+        kinds: &[EdgeKind],
+        limit: usize,
+        checkpoint: F,
+    ) -> Result<EdgesByEndpointPage>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_edges_by_endpoint_page_controlled(self, "target", target_ids, kinds, limit, checkpoint)
+            .await
+    }
+
     pub async fn get_incoming_edges_bulk_controlled<F>(
         &self,
         target_ids: &[String],

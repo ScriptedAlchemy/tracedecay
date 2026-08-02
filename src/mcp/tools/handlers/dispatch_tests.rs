@@ -921,6 +921,52 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     )
     .await
     .unwrap();
+    let cursor_db = runtime
+        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .expect("registered project cursor authority");
+    let missing_key_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: Some(cursor_db.clone()),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("a read must not mint a missing cursor key");
+    assert!(
+        missing_key_error
+            .to_string()
+            .contains("pre-provisioned PR context cursor key is unavailable")
+    );
+    let key_snapshot = cursor_db.read_snapshot().await.unwrap();
+    let mut key_rows = key_snapshot
+        .query("SELECT COUNT(*) FROM session_query_cursor_keys", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        key_rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        0,
+        "PR context read must leave the cursor-key table unchanged",
+    );
+    drop(key_rows);
+    drop(key_snapshot);
+    cursor_db
+        .ensure_active_session_cursor_key_result()
+        .await
+        .expect("pre-provision PR context cursor key");
     cg.index_all().await.unwrap();
 
     let options = ToolCallRegistryOptions {
@@ -1004,12 +1050,9 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     )
     .expect("JSON PR context");
     assert_eq!(first["symbol_page"]["returned"], 1);
-    let total = first["symbol_page"]["total"]
-        .as_u64()
-        .expect("exact symbol total");
-    assert!(total > 1);
+    assert_eq!(first["symbol_page"]["rows_read"], 2);
+    assert_eq!(first["symbol_page"]["has_more"], true);
     assert_eq!(first["symbol_page"]["complete"], false);
-    assert_eq!(first["symbol_page"]["omitted"], total - 1);
     assert_eq!(first["symbol_page"]["continuation_available"], true);
     let cursor = first["next_cursor"]
         .as_str()
@@ -1040,7 +1083,7 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
             .expect("JSON tool text"),
     )
     .expect("second JSON PR context");
-    assert_eq!(second["symbol_page"]["offset"], 1);
+    assert_eq!(second["symbol_page"]["returned"], 1);
     assert_ne!(second["added"], first["added"]);
 
     let mut tampered = cursor.as_bytes().to_vec();

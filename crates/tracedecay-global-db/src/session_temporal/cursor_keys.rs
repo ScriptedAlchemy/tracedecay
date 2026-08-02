@@ -25,6 +25,8 @@ const CURSOR_KEY_RETENTION_MICROS: i64 = CURSOR_LIFETIME_MICROS + CURSOR_CLOCK_S
 
 #[derive(Debug, Error)]
 pub enum GlobalDbCursorKeyProviderError {
+    #[error("no pre-provisioned active cursor authentication key is available")]
+    ActiveKeyMissing,
     #[error("frozen snapshot does not select a cursor authentication key")]
     SnapshotKeyUnavailable,
     #[error("cursor authentication key is unavailable for frozen key {expected:?}")]
@@ -193,6 +195,45 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
 }
 
 impl GlobalDbCursorKeyProvider {
+    pub async fn from_registered_active(
+        read: &ReadSnapshot,
+    ) -> Result<Self, GlobalDbCursorKeyProviderError> {
+        let mut rows = read
+            .query(
+                "SELECT key_id, key_version
+                 FROM session_query_cursor_keys
+                 WHERE retired_at IS NULL
+                 ORDER BY key_version DESC
+                 LIMIT 2",
+                (),
+            )
+            .await
+            .map_err(storage)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(storage)?
+            .ok_or(GlobalDbCursorKeyProviderError::ActiveKeyMissing)?;
+        if rows.next().await.map_err(storage)?.is_some() {
+            return Err(GlobalDbCursorKeyProviderError::MultipleActiveKeys { count: 2 });
+        }
+        let key_id = SessionCursorKeyIdV1::new(row.get::<String>(0).map_err(storage)?)
+            .map_err(|_| GlobalDbCursorKeyProviderError::InvalidKeyId)?;
+        let version_value = row.get::<i64>(1).map_err(storage)?;
+        let version = u16::try_from(version_value)
+            .ok()
+            .and_then(|value| SessionCursorVersionV1::new(value).ok())
+            .ok_or(GlobalDbCursorKeyProviderError::InvalidKeyVersion {
+                value: version_value,
+            })?;
+        drop(rows);
+        Self::from_registered_key_ref(read, SignedCursorKeyRefV1 { key_id, version }).await
+    }
+
+    pub fn active_key_ref(&self) -> &SignedCursorKeyRefV1 {
+        &self.active_key
+    }
+
     pub async fn from_registered_key_ref(
         read: &ReadSnapshot,
         expected: SignedCursorKeyRefV1,

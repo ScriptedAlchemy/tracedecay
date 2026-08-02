@@ -50,6 +50,7 @@ pub use connection::{
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+pub use edges::EdgesByEndpointPage;
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;

@@ -29,7 +29,7 @@ use super::coverage::{
 };
 use super::edges::{
     bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
-    single_edges_by_endpoint_page_sql,
+    read_edges_by_endpoint_page_controlled, single_edges_by_endpoint_page_sql,
 };
 use super::engine::{
     IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, Value,
@@ -540,6 +540,30 @@ async fn bulk_endpoint_edges_page_past_the_runtime_query_limit() {
     assert_eq!(i64::try_from(edges.len()).expect("edge count"), ROWS + 1);
 }
 
+#[tokio::test]
+async fn high_fan_in_impact_page_reads_only_limit_plus_one_rows() {
+    let directory = TempDir::new().expect("bounded fan-in tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+    let page = read_edges_by_endpoint_page_controlled(
+        &counted,
+        "target",
+        &[HUB_ID.to_owned()],
+        &[],
+        100,
+        || Ok(()),
+    )
+    .await
+    .expect("bounded fan-in page");
+    assert_eq!(page.edges.len(), 100);
+    assert!(page.has_more);
+    assert_eq!(page.rows_read, 101);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
+}
+
 /// A repository-scale matching set still performs one bounded query per stable
 /// page and materializes only that page.
 #[tokio::test]
@@ -554,20 +578,12 @@ async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
         .map(|index| format!("{FUNCTION_DIR}m{index:05}.rs"))
         .collect();
     paths.push("src/hub.rs".to_owned());
-    let added_paths = paths[..1_900].to_vec();
-    let first =
-        read_nodes_by_files_page_controlled(&counted, &paths, &[], &added_paths, None, 100, || {
-            Ok(())
-        })
+    let first = read_nodes_by_files_page_controlled(&counted, &paths, None, 100, || Ok(()))
         .await
         .expect("first bounded node page");
     assert_eq!(first.entries.len(), 100);
-    assert_eq!(first.offset, 0);
-    assert_eq!(
-        first.total_symbols,
-        3_815 + usize::try_from(ROWS + 1).unwrap()
-    );
-    assert_eq!(first.added_symbols, 1_900);
+    assert!(first.has_more);
+    assert_eq!(first.rows_read, 101);
     assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
 
     let last = &first.entries[99].node;
@@ -576,20 +592,13 @@ async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
         start_line: last.start_line,
         id: last.id.clone(),
     };
-    let second = read_nodes_by_files_page_controlled(
-        &counted,
-        &paths,
-        &[],
-        &added_paths,
-        Some(&after),
-        100,
-        || Ok(()),
-    )
-    .await
-    .expect("second bounded node page");
+    let second =
+        read_nodes_by_files_page_controlled(&counted, &paths, Some(&after), 100, || Ok(()))
+            .await
+            .expect("second bounded node page");
     assert_eq!(second.entries.len(), 100);
-    assert_eq!(second.offset, 100);
-    assert_eq!(second.total_symbols, first.total_symbols);
+    assert!(second.has_more);
+    assert_eq!(second.rows_read, 101);
     assert_eq!(counted.queries.load(Ordering::Relaxed), 2);
     let first_ids: std::collections::HashSet<&str> = first
         .entries
@@ -611,7 +620,7 @@ async fn nodes_by_files_page_cancellation_stops_mid_page() {
     let conn = seed_oversized_graph(&directory).await;
     let paths = vec!["src/hub.rs".to_owned()];
     let checkpoints = AtomicUsize::new(0);
-    let error = read_nodes_by_files_page_controlled(&conn, &paths, &[], &[], None, 500, || {
+    let error = read_nodes_by_files_page_controlled(&conn, &paths, None, 500, || {
         let observed = checkpoints.fetch_add(1, Ordering::Relaxed);
         if observed == 1 {
             Err(crate::errors::TraceDecayError::Config {
@@ -633,11 +642,11 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     let conn = seed_oversized_graph(&directory).await;
     let paths = vec![format!("{FUNCTION_DIR}m00000.rs")];
     let snapshot = conn.read_snapshot().await.expect("begin graph snapshot");
-    let before =
-        read_nodes_by_files_page_controlled(&snapshot, &paths, &[], &[], None, 10, || Ok(()))
-            .await
-            .expect("read snapshot symbol page");
-    assert_eq!(before.total_symbols, 1);
+    let before = read_nodes_by_files_page_controlled(&snapshot, &paths, None, 10, || Ok(()))
+        .await
+        .expect("read snapshot symbol page");
+    assert_eq!(before.entries.len(), 1);
+    assert!(!before.has_more);
 
     conn.execute(
         "INSERT INTO nodes (
@@ -663,11 +672,11 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     .await
     .expect("publish concurrent edge");
 
-    let stable =
-        read_nodes_by_files_page_controlled(&snapshot, &paths, &[], &[], None, 10, || Ok(()))
-            .await
-            .expect("repeat snapshot symbol page");
-    assert_eq!(stable.total_symbols, 1);
+    let stable = read_nodes_by_files_page_controlled(&snapshot, &paths, None, 10, || Ok(()))
+        .await
+        .expect("repeat snapshot symbol page");
+    assert_eq!(stable.entries.len(), 1);
+    assert!(!stable.has_more);
     let stable_edges = read_edges_by_endpoint_controlled(
         &snapshot,
         "target",
@@ -685,11 +694,10 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     );
 
     let current = conn.read_snapshot().await.expect("begin current snapshot");
-    let current_page =
-        read_nodes_by_files_page_controlled(&current, &paths, &[], &[], None, 10, || Ok(()))
-            .await
-            .expect("read current symbol page");
-    assert_eq!(current_page.total_symbols, 2);
+    let current_page = read_nodes_by_files_page_controlled(&current, &paths, None, 10, || Ok(()))
+        .await
+        .expect("read current symbol page");
+    assert_eq!(current_page.entries.len(), 2);
 }
 
 /// `get_nodes_by_file` and the id gather in `delete_nodes_by_file` read one

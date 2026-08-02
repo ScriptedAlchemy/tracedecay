@@ -9,7 +9,7 @@ use super::shell::{
     git_pr_comparison_controlled, git_recent_commits,
 };
 use super::*;
-use crate::types::{EdgeKind, Node};
+use crate::types::{Edge, EdgeKind, Node};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -458,6 +458,9 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 
 const PR_CONTEXT_DEFAULT_SYMBOLS: usize = 200;
 const PR_CONTEXT_MAX_SYMBOLS: usize = 500;
+const PR_CONTEXT_MAX_IMPACT_NODES: usize = 1_000;
+const PR_CONTEXT_MAX_IMPACT_EDGES: usize = 2_000;
+const PR_CONTEXT_MAX_IMPACT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
 struct PrContextControls {
@@ -502,20 +505,52 @@ async fn pr_context_impact_snapshot(
     seed_nodes: &[Node],
     max_depth: usize,
     controls: &PrContextControls,
-) -> Result<Vec<Node>> {
-    let mut visited: HashSet<String> = seed_nodes.iter().map(|node| node.id.clone()).collect();
-    let mut result = seed_nodes.to_vec();
-    let mut frontier: Vec<String> = seed_nodes.iter().map(|node| node.id.clone()).collect();
-    for _depth in 0..max_depth {
+) -> Result<PrContextImpact> {
+    let mut impact = PrContextImpact::default();
+    let mut visited = HashSet::new();
+    let mut frontier = Vec::new();
+    for node in seed_nodes {
+        let bytes = pr_context_node_bytes(node);
+        if impact.nodes.len() >= PR_CONTEXT_MAX_IMPACT_NODES
+            || impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES
+        {
+            impact.partial = true;
+            continue;
+        }
+        impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+        visited.insert(node.id.clone());
+        frontier.push(node.id.clone());
+        impact.nodes.push(node.clone());
+    }
+    for depth in 0..max_depth {
         if frontier.is_empty() {
             break;
         }
+        let remaining_edges = PR_CONTEXT_MAX_IMPACT_EDGES.saturating_sub(impact.edges_admitted);
+        if remaining_edges == 0 {
+            impact.partial = true;
+            break;
+        }
         controls.checkpoint()?;
-        let edges = snapshot
-            .get_incoming_edges_bulk_controlled(&frontier, &[], || controls.checkpoint())
+        let edge_page = snapshot
+            .get_incoming_edges_bulk_page_controlled(&frontier, &[], remaining_edges, || {
+                controls.checkpoint()
+            })
             .await?;
+        impact.edge_rows_read = impact.edge_rows_read.saturating_add(edge_page.rows_read);
+        impact.partial |= edge_page.has_more;
         let mut next_ids = Vec::new();
-        for edge in edges {
+        for edge in edge_page.edges {
+            let bytes = pr_context_edge_bytes(&edge);
+            if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
+                impact.partial = true;
+                break;
+            }
+            impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+            impact.edges_admitted = impact.edges_admitted.saturating_add(1);
+            if depth == 0 && edge.kind == EdgeKind::Calls {
+                impact.incoming_calls.push(edge.clone());
+            }
             if visited.insert(edge.source.clone()) {
                 next_ids.push(edge.source);
             }
@@ -523,16 +558,54 @@ async fn pr_context_impact_snapshot(
         if next_ids.is_empty() {
             break;
         }
+        let remaining_nodes = PR_CONTEXT_MAX_IMPACT_NODES.saturating_sub(impact.nodes.len());
+        if next_ids.len() > remaining_nodes {
+            next_ids.truncate(remaining_nodes);
+            impact.partial = true;
+        }
         let nodes = snapshot
             .get_nodes_by_ids_controlled(&next_ids, || controls.checkpoint())
             .await?;
         frontier.clear();
         for node in nodes {
+            let bytes = pr_context_node_bytes(&node);
+            if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
+                impact.partial = true;
+                continue;
+            }
+            impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
             frontier.push(node.id.clone());
-            result.push(node);
+            impact.nodes.push(node);
         }
     }
-    Ok(result)
+    Ok(impact)
+}
+
+#[derive(Default)]
+struct PrContextImpact {
+    nodes: Vec<Node>,
+    incoming_calls: Vec<Edge>,
+    edges_admitted: usize,
+    edge_rows_read: usize,
+    bytes_admitted: usize,
+    partial: bool,
+}
+
+fn pr_context_node_bytes(node: &Node) -> usize {
+    node.id
+        .len()
+        .saturating_add(node.name.len())
+        .saturating_add(node.qualified_name.len())
+        .saturating_add(node.file_path.len())
+        .saturating_add(node.docstring.as_ref().map_or(0, String::len))
+        .saturating_add(node.signature.as_ref().map_or(0, String::len))
+}
+
+fn pr_context_edge_bytes(edge: &Edge) -> usize {
+    edge.source
+        .len()
+        .saturating_add(edge.target.len())
+        .saturating_add(edge.kind.as_str().len())
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
@@ -683,24 +756,17 @@ pub(crate) async fn handle_pr_context(
 
     let stage_started = std::time::Instant::now();
     let symbol_page = graph_snapshot
-        .get_nodes_by_files_page_controlled(
-            &changed_files,
-            &config_paths,
-            &added_paths,
-            after.as_ref(),
-            maximum_symbols,
-            || controls.checkpoint(),
-        )
+        .get_nodes_by_files_page_controlled(&changed_files, after.as_ref(), maximum_symbols, || {
+            controls.checkpoint()
+        })
         .await?;
     controls.checkpoint()?;
     stage_timings.insert(
         "symbol_page".to_owned(),
         json!(elapsed_micros(stage_started)),
     );
-    let total_symbols = symbol_page.total_symbols;
-    let page_offset = symbol_page.offset;
-    let symbols_added = symbol_page.added_symbols;
-    let symbols_modified = total_symbols.saturating_sub(symbols_added);
+    let symbol_has_more = symbol_page.has_more;
+    let symbol_rows_read = symbol_page.rows_read;
     let next_page_key = symbol_page.entries.last().map(|entry| NodesByFilesPageKey {
         file_path: entry.node.file_path.clone(),
         start_line: entry.node.start_line,
@@ -717,7 +783,10 @@ pub(crate) async fn handle_pr_context(
             json!({
                 "file": &node.file_path,
                 "kind": "config_summary",
-                "config_keys": entry.source_node_count,
+                "name": &node.name,
+                "line": node.start_line,
+                "config_keys": Value::Null,
+                "coverage": "bounded_representative",
             })
         } else {
             json!({
@@ -737,28 +806,20 @@ pub(crate) async fn handle_pr_context(
         }
     }
     let returned_symbols = added.len().saturating_add(modified.len());
-    let omitted_symbols =
-        total_symbols.saturating_sub(page_offset.saturating_add(returned_symbols));
-
-    let node_ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
-    let stage_started = std::time::Instant::now();
-    let incoming_calls = graph_snapshot
-        .get_incoming_edges_bulk_controlled(&node_ids, &[EdgeKind::Calls], || controls.checkpoint())
-        .await?;
-    controls.checkpoint()?;
-    stage_timings.insert(
-        "incoming_calls".to_owned(),
-        json!(elapsed_micros(stage_started)),
-    );
+    let symbols_added = added.len();
+    let symbols_modified = modified.len();
 
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
     let impact = pr_context_impact_snapshot(&graph_snapshot, &nodes, 2, &controls).await?;
     controls.checkpoint()?;
-    let impacted_by_id: HashMap<&str, &Node> =
-        impact.iter().map(|node| (node.id.as_str(), node)).collect();
-    for edge in &incoming_calls {
+    let impacted_by_id: HashMap<&str, &Node> = impact
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    for edge in &impact.incoming_calls {
         if let Some(caller) = impacted_by_id.get(edge.source.as_str())
             && !changed_paths.contains(caller.file_path.as_str())
         {
@@ -771,7 +832,7 @@ pub(crate) async fn handle_pr_context(
             impacted_modules.insert(dir.to_owned());
         }
     }
-    for impacted in &impact {
+    for impacted in &impact.nodes {
         if !changed_paths.contains(impacted.file_path.as_str()) && has_tests(&impacted.file_path) {
             affected_tests.insert(impacted.file_path.clone());
         }
@@ -784,14 +845,15 @@ pub(crate) async fn handle_pr_context(
     affected_sorted.sort();
 
     let stage_started = std::time::Instant::now();
-    let complete = omitted_symbols == 0;
-    let next_cursor = if complete {
+    let symbol_complete = !symbol_has_more;
+    let impact_complete = symbol_complete && !impact.partial;
+    let next_cursor = if symbol_complete {
         None
     } else {
         let key = next_page_key
             .as_ref()
             .ok_or_else(|| TraceDecayError::Config {
-                message: "PR context page omitted symbols without a continuation key".to_owned(),
+                message: "PR context page has more symbols without a continuation key".to_owned(),
             })?;
         let (snapshot, authenticator) =
             cursor_authority
@@ -818,23 +880,34 @@ pub(crate) async fn handle_pr_context(
         "symbol_page": {
             "limit": maximum_symbols,
             "returned": returned_symbols,
-            "offset": page_offset,
-            "total": total_symbols,
-            "omitted": omitted_symbols,
-            "complete": complete,
+            "rows_read": symbol_rows_read,
+            "has_more": symbol_has_more,
+            "complete": symbol_complete,
             "selection": "stable_prefix",
-            "continuation_available": !complete,
+            "continuation_available": symbol_has_more,
         },
         "analysis_coverage": {
             "seed_symbols_analyzed": nodes.len(),
             "symbols_returned": returned_symbols,
-            "symbols_total": total_symbols,
-            "omitted_symbols": omitted_symbols,
-            "complete": complete,
+            "symbols_complete": symbol_complete,
+            "impact_nodes_admitted": impact.nodes.len(),
+            "impact_edges_admitted": impact.edges_admitted,
+            "impact_edge_rows_read": impact.edge_rows_read,
+            "impact_bytes_admitted": impact.bytes_admitted,
+            "impact_partial": impact.partial,
+            "complete": impact_complete,
         },
         "test_files_changed": test_files_changed,
         "affected_tests": affected_sorted,
+        "affected_tests_coverage": {
+            "complete": impact_complete,
+            "selection": "deterministic_bounded_prefix",
+        },
         "impacted_modules": impacted_sorted,
+        "impacted_modules_coverage": {
+            "complete": impact_complete,
+            "selection": "deterministic_bounded_prefix",
+        },
     });
     stage_timings.insert("assemble".to_owned(), json!(elapsed_micros(stage_started)));
     stage_timings.insert("total".to_owned(), json!(elapsed_micros(total_started)));
@@ -842,7 +915,7 @@ pub(crate) async fn handle_pr_context(
     tracing::info!(
         tool = "tracedecay_pr_context",
         files = changed_files.len(),
-        symbols = total_symbols,
+        symbols = returned_symbols,
         timings = %timing_value,
         "PR context stage timings"
     );

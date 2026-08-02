@@ -57,25 +57,17 @@ pub(super) async fn pr_context_cursor_authority(
             message: format!("invalid PR context graph generation watermark: {error}"),
         })?
         .max(1);
-    let key = session_db
-        .ensure_active_session_cursor_key_result()
+    let authenticator = session_db
+        .load_preprovisioned_session_cursor_key_provider_result()
         .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("PR context cursor key is unavailable: {error}"),
+        .map_err(|error| {
+            TraceDecayError::project_route(
+                "pr_context_cursor_authority_unavailable",
+                true,
+                format!("pre-provisioned PR context cursor key is unavailable: {error}"),
+            )
         })?;
-    let key_snapshot =
-        session_db
-            .read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("PR context cursor key snapshot is unavailable: {error}"),
-            })?;
-    let authenticator =
-        GlobalDbCursorKeyProvider::from_registered_key_ref(&key_snapshot, key.clone())
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("PR context cursor authenticator is unavailable: {error}"),
-            })?;
+    let key = authenticator.active_key_ref().clone();
     let request = TemporalSnapshotRequest::new(
         SessionId::new(PR_CONTEXT_CURSOR_SESSION).map_err(|error| TraceDecayError::Config {
             message: format!("invalid PR context cursor session: {error}"),

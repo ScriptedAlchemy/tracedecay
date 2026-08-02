@@ -137,8 +137,6 @@ impl TraceDecay {
     pub async fn get_nodes_by_files_page_controlled<F>(
         &self,
         file_paths: &[String],
-        config_paths: &[String],
-        added_paths: &[String],
         after: Option<&crate::db::NodesByFilesPageKey>,
         limit: usize,
         checkpoint: F,
@@ -147,14 +145,7 @@ impl TraceDecay {
         F: FnMut() -> Result<()>,
     {
         self.db
-            .get_nodes_by_files_page_controlled(
-                file_paths,
-                config_paths,
-                added_paths,
-                after,
-                limit,
-                checkpoint,
-            )
+            .get_nodes_by_files_page_controlled(file_paths, after, limit, checkpoint)
             .await
     }
 
