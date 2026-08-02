@@ -758,13 +758,10 @@ impl ContextScoutSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct GitPreviewSurfaceRequest {
     pub operation: GitIndexTransactionOperationV1,
-    /// Compatibility input only. The daemon always replaces this value with a
-    /// freshly minted preview identity before application admission.
     #[serde(default)]
-    pub preview_id: GitIndexPreviewId,
-    pub repository_snapshot: RepositoryStateSnapshotV1,
+    pub preview_input_id: Option<GitIndexPreviewId>,
     #[serde(default)]
-    pub selected_hunks: Vec<HunkRefV1>,
+    pub selected_hunk_digests: Vec<ManifestDigest>,
     #[serde(default)]
     pub commit_intent: Option<GitIndexCommitIntentV1>,
 }
@@ -772,7 +769,8 @@ pub struct GitPreviewSurfaceRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitApplySurfaceRequest {
-    pub preview: GitIndexPreviewV1,
+    pub preview_id: GitIndexPreviewId,
+    pub preview_digest: ManifestDigest,
     pub idempotency_key: IdempotencyKey,
 }
 
@@ -2833,9 +2831,7 @@ fn parse_git_read_surface_request(
         ApplicationSurfaceOperation::GitHunks => {
             crate::application::git_reads::GitReadRequestV1::Hunks {
                 scope: scope(false)?,
-                preview_id: string("preview_id")?,
-                snapshot_digest: ManifestDigest::new(string("snapshot_digest")?)
-                    .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+                daemon_binding: None,
             }
         }
         _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
@@ -2856,13 +2852,7 @@ fn parse_git_read_surface_request(
         ApplicationSurfaceOperation::GitBlame => {
             &["path", "follow_renames", "max_entries", "max_bytes"][..]
         }
-        ApplicationSurfaceOperation::GitHunks => &[
-            "scope",
-            "preview_id",
-            "snapshot_digest",
-            "max_entries",
-            "max_bytes",
-        ][..],
+        ApplicationSurfaceOperation::GitHunks => &["scope", "max_entries", "max_bytes"][..],
         _ => &[],
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {

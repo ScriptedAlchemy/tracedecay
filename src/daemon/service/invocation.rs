@@ -56,8 +56,9 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, ManifestDigest, ProjectId,
-    ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros, WorkAuthority, canonical_sha256,
+    GitIndexPreviewInputV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
+    WorkAuthority, canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -145,6 +146,7 @@ use crate::application_surface::{
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
+    capture_exact_snapshot,
 };
 use crate::daemon::work_runtime::DaemonWorkRuntimeV1;
 use crate::daemon::workflow_runtime::execute_canonical_workflow;
