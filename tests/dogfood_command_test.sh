@@ -46,6 +46,8 @@ if [[ "$command_text" == "reinstall --dry-run" ]]; then
 fi
 
 if [[ "$command_text" == migrate\ rehearse-profile-backup* ]]; then
+  printf '%s:%s\n' "$binary_id" "$command_text" \
+    >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}.rehearsal"
   exit 0
 fi
 
@@ -757,6 +759,8 @@ grep -Fq 'proceeding without a profile backup' "$case_output" ||
   fail "absent backup did not announce that it proceeded without one"
 test -e "$case_state" ||
   fail "absent backup stopped short of the migration marker boundary"
+test ! -e "$case_log.rehearsal" ||
+  fail "absent backup unexpectedly invoked the backup rehearsal"
 
 # Dogfood must stop before installation or marker publication when a backup is
 # named but is not a complete verified backup fit for restored-copy rehearsal.
@@ -1426,6 +1430,8 @@ assert_boundary outcome validated
 assert_boundary attempt_boundary reached
 assert_boundary old_binary_policy forbidden
 assert_no_temporary_install_files
+grep -Fq 'new:migrate rehearse-profile-backup' "$case_log.rehearsal" ||
+  fail 'named checksummed backup did not trigger the rehearsal'
 
 grep -Fq \
   'dogfood = "run --quiet --bin tracedecay -- dogfood"' \
