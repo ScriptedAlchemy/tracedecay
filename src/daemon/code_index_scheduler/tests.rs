@@ -1695,12 +1695,12 @@ fn generation_record_index_matches_linear_scan_lookups() {
 
     let same_generation = scheduler.latest_complete().expect("same latest generation");
     assert!(
-        Arc::ptr_eq(&latest.record_index, &same_generation.record_index),
-        "repeated queries must reuse the generation-bound record index"
+        Arc::ptr_eq(&latest.serving, &same_generation.serving),
+        "repeated queries must reuse the generation-bound serving authority"
     );
     assert!(
-        same_generation.record_index.get().is_some(),
-        "the shared record index must stay built across queries"
+        same_generation.serving.get().is_some(),
+        "the shared serving authority must stay built across queries"
     );
 }
 

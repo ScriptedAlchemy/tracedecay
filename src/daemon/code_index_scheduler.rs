@@ -53,7 +53,6 @@ use crate::{
     privacy::{
         CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
     },
-    query::retrieval::graph::{CodeGraphEvidenceAdapterV1, GraphLane},
     retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
     },
@@ -1062,10 +1061,7 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<ResidentPublishedGenerationV1>,
-    query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
-    exact_lexical: Arc<OnceLock<Arc<ResidentReadyV1<ExactLexicalOwnersV1>>>>,
-    graph: Arc<OnceLock<Arc<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>>>>,
-    record_index: Arc<OnceLock<Arc<ResidentReadyV1<queries::GenerationRecordIndexV1>>>>,
+    serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     /// Single-flight gate for the O(store) lane-owner build. Without it every
     /// query that raced the activation warm rebuilt the full lexical/exact
     /// projection inline — N concurrent cold queries did N store-sized builds,
@@ -1912,21 +1908,15 @@ impl CodeIndexWorktreeSchedulerV1 {
                 caches.cancel();
             }
         }
-        let (query_owners, exact_lexical, graph, record_index, build_gate, control) = (
-            Arc::clone(&caches.query_owners),
-            Arc::clone(&caches.exact_lexical),
-            Arc::clone(&caches.graph),
-            Arc::clone(&caches.record_index),
+        let (serving, build_gate, control) = (
+            Arc::clone(&caches.serving),
             Arc::clone(&caches.build_gate),
             Arc::clone(&caches.control),
         );
         drop(cached);
         LatestCompleteCodeIndexV1 {
             generation,
-            query_owners,
-            exact_lexical,
-            graph,
-            record_index,
+            serving,
             query_owners_build_gate: build_gate,
             warm_control: control,
         }

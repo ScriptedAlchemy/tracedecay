@@ -297,14 +297,11 @@ fn cancelled_lane_warm_releases_every_unpublished_lane_charge() {
         Err(tracedecay_query::retrieval::ports::RetrievalPortError::Cancelled)
     ));
     assert!(
-        resident_memory.snapshot().charges.iter().all(|charge| {
-            !matches!(
-                charge.key.component.as_str(),
-                "code_index.record_index.v1"
-                    | "code_index.exact_lexical.v1"
-                    | "code_index.graph.v1"
-            )
-        }),
+        resident_memory
+            .snapshot()
+            .charges
+            .iter()
+            .all(|charge| { charge.key.component.as_str() != "code_index.serving_generation.v1" }),
         "cancelled warm must publish no derived lane reservation"
     );
 }
@@ -332,12 +329,11 @@ fn lane_admission_denies_before_publishing_any_derived_owner() {
     ));
     assert!(!latest.query_owners_are_warm());
     assert!(
-        resident_memory.snapshot().charges.iter().all(|charge| {
-            !matches!(
-                charge.key.component.as_str(),
-                "code_index.exact_lexical.v1" | "code_index.graph.v1"
-            )
-        }),
+        resident_memory
+            .snapshot()
+            .charges
+            .iter()
+            .all(|charge| { charge.key.component.as_str() != "code_index.serving_generation.v1" }),
         "denied lane build must retain no partial reservation"
     );
 }
@@ -368,7 +364,7 @@ fn in_flight_lane_arc_retains_charge_until_its_final_reader_drops() {
             .snapshot()
             .charges
             .iter()
-            .any(|charge| { charge.key.component.as_str() == "code_index.exact_lexical.v1" }),
+            .any(|charge| { charge.key.component.as_str() == "code_index.serving_generation.v1" }),
         "in-flight lane owner must retain its reservation"
     );
     drop(owners);
@@ -401,9 +397,7 @@ fn realistic_corpus_retains_every_serving_component_within_authority() {
     for component in [
         "code_index.capture_working_set.v1",
         "code_index.canonical_generation.v1",
-        "code_index.record_index.v1",
-        "code_index.exact_lexical.v1",
-        "code_index.graph.v1",
+        "code_index.serving_generation.v1",
     ] {
         assert!(
             snapshot

@@ -59,11 +59,14 @@ pub(super) struct ExactLexicalOwnersV1 {
     pub(super) lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
 }
 
+pub(super) struct ProductionCodeIndexServingGenerationV1 {
+    record_index: queries::GenerationRecordIndexV1,
+    exact_lexical: ExactLexicalOwnersV1,
+    graph: GraphLane<CodeGraphEvidenceAdapterV1>,
+}
+
 pub(super) struct GenerationServingCachesV1 {
-    pub(super) query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
-    pub(super) exact_lexical: Arc<OnceLock<Arc<ResidentReadyV1<ExactLexicalOwnersV1>>>>,
-    pub(super) graph: Arc<OnceLock<Arc<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>>>>,
-    pub(super) record_index: Arc<OnceLock<Arc<ResidentReadyV1<queries::GenerationRecordIndexV1>>>>,
+    pub(super) serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     pub(super) build_gate: Arc<Mutex<()>>,
     pub(super) control: Arc<ServingWarmControlV1>,
 }
@@ -71,10 +74,7 @@ pub(super) struct GenerationServingCachesV1 {
 impl GenerationServingCachesV1 {
     pub(super) fn new() -> Self {
         Self {
-            query_owners: Arc::new(OnceLock::new()),
-            exact_lexical: Arc::new(OnceLock::new()),
-            graph: Arc::new(OnceLock::new()),
-            record_index: Arc::new(OnceLock::new()),
+            serving: Arc::new(OnceLock::new()),
             build_gate: Arc::new(Mutex::new(())),
             control: Arc::new(ServingWarmControlV1::default()),
         }
@@ -87,8 +87,7 @@ impl GenerationServingCachesV1 {
 
 #[derive(Clone)]
 pub(super) struct ProductionCodeIndexQueryOwnersV1 {
-    pub(super) exact_lexical: Arc<ResidentReadyV1<ExactLexicalOwnersV1>>,
-    pub(super) graph: Arc<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>>,
+    ready: Arc<ResidentReadyV1<ProductionCodeIndexServingGenerationV1>>,
 }
 
 impl ProductionCodeIndexQueryOwnersV1 {
@@ -98,15 +97,19 @@ impl ProductionCodeIndexQueryOwnersV1 {
         CentralExactAdmissionAuthorityV1,
         CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
     > {
-        &self.exact_lexical.exact
+        &self.ready.exact_lexical.exact
     }
 
     pub(super) fn lexical(&self) -> &LexicalLane<CodeLexicalProjectionAdapterV1> {
-        &self.exact_lexical.lexical
+        &self.ready.exact_lexical.lexical
     }
 
     pub(super) fn graph(&self) -> &GraphLane<CodeGraphEvidenceAdapterV1> {
-        &self.graph
+        &self.ready.graph
+    }
+
+    fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
+        &self.ready.record_index
     }
 }
 
@@ -151,9 +154,9 @@ impl LatestCompleteCodeIndexV1 {
         &self,
     ) -> Result<&queries::GenerationRecordIndexV1, RetrievalPortError> {
         self.ensure_serving_ready()?;
-        self.record_index
+        self.serving
             .get()
-            .map(|ready| &ready.value)
+            .map(|owners| owners.record_index())
             .ok_or_else(|| {
                 RetrievalPortError::AuthorityUnavailable(
                     "record-index warm completed without a ready value".to_owned(),
@@ -171,19 +174,19 @@ impl LatestCompleteCodeIndexV1 {
 
     #[cfg(test)]
     pub(super) fn record_index_is_warm(&self) -> bool {
-        self.record_index.get().is_some()
+        self.serving.get().is_some()
     }
 
     #[cfg(test)]
     pub(super) fn query_owners_are_warm(&self) -> bool {
-        self.query_owners.get().is_some()
+        self.serving.get().is_some()
     }
 
     pub(super) fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         self.ensure_serving_ready()?;
-        self.query_owners.get().map(Arc::clone).ok_or_else(|| {
+        self.serving.get().map(Arc::clone).ok_or_else(|| {
             RetrievalPortError::AuthorityUnavailable(
                 "serving warm completed without ready query owners".to_owned(),
             )
@@ -191,14 +194,14 @@ impl LatestCompleteCodeIndexV1 {
     }
 
     fn ensure_serving_ready(&self) -> Result<(), RetrievalPortError> {
-        if self.serving_ready() {
+        if self.serving.get().is_some() {
             return Ok(());
         }
         let _build = self
             .query_owners_build_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.serving_ready() {
+        if self.serving.get().is_some() {
             return Ok(());
         }
         self.warm_control.checkpoint()?;
@@ -211,77 +214,59 @@ impl LatestCompleteCodeIndexV1 {
             .saturating_add(self.generation.chunks().chunks().len().saturating_mul(3))
             .saturating_add(self.generation.symbols().symbols.len())
             .saturating_add(self.generation.edges().len().saturating_mul(2));
-        let record_reservation = self.reserve_serving_component(
-            "code_index.record_index.v1",
-            conservative_lane_reservation(
-                self.generation.sealed_bytes,
-                record_entries,
-                512,
-                8 * 1024 * 1024,
-            )?,
+        let record_bytes = conservative_lane_reservation(
+            self.generation.sealed_bytes,
+            record_entries,
+            512,
+            8 * 1024 * 1024,
         )?;
-        let record_index =
-            queries::GenerationRecordIndexV1::build(self.generation.as_ref(), &self.warm_control)?;
-
-        let exact_lexical_reservation = self.reserve_serving_component(
-            "code_index.exact_lexical.v1",
-            conservative_exact_lexical_reservation(
-                self.generation.sealed_bytes,
-                self.generation.chunks().chunks().len(),
-            )?,
+        let exact_lexical_bytes = conservative_exact_lexical_reservation(
+            self.generation.sealed_bytes,
+            self.generation.chunks().chunks().len(),
         )?;
-        let exact_lexical_value = self.build_exact_lexical_owners()?;
-
         let graph_entries = self
             .generation
             .edges()
             .len()
             .saturating_add(self.generation.symbols().symbols.len());
-        let graph_reservation = self.reserve_serving_component(
-            "code_index.graph.v1",
-            conservative_lane_reservation(
-                self.generation.sealed_bytes,
-                graph_entries,
-                512,
-                8 * 1024 * 1024,
-            )?,
+        let graph_bytes = conservative_lane_reservation(
+            self.generation.sealed_bytes,
+            graph_entries,
+            512,
+            8 * 1024 * 1024,
         )?;
-        let graph_value = self.build_graph_owner()?;
+        let serving_bytes = record_bytes
+            .checked_add(exact_lexical_bytes)
+            .and_then(|bytes| bytes.checked_add(graph_bytes))
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "serving-generation reservation exceeds u64".to_owned(),
+                )
+            })?;
+        let reservation = self.reserve_serving_component(serving_bytes)?;
+
+        let record_index =
+            queries::GenerationRecordIndexV1::build(self.generation.as_ref(), &self.warm_control)?;
+        let exact_lexical = self.build_exact_lexical_owners()?;
+        let graph = self.build_graph_owner()?;
         self.warm_control.checkpoint()?;
 
-        let record_index = Arc::new(ResidentReadyV1 {
-            value: record_index,
-            _reservation: record_reservation,
+        let ready = Arc::new(ResidentReadyV1 {
+            value: ProductionCodeIndexServingGenerationV1 {
+                record_index,
+                exact_lexical,
+                graph,
+            },
+            _reservation: reservation,
         });
-        let exact_lexical = Arc::new(ResidentReadyV1 {
-            value: exact_lexical_value,
-            _reservation: exact_lexical_reservation,
-        });
-        let graph = Arc::new(ResidentReadyV1 {
-            value: graph_value,
-            _reservation: graph_reservation,
-        });
-        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
-            exact_lexical: Arc::clone(&exact_lexical),
-            graph: Arc::clone(&graph),
-        });
-        self.record_index.get_or_init(|| record_index);
-        self.exact_lexical.get_or_init(|| exact_lexical);
-        self.graph.get_or_init(|| graph);
-        self.query_owners.get_or_init(|| owners);
-        if !self.serving_ready() {
+        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 { ready });
+        self.serving.get_or_init(|| owners);
+        if self.serving.get().is_none() {
             return Err(RetrievalPortError::AuthorityUnavailable(
                 "serving warm failed to publish its complete resident set".to_owned(),
             ));
         }
         Ok(())
-    }
-
-    fn serving_ready(&self) -> bool {
-        self.record_index.get().is_some()
-            && self.exact_lexical.get().is_some()
-            && self.graph.get().is_some()
-            && self.query_owners.get().is_some()
     }
 
     fn build_exact_lexical_owners(&self) -> Result<ExactLexicalOwnersV1, RetrievalPortError> {
@@ -353,14 +338,13 @@ impl LatestCompleteCodeIndexV1 {
 
     fn reserve_serving_component(
         &self,
-        component: &'static str,
         requested_bytes: u64,
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
         self.warm_control.checkpoint()?;
         let requested_bytes = NonZeroU64::new(requested_bytes).ok_or_else(|| {
             RetrievalPortError::Contract("serving resident reservation is zero".to_owned())
         })?;
-        let component = ResidentMemoryComponentIdV1::new(component)
+        let component = ResidentMemoryComponentIdV1::new("code_index.serving_generation.v1")
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
         self.generation
             .resident_memory
