@@ -206,8 +206,21 @@ impl DaemonInvocationState {
             .mount_worktree(project_id, project_root, store_root, semantic_schedule)
             .await
             .map(|_| ())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("code-index scheduler could not be mounted: {error}"),
+            .map_err(|error| {
+                // A retryable admission timeout is a busy daemon, not a broken
+                // store: say so, so the caller retries instead of reopening.
+                if error.is_retryable() {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "code-index scheduler is warming and could not be mounted yet: \
+                             {error}"
+                        ),
+                    }
+                } else {
+                    TraceDecayError::Config {
+                        message: format!("code-index scheduler could not be mounted: {error}"),
+                    }
+                }
             })
     }
 
