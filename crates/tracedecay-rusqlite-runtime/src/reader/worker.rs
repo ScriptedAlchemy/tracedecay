@@ -439,9 +439,8 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::MigrationQuery { request, reply } => {
-                if let Err(error) = probe_family(family_guard) {
-                    let _ =
-                        reply.send(Err(MigrationSqlError::ReaderUnavailable(error.to_string())));
+                if let Err(error) = probe_family_integrity(family_guard) {
+                    let _ = reply.send(Err(MigrationSqlError::SqliteFamily(error)));
                     continue;
                 }
                 let _ = reply.send(execute_query(&transaction, request));
@@ -529,9 +528,13 @@ fn run_snapshot<E: ReaderQueryExecutor>(
 }
 
 fn probe_family(family_guard: Option<&SqliteFamilyGuard>) -> Result<(), ReaderWorkerError> {
-    family_guard
-        .map_or(Ok(()), SqliteFamilyGuard::probe)
-        .map_err(ReaderWorkerError::SqliteFamily)
+    probe_family_integrity(family_guard).map_err(ReaderWorkerError::SqliteFamily)
+}
+
+fn probe_family_integrity(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe)
 }
 
 fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {

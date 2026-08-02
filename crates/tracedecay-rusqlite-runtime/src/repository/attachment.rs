@@ -368,7 +368,7 @@ impl RepositoryRuntimePhysicalAttachment {
         state
             .family_guard
             .probe()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(MigrationSqlError::SqliteFamily)?;
         let writer = state
             .writer
             .as_deref()
@@ -937,7 +937,12 @@ mod tests {
         ));
         assert!(matches!(
             attachment.migration_sql_handle(),
-            Err(MigrationSqlError::ReaderUnavailable(_))
+            Err(MigrationSqlError::SqliteFamily(
+                crate::SqliteFamilyIntegrityError::Quarantined {
+                    component: crate::SqliteFamilyComponent::Wal,
+                    ..
+                }
+            ))
         ));
 
         attachment.drain().unwrap();

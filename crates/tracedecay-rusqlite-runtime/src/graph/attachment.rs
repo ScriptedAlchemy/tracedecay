@@ -448,7 +448,7 @@ impl GraphRuntimePhysicalAttachment {
         state
             .family_guard
             .probe()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(MigrationSqlError::SqliteFamily)?;
         let readers = state.readers.as_ref().ok_or_else(|| {
             MigrationSqlError::ReaderUnavailable("graph readers are unavailable".to_owned())
         })?;
