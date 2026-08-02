@@ -671,12 +671,6 @@ impl CodeIndexSchedulerRegistryV1 {
             if let Some(hook) = open_semantic_schedule {
                 opened.replace_semantic_schedule_hook(Some(hook));
             }
-            // Warm every per-generation serving derivation while still on the
-            // blocking pool. Without this the exact-admission sweep, record
-            // indices, and lane owners are all built lazily by whichever query
-            // arrives first, putting the same O(store) canonical hashing back on
-            // the request path that the decode was just moved off.
-            opened.prime_serving_caches();
             let restored = opened.latest_complete();
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
         })
@@ -847,6 +841,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
+        // Warm the restored generation's serving derivations (exact-admission
+        // sweep, record indices, lane owners) on a detached blocking task. This
+        // used to run inline in the open task above, but the warm is O(store)
+        // and the worktree is invisible to every query until the mount
+        // publishes it — a live daemon sat unmountable for 15+ minutes building
+        // BM25 postings while search failed typed the whole time. The memos are
+        // shared OnceLocks, so a query racing the warm pays at most what it
+        // always paid, and the mount itself stays O(decode).
+        if let Some(latest) = restored_generation.clone() {
+            tokio::task::spawn_blocking(move || latest.warm_serving_caches());
+        }
         if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
             let _ = hook(&latest.generation);
         }
