@@ -73,6 +73,117 @@ async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
     assert!(outcome.owned_session_ids.is_empty());
 }
 
+/// A failed `has_session_message` lookup is store *unavailability*, not proof
+/// the bubble is already durable. The sweep must defer it and ingest it on a
+/// later pass instead of skipping it — and it must not let a later header in
+/// the same composer advance the source cursor past the unverified bubble,
+/// which is what made the old `unwrap_or(true)` a permanent silent drop.
+#[tokio::test]
+async fn store_error_during_message_lookup_defers_instead_of_dropping_the_bubble() {
+    use crate::admission::test_support::MemoryHostAdmission;
+
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let connection = rusqlite::Connection::open(state_dir.join("state.vscdb")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:comp-retry",
+                json!({
+                    "composerId": "comp-retry",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": [
+                        { "bubbleId": "b1" },
+                        { "bubbleId": "b2" }
+                    ]
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    for (bubble, text) in [("b1", "first bubble"), ("b2", "second bubble")] {
+        connection
+            .execute(
+                "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+                rusqlite::params![
+                    format!("bubbleId:comp-retry:{bubble}"),
+                    json!({ "type": 1, "text": text }).to_string()
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let project_id = tracedecay_domain::ProjectId::new("project.cursor-composer-retry").unwrap();
+    let admission = MemoryHostAdmission::default();
+    let source = CursorComposerSource::with_home(home.path());
+
+    // The very first lookup (bubble `b1`) sees a saturated/unavailable store.
+    admission.fail_next_session_message_lookups(1);
+    let deferred = source
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id.clone(),
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        deferred.messages_upserted, 0,
+        "a store error must stop the composer before any later header advances its cursor"
+    );
+    assert!(
+        deferred.deferred_by_byte_cap,
+        "the pass must report itself incomplete so catch-up runs again"
+    );
+
+    // Catch-up pass with a healthy store.
+    let recovered = source
+        .ingest_capped(
+            &admission,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+        )
+        .await;
+    assert!(
+        recovered.messages_upserted >= 2,
+        "both bubbles must reach the store once it recovers, got {}",
+        recovered.messages_upserted
+    );
+
+    let payloads = admission
+        .observations()
+        .iter()
+        .map(|stored| stored.observation().payload().to_string())
+        .collect::<Vec<_>>();
+    for bubble in ["comp-retry:b1", "comp-retry:b2"] {
+        assert!(
+            payloads.iter().any(|payload| payload.contains(bubble)),
+            "{bubble} was dropped instead of retried"
+        );
+    }
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_snapshot_generation_is_stable_across_appends() {
