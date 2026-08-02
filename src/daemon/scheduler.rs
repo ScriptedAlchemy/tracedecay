@@ -1506,33 +1506,33 @@ async fn run_host_receipt_review(
         .store_administration
         .registered_project_session_database(project_path, cg.store_layout())
         .await?;
-    let snapshot =
-        session_database
-            .read_snapshot()
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("host receipt session snapshot unavailable: {error}"),
+    let watermark_durable =
+        {
+            let snapshot = session_database.read_snapshot().await.map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("host receipt session snapshot unavailable: {error}"),
+                }
             })?;
-    let mut rows = snapshot
-        .query(
-            "SELECT 1
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2
-             LIMIT 1",
-            crate::db::engine::params!["hermes", ready.transcript_watermark.as_str()],
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("host receipt transcript watermark query failed: {error}"),
-        })?;
-    if rows
-        .next()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("host receipt transcript watermark read failed: {error}"),
-        })?
-        .is_none()
-    {
+            let mut rows = snapshot
+                .query(
+                    "SELECT 1
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2
+                 LIMIT 1",
+                    crate::db::engine::params!["hermes", ready.transcript_watermark.as_str()],
+                )
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("host receipt transcript watermark query failed: {error}"),
+                })?;
+            rows.next()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("host receipt transcript watermark read failed: {error}"),
+                })?
+                .is_some()
+        };
+    if !watermark_durable {
         // Never review a terminal receipt until the exact completed-turn
         // watermark is durable in LCM.
         return Ok(());

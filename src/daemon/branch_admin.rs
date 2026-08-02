@@ -1036,13 +1036,6 @@ impl StoreAdministration {
         ensure_no_external_branch_store_holders(database_paths)
     }
 
-    /// Reports whether writer administration is already held. Work that would
-    /// queue behind an unrelated writer can be delayed for that writer's whole
-    /// operation, which callers may want to answer with a retry hint instead.
-    pub(super) fn writer_is_busy(&self) -> bool {
-        self.gate.try_lock().is_err()
-    }
-
     /// Acquires writer administration before constructing the supplied future
     /// and holds it until that future completes.
     pub(super) async fn with_writer<Operation, OperationFuture, Output>(
@@ -1053,7 +1046,10 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let _writer = self.gate.lock().await;
+        // Queueing for the writer is a park, not work: a background refresh or a
+        // generation rebuild can hold this gate for minutes. Surrender the
+        // admission slot while queued and take it back before running.
+        let _writer = super::park_admission(self.gate.lock()).await;
         operation().await
     }
 
@@ -1085,11 +1081,14 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let _writer = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return None,
-            writer = self.gate.lock() => writer,
-        };
+        let _writer = super::park_admission(async {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                writer = self.gate.lock() => Some(writer),
+            }
+        })
+        .await?;
         Some(operation().await)
     }
 

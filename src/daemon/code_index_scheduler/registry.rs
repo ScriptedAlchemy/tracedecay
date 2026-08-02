@@ -28,9 +28,20 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
 /// mounts. A single global permit serialized EVERY project/worktree cold build
-/// across the whole daemon, turning independent opens into an N-way queue. The
-/// bound stays small enough to respect store write-lock / maintenance-lease
-/// pressure, so it is capped at 4 and scaled to half the available cores.
+/// across the whole daemon, turning independent opens into an N-way queue.
+///
+/// The bound is 2, not 4. Per-file extraction now fans out across the shared
+/// reserved-width indexing pool (`tracedecay_code_index::parallelism`), so a
+/// SINGLE worktree already saturates every non-reserved core. Admitting more
+/// worktrees cannot add throughput — the pool is the same pool — it only
+/// interleaves them, so every worktree's index lands N times later and every
+/// worktree's snapshot bytes sit in RSS N times longer. Race-to-idle: run a
+/// worktree at full width, finish it, take the next one.
+///
+/// Two rather than one because a reconcile is not pure CPU: gix
+/// classification, store writes and publication are I/O and lock phases that
+/// do not touch the indexing pool, so a second admitted worktree overlaps
+/// those with the first one's extraction at negligible CPU cost.
 ///
 /// Same-store (same-worktree) exclusion does NOT depend on this bound: each
 /// mounted worktree owns exactly one reconcile worker task that dequeues wakes
@@ -38,8 +49,12 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 /// per-scheduler `Mutex`. Raising the global bound therefore only lets DISTINCT
 /// worktrees (which write to path-scoped stores) reconcile in parallel; it can
 /// never overlap two reconciles for the same worktree/store.
+const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
+
 fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism().map_or(1, |cores| (cores.get() / 2).clamp(1, 4))
+    std::thread::available_parallelism().map_or(1, |cores| {
+        cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1162,81 +1177,85 @@ impl CodeIndexSchedulerRegistryV1 {
         // refresh; the next request observes the newly published generation.
         let authority_root = project_root.clone();
         let cadence_telemetry = Arc::clone(&self.cadence_telemetry);
-        let (latest, publication) = tokio::task::spawn_blocking(move || {
-            let mut scheduler = match scheduler.try_lock() {
-                Ok(scheduler) => scheduler,
-                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    // Serve prior generation without waiting, but schedule a
-                    // follow-up verification so busy refresh cannot strand
-                    // cadence indefinitely.
-                    Self::note_wake(
+        // `ensure_fresh_for_query` reconciles inline on the winner of the
+        // scheduler lock, and that reconcile can run for as long as a generation
+        // rebuild takes. Hold no admission slot while it does.
+        let (latest, publication) =
+            crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
+                let mut scheduler = match scheduler.try_lock() {
+                    Ok(scheduler) => scheduler,
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        // Serve prior generation without waiting, but schedule a
+                        // follow-up verification so busy refresh cannot strand
+                        // cadence indefinitely.
+                        Self::note_wake(
+                            &pending_wake_micros,
+                            &pending_wake_trigger,
+                            &wake,
+                            CodeIndexCadenceTriggerV1::BusyFollowUp,
+                        );
+                        return serving_generation
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone()
+                            .map(|latest| (latest, None));
+                    }
+                };
+                // Dequeue instant for the query-admission path: the scheduler lock
+                // is held and reconcile work starts on the next line.
+                let started_micros = now_micros().0;
+                let outcome = scheduler.ensure_fresh_for_query().ok()?;
+                let latest = scheduler.latest_complete()?;
+                *serving_generation
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+                if let Some(outcome) = outcome.as_ref() {
+                    // Prefer the earlier pending wake when one exists; otherwise this
+                    // query-admission reconcile is its own event-to-ready sample.
+                    let _ = pending_wake_micros.compare_exchange(
+                        0,
+                        u64::try_from(started_micros).unwrap_or(u64::MAX),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    if pending_wake_trigger.load(Ordering::Acquire) == 0 {
+                        pending_wake_trigger.store(
+                            Self::pack_trigger(CodeIndexCadenceTriggerV1::QueryAdmission),
+                            Ordering::Release,
+                        );
+                    }
+                    let (arrival, trigger) = Self::take_pending_arrival(
                         &pending_wake_micros,
                         &pending_wake_trigger,
-                        &wake,
-                        CodeIndexCadenceTriggerV1::BusyFollowUp,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
                     );
-                    return serving_generation
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                        .map(|latest| (latest, None));
-                }
-            };
-            // Dequeue instant for the query-admission path: the scheduler lock
-            // is held and reconcile work starts on the next line.
-            let started_micros = now_micros().0;
-            let outcome = scheduler.ensure_fresh_for_query().ok()?;
-            let latest = scheduler.latest_complete()?;
-            *serving_generation
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-            if let Some(outcome) = outcome.as_ref() {
-                // Prefer the earlier pending wake when one exists; otherwise this
-                // query-admission reconcile is its own event-to-ready sample.
-                let _ = pending_wake_micros.compare_exchange(
-                    0,
-                    u64::try_from(started_micros).unwrap_or(u64::MAX),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-                if pending_wake_trigger.load(Ordering::Acquire) == 0 {
-                    pending_wake_trigger.store(
-                        Self::pack_trigger(CodeIndexCadenceTriggerV1::QueryAdmission),
-                        Ordering::Release,
+                    Self::record_reconcile_receipt(
+                        &cadence_telemetry,
+                        project_root.clone(),
+                        arrival,
+                        trigger,
+                        started_micros,
+                        outcome,
                     );
                 }
-                let (arrival, trigger) = Self::take_pending_arrival(
-                    &pending_wake_micros,
-                    &pending_wake_trigger,
-                    CodeIndexCadenceTriggerV1::QueryAdmission,
-                );
-                Self::record_reconcile_receipt(
-                    &cadence_telemetry,
-                    project_root.clone(),
-                    arrival,
-                    trigger,
-                    started_micros,
-                    outcome,
-                );
-            }
-            let publication = outcome.as_ref().and_then(|outcome| match outcome {
-                CodeIndexReconcileOutcomeV1::Published(evidence) => {
-                    Some(CodeIndexGenerationPublishedV1 {
-                        project_root: project_root.clone(),
-                        repository_id: evidence.repository_id.clone(),
-                        generation_id: evidence.generation_id.clone(),
-                        snapshot_content_identity: evidence.snapshot_content_identity.clone(),
-                        observation_time_micros: now_micros().0,
-                    })
-                }
-                CodeIndexReconcileOutcomeV1::Noop(_) => None,
-            });
-            Some((latest, publication))
-        })
-        .await
-        .ok()
-        .flatten()?;
+                let publication = outcome.as_ref().and_then(|outcome| match outcome {
+                    CodeIndexReconcileOutcomeV1::Published(evidence) => {
+                        Some(CodeIndexGenerationPublishedV1 {
+                            project_root: project_root.clone(),
+                            repository_id: evidence.repository_id.clone(),
+                            generation_id: evidence.generation_id.clone(),
+                            snapshot_content_identity: evidence.snapshot_content_identity.clone(),
+                            observation_time_micros: now_micros().0,
+                        })
+                    }
+                    CodeIndexReconcileOutcomeV1::Noop(_) => None,
+                });
+                Some((latest, publication))
+            }))
+            .await
+            .ok()
+            .flatten()?;
         if let Some(publication) = publication {
             let _ = self.generation_publications.send(publication);
         }
@@ -1358,6 +1377,41 @@ impl CodeIndexSchedulerRegistryV1 {
             matched?
         };
         let latest = self.latest_complete_ready(&root).await?;
+        Self::latest_matches_scope(&latest, scope).then_some(latest)
+    }
+
+    /// Resolve one exact scope and serve the last complete generation already
+    /// held for that worktree, without running the freshness ladder.
+    ///
+    /// This is the stale-while-revalidate arm of query admission. The
+    /// per-worktree `serving_generation` is seeded at mount from the restored
+    /// generation and rewritten by every publication, so the read is O(1) and
+    /// never blocks on reconcile, gix status, or the scheduler mutex. A caller
+    /// that takes this arm is serving an older complete generation and must
+    /// mark its lanes stale; it must never present the result as current.
+    pub(in crate::daemon) async fn latest_complete_serving_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let serving_generation = {
+            let mounted = self.mounted.lock().await;
+            let mut matched = None;
+            for worktree in mounted.values() {
+                if worktree.repository_id == scope.repository_id
+                    && worktree.worktree_id == scope.worktree_id
+                {
+                    if matched.is_some() {
+                        return None;
+                    }
+                    matched = Some(Arc::clone(&worktree.serving_generation));
+                }
+            }
+            matched?
+        };
+        let latest = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
         Self::latest_matches_scope(&latest, scope).then_some(latest)
     }
 

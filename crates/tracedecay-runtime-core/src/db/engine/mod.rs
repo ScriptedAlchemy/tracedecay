@@ -11,7 +11,7 @@ mod test_support;
 mod transaction;
 mod value;
 
-pub use connection::{Connection, ReadConnection};
+pub use connection::{Connection, ReadConnection, ReaderPoolSnapshot, ReaderPoolState};
 pub use error::{Error, Result};
 pub use executor::{DatabaseAttachmentExecutor, Executor, QueryExecutor, WalCheckpointExecutor};
 pub use params::{IntoParams, IntoValue, Params, params, params_from_iter};
