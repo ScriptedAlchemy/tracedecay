@@ -1401,10 +1401,7 @@ impl Database {
                                        'returns', 'receives', 'uses' \
                                    ) \
                              ) \
-                             AND NOT EXISTS ( \
-                                 SELECT 1 FROM test_annotated_targets t \
-                                 WHERE t.target = n.id \
-                             ) \
+                             AND n.id NOT IN (SELECT target FROM test_annotated_targets) \
                             THEN 1 ELSE 0 END) AS dead \
                    FROM nodes n ";
         let sql_suffix = "GROUP BY n.file_path ORDER BY n.file_path LIMIT ?2";
