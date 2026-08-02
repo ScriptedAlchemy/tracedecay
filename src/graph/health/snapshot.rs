@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use crate::errors::Result;
 use crate::graph::queries::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
-use crate::types::NodeKind;
 
 use super::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth, depth_score,
@@ -65,34 +64,29 @@ pub(crate) async fn compute_health_snapshot(
     let depth_result = dependency_depth(&adj, 1);
     let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
 
-    // Per-file aggregates — the weighted complexity sum, the function/method
-    // count, and the skip-test-coverage count — are folded inside SQLite in one
-    // `GROUP BY` scan instead of materializing the whole node table (and a
-    // separate skip-marker scan) in the process. Filtering the grouped rows by
-    // scope is byte-identical to filtering nodes before folding, because every
-    // node in a file shares that file's path.
+    // Per-file aggregates — weighted complexity, function/method count,
+    // skip-test-coverage count, and dead function/method count — are folded
+    // inside SQLite in one keyset-paged `GROUP BY` scan instead of
+    // materializing the whole node table in the process. Filtering grouped
+    // rows by scope is byte-identical to filtering nodes before folding,
+    // because every node in a file shares that file's path.
     let file_aggregates = cg.db().health_file_aggregates().await?;
     let mut complexity_values: Vec<f64> = Vec::with_capacity(file_aggregates.len());
     let mut total_fns = 0usize;
     let mut skipped_in_scope = 0usize;
+    let mut dead_count = 0usize;
     for agg in &file_aggregates {
         if crate::path_scope::path_matches_scope(&agg.file_path, path_prefix) {
             complexity_values.push(agg.complexity);
             total_fns += agg.function_methods;
             skipped_in_scope += agg.skipped_function_methods;
+            dead_count += agg.dead_function_methods;
         }
     }
     let complexity_files = complexity_values.len();
     let gini = gini_coefficient(&complexity_values);
     let equality = (1.0 - gini).clamp(0.0, 1.0);
 
-    let dead = cg
-        .find_dead_code(&[NodeKind::Function, NodeKind::Method], false)
-        .await?;
-    let dead_count = dead
-        .iter()
-        .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
-        .count();
     let redundancy = if total_fns == 0 {
         1.0
     } else {

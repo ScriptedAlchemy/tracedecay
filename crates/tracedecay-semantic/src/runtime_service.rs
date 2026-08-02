@@ -8,10 +8,10 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 #[cfg(test)]
 use std::sync::RwLockWriteGuard;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 
 use serde::Serialize;
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
