@@ -57,6 +57,38 @@ fn bounded_daemon_admission_permits() -> usize {
     })
 }
 
+/// How long a mount may wait for an admission permit before failing retryably.
+///
+/// Admission is only 2 permits wide, and the work it guards is an O(store)
+/// generation decode. Several large worktrees opening at once therefore queue
+/// N sequential decodes behind one unbounded `acquire()`, and the caller has no
+/// way to learn it is queued rather than working. The wait is bounded instead:
+/// a mount that cannot be admitted in time reports a typed warming error the
+/// caller can retry, which is strictly better than holding the caller's
+/// deadline hostage to a queue whose depth it cannot see.
+const MOUNT_ADMISSION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Deadline-bounded mount admission.
+///
+/// Timing out is not a failure of the mount: the store is intact, the decode is
+/// simply queued behind other worktrees. The typed
+/// [`CodeIndexSchedulerErrorV1::MountAdmissionWarming`] says exactly that, so a
+/// caller retries rather than treating a busy daemon as a broken store.
+async fn acquire_mount_admission(
+    admission: &Arc<tokio::sync::Semaphore>,
+    deadline: std::time::Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>, CodeIndexSchedulerErrorV1> {
+    match tokio::time::timeout(deadline, admission.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(CodeIndexSchedulerErrorV1::Identity(
+            "code-index mount admission semaphore is closed".to_owned(),
+        )),
+        Err(_) => Err(CodeIndexSchedulerErrorV1::MountAdmissionWarming {
+            waited_ms: u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+        }),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub project_root: PathBuf,
@@ -513,11 +545,8 @@ impl CodeIndexSchedulerRegistryV1 {
         // independent work, so a small bound lets concurrent opens proceed while
         // still capping simultaneous store-open pressure. Holding `mounted` here
         // would instead block every foreground query across every project.
-        let _mount_admission = self.mount_admission.acquire().await.map_err(|_| {
-            CodeIndexSchedulerErrorV1::Identity(
-                "code-index mount admission semaphore is closed".to_owned(),
-            )
-        })?;
+        let _mount_admission =
+            acquire_mount_admission(&self.mount_admission, MOUNT_ADMISSION_DEADLINE).await?;
         let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
@@ -1769,4 +1798,58 @@ fn feedback_document_logical_path(
         .to_str()
         .map(|path| path.replace('\\', "/"))
         .ok_or_else(|| LspRuntimeFailure::new("feedback-document-path-unavailable"))
+}
+
+#[cfg(test)]
+mod mount_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn admission_within_the_deadline_returns_a_permit() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = acquire_mount_admission(&admission, std::time::Duration::from_secs(5))
+            .await
+            .expect("a free permit is admitted immediately");
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_admission_fails_retryably_at_the_deadline() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&admission)
+            .acquire_owned()
+            .await
+            .expect("semaphore is open");
+        let deadline = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let error = acquire_mount_admission(&admission, deadline)
+            .await
+            .expect_err("an exhausted admission must not wait unbounded");
+        assert!(
+            started.elapsed() >= deadline,
+            "the deadline must be observed before failing"
+        );
+        assert!(
+            matches!(
+                error,
+                CodeIndexSchedulerErrorV1::MountAdmissionWarming { waited_ms } if waited_ms == 50
+            ),
+            "expected a typed warming error, got {error:?}"
+        );
+        assert!(error.is_retryable(), "warming is retryable");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_closed_admission_is_not_retryable() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        admission.close();
+        let error = acquire_mount_admission(&admission, std::time::Duration::from_secs(5))
+            .await
+            .expect_err("a closed semaphore cannot admit");
+        assert!(
+            !error.is_retryable(),
+            "a closed admission never reopens, so retrying cannot succeed"
+        );
+    }
 }
