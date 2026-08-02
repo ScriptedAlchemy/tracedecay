@@ -740,7 +740,7 @@ pub fn issue_enrollment(
 /// Authority authentication is delegated to the concrete network boundary.
 /// An HTTP/rustls adapter must verify the connected authority peer; the
 /// application never accepts a caller-supplied boolean or trust-root claim.
-pub trait RemoteAuthorityAuthenticationPort {
+pub trait RemoteAuthorityAuthenticationPort: Send + Sync {
     fn authenticate_connected_authority(
         &self,
         expected_authority: &CurrentRemoteAuthorityV1,

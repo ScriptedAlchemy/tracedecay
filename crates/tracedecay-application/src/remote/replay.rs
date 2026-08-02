@@ -4,7 +4,7 @@
 //! application carries only canonical capture identity and a bounded replay
 //! receipt suitable for validation and status reporting.
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,9 +23,8 @@ use super::auth::{
 use super::capture::{RemoteCapturePersistenceErrorV1, RemoteWriterAuthorityV1};
 use super::protocol::{
     REMOTE_PROTOCOL_VERSION_V1, REMOTE_REPLAY_USE_CASE_ID_V1, RemoteClockPortV1,
-    RemoteProtocolExecutionErrorV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
-    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
-    remote_replay_result_contract_v1,
+    RemoteProtocolExecutionErrorV1, RemoteProtocolFailureV1, RemoteProtocolRequestV1,
+    RemoteProtocolResponseV1, remote_protocol_problem, remote_replay_result_contract_v1,
 };
 use crate::{
     ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult, EffectTermination,
@@ -215,7 +214,7 @@ impl RemoteReplayServiceV1 {
         }
     }
 
-    pub fn replay(
+    pub async fn replay(
         &self,
         request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         presented_credential: &OpaqueRemoteCredential,
@@ -290,7 +289,8 @@ impl RemoteReplayServiceV1 {
             writer,
             request.body.replay_attempt,
             self.clock.as_ref(),
-        )?;
+        )
+        .await?;
         Ok(RemoteReplayServiceOutcomeV1 {
             outcome,
             authority: current.state,
@@ -327,73 +327,93 @@ pub struct RemoteReplayProtocolAdapterV1 {
     service: RemoteReplayServiceV1,
 }
 
+pub type RemoteReplayProtocolFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    RemoteProtocolResponseV1<RemoteReplayOutcomeV1>,
+                    RemoteProtocolExecutionErrorV1,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub trait RemoteReplayProtocolPortV1: Send + Sync {
+    fn execute_replay(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteReplayProtocolFutureV1<'_>;
+}
+
 impl RemoteReplayProtocolAdapterV1 {
     pub fn new(service: RemoteReplayServiceV1) -> Self {
         Self { service }
     }
 }
 
-impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapterV1 {
-    type Output = RemoteReplayOutcomeV1;
-
-    fn execute(
+impl RemoteReplayProtocolPortV1 for RemoteReplayProtocolAdapterV1 {
+    fn execute_replay(
         &self,
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1> {
-        let request_id = request.request_id.clone();
-        let observed_at = self.service.clock.now()?;
-        let server_authority = self
-            .service
-            .current_writer
-            .current_authority(&request.expected_authority)
-            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)?;
-        match self.service.replay(&request, &credential) {
-            Ok(outcome) => {
-                let authority = outcome.authority.clone();
-                let result = replay_effect_envelope(request, outcome).map_err(|failure| {
-                    remote_protocol_problem(
-                        remote_replay_result_contract_v1(),
-                        request_id.clone(),
-                        failure,
-                    )
-                });
-                RemoteProtocolResponseV1::new(request_id, authority, result)
-                    .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
-            }
-            Err(error) => {
-                let authority = if matches!(
-                    &error,
-                    RemoteReplayServiceErrorV1::Credential(
-                        RemoteEnrollmentAuthorityErrorV1::GrantNotFound
-                    )
-                ) {
-                    CurrentRemoteAuthorityStateV1::Unavailable {
-                        reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-                        observed_at,
-                    }
-                } else {
-                    match &error {
-                        RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
-                        | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
-                            state.as_ref().clone()
+    ) -> RemoteReplayProtocolFutureV1<'_> {
+        Box::pin(async move {
+            let request_id = request.request_id.clone();
+            let observed_at = self.service.clock.now()?;
+            let server_authority = self
+                .service
+                .current_writer
+                .current_authority(&request.expected_authority)
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)?;
+            match self.service.replay(&request, &credential).await {
+                Ok(outcome) => {
+                    let authority = outcome.authority.clone();
+                    let result = replay_effect_envelope(request, outcome).map_err(|failure| {
+                        remote_protocol_problem(
+                            remote_replay_result_contract_v1(),
+                            request_id.clone(),
+                            failure,
+                        )
+                    });
+                    RemoteProtocolResponseV1::new(request_id, authority, result)
+                        .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
+                }
+                Err(error) => {
+                    let authority = if matches!(
+                        &error,
+                        RemoteReplayServiceErrorV1::Credential(
+                            RemoteEnrollmentAuthorityErrorV1::GrantNotFound
+                        )
+                    ) {
+                        CurrentRemoteAuthorityStateV1::Unavailable {
+                            reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
+                            observed_at,
                         }
-                        _ => server_authority,
-                    }
-                };
-                let failure = replay_protocol_failure(error);
-                RemoteProtocolResponseV1::new(
-                    request_id.clone(),
-                    authority,
-                    Err(remote_protocol_problem(
-                        remote_replay_result_contract_v1(),
-                        request_id,
-                        failure,
-                    )),
-                )
-                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
+                    } else {
+                        match &error {
+                            RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
+                            | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
+                                state.as_ref().clone()
+                            }
+                            _ => server_authority,
+                        }
+                    };
+                    let failure = replay_protocol_failure(error);
+                    RemoteProtocolResponseV1::new(
+                        request_id.clone(),
+                        authority,
+                        Err(remote_protocol_problem(
+                            remote_replay_result_contract_v1(),
+                            request_id,
+                            failure,
+                        )),
+                    )
+                    .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
+                }
             }
-        }
+        })
     }
 }
 
@@ -576,13 +596,21 @@ pub enum RemoteReplayTransactionOutcomeV1 {
     Duplicate(RemoteReplayCommitReceiptV1),
 }
 
+pub type RemoteReplayTransactionFutureV1<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 pub trait RemoteReplayTransactionPortV1: Send + Sync {
-    fn commit(
-        &self,
-        frame: &RemoteReplayFrameV1,
-        current_writer: &RemoteWriterAuthorityV1,
-        committed_at: UtcMicros,
-    ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>;
+    fn commit<'a>(
+        &'a self,
+        frame: &'a RemoteReplayFrameV1,
+        current_writer: &'a RemoteWriterAuthorityV1,
+    ) -> RemoteReplayTransactionFutureV1<'a>;
 }
 
 pub fn canonical_remote_observation_write_v1(
@@ -637,7 +665,7 @@ pub enum RemoteReplayOutcomeV1 {
 /// attempts and acknowledgement transitions; this authority validates and
 /// atomically commits only the submitted sanitized frame.
 #[allow(clippy::too_many_arguments)]
-pub fn admit_remote_replay_at_authority(
+pub async fn admit_remote_replay_at_authority(
     authentication: &dyn RemoteAuthorityAuthenticationPort,
     policy: &dyn RemoteReplayPolicyPortV1,
     transaction: &dyn RemoteReplayTransactionPortV1,
@@ -653,6 +681,9 @@ pub fn admit_remote_replay_at_authority(
         return Err(RemoteReplayApplicationErrorV1::InvalidReplayAttempt);
     }
     let started_at = remote_clock_now(clock)?;
+    if frame.capture.captured_at > started_at {
+        return Err(RemoteReplayApplicationErrorV1::InvalidFrame);
+    }
     validate_scope_and_fence(frame, current_writer, caller_credential)?;
     authenticate_remote_request(
         authentication,
@@ -696,9 +727,9 @@ pub fn admit_remote_replay_at_authority(
         RemoteReplayPolicyDecisionV1::Admit => {}
     }
 
-    let committed_at = remote_clock_now(clock)?;
     let (disposition, receipt) = match transaction
-        .commit(frame, current_writer, committed_at)
+        .commit(frame, current_writer)
+        .await
         .map_err(RemoteReplayApplicationErrorV1::Transaction)?
     {
         RemoteReplayTransactionOutcomeV1::Admitted(receipt) => {

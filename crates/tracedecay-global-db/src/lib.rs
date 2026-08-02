@@ -17,7 +17,7 @@ mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
 mod support;
-pub use observation_adapter::GlobalDbObservationStore;
+pub use observation_adapter::{GlobalDbObservationStore, RegisteredRemoteReplayTransactionV1};
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 mod observation_store;
 mod project_registry;

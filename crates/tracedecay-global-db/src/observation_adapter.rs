@@ -1,10 +1,21 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_application::{
+    OperationBudgetUsage,
+    remote::{
+        capture::RemoteWriterAuthorityV1,
+        replay::{
+            RemoteReplayCommitReceiptV1, RemoteReplayFrameV1, RemoteReplayTransactionErrorV1,
+            RemoteReplayTransactionFutureV1, RemoteReplayTransactionOutcomeV1,
+            RemoteReplayTransactionPortV1, canonical_remote_observation_write_v1,
+        },
+    },
+};
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, UtcMicros, canonical_sha256,
-    classify_observation_collision,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, UtcMicros, canonical_json_bytes,
+    canonical_sha256, classify_observation_collision,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -41,6 +52,89 @@ impl<'a> GlobalDbObservationStore<'a> {
             runtime,
             write_authority,
         }
+    }
+}
+
+/// Remote replay transaction over the same registered repository runtime as
+/// ordinary observation persistence.
+pub struct RegisteredRemoteReplayTransactionV1 {
+    runtime: StoreRuntimeHandle,
+    write_authority: DatabaseAuthority,
+}
+
+impl RegisteredRemoteReplayTransactionV1 {
+    pub(crate) fn new(runtime: StoreRuntimeHandle, write_authority: DatabaseAuthority) -> Self {
+        Self {
+            runtime,
+            write_authority,
+        }
+    }
+}
+
+impl RemoteReplayTransactionPortV1 for RegisteredRemoteReplayTransactionV1 {
+    fn commit<'a>(
+        &'a self,
+        frame: &'a RemoteReplayFrameV1,
+        current_writer: &'a RemoteWriterAuthorityV1,
+    ) -> RemoteReplayTransactionFutureV1<'a> {
+        Box::pin(async move {
+            let write = canonical_remote_observation_write_v1(frame, current_writer)
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+            let payload = RepositoryWritePayloadV1::RemoteObservation(Box::new(write));
+            let command = canonical_observation_runtime_command_v1(&payload)
+                .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+            let bytes_consumed = u64::try_from(
+                canonical_json_bytes(&command.command)
+                    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?
+                    .len(),
+            )
+            .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?
+            .max(1);
+            let outcome = submit_runtime_write(
+                &self.runtime,
+                &self.write_authority,
+                payload,
+                frame.event_id.clone(),
+                "commit remote observation replay",
+            )
+            .await
+            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
+            let (receipt, duplicate) = match outcome {
+                RuntimeSubmitOutcomeV1::Committed { receipt }
+                | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { receipt, .. } => {
+                    (receipt, false)
+                }
+                RuntimeSubmitOutcomeV1::ExactReplay { receipt } => (receipt, true),
+                RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
+                    return Err(RemoteReplayTransactionErrorV1::IdempotencyConflict);
+                }
+                RuntimeSubmitOutcomeV1::Fenced { .. } => {
+                    return Err(RemoteReplayTransactionErrorV1::FenceMismatch);
+                }
+                RuntimeSubmitOutcomeV1::Saturated { .. }
+                | RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }
+                | RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. }
+                | RuntimeSubmitOutcomeV1::Unavailable { .. } => {
+                    return Err(RemoteReplayTransactionErrorV1::Unavailable);
+                }
+            };
+            let receipt = RemoteReplayCommitReceiptV1 {
+                event_id: frame.event_id.clone(),
+                writer_fence: current_writer.authority.fence.clone(),
+                commit_sequence: receipt.commit_sequence.0,
+                committed_at: receipt.committed_at,
+                budget: OperationBudgetUsage {
+                    units_consumed: 1,
+                    bytes_consumed,
+                    elapsed_micros: 0,
+                },
+            };
+            if duplicate {
+                Ok(RemoteReplayTransactionOutcomeV1::Duplicate(receipt))
+            } else {
+                Ok(RemoteReplayTransactionOutcomeV1::Admitted(receipt))
+            }
+        })
     }
 }
 
@@ -337,10 +431,10 @@ fn dispatch_runtime_observation_read(
                 "canonical digest prefix is invalid",
             )
         })?;
-    let admission_bytes = serde_json::to_vec(&operation)
+    let admission_bytes = canonical_json_bytes(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?
         .len();
-    let requested_at = runtime_now();
+    let requested_at = runtime_now()?;
     let control = RuntimeRequestControlV1 {
         requested_at,
         deadline: RuntimeDeadlineV1 {
@@ -499,7 +593,7 @@ async fn submit_runtime_write(
         .as_str()
         .strip_prefix("sha256:")
         .ok_or_else(|| runtime_storage_error(operation, "canonical digest prefix is invalid"))?;
-    let admitted_at = runtime_now();
+    let admitted_at = runtime_now()?;
     let binding = runtime.binding();
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!(
@@ -522,7 +616,7 @@ async fn submit_runtime_write(
         durability: DurabilityClassV1::Full,
         priority: OperationPriorityV1::Foreground,
         admission_bytes: u64::try_from(
-            serde_json::to_vec(&command)
+            canonical_json_bytes(&command)
                 .map_err(|error| runtime_storage_error(operation, error.to_string()))?
                 .len(),
         )
@@ -590,12 +684,14 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
         })
 }
 
-fn runtime_now() -> UtcMicros {
+fn runtime_now() -> ObservationStoreResult<UtcMicros> {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|error| runtime_storage_error("read observation runtime clock", error))?
         .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+    Ok(UtcMicros(i64::try_from(micros).map_err(|_| {
+        runtime_storage_error("read observation runtime clock", "timestamp exceeds i64")
+    })?))
 }
 
 fn runtime_storage_error(

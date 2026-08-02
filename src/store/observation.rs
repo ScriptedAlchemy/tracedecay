@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ObservationCollisionOutcomeV1, ObservationScopeV1, UtcMicros, canonical_sha256,
-    classify_observation_collision,
+    ObservationCollisionOutcomeV1, ObservationScopeV1, UtcMicros, canonical_json_bytes,
+    canonical_sha256, classify_observation_collision,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
@@ -337,10 +337,10 @@ fn dispatch_runtime_observation_read(
                 "canonical digest prefix is invalid",
             )
         })?;
-    let admission_bytes = serde_json::to_vec(&operation)
+    let admission_bytes = canonical_json_bytes(&operation)
         .map_err(|error| runtime_storage_error("build observation runtime read", error))?
         .len();
-    let requested_at = runtime_now();
+    let requested_at = runtime_now()?;
     let control = RuntimeRequestControlV1 {
         requested_at,
         deadline: RuntimeDeadlineV1 {
@@ -499,7 +499,7 @@ async fn submit_runtime_write(
         .as_str()
         .strip_prefix("sha256:")
         .ok_or_else(|| runtime_storage_error(operation, "canonical digest prefix is invalid"))?;
-    let admitted_at = runtime_now();
+    let admitted_at = runtime_now()?;
     let binding = runtime.binding();
     let metadata = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new(format!(
@@ -522,7 +522,7 @@ async fn submit_runtime_write(
         durability: DurabilityClassV1::Full,
         priority: OperationPriorityV1::Foreground,
         admission_bytes: u64::try_from(
-            serde_json::to_vec(&command)
+            canonical_json_bytes(&command)
                 .map_err(|error| runtime_storage_error(operation, error.to_string()))?
                 .len(),
         )
@@ -590,12 +590,14 @@ fn canonical_runtime_digest(value: &serde_json::Value) -> ObservationStoreResult
         })
 }
 
-fn runtime_now() -> UtcMicros {
+fn runtime_now() -> ObservationStoreResult<UtcMicros> {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_err(|error| runtime_storage_error("read observation runtime clock", error))?
         .as_micros();
-    UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
+    Ok(UtcMicros(i64::try_from(micros).map_err(|_| {
+        runtime_storage_error("read observation runtime clock", "timestamp exceeds i64")
+    })?))
 }
 
 fn runtime_storage_error(

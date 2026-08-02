@@ -31,7 +31,9 @@ use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayProtocolPortV1, RemoteReplayRequestV1,
+};
 use tracedecay_application::{ApplicationProblemKind, RequestId, ResultContractRef};
 use tracedecay_tool_catalog::SchemaId;
 
@@ -256,6 +258,24 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
         Ok(response.into())
     }
 
+    pub async fn execute_replay(
+        &self,
+        request: RemoteHttpRequestV1<RemoteReplayRequestV1>,
+        authorization: RemoteAuthorizationHeader,
+    ) -> Result<RemoteHttpResponseV1<RemoteReplayOutcomeV1>, RemoteHttpBoundaryError>
+    where
+        Port: RemoteReplayProtocolPortV1,
+    {
+        let request_id = request.request.request_id.clone();
+        let admission = request.admit(authorization)?;
+        let response = self
+            .service
+            .execute_replay(admission.request, admission.credential)
+            .await
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
+        Ok(response.into())
+    }
+
     pub fn execute_enrollment(
         &self,
         request: RemoteEnrollmentHttpRequestV1,
@@ -329,7 +349,7 @@ pub fn remote_protocol_router<Port, Query>(port: Port) -> Router
 where
     Port: RemoteEnrollmentProtocolPortV1
         + RemoteAuthorityDiscoveryProtocolPortV1
-        + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
+        + RemoteReplayProtocolPortV1
         + RemoteProtocolPortV1<Query>
         + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
         + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
@@ -346,10 +366,7 @@ where
     Router::new()
         .route("/enrollment", post(enrollment_route::<Port>))
         .route("/discovery", post(discovery_route::<Port>))
-        .route(
-            "/replay",
-            post(protocol_route::<Port, RemoteReplayRequestV1>),
-        )
+        .route("/replay", post(replay_route::<Port>))
         .route("/query", post(protocol_route::<Port, Query>))
         .route("/backup", post(protocol_route::<Port, BackupRequestV1>))
         .route(
@@ -362,6 +379,28 @@ where
         )
         .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
         .with_state(state)
+}
+
+async fn replay_route<Port>(
+    State(state): State<RemoteProtocolRouterStateV1<Port>>,
+    headers: HeaderMap,
+    payload: Result<Json<RemoteHttpRequestV1<RemoteReplayRequestV1>>, JsonRejection>,
+) -> Response
+where
+    Port: RemoteReplayProtocolPortV1 + Send + Sync + 'static,
+{
+    let authorization = match authorization_header(&headers) {
+        Ok(authorization) => authorization,
+        Err(_) => return concealed_authentication_response(concealed_request_id()),
+    };
+    let Json(request) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return invalid_remote_request_response(),
+    };
+    match state.transport.execute_replay(request, authorization).await {
+        Ok(response) => remote_protocol_response(response),
+        Err(error) => remote_boundary_error_response(error),
+    }
 }
 
 async fn protocol_route<Port, Request>(
@@ -828,7 +867,6 @@ mod tests {
         };
     }
 
-    route_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
     route_port!(BackupRequestV1, BackupOperationStateV1);
     route_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
     route_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
@@ -854,11 +892,33 @@ mod tests {
         };
     }
 
-    validation_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
     validation_port!(BackupRequestV1, BackupOperationStateV1);
     validation_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
     validation_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
     validation_port!(TestQuery, TestQueryResult);
+
+    impl RemoteReplayProtocolPortV1 for RoutePort {
+        fn execute_replay(
+            &self,
+            request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+            _credential: OpaqueRemoteCredential,
+        ) -> tracedecay_application::remote::replay::RemoteReplayProtocolFutureV1<'_> {
+            let response = problem_route_response(request.request_id, self.outcome);
+            Box::pin(async move { Ok(response) })
+        }
+    }
+
+    impl RemoteReplayProtocolPortV1 for ValidationPort {
+        fn execute_replay(
+            &self,
+            request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+            _credential: OpaqueRemoteCredential,
+        ) -> tracedecay_application::remote::replay::RemoteReplayProtocolFutureV1<'_> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let response = problem_route_response(request.request_id, RouteOutcome::Unavailable);
+            Box::pin(async move { Ok(response) })
+        }
+    }
 
     impl RemoteProtocolPortV1<TestQuery> for RoutePort {
         type Output = TestQueryResult;
@@ -1187,6 +1247,29 @@ mod tests {
         .status()
     }
 
+    fn replay_validation_status(
+        calls: &Arc<AtomicUsize>,
+        request: RemoteHttpRequestV1<RemoteReplayRequestV1>,
+        authorized: bool,
+    ) -> StatusCode {
+        let state = RemoteProtocolRouterStateV1 {
+            transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
+                Arc::clone(calls),
+            ))),
+        };
+        let headers = if authorized {
+            authenticated_headers(false)
+        } else {
+            HeaderMap::new()
+        };
+        block_on(replay_route::<ValidationPort>(
+            State(state),
+            headers,
+            Ok(Json(request)),
+        ))
+        .status()
+    }
+
     fn enrollment_validation_status(
         calls: &Arc<AtomicUsize>,
         request: EnrollmentRequestV1,
@@ -1373,7 +1456,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            validation_status(
+            replay_validation_status(
                 &calls,
                 protocol_request("request.remote.replay-validation", {
                     let mut request = replay_request();
@@ -1515,7 +1598,7 @@ mod tests {
         assert_eq!(discovery_validation_status(&calls), StatusCode::OK);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
-            validation_status(
+            replay_validation_status(
                 &calls,
                 protocol_request("request.remote.valid-replay", replay_request(),),
                 true,

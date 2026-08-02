@@ -133,6 +133,27 @@ impl<Port> RemoteProtocolServiceV1<Port> {
         self.port.execute(request, credential)
     }
 
+    pub async fn execute_replay(
+        &self,
+        request: RemoteProtocolRequestV1<crate::remote::replay::RemoteReplayRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> Result<
+        RemoteProtocolResponseV1<crate::remote::replay::RemoteReplayOutcomeV1>,
+        RemoteProtocolExecutionErrorV1,
+    >
+    where
+        Port: crate::remote::replay::RemoteReplayProtocolPortV1,
+    {
+        request
+            .validate_metadata()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::InvalidRequest)?;
+        request
+            .body
+            .validate_remote_protocol_body()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::InvalidRequest)?;
+        self.port.execute_replay(request, credential).await
+    }
+
     pub fn execute_enrollment(
         &self,
         request: RemoteEnrollmentProtocolRequestV1,
