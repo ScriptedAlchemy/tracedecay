@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
 };
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -148,14 +149,64 @@ unsafe impl ExtractionAdmittedChunkV1 for ExtractionAdmittedCodeSearchChunkV1 {
     }
 }
 
+/// Chunk counts below this stay on the calling thread. One canonical chunk
+/// digest costs single-digit microseconds, so small files are cheaper inline
+/// than split across the pool — and leaving them sequential keeps the pool free
+/// for the coarser per-file fan-out above this layer.
+const PARALLEL_CHUNK_THRESHOLD: usize = 16;
+
+/// Map `operation` over every chunk, fanning out across the pool once the batch
+/// is large enough. Results are returned in chunk order and the reported
+/// failure is always the lowest-index one, so the outcome is identical to the
+/// sequential sweep this replaces.
+fn map_chunks_ordered<T, F>(
+    chunks: &[CodeSearchChunkV1],
+    operation: F,
+) -> Result<Vec<T>, ChunkingFailureV1>
+where
+    T: Send,
+    F: Fn(&CodeSearchChunkV1) -> Result<T, ChunkingFailureV1> + Send + Sync,
+{
+    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
+        return chunks.iter().map(operation).collect();
+    }
+    let results: Vec<Result<T, ChunkingFailureV1>> =
+        chunks.par_iter().map(operation).collect::<Vec<_>>();
+    results.into_iter().collect()
+}
+
+/// Run `operation` over every chunk for its failure only, fanning out across
+/// the pool once the batch is large enough. The lowest-index failure is
+/// returned, matching the sequential sweep's short-circuit outcome.
+fn try_for_each_chunk_ordered<F>(
+    chunks: &[CodeSearchChunkV1],
+    operation: F,
+) -> Result<(), ChunkingFailureV1>
+where
+    F: Fn(&CodeSearchChunkV1) -> Result<(), ChunkingFailureV1> + Send + Sync,
+{
+    if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
+        return chunks.iter().try_for_each(operation);
+    }
+    let failure = chunks
+        .par_iter()
+        .enumerate()
+        .filter_map(|(index, chunk)| operation(chunk).err().map(|error| (index, error)))
+        .min_by_key(|(index, _)| *index);
+    match failure {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
 impl ExactExtractionAuthorityV1 {
     fn mint(chunks: &[CodeSearchChunkV1]) -> Result<Self, ChunkingFailureV1> {
+        let digests = map_chunks_ordered(chunks, |chunk| {
+            canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)
+        })?;
         let mut chunk_digests = BTreeMap::new();
-        for chunk in chunks {
-            chunk_digests.insert(
-                chunk.id.clone(),
-                canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)?,
-            );
+        for (chunk, digest) in chunks.iter().zip(digests) {
+            chunk_digests.insert(chunk.id.clone(), digest);
         }
         Ok(Self { chunk_digests })
     }
@@ -201,13 +252,17 @@ impl ExactExtractionAuthorityV1 {
             ));
         }
         let mut seen = BTreeSet::new();
-        for chunk in chunks {
-            if !seen.insert(&chunk.id) {
-                return Err(ChunkingFailureV1::NonCanonicalIdentity(
-                    "chunk set repeats parser-backed exact extraction identity".to_owned(),
-                ));
-            }
-            self.validate_chunk(chunk)?;
+        let repeated_at = chunks
+            .iter()
+            .position(|chunk| !seen.insert(&chunk.id))
+            .unwrap_or(chunks.len());
+        // The sequential sweep stopped at the first repeated identity, so only
+        // the chunks ahead of it were ever digest-checked.
+        try_for_each_chunk_ordered(&chunks[..repeated_at], |chunk| self.validate_chunk(chunk))?;
+        if repeated_at < chunks.len() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "chunk set repeats parser-backed exact extraction identity".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -224,7 +279,14 @@ impl ExactExtractionAuthorityV1 {
         &self,
         chunks: Vec<CodeSearchChunkV1>,
     ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
-        chunks.into_iter().map(|chunk| self.admit(chunk)).collect()
+        if chunks.len() < PARALLEL_CHUNK_THRESHOLD {
+            return chunks.into_iter().map(|chunk| self.admit(chunk)).collect();
+        }
+        let admitted = chunks
+            .into_par_iter()
+            .map(|chunk| self.admit(chunk))
+            .collect::<Vec<_>>();
+        admitted.into_iter().collect()
     }
 
     /// Rebind an exact authority only after every prior parser-backed chunk
@@ -285,7 +347,7 @@ impl CodeFileChunksV1 {
                 "document chunk membership does not match canonical chunk order".to_owned(),
             ));
         }
-        for chunk in &self.chunks {
+        try_for_each_chunk_ordered(&self.chunks, |chunk| {
             if chunk.anchor.generation_id != self.document.generation_id
                 || chunk.anchor.file_occurrence_id != self.document.file_occurrence_id
             {
@@ -293,9 +355,8 @@ impl CodeFileChunksV1 {
             }
             chunk
                 .validate()
-                .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
-        }
-        Ok(())
+                .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
+        })
     }
 
     /// Rebind carried-forward chunks to their next generation without
@@ -2187,6 +2248,136 @@ mod tests {
         chunker()
             .chunk_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
             .expect("chunking succeeds")
+    }
+
+    /// A chunk set large enough to cross `PARALLEL_CHUNK_THRESHOLD`, built from
+    /// real extraction rather than hand-assembled chunks.
+    fn wide_chunk_source(symbols: usize) -> String {
+        let mut source =
+            String::from("//! Module documentation.\n\nuse std::collections::HashMap;\n\n");
+        for index in 0..symbols {
+            source.push_str(&format!(
+                "/// Doc comment for symbol {index}.\npub fn symbol_{index}(value: u32, label: &str) -> u32 {{\n    let mapping: HashMap<u32, &str> = HashMap::new();\n    let _ = mapping.get(&value).unwrap_or(&label);\n    value + {index}\n}}\n\n"
+            ));
+        }
+        source
+    }
+
+    fn wide_chunks(symbols: usize) -> CodeFileChunksV1 {
+        let chunks = chunk_source(&wide_chunk_source(symbols));
+        assert!(
+            chunks.chunks.len() > PARALLEL_CHUNK_THRESHOLD,
+            "fixture must cross the parallel threshold, got {} chunks",
+            chunks.chunks.len()
+        );
+        chunks
+    }
+
+    fn sequential_digest_reference(
+        chunks: &[CodeSearchChunkV1],
+    ) -> BTreeMap<CodeSearchChunkId, String> {
+        let mut digests = BTreeMap::new();
+        for chunk in chunks {
+            digests.insert(
+                chunk.id.clone(),
+                canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)
+                    .expect("reference digest"),
+            );
+        }
+        digests
+    }
+
+    /// The fanned-out digest sweep must produce byte-identical digests, in the
+    /// same association, as the single-threaded reference it replaced.
+    #[test]
+    fn parallel_digest_sweep_matches_the_sequential_reference() {
+        let chunks = wide_chunks(48);
+        let reference = sequential_digest_reference(&chunks.chunks);
+
+        let authority = ExactExtractionAuthorityV1::restore(&chunks).expect("sealed authority");
+        assert_eq!(authority.chunk_digests, reference);
+
+        authority
+            .validate_all(&chunks.chunks)
+            .expect("parallel validation accepts its own chunks");
+
+        let admitted = authority
+            .admit_all(chunks.chunks.clone())
+            .expect("parallel admission");
+        let readmitted = admitted
+            .into_iter()
+            .map(ExtractionAdmittedCodeSearchChunkV1::into_chunk)
+            .collect::<Vec<_>>();
+        assert_eq!(readmitted, chunks.chunks, "admission must preserve order");
+    }
+
+    /// The fanned-out sweeps still report the lowest-index failure, so callers
+    /// observe the same error the sequential short-circuit produced.
+    #[test]
+    fn parallel_validation_reports_the_lowest_index_failure() {
+        let baseline = wide_chunks(48);
+        let early = 3usize;
+        let late = baseline.chunks.len() - 2;
+        assert!(early < late);
+
+        let mut identity_first = baseline.clone();
+        identity_first.chunks[early].anchor.parent_chunk_id =
+            Some(identity_first.chunks[early].id.clone());
+        identity_first.chunks[late].anchor.generation_id = id("generation.other");
+        assert!(matches!(
+            identity_first.validate(),
+            Err(ChunkingFailureV1::NonCanonicalIdentity(_))
+        ));
+
+        let mut generation_first = baseline.clone();
+        generation_first.chunks[early].anchor.generation_id = id("generation.other");
+        generation_first.chunks[late].anchor.parent_chunk_id =
+            Some(generation_first.chunks[late].id.clone());
+        assert_eq!(
+            generation_first.validate(),
+            Err(ChunkingFailureV1::GenerationMismatch)
+        );
+    }
+
+    /// Timing probe, not an assertion: prints the single-threaded canonical
+    /// digest sweep against the fanned-out mint over the same fixture.
+    /// `cargo test --release -p tracedecay-code-index -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing probe; run explicitly with --ignored --nocapture"]
+    fn digest_sweep_timing_probe() {
+        use std::time::{Duration, Instant};
+
+        /// Report the fastest of `rounds` runs: on a shared build host the mean
+        /// tracks neighbouring load, the minimum tracks the code.
+        fn best_of(rounds: u32, mut run: impl FnMut()) -> Duration {
+            run();
+            (0..rounds)
+                .map(|_| {
+                    let started = Instant::now();
+                    run();
+                    started.elapsed()
+                })
+                .min()
+                .unwrap_or_default()
+        }
+
+        let chunks = wide_chunks(400);
+        let rounds = 25;
+
+        let sequential = best_of(rounds, || {
+            let _ = sequential_digest_reference(&chunks.chunks);
+        });
+        let parallel = best_of(rounds, || {
+            let _ = ExactExtractionAuthorityV1::mint(&chunks.chunks).expect("mint");
+        });
+        let validate = best_of(rounds, || {
+            chunks.validate().expect("validate");
+        });
+
+        println!(
+            "chunks={} sequential_digest_sweep={sequential:?} parallel_mint={parallel:?} validate={validate:?}",
+            chunks.chunks.len()
+        );
     }
 
     #[test]
