@@ -1087,18 +1087,122 @@ fn metric_fixture_nodes() -> Vec<Node> {
     };
 
     // src/a.rs
-    set("a-f1", "alpha", "src/a.rs", NodeKind::Function, 3, 1, 2, 4, 1, 20, None, false);
-    set("a-m1", "beta", "src/a.rs", NodeKind::Method, 1, 0, 1, 1, 5, 8, None, true);
-    set("a-s1", "Widget", "src/a.rs", NodeKind::Struct, 0, 0, 0, 0, 22, 40, None, false);
+    set(
+        "a-f1",
+        "alpha",
+        "src/a.rs",
+        NodeKind::Function,
+        3,
+        1,
+        2,
+        4,
+        1,
+        20,
+        None,
+        false,
+    );
+    set(
+        "a-m1",
+        "beta",
+        "src/a.rs",
+        NodeKind::Method,
+        1,
+        0,
+        1,
+        1,
+        5,
+        8,
+        None,
+        true,
+    );
+    set(
+        "a-s1",
+        "Widget",
+        "src/a.rs",
+        NodeKind::Struct,
+        0,
+        0,
+        0,
+        0,
+        22,
+        40,
+        None,
+        false,
+    );
 
     // src/b.rs
-    set("b-f1", "gamma", "src/b.rs", NodeKind::Function, 7, 2, 3, 5, 1, 60, None, false);
-    set("b-c1", "Service", "src/b.rs", NodeKind::Class, 0, 0, 0, 0, 1, 80, None, false);
-    set("b-m1", "handle", "src/b.rs", NodeKind::Method, 2, 1, 1, 2, 10, 30, Some("b-c1"), false);
-    set("b-m2", "start", "src/b.rs", NodeKind::Method, 0, 0, 0, 0, 32, 34, Some("b-c1"), true);
+    set(
+        "b-f1",
+        "gamma",
+        "src/b.rs",
+        NodeKind::Function,
+        7,
+        2,
+        3,
+        5,
+        1,
+        60,
+        None,
+        false,
+    );
+    set(
+        "b-c1",
+        "Service",
+        "src/b.rs",
+        NodeKind::Class,
+        0,
+        0,
+        0,
+        0,
+        1,
+        80,
+        None,
+        false,
+    );
+    set(
+        "b-m1",
+        "handle",
+        "src/b.rs",
+        NodeKind::Method,
+        2,
+        1,
+        1,
+        2,
+        10,
+        30,
+        Some("b-c1"),
+        false,
+    );
+    set(
+        "b-m2",
+        "start",
+        "src/b.rs",
+        NodeKind::Method,
+        0,
+        0,
+        0,
+        0,
+        32,
+        34,
+        Some("b-c1"),
+        true,
+    );
 
     // src/nested/c.rs
-    set("c-f1", "delta", "src/nested/c.rs", NodeKind::Function, 1, 3, 0, 1, 1, 9, None, true);
+    set(
+        "c-f1",
+        "delta",
+        "src/nested/c.rs",
+        NodeKind::Function,
+        1,
+        3,
+        0,
+        1,
+        1,
+        9,
+        None,
+        true,
+    );
 
     nodes
 }
@@ -1131,8 +1235,7 @@ async fn complexity_sum_by_file_matches_rust_fold() {
     db.insert_nodes(&nodes).await.expect("insert nodes");
 
     for prefix in [None, Some("src"), Some("src/nested")] {
-        let mut expected: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut expected: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         for n in nodes.iter().filter(|n| in_scope(&n.file_path, prefix)) {
             let c = f64::from(n.branches + n.loops + n.returns + n.max_nesting);
             *expected.entry(n.file_path.clone()).or_insert(0.0) += c;
@@ -1182,7 +1285,9 @@ async fn health_file_aggregates_match_rust_fold() {
             + f64::from(n.loops) * 2.0
             + f64::from(n.max_nesting) * 3.0
             + f64::from(n.end_line.saturating_sub(n.start_line) + 1);
-        *per_file_complexity.entry(n.file_path.clone()).or_insert(0.0) += c;
+        *per_file_complexity
+            .entry(n.file_path.clone())
+            .or_insert(0.0) += c;
     }
     let total_fns = nodes
         .iter()
@@ -1235,14 +1340,12 @@ async fn cross_file_fan_matches_rust_fold() {
             .iter()
             .map(|n| (n.id.clone(), n.file_path.clone()))
             .collect();
-        let mut expected: std::collections::HashMap<String, f64> =
-            std::collections::HashMap::new();
+        let mut expected: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         for n in &nodes {
             expected.entry(n.file_path.clone()).or_insert(0.0);
         }
         for e in &edges {
-            if let (Some(sf), Some(tf)) =
-                (node_to_file.get(&e.source), node_to_file.get(&e.target))
+            if let (Some(sf), Some(tf)) = (node_to_file.get(&e.source), node_to_file.get(&e.target))
                 && sf != tf
             {
                 let key = if fan_in { tf.clone() } else { sf.clone() };
@@ -1347,8 +1450,7 @@ async fn health_aggregate_pushdown_avoids_whole_table_fold() {
         *per_file.entry(n.file_path.clone()).or_insert(0.0) += c;
         if matches!(n.kind, NodeKind::Function | NodeKind::Method) {
             old_fns += 1;
-            if n
-                .docstring
+            if n.docstring
                 .as_deref()
                 .is_some_and(|d| d.contains("skip-test-coverage"))
             {

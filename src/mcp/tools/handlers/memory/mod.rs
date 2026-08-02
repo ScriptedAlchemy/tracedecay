@@ -441,10 +441,7 @@ mod tests {
             .await
             .map_err(memory_application_error)
             .expect("a clean add must complete promptly");
-        assert!(
-            outcome.fact.is_some(),
-            "the add must persist a fact"
-        );
+        assert!(outcome.fact.is_some(), "the add must persist a fact");
     }
 
     #[tokio::test]

@@ -3,7 +3,9 @@ use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::Database;
 use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
-use super::sql::{collect_rowid_pages, collect_rowid_pages_with, collect_rows, path_prefix_like_value};
+use super::sql::{
+    collect_rowid_pages, collect_rowid_pages_with, collect_rows, path_prefix_like_value,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -1107,14 +1109,14 @@ impl Database {
     /// file_path` queries. The grouped result is one row per file (a few
     /// thousand at most), so it is read in a single query without paging.
     async fn file_metric_sums(&self, sql: &str, op: &str) -> Result<Vec<(String, f64)>> {
-        let mut rows = self
-            .engine_conn()
-            .query(sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query per-file metric sums: {e}"),
-                operation: op.to_string(),
-            })?;
+        let mut rows =
+            self.engine_conn()
+                .query(sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query per-file metric sums: {e}"),
+                    operation: op.to_string(),
+                })?;
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read per-file metric row: {e}"),
@@ -1146,7 +1148,13 @@ impl Database {
              WHERE kind IN ('function', 'method') AND rowid > ?1 \
              ORDER BY rowid LIMIT ?2",
             3,
-            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<i64>(2)?,
+                ))
+            },
             "symbol_complexity",
         )
         .await?;
@@ -1246,14 +1254,14 @@ impl Database {
                             THEN 1 ELSE 0 END) AS skipped \
                    FROM nodes GROUP BY file_path";
         let op = "health_file_aggregates";
-        let mut rows = self
-            .engine_conn()
-            .query(sql, ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query health file aggregates: {e}"),
-                operation: op.to_string(),
-            })?;
+        let mut rows =
+            self.engine_conn()
+                .query(sql, ())
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query health file aggregates: {e}"),
+                    operation: op.to_string(),
+                })?;
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
             message: format!("failed to read health aggregate row: {e}"),

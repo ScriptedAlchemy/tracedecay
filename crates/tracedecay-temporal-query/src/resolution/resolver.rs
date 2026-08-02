@@ -825,9 +825,14 @@ mod algorithmic_equivalence_tests {
             for index in 0..node_count {
                 let start = oid(index);
                 let mut reference_hook = noop_hook();
-                let expected =
-                    copy_root(&start, &sources, &eligible_ids, &control, &mut reference_hook)
-                        .expect("reference copy root");
+                let expected = copy_root(
+                    &start,
+                    &sources,
+                    &eligible_ids,
+                    &control,
+                    &mut reference_hook,
+                )
+                .expect("reference copy root");
                 let mut memo_hook = noop_hook();
                 let actual = copy_root_memoized(
                     &start,

@@ -17,10 +17,10 @@ use crate::global_db::RegisteredGlobalDb;
 // lives in `tracedecay-usecases`. The root binary keeps only the CLI/daemon
 // orchestration below, plus the `Vec`-by-value `import_hook_analytics` wrapper
 // whose owned argument keeps the spawned startup catch-up future `Send`.
+use tracedecay_usecases::analytics_bridge::import_source;
 pub use tracedecay_usecases::analytics_bridge::{
     HookImportOutcome, HookImportSource, HookImportSourceOutcome, hook_import_sources,
 };
-use tracedecay_usecases::analytics_bridge::import_source;
 
 /// Imports new hook JSONL rows into `analytics_events`, advancing a byte
 /// cursor per source file so re-runs only ingest the appended tail.
