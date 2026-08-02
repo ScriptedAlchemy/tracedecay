@@ -7,6 +7,25 @@ use super::*;
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
 const STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Why a detached branch reopen was kicked. The two triggers differ only in
+/// whether the reopen re-checks for drift before running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchReopenTrigger {
+    /// A request observed the served branch diverge from the live one.
+    Drift,
+    /// A branch was newly tracked, so the live branch now has a DB of its own.
+    TrackingAdded,
+}
+
+impl BranchReopenTrigger {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Drift => "branch_drift",
+            Self::TrackingAdded => "branch_tracking_added",
+        }
+    }
+}
+
 async fn join_or_abort_startup_ingest(
     mut task: tokio::task::JoinHandle<()>,
     deadline: Duration,
@@ -585,17 +604,26 @@ impl McpServer {
         }
     }
 
-    /// Detects mid-session branch drift and reopens the served instance
-    /// onto the live branch's DB, returning the instance the caller should
-    /// use for this request.
+    /// Detects mid-session branch drift, kicks the reopen onto the live
+    /// branch's DB in the background, and returns the instance the caller
+    /// should use for this request.
     ///
     /// Fast path: one cheap `branch_drifted` check (gix HEAD read) on the
-    /// current snapshot. On drift, the write lock serializes the swap and
-    /// the drift check is repeated under it so concurrent calls reopen at
-    /// most once. If reopening fails the previous instance is kept — the
-    /// drift guards in [`TraceDecay::ensure_branch_writable`] and
-    /// [`Self::maybe_sync_if_stale`] still protect writes, exactly as
-    /// before this hot-swap existed.
+    /// current snapshot.
+    ///
+    /// **Serve old, await new.** On drift the caller does *not* wait for the
+    /// reopen. `reopen_for_current_branch` is a full DB open plus a sealed
+    /// restore — O(store), seconds to minutes on a large index — and it used to
+    /// run inline on the request that happened to notice the checkout, with
+    /// every other caller either blocked behind the reopen lock or (worse, in
+    /// [`Self::reopen_after_branch_tracking_added`]) queued on it with no
+    /// bound. Now the reopen is detached and single-flighted, and every caller
+    /// — the one that noticed the drift included — serves the last complete
+    /// snapshot until the swap lands.
+    ///
+    /// If reopening fails the previous instance is kept — the drift guards in
+    /// [`TraceDecay::ensure_branch_writable`] and [`Self::maybe_sync_if_stale`]
+    /// still protect writes, exactly as before this hot-swap existed.
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -608,79 +636,115 @@ impl McpServer {
         &self,
     ) -> (Arc<TraceDecay>, crate::branch::BranchMemo) {
         let current = self.cg_snapshot().await;
-        // One resolution serves the fast-path check, the re-check under the
-        // reopen lock, and every later live-branch read in this request.
+        // One resolution serves the fast-path check and every later
+        // live-branch read in this request.
         let live_branch = current.branch_memo();
         if !current.branch_drifted_with(&live_branch) {
             return (current, live_branch);
         }
-        let Ok(_reopen_guard) = self.branch_reopen.try_lock() else {
-            return (current, live_branch);
-        };
-        // Re-check against a *fresh snapshot*: a concurrent request may have
-        // already swapped the served instance onto this same live branch.
-        let current = self.cg_snapshot().await;
-        if !current.branch_drifted_with(&live_branch) {
-            return (current, live_branch);
-        }
-        let fresh = match current.reopen_for_current_branch().await {
-            Ok(fresh) => Arc::new(fresh),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    serving_branch = current.serving_branch().unwrap_or("<none>"),
-                    "branch drift detected but index reopen failed"
-                );
-                return (current, live_branch);
-            }
-        };
-        tracing::info!(
-            branch = fresh.active_branch().unwrap_or("<detached>"),
-            "reopened index after branch change"
-        );
-        {
-            let mut guard = self.cg.write().await;
-            *guard = fresh.clone();
-        }
-        if let Some(reconcile) = &self.database_owner_reconciler {
-            reconcile(fresh.clone()).await;
-        }
-        // New branch DB ⇒ new file set; refresh the token accounting map.
-        self.refresh_file_token_map().await;
-        (fresh, live_branch)
+        self.spawn_branch_reopen(BranchReopenTrigger::Drift);
+        (current, live_branch)
     }
 
+    /// Kicks a reopen after a branch was newly tracked.
+    ///
+    /// Never blocks: this used to take `branch_reopen.lock().await`, so every
+    /// caller arriving during an in-flight reopen queued behind a full DB open.
+    /// It now try-locks and detaches exactly like the drift path.
     pub(crate) async fn reopen_after_branch_tracking_added(&self) {
-        let _reopen_guard = self.branch_reopen.lock().await;
-        let current = self.cg_snapshot().await;
-        let reopened = match current.reopen_for_current_branch().await {
-            Ok(fresh) => {
-                let fresh = Arc::new(fresh);
-                tracing::info!(
-                    branch = fresh.active_branch().unwrap_or("<detached>"),
-                    "reopened index after branch tracking was added"
-                );
-                {
-                    let mut guard = self.cg.write().await;
-                    *guard = fresh.clone();
-                }
-                if let Some(reconcile) = &self.database_owner_reconciler {
-                    reconcile(fresh.clone()).await;
-                }
-                true
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    serving_branch = current.serving_branch().unwrap_or("<none>"),
-                    "index reopen failed after branch tracking was added"
-                );
-                false
-            }
+        self.spawn_branch_reopen(BranchReopenTrigger::TrackingAdded);
+    }
+
+    /// Single-flights and detaches one reopen onto the live branch.
+    ///
+    /// The `branch_reopen` guard is *moved into* the spawned task, so it is
+    /// held for the reopen's real duration while no caller ever awaits it. A
+    /// caller that finds the lane busy returns immediately: a reopen is already
+    /// converging on the same live branch, and the next request observes the
+    /// swap.
+    fn spawn_branch_reopen(&self, trigger: BranchReopenTrigger) {
+        let Ok(reopen_guard) = Arc::clone(&self.branch_reopen).try_lock_owned() else {
+            return;
         };
-        if reopened {
-            self.refresh_file_token_map().await;
+        let cg_cell = Arc::clone(&self.cg);
+        let token_map = Arc::clone(&self.file_token_map);
+        let completions = Arc::clone(&self.branch_reopen_completions);
+        let reconcile = self.database_owner_reconciler.clone();
+        let reason = trigger.reason();
+        tokio::spawn(async move {
+            let _reopen_guard = reopen_guard;
+            let current = cg_cell.read().await.clone();
+            // Drift-triggered reopens re-check against a *fresh snapshot*: a
+            // concurrent reopen may already have swapped the served instance
+            // onto this same live branch. A tracking-added reopen has no drift
+            // to re-check — the served branch is already the live one; what
+            // changed is that it now has a DB of its own — so it always runs,
+            // exactly as the blocking version did.
+            if trigger == BranchReopenTrigger::Drift && !current.branch_drifted() {
+                completions.fetch_add(1, Ordering::Release);
+                return;
+            }
+            match current.reopen_for_current_branch().await {
+                Ok(fresh) => {
+                    let fresh = Arc::new(fresh);
+                    tracing::info!(
+                        branch = fresh.active_branch().unwrap_or("<detached>"),
+                        reason,
+                        "reopened index onto the live branch"
+                    );
+                    {
+                        let mut guard = cg_cell.write().await;
+                        *guard = Arc::clone(&fresh);
+                    }
+                    // The owner reconcile runs here, after the swap, rather
+                    // than inside the request that noticed the drift: it takes
+                    // the daemon's store writer lane, and a live `tools/call`
+                    // must never park on it. That call has already answered on
+                    // the snapshot it held.
+                    if let Some(reconcile) = &reconcile {
+                        reconcile(Arc::clone(&fresh)).await;
+                    }
+                    // New branch DB ⇒ new file set; refresh the token
+                    // accounting map.
+                    if let Ok(refreshed) = fresh.get_file_token_map().await {
+                        *crate::mcp::server::requests::recover_lock(&token_map) = refreshed;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        serving_branch = current.serving_branch().unwrap_or("<none>"),
+                        reason,
+                        "index reopen onto the live branch failed"
+                    );
+                }
+            }
+            completions.fetch_add(1, Ordering::Release);
+        });
+    }
+
+    /// Polls until at least one branch reopen has completed past `after`, or
+    /// until `timeout` elapses. Returns `true` if one landed.
+    ///
+    /// Reopens are detached, so tests (and any caller that genuinely needs the
+    /// post-swap state rather than an answer) observe completion here instead
+    /// of blocking the request path.
+    #[doc(hidden)]
+    pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        true
+    }
+
+    /// Number of branch reopens that have completed so far.
+    #[doc(hidden)]
+    pub fn branch_reopens_completed(&self) -> u64 {
+        self.branch_reopen_completions.load(Ordering::Acquire)
     }
 
     /// Catch-up sync helper for tests and explicit callers. Bypasses the 30 s
@@ -845,11 +909,20 @@ impl McpServer {
         true
     }
 
-    /// Walk the project tree, sync any stale files, and refresh the
-    /// file-to-token-count map — but only if at least 30 s have passed
-    /// since the last successful sync. The cooldown is the gate: while
-    /// it holds, this returns immediately, so dropping it into every
-    /// `tools/call` handler is cheap.
+    /// Claim the lazy-sync window for edit-shaped tools and kick the sync in
+    /// the background — but only if at least 30 s have passed since the last
+    /// successful sync. The cooldown is the gate: while it holds, this returns
+    /// immediately, so dropping it into every `tools/call` handler is cheap.
+    ///
+    /// **Never blocks.** This used to run `find_stale_files` (a full project
+    /// tree walk) and then reindex the entire stale set inline, on the request
+    /// path, with no bound: one `git pull` ahead of an edit tool turned that
+    /// call into an O(store) reindex the client waited on. The claim is still
+    /// made here — so the cooldown and single-flight semantics are unchanged —
+    /// but the work is detached through the same mechanism read tools already
+    /// use ([`Self::spawn_read_refresh_task`]), and the caller serves
+    /// immediately on the current snapshot. The *next* call observes the
+    /// freshly synced index.
     ///
     /// Concurrent callers are serialized via
     /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
@@ -889,17 +962,21 @@ impl McpServer {
             return;
         }
 
-        let stale = cg.find_stale_files().await;
-        if !stale.is_empty()
-            && let Err(e) = cg.sync_if_stale_silent(&stale).await
+        // Reserve the single-flight slot shared with the read-refresh lane so a
+        // lazy sync and a read refresh never stack on the same store. If a
+        // refresh is already running, the cooldown claim above has done its job
+        // and this call simply serves the current snapshot.
+        if self
+            .background_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
-            tracing::warn!(error = %e, "lazy sync failed");
             return;
         }
-        // Always refresh: a sibling MCP peer may have synced the DB
-        // between our cooldown windows, in which case `stale` is empty
-        // here but our in-memory `file_token_map` is still pre-sync.
-        self.refresh_file_token_map().await;
+        // The detached task refreshes `file_token_map` from the synced graph on
+        // every success — including the case where nothing was stale, because a
+        // sibling MCP peer may have synced the DB between our cooldown windows.
+        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
     }
 
     /// D4: sync-on-read entry point for read (non-edit) tools. NEVER blocks.

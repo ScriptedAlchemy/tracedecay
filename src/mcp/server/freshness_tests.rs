@@ -89,8 +89,11 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
     )
 }
 
+/// Serve-old/await-new: the request that notices the drift answers on the
+/// snapshot it already had, and the reopen (plus its owner reconcile) lands
+/// behind it.
 #[tokio::test]
-async fn branch_drift_reconciles_database_owner_before_returning() {
+async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     let (cg, dir, fixture_authority) = init_indexed_repo().await;
     let root = dir.path();
     cg.checkpoint().await.unwrap();
@@ -130,8 +133,28 @@ async fn branch_drift_reconciles_database_owner_before_returning() {
     .await;
 
     git(root, &["checkout", "-q", "feature"]);
-    let fresh = server.reopen_if_branch_drifted().await;
+    let before = server.branch_reopens_completed();
+    let served = server.reopen_if_branch_drifted().await;
 
+    // The caller is answered on the pre-drift snapshot: it never waits for the
+    // full DB open the reopen performs.
+    assert_eq!(
+        served.serving_branch(),
+        Some("main"),
+        "the drifting request must serve the last complete snapshot"
+    );
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "the owner reconcile must not run inside the request"
+    );
+
+    assert!(
+        server
+            .wait_for_branch_reopen(before, std::time::Duration::from_secs(30))
+            .await,
+        "the detached reopen must land"
+    );
+    let fresh = server.reopen_if_branch_drifted().await;
     assert_eq!(fresh.serving_branch(), Some("feature"));
     assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
     server.shutdown().await;

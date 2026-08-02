@@ -663,9 +663,13 @@ pub(super) fn coordinated_background_refresh_writer(
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "retained background refresh graph is unavailable".to_string(),
                 })?;
+            let scope = crate::daemon::branch_admin::graph_writer_scope(
+                &graph,
+                crate::daemon::branch_admin::StoreWriterClass::Content,
+            );
             request.graph = graph;
             administration
-                .with_writer(|| async move {
+                .with_writer_in(scope, || async move {
                     crate::mcp::server::execute_background_refresh_direct(request).await
                 })
                 .await

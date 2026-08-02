@@ -258,10 +258,44 @@ lands on the next background pass instead of being forced onto the first query
 to notice it, which is what "serving never couples to indexing recency"
 requires.
 
+### 7. A request never parks on a store-sized hold
+
+Serve-old/await-new applies to *locks* as well as generations. Three holds
+violated it and are now closed:
+
+- **Writer administration was one daemon-wide mutex.** Its own comment conceded
+  that "a background refresh or a generation rebuild can hold this gate for
+  minutes", and a git-watch sync held it across a full `cg.sync()`. The first
+  request for an *unrelated* project parked behind it with no deadline. The gate
+  is now per store (`daemon/store_writer_gate.rs`) with three classes —
+  `Destructive` (branch-store GC, totally exclusive on its store), `Owner`
+  (project open, owner rekey, scheduler transitions) and `Content` (index sync,
+  background refresh) — under a daemon-wide `RwLock` that store-scoped writers
+  hold shared and all-store sweeps hold exclusively. Exclusivity is preserved
+  exactly: two writers of the same class on one store still contend, and
+  `Destructive` still excludes everything on its store, which is what lets
+  branch GC keep proving no holder before it unlinks a SQLite family. Request-
+  side waits (project open) additionally carry a deadline and answer with the
+  typed retryable `store_writer_busy` rather than queuing without bound.
+- **The lazy stale-sync ran inline.** Edit-shaped tools walked the whole tree
+  (`find_stale_files`) and reindexed the entire stale set on the request path.
+  The cooldown claim is unchanged; the work is now detached through the same
+  single-flighted lane read tools use, and the tool answers on the current
+  snapshot.
+- **Branch-drift reopen ran inline.** The request that noticed a checkout
+  performed the full DB open plus sealed restore, then awaited the daemon owner
+  reconcile — through the writer gate — inside a live `tools/call`; the
+  branch-tracking-added path was worse still, blocking every caller on the
+  reopen mutex. The reopen is now detached and single-flighted, the owner
+  reconcile runs behind the swap, and every caller (the one that noticed the
+  drift included) serves the last complete snapshot until the swap lands.
+
 ## Status map (2026-08-01)
 
 | Principle | State |
 |---|---|
+| 7 per-store writer gates + request-side gate deadline | merged |
+| 7 detached lazy stale-sync + detached branch-drift reopen | merged |
 | 1 validation/admission/attribution memoization + generation LRU | merged |
 | 1 snapshot hash indices (record port + relation BFS adjacency) | merged |
 | 2 redundancy comparison-budget pacing + shared shingle merge | merged |

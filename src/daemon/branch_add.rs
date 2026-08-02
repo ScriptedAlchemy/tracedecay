@@ -38,8 +38,15 @@ pub(super) fn coordinated_hook_branch_writer(
                     message: "retained hook branch graph is unavailable".to_string(),
                 });
             }
+            // A hook branch write creates and tracks a branch family inside one
+            // store, so it takes that store's owner lane rather than excluding
+            // every other project's writers.
+            let scope = super::branch_admin::graph_writer_scope(
+                &request.graph,
+                super::branch_admin::StoreWriterClass::Owner,
+            );
             administration
-                .with_writer(|| async move {
+                .with_writer_in(scope, || async move {
                     crate::mcp::server::execute_hook_branch_write_direct(request).await
                 })
                 .await
@@ -121,8 +128,14 @@ pub(super) async fn branch_add_response(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained branch-add graph is unavailable".to_string(),
             })?;
+        let scope = super::branch_admin::graph_writer_scope(
+            &cg,
+            super::branch_admin::StoreWriterClass::Owner,
+        );
         administration
-            .with_writer(|| async { cg.track_worktree_branch(cg.project_root(), branch).await })
+            .with_writer_in(scope, || async {
+                cg.track_worktree_branch(cg.project_root(), branch).await
+            })
             .await
     }
     .await;
