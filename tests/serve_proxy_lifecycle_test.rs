@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use tempfile::TempDir;
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracedecay::daemon::{DaemonHandshake, proxy_transport_to_daemon};
 use tracedecay::mcp::transport::ChannelTransport;
 
@@ -26,21 +26,22 @@ fn test_handshake(profile_root: &std::path::Path) -> DaemonHandshake {
 }
 
 #[tokio::test]
-async fn proxy_exits_when_host_closes_during_daemon_request() {
+async fn proxy_delivers_in_flight_response_after_host_closes() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
     let (request_received_tx, request_received_rx) = tokio::sync::oneshot::channel();
+    let (write_response_tx, write_response_rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
         let (stream, _addr) = listener.accept().await.expect("accept proxied client");
-        let (reader, _writer) = stream.into_split();
+        let (reader, mut writer) = stream.into_split();
         let mut lines = tokio::io::BufReader::new(reader).lines();
         lines
             .next_line()
             .await
             .expect("read handshake")
             .expect("handshake line");
-        lines
+        let request = lines
             .next_line()
             .await
             .expect("read request")
@@ -48,10 +49,24 @@ async fn proxy_exits_when_host_closes_during_daemon_request() {
         request_received_tx
             .send(())
             .expect("notify request received");
-        std::future::pending::<()>().await;
+        write_response_rx.await.expect("release daemon response");
+        let request: serde_json::Value =
+            serde_json::from_str(&request).expect("request must be JSON");
+        let response = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": { "tools": [] }
+        }))
+        .expect("response json");
+        writer
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        writer.write_all(b"\n").await.expect("write newline");
+        writer.shutdown().await.expect("shutdown fake daemon");
     });
 
-    let (mut transport, sender, _receiver) = ChannelTransport::new();
+    let (mut transport, sender, mut receiver) = ChannelTransport::new();
     let proxy_socket = socket.clone();
     let handshake = test_handshake(dir.path());
     let proxy = tokio::spawn(async move {
@@ -63,20 +78,32 @@ async fn proxy_exits_when_host_closes_during_daemon_request() {
             serde_json::to_string(&json!({
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "initialize"
+                "method": "tools/list"
             }))
             .expect("request json"),
         )
         .expect("send request");
     request_received_rx.await.expect("daemon received request");
     drop(sender);
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    write_response_tx
+        .send(())
+        .expect("release daemon response after host EOF");
 
-    tokio::time::timeout(std::time::Duration::from_millis(250), proxy)
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
         .await
-        .expect("proxy must observe host EOF while the daemon request is pending")
+        .expect("proxy response timed out")
+        .expect("proxy must deliver the in-flight response after host EOF");
+    let response: serde_json::Value =
+        serde_json::from_str(response.trim()).expect("response must be JSON");
+    assert_eq!(response["id"], json!(1));
+    assert_eq!(response["result"], json!({ "tools": [] }));
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), proxy)
+        .await
+        .expect("proxy must exit after delivering the in-flight response")
         .expect("proxy task")
         .expect("proxy transport");
 
-    daemon.abort();
-    let _ = daemon.await;
+    daemon.await.expect("daemon task");
 }

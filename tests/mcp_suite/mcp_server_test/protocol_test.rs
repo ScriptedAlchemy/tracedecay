@@ -567,7 +567,11 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
             Ok(())
         }
 
-        async fn peer_fully_closed_after_eof(&self) {}
+        fn peer_fully_closed_after_eof(
+            &self,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            std::future::ready(())
+        }
     }
 
     let (server, _dir) = setup_server().await;
@@ -619,7 +623,11 @@ async fn non_cancellable_tool_call_is_dropped_on_full_peer_close() {
             Ok(())
         }
 
-        async fn peer_fully_closed_after_eof(&self) {}
+        fn peer_fully_closed_after_eof(
+            &self,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            std::future::ready(())
+        }
     }
 
     let (server, _dir) = setup_server().await;
