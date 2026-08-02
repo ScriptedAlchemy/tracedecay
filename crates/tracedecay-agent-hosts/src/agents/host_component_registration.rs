@@ -323,18 +323,6 @@ impl HostComponentRegistrationDelegate {
         });
         if self.project_path.is_some() {
             CompatibilityRegistrationMode::LegacyIntegration
-        } else if kiro_registration_is_the_artifact(component_set) {
-            // Kiro's `context_mcp` artifact *is* its MCP registration: the
-            // component set installs `~/.kiro/settings/mcp.json`, which is the
-            // exact file `install_mcp_server` would otherwise register into.
-            // Running both writers over one file gives it two owners — the
-            // native activation reserializes the document the artifact layer
-            // just wrote byte-for-byte, so the receipt's own artifact
-            // verification then fails with a content mismatch. The artifact
-            // write is the complete lifecycle here, which is what
-            // `supports_artifact_only_backup_restore` has always claimed for
-            // this set.
-            CompatibilityRegistrationMode::ArtifactOnly
         } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
@@ -1073,7 +1061,24 @@ impl HostComponentRegistrationDelegate {
             }
             mutation_plan.paths.clone()
         } else {
-            current_registration_paths
+            // The inventory recorded at backup time is what the backup markers
+            // are indexed by, so it -- not a fresh recomputation -- is the set
+            // to restore. Some inventories are derived from state the operation
+            // itself rewrites: Codex's `.tracedecay-managed-agents.json` is both
+            // a registration path and the record naming the previous bundle's
+            // exports, so a Core apply that retires a stale export shrinks the
+            // recomputed set. Demanding exact equality made every such rollback
+            // refuse as `WrongTarget` and strand the journal. Require instead
+            // that the recorded inventory still cover everything registration
+            // surface is today, which is what actually rules out restoring a
+            // backup taken for a different target.
+            if current_registration_paths
+                .iter()
+                .any(|path| !persisted_paths.contains(path))
+            {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::WrongTarget);
+            }
+            persisted_paths.clone()
         };
         let allowed_registration_directories = self.allowed_registration_directories();
         let registration_directories = mutation_plan.directories.clone();
@@ -1800,20 +1805,6 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         }
         self.restore_registration(component_set, request.operation_id)
     }
-}
-
-/// Whether this component set is Kiro's `context_mcp` set, whose single managed
-/// artifact (`~/.kiro/settings/mcp.json`) is simultaneously the file Kiro's
-/// native MCP registration writes. The artifact bytes are already a complete,
-/// valid registration document, so the artifact write is the whole lifecycle
-/// and the native activation must not run as a second writer.
-fn kiro_registration_is_the_artifact(
-    component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
-) -> bool {
-    component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
-        && component_set.components.len() == 1
-        && component_set.components[0].manifest.component
-            == crate::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp
 }
 
 /// Languages the component set's own `OpenCode` analyzer registration declares.
