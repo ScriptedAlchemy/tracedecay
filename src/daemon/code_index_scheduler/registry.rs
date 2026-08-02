@@ -626,19 +626,32 @@ impl CodeIndexSchedulerRegistryV1 {
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
             drop(mounted);
-            let latest = {
+            // The scheduler mutex is held for the full duration of any
+            // in-flight reconcile. Waiting for it on a runtime worker — while
+            // also holding the mount-admission permit — parked that worker and
+            // starved mount admission for every other lane whenever a rebuild
+            // was running. Pay the wait on the blocking pool instead.
+            let remount_project_id = project_id.clone();
+            let remount_hook = semantic_schedule.clone();
+            let latest = tokio::task::spawn_blocking(move || {
                 let mut scheduler = scheduler
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if scheduler.project_id() != &project_id {
+                if scheduler.project_id() != &remount_project_id {
                     return Err(CodeIndexSchedulerErrorV1::Identity(
                         "mounted worktree belongs to a different project identity".to_owned(),
                     ));
                 }
                 let latest = scheduler.latest_complete().map(|latest| latest.generation);
-                scheduler.replace_semantic_schedule_hook(semantic_schedule.clone());
-                latest
-            };
+                scheduler.replace_semantic_schedule_hook(remount_hook);
+                Ok(latest)
+            })
+            .await
+            .map_err(|error| {
+                CodeIndexSchedulerErrorV1::Identity(format!(
+                    "code-index remount task failed: {error}"
+                ))
+            })??;
             if let (Some(hook), Some(generation)) = (semantic_schedule, latest) {
                 let _ = hook(&generation);
             }
@@ -1104,14 +1117,22 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
-        let mounted = self.mounted.lock().await;
-        let worktree = mounted.get(&project_root)?;
-        worktree
-            .scheduler
-            .lock()
+        // Read the O(1) serving slot instead of the scheduler mutex. This used
+        // to take `scheduler.lock()` — a blocking std mutex held by any
+        // in-flight reconcile — while still holding the `mounted` async mutex,
+        // so one warmup/dashboard call during a rebuild parked a runtime worker
+        // for the reconcile's whole duration AND serialized every code-index
+        // query behind it: a silent, daemon-wide code-index outage.
+        let serving = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            Arc::clone(&worktree.serving_generation)
+        };
+        let latest = serving
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .latest_complete()
-            .map(|latest| latest.generation.manifest().generation_id.clone())
+            .clone()?;
+        Some(latest.generation.manifest().generation_id.clone())
     }
 
     /// Exact live dashboard projection for one mounted worktree.
