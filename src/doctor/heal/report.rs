@@ -13,24 +13,6 @@ pub(super) fn render_missing_profile_report() -> HealthPassReport {
 
 /// Prints the doctor-style summary for a computed report.
 pub(super) fn render_health_pass_report(report: &HealthPassReport) {
-    if report.retired_consolidation_manifests.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No completed consolidation manifests to retire");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} completed consolidation input manifest(s):",
-            report.retired_consolidation_manifests.len()
-        );
-        for path in &report.retired_consolidation_manifests {
-            eprintln!("      • {}", path.display());
-        }
-    }
-    if report.retired_consolidation_registry_projects > 0 {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} superseded consolidation registry project(s)",
-            report.retired_consolidation_registry_projects
-        );
-    }
-
     if report.quarantined_branch_meta.is_empty() {
         eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
     } else {
