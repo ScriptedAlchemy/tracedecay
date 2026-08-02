@@ -75,6 +75,16 @@ pub enum TestDatabaseRuntimeMode {
     ReadOnly,
 }
 
+/// Exact shard family published by an isolated registered-store fixture.
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TestDatabaseRuntimeScope {
+    Profile,
+    ProfileSessions,
+    ProjectSessions { project_id: ProjectId },
+}
+
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 struct ExactTestRuntimeResolver {
     locators: BTreeMap<StoreRuntimeKey, ExactTestRuntimeLocator>,
@@ -727,7 +737,26 @@ impl Database {
                 operation: "publish test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode).await
+        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
+    }
+
+    /// Publishes an isolated registered-store fixture with the exact typed
+    /// shard family consumed by the test.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_registered_test_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+        scope: TestDatabaseRuntimeScope,
+    ) -> Result<(Self, bool)> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "registered test runtime requires explicit test authority".to_owned(),
+                operation: "publish registered test database runtime".to_owned(),
+            });
+        }
+        Self::publish_fixture_runtime(db_path, authority, mode, test_registered_shard(scope)?).await
     }
 
     /// Publishes an isolated integration-test fixture with the retained
@@ -761,7 +790,7 @@ impl Database {
                 operation: "publish maintenance test database runtime".to_owned(),
             });
         }
-        Self::publish_fixture_runtime(db_path, authority, mode).await
+        Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
     }
 
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -769,6 +798,7 @@ impl Database {
         db_path: &Path,
         authority: &DatabaseAuthority,
         mode: TestDatabaseRuntimeMode,
+        target_shard: StoreShardIdV1,
     ) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
@@ -783,30 +813,9 @@ impl Database {
             }
             return Ok((Self { inner }, false));
         }
-        let brain_id = BrainId::try_from("brain.test-runtime".to_owned()).map_err(|error| {
-            test_runtime_error("construct test brain identity", error.to_string())
-        })?;
-        let profile_id =
-            UserProfileId::try_from("profile.test-runtime".to_owned()).map_err(|error| {
-                test_runtime_error("construct test profile identity", error.to_string())
-            })?;
-        let profile_shard = StoreShardIdV1::profile(brain_id.clone(), profile_id.clone());
-        let code_shard = StoreShardIdV1::code(
-            brain_id,
-            profile_id,
-            ProjectId::try_from("project.test-runtime".to_owned()).map_err(|error| {
-                test_runtime_error("construct test project identity", error.to_string())
-            })?,
-            RepositoryId::try_from("repository.test-runtime".to_owned()).map_err(|error| {
-                test_runtime_error("construct test repository identity", error.to_string())
-            })?,
-            CodeShardScopeV1::Worktree {
-                worktree_id: WorktreeId::try_from("worktree.test-runtime".to_owned()).map_err(
-                    |error| {
-                        test_runtime_error("construct test worktree identity", error.to_string())
-                    },
-                )?,
-            },
+        let profile_shard = StoreShardIdV1::profile(
+            target_shard.brain_id.clone(),
+            target_shard.profile_id.clone(),
         );
         let incarnation = StoreIncarnationV1::new(1)
             .map_err(|error| test_runtime_error("construct test incarnation", error.to_string()))?;
@@ -817,19 +826,27 @@ impl Database {
             ".tracedecay-test-profile-{}.db",
             &hex::encode(digest.finalize())[..16]
         );
-        let profile_path = path.with_file_name(profile_name);
+        let target_is_profile = target_shard == profile_shard;
+        let profile_path = if target_is_profile {
+            path.clone()
+        } else {
+            path.with_file_name(profile_name)
+        };
         let (profile_key, profile_locator) =
             exact_test_runtime_locator(profile_shard.clone(), incarnation, profile_path.clone())?;
-        let (code_key, code_locator) =
-            exact_test_runtime_locator(code_shard.clone(), incarnation, path)?;
+        let (target_key, target_locator) =
+            exact_test_runtime_locator(target_shard.clone(), incarnation, path)?;
         let mut locators = BTreeMap::new();
         locators.insert(profile_key, profile_locator);
-        locators.insert(code_key, code_locator);
+        locators.insert(target_key, target_locator);
         let resolver = Arc::new(ExactTestRuntimeResolver { locators });
         let registry =
             StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
-        let profile_authority =
-            DatabaseAuthority::acquire_test(&profile_path, "publish test profile runtime")?;
+        let profile_authority = if target_is_profile {
+            authority.clone()
+        } else {
+            DatabaseAuthority::acquire_test(&profile_path, "publish test profile runtime")?
+        };
         let profile_exists = profile_path.try_exists().map_err(|error| {
             test_runtime_error("inspect test profile runtime", error.to_string())
         })?;
@@ -848,7 +865,7 @@ impl Database {
                 profile_authority,
             )
         };
-        let _profile_runtime = match registry.open(profile_request).await {
+        let profile_runtime = match registry.open(profile_request).await {
             StoreRuntimeOpenResult::Published(runtime) => runtime,
             StoreRuntimeOpenResult::Failed(failure) => {
                 return Err(test_runtime_error(
@@ -857,42 +874,48 @@ impl Database {
                 ));
             }
         };
-        let profile_pin = match registry.profile_authority_pin(&profile_shard) {
-            ProfileAuthorityPinResult::Pinned(pin) => pin,
-            outcome => {
-                return Err(test_runtime_error(
-                    "pin test profile runtime",
-                    format!("{outcome:?}"),
-                ));
-            }
-        };
-        let open_mode = match mode {
-            TestDatabaseRuntimeMode::Initialize => StoreRuntimeOpenMode::Initialize,
-            TestDatabaseRuntimeMode::Existing | TestDatabaseRuntimeMode::ReadOnly => {
-                StoreRuntimeOpenMode::Existing
-            }
-        };
-        let request = match open_mode {
-            StoreRuntimeOpenMode::Initialize => StoreRuntimeOpenRequest::new_initialize_authorized(
-                code_shard,
-                incarnation,
-                Some(profile_pin),
-                authority.clone(),
-            ),
-            StoreRuntimeOpenMode::Existing => StoreRuntimeOpenRequest::new_authorized(
-                code_shard,
-                incarnation,
-                Some(profile_pin),
-                authority.clone(),
-            ),
-        };
-        let runtime = match registry.open(request).await {
-            StoreRuntimeOpenResult::Published(runtime) => runtime,
-            StoreRuntimeOpenResult::Failed(failure) => {
-                return Err(test_runtime_error(
-                    "publish test database runtime",
-                    format!("{failure:?}"),
-                ));
+        let runtime = if target_is_profile {
+            profile_runtime
+        } else {
+            let profile_pin = match registry.profile_authority_pin(&profile_shard) {
+                ProfileAuthorityPinResult::Pinned(pin) => pin,
+                outcome => {
+                    return Err(test_runtime_error(
+                        "pin test profile runtime",
+                        format!("{outcome:?}"),
+                    ));
+                }
+            };
+            let open_mode = match mode {
+                TestDatabaseRuntimeMode::Initialize => StoreRuntimeOpenMode::Initialize,
+                TestDatabaseRuntimeMode::Existing | TestDatabaseRuntimeMode::ReadOnly => {
+                    StoreRuntimeOpenMode::Existing
+                }
+            };
+            let request = match open_mode {
+                StoreRuntimeOpenMode::Initialize => {
+                    StoreRuntimeOpenRequest::new_initialize_authorized(
+                        target_shard,
+                        incarnation,
+                        Some(profile_pin),
+                        authority.clone(),
+                    )
+                }
+                StoreRuntimeOpenMode::Existing => StoreRuntimeOpenRequest::new_authorized(
+                    target_shard,
+                    incarnation,
+                    Some(profile_pin),
+                    authority.clone(),
+                ),
+            };
+            match registry.open(request).await {
+                StoreRuntimeOpenResult::Published(runtime) => runtime,
+                StoreRuntimeOpenResult::Failed(failure) => {
+                    return Err(test_runtime_error(
+                        "publish test database runtime",
+                        format!("{failure:?}"),
+                    ));
+                }
             }
         };
         let _schema_initialized = runtime.schema_migrated();
@@ -1741,6 +1764,52 @@ fn exact_test_runtime_locator(
         StoreRuntimeKey::new(shard_id, incarnation),
         ExactTestRuntimeLocator { verified, path },
     ))
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn test_runtime_identity() -> Result<(BrainId, UserProfileId)> {
+    let brain_id = BrainId::try_from("brain.test-runtime".to_owned())
+        .map_err(|error| test_runtime_error("construct test brain identity", error.to_string()))?;
+    let profile_id =
+        UserProfileId::try_from("profile.test-runtime".to_owned()).map_err(|error| {
+            test_runtime_error("construct test profile identity", error.to_string())
+        })?;
+    Ok((brain_id, profile_id))
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn test_code_shard() -> Result<StoreShardIdV1> {
+    let (brain_id, profile_id) = test_runtime_identity()?;
+    Ok(StoreShardIdV1::code(
+        brain_id,
+        profile_id,
+        ProjectId::try_from("project.test-runtime".to_owned()).map_err(|error| {
+            test_runtime_error("construct test project identity", error.to_string())
+        })?,
+        RepositoryId::try_from("repository.test-runtime".to_owned()).map_err(|error| {
+            test_runtime_error("construct test repository identity", error.to_string())
+        })?,
+        CodeShardScopeV1::Worktree {
+            worktree_id: WorktreeId::try_from("worktree.test-runtime".to_owned()).map_err(
+                |error| test_runtime_error("construct test worktree identity", error.to_string()),
+            )?,
+        },
+    ))
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardIdV1> {
+    let (brain_id, profile_id) = test_runtime_identity()?;
+    let shard = match scope {
+        TestDatabaseRuntimeScope::Profile => StoreShardIdV1::profile(brain_id, profile_id),
+        TestDatabaseRuntimeScope::ProfileSessions => {
+            StoreShardIdV1::profile_sessions(brain_id, profile_id)
+        }
+        TestDatabaseRuntimeScope::ProjectSessions { project_id } => {
+            StoreShardIdV1::project_sessions(brain_id, profile_id, project_id)
+        }
+    };
+    Ok(shard)
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
