@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tracedecay_store::OperationPriorityV1;
+
 use tracedecay_rusqlite_runtime::migration_sql::{
     MigrationSqlBatchResult, MigrationSqlExecuteResult, MigrationSqlHandle,
     MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
@@ -14,7 +16,11 @@ const READER_WAIT: Duration = Duration::from_secs(5);
 
 pub(super) trait Runtime: Send + Sync {
     fn execute(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlExecuteResult>;
-    fn query(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlRows>;
+    fn query(
+        &self,
+        statement: MigrationSqlStatement,
+        priority: OperationPriorityV1,
+    ) -> Result<MigrationSqlRows>;
     fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
     fn repair_incremental_auto_vacuum(&self) -> Result<()>;
@@ -22,7 +28,10 @@ pub(super) trait Runtime: Send + Sync {
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn last_insert_rowid(&self) -> i64;
-    fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
+    fn begin_read_snapshot(
+        &self,
+        priority: OperationPriorityV1,
+    ) -> Result<MigrationSqlReadSnapshot>;
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
@@ -35,8 +44,13 @@ impl Runtime for MigrationSqlHandle {
         self.execute(statement).map_err(Into::into)
     }
 
-    fn query(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlRows> {
-        self.query(statement, READER_WAIT).map_err(Into::into)
+    fn query(
+        &self,
+        statement: MigrationSqlStatement,
+        priority: OperationPriorityV1,
+    ) -> Result<MigrationSqlRows> {
+        self.query_with_priority(statement, priority, READER_WAIT)
+            .map_err(Into::into)
     }
 
     fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows> {
@@ -61,8 +75,12 @@ impl Runtime for MigrationSqlHandle {
         self.last_insert_rowid()
     }
 
-    fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
-        self.begin_read_snapshot(READER_WAIT).map_err(Into::into)
+    fn begin_read_snapshot(
+        &self,
+        priority: OperationPriorityV1,
+    ) -> Result<MigrationSqlReadSnapshot> {
+        self.begin_read_snapshot_with_priority(priority, READER_WAIT)
+            .map_err(Into::into)
     }
 
     fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
@@ -87,6 +105,13 @@ impl Runtime for MigrationSqlHandle {
 #[derive(Clone)]
 pub struct Connection {
     runtime: Arc<dyn Runtime>,
+    /// Priority every read issued through this handle is admitted under.
+    ///
+    /// Reads default to `Foreground`; a caller that knows it is bulk or
+    /// maintenance work opts down with [`ReadConnection::background`], which
+    /// keeps a slice of the reader pool's general lane free for interactive
+    /// queries.
+    read_priority: OperationPriorityV1,
 }
 
 #[derive(Clone)]
@@ -105,12 +130,28 @@ impl ReadConnection {
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         self.connection.read_snapshot().await
     }
+
+    /// The same store, read as background work.
+    ///
+    /// Use this for bulk sweeps, catch-up ingest, and maintenance scans: they
+    /// admit against the unreserved slice of the reader lane, so a saturating
+    /// sweep cannot starve an interactive read.
+    #[must_use]
+    pub fn background(&self) -> Self {
+        Self {
+            connection: Connection {
+                runtime: Arc::clone(&self.connection.runtime),
+                read_priority: OperationPriorityV1::Background,
+            },
+        }
+    }
 }
 
 impl Connection {
     pub fn attach(runtime: MigrationSqlHandle) -> Self {
         Self {
             runtime: Arc::new(runtime),
+            read_priority: OperationPriorityV1::Foreground,
         }
     }
 
@@ -138,7 +179,8 @@ impl Connection {
     {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
-        let rows = tokio::task::spawn_blocking(move || runtime.query(statement))
+        let priority = self.read_priority;
+        let rows = tokio::task::spawn_blocking(move || runtime.query(statement, priority))
             .await
             .map_err(join_error)??;
         Ok(Rows::from_parts(
@@ -201,7 +243,8 @@ impl Connection {
 
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_read_snapshot())
+        let priority = self.read_priority;
+        tokio::task::spawn_blocking(move || runtime.begin_read_snapshot(priority))
             .await
             .map_err(join_error)?
             .map(ReadSnapshot::from_runtime)
