@@ -10,10 +10,10 @@ use super::branch_admin::StoreAdministration;
 
 const COLD_STORE_PAGE_LIMIT: usize = 8;
 /// Upper bound on mounted session databases + project graphs a single
-/// maintenance tick may process. The tick holds the writer lane while it works,
-/// so an unbounded loop over every mounted project×branch starved query/index
-/// writers; this budget caps the per-tick work and a round-robin cursor
-/// (`store_cursor`) guarantees every store is still reached across ticks.
+/// maintenance tick may process. Each store gets one writer admission, so an
+/// unbounded loop over every mounted project×branch cannot monopolize the lane;
+/// this budget caps total work and a round-robin cursor (`store_cursor`)
+/// guarantees every store is still reached across ticks.
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
@@ -163,6 +163,20 @@ fn select_store_window(
     (indices, next)
 }
 
+fn cursor_after_attempted_units(
+    keys: &[String],
+    window: &[usize],
+    attempted: usize,
+    prior: Option<&str>,
+) -> Option<String> {
+    attempted
+        .checked_sub(1)
+        .and_then(|last| window.get(last))
+        .and_then(|&index| keys.get(index))
+        .cloned()
+        .or_else(|| prior.map(str::to_owned))
+}
+
 impl MaintenanceCoordinator {
     pub(super) async fn spawn(
         profile_root: PathBuf,
@@ -276,104 +290,132 @@ impl MaintenanceCoordinator {
         work.sort_by(|left, right| left.0.cmp(&right.0));
         let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
         let after = self.store_cursor.lock().await.clone();
-        let (window, next_cursor) =
+        let (window, _) =
             select_store_window(&keys, after.as_deref(), MAINTENANCE_STORE_PAGE_LIMIT);
-
-        let admitted = administration
-            .try_with_writer(|| async {
-                let mut succeeded = true;
-                // Bounded, round-robin slice of mounted stores. The cursor
-                // advances even on cancellation so the next tick resumes past
-                // the stores already handled rather than restarting.
-                for &index in &window {
-                    if self.cancellation.is_cancelled() {
-                        *self.store_cursor.lock().await = next_cursor.clone();
-                        return false;
-                    }
+        let mut attempted = 0usize;
+        let mut deferred = 0u64;
+        let mut succeeded = true;
+        for &index in &window {
+            if self.cancellation.is_cancelled() {
+                succeeded = false;
+                break;
+            }
+            let admitted = administration
+                .try_with_writer(|| async {
                     match &work[index].1 {
                         MaintenanceStoreWork::Session(database) => {
-                            succeeded &= super::store_maintenance::run_session_retention(
-                                database, retention,
-                            )
-                            .await;
+                            super::store_maintenance::run_session_retention(database, retention)
+                                .await
                         }
                         MaintenanceStoreWork::Graph(graph) => {
-                            succeeded &=
-                                super::store_maintenance::run_code_generation_retention(graph)
-                                    .await;
-                            // Generation retention only ever sees the one scope
-                            // root derived from this graph's project root. Scope
-                            // reconciliation is the sibling pass that reaches
-                            // whole scope directories whose project root no
-                            // longer exists.
-                            succeeded &=
-                                super::store_maintenance::run_code_index_scope_reconciliation(
+                            let mut unit_succeeded =
+                                super::store_maintenance::run_code_generation_retention(
                                     graph,
+                                    &self.cancellation,
                                 )
                                 .await;
-                            if let Some(compaction) = &retention.compaction {
-                                succeeded &= super::store_maintenance::run_project_compaction(
+                            if !self.cancellation.is_cancelled() {
+                                unit_succeeded &=
+                                    super::store_maintenance::run_code_index_scope_reconciliation(
+                                        graph,
+                                    )
+                                    .await;
+                            }
+                            if !self.cancellation.is_cancelled()
+                                && let Some(compaction) = &retention.compaction
+                            {
+                                unit_succeeded &= super::store_maintenance::run_project_compaction(
                                     graph.db(),
                                     compaction,
                                 )
                                 .await;
-                                succeeded &= super::store_maintenance::run_branch_compaction(
-                                    graph, compaction,
-                                )
-                                .await;
+                                if !self.cancellation.is_cancelled() {
+                                    unit_succeeded &=
+                                        super::store_maintenance::run_branch_compaction(
+                                            graph, compaction,
+                                        )
+                                        .await;
+                                }
                             }
+                            unit_succeeded && !self.cancellation.is_cancelled()
                         }
                     }
+                })
+                .await;
+            attempted = attempted.saturating_add(1);
+            match admitted {
+                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                None => {
+                    deferred = deferred.saturating_add(1);
+                    succeeded = false;
                 }
-                *self.store_cursor.lock().await = next_cursor.clone();
-                // Global (profile-wide) compaction is a single bounded op, not a
-                // per-store loop, so it runs every tick outside the round-robin.
-                if let Some(compaction) = &retention.compaction {
-                    succeeded &= super::store_maintenance::run_global_compaction(
-                        profile_database,
-                        compaction,
-                    )
-                    .await;
-                }
-                match run_cold_store_page(
-                    profile_root,
-                    profile_database,
-                    retention,
-                    &self.cancellation,
-                )
+            }
+            if self.cancellation.is_cancelled() {
+                succeeded = false;
+                break;
+            }
+        }
+        *self.store_cursor.lock().await =
+            cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
+
+        if !self.cancellation.is_cancelled()
+            && let Some(compaction) = &retention.compaction
+        {
+            match administration
+                .try_with_writer(|| async {
+                    super::store_maintenance::run_global_compaction(profile_database, compaction)
+                        .await
+                })
                 .await
-                {
-                    Ok(page) => {
-                        let mut metrics = self.metrics.lock().await;
-                        metrics.processed_stores = metrics
-                            .processed_stores
-                            .saturating_add(page.processed_stores);
-                        // Per-tick gauge, not a lifetime total: a store missing
-                        // from disk is re-observed every census pass, so a
-                        // cumulative sum grew without bound (the "148"). Report
-                        // the current census page's unavailable count instead.
-                        metrics.unavailable_stores = page.unavailable_stores;
-                        metrics.reclaimed_bytes =
-                            metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
-                        metrics.last_outcome = Some(page.outcome);
-                        succeeded &= page.outcome.was_processed();
-                    }
-                    Err(_) => succeeded = false,
+            {
+                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                None => {
+                    deferred = deferred.saturating_add(1);
+                    succeeded = false;
                 }
-                succeeded
-            })
-            .await;
+            }
+        }
+        if !self.cancellation.is_cancelled() {
+            match administration
+                .try_with_writer(|| {
+                    run_cold_store_page(
+                        profile_root,
+                        profile_database,
+                        retention,
+                        &self.cancellation,
+                    )
+                })
+                .await
+            {
+                Some(Ok(page)) => {
+                    let mut metrics = self.metrics.lock().await;
+                    metrics.processed_stores = metrics
+                        .processed_stores
+                        .saturating_add(page.processed_stores);
+                    metrics.unavailable_stores = page.unavailable_stores;
+                    metrics.reclaimed_bytes =
+                        metrics.reclaimed_bytes.saturating_add(page.reclaimed_bytes);
+                    metrics.last_outcome = Some(page.outcome);
+                    succeeded &= page.outcome.was_processed();
+                }
+                Some(Err(_)) => succeeded = false,
+                None => {
+                    deferred = deferred.saturating_add(1);
+                    succeeded = false;
+                }
+            }
+        } else {
+            succeeded = false;
+        }
 
         let mut metrics = self.metrics.lock().await;
         metrics.ticks = metrics.ticks.saturating_add(1);
-        let succeeded = match admitted {
-            Some(succeeded) => succeeded,
-            None => {
-                metrics.deferred_stores = metrics.deferred_stores.saturating_add(1);
-                metrics.last_outcome = Some(MaintenanceStoreOutcomeV1::Busy);
-                false
-            }
-        };
+        metrics.deferred_stores = metrics.deferred_stores.saturating_add(deferred);
+        if deferred > 0 {
+            metrics.last_outcome = Some(MaintenanceStoreOutcomeV1::Busy);
+        } else if self.cancellation.is_cancelled() {
+            metrics.last_outcome = Some(MaintenanceStoreOutcomeV1::Cancelled);
+        }
         super::log_daemon_event(
             "retention_maintenance_tick",
             &[
@@ -578,8 +620,9 @@ mod tests {
 
     use super::{
         ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
-        MaintenanceStoreOutcomeV1, checkpoint_path, classify_cold_store_state, load_cursor,
-        next_cold_store_cursor, persist_cursor, select_store_window,
+        MaintenanceStoreOutcomeV1, checkpoint_path, classify_cold_store_state,
+        cursor_after_attempted_units, load_cursor, next_cold_store_cursor, persist_cursor,
+        select_store_window,
     };
 
     #[test]
@@ -662,6 +705,21 @@ mod tests {
         let (window, next) = select_store_window(&[], Some("s:005"), 8);
         assert!(window.is_empty());
         assert_eq!(next.as_deref(), Some("s:005"));
+    }
+
+    #[test]
+    fn maintenance_cursor_advances_only_past_attempted_units() {
+        let keys = store_keys(8);
+        let (window, _) = select_store_window(&keys, None, 4);
+
+        assert_eq!(
+            cursor_after_attempted_units(&keys, &window, 2, None).as_deref(),
+            Some("s:001")
+        );
+        assert_eq!(
+            cursor_after_attempted_units(&keys, &window, 0, Some("s:007")).as_deref(),
+            Some("s:007")
+        );
     }
 
     #[test]
