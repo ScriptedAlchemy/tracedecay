@@ -24,8 +24,7 @@ pub(super) async fn serve_socket_client(
     .await
 }
 
-#[cfg(unix)]
-#[allow(dead_code)] // in-flight authenticated socket serving — staged
+#[cfg(all(unix, test))]
 pub(super) async fn serve_authenticated_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
@@ -190,10 +189,6 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
-    let mut engine = engine;
-    engine.store_administration = store_administration;
     let first_request_line = tokio::select! {
         result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
@@ -201,8 +196,15 @@ async fn serve_broker_socket_client(
     let Some(first_request_line) = first_request_line else {
         return Ok(());
     };
-    let reserved_control_request = is_reserved_control_request(&first_request_line);
-    if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
+    if let Some(response) = daemon_shutdown_response(&first_request_line) {
+        engine.lifecycle.begin_draining();
+        write_json_rpc_response(&mut transport, &response).await?;
+        drop(setup_activity);
+        return Ok(());
+    }
+    if admission_class == DaemonClientAdmissionClass::ReservedControl
+        && !is_reserved_control_request(&first_request_line)
+    {
         drop(setup_activity);
         reject_reserved_bulk_request(
             &mut transport,
@@ -212,6 +214,10 @@ async fn serve_broker_socket_client(
         .await?;
         return Ok(());
     }
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let mut engine = engine;
+    engine.store_administration = store_administration;
     let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
         match engine
             .per_client_admission

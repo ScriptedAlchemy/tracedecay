@@ -285,6 +285,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 }
                 continue;
             },
+            () = engine.lifecycle.wait_for_draining() => break,
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
         };

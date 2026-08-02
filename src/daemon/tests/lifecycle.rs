@@ -203,6 +203,162 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
     assert!(!lifecycle.accepting());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn authenticated_socket_shutdown_acks_and_begins_draining() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    let profile = TempDir::new().expect("profile");
+    let engine = test_daemon_engine_for_profile(profile.path());
+    let server_lifecycle = engine.lifecycle.clone();
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept shutdown client");
+        super::super::serve_authenticated_socket_client(stream, engine, TOKEN.to_owned())
+            .await
+            .expect("serve shutdown client");
+    });
+
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect shutdown client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+        .to_line()
+        .expect("auth preface");
+    writer
+        .write_all(format!("{preface}\n").as_bytes())
+        .await
+        .expect("write auth preface");
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                DaemonHandshake {
+                    client_identity: test_client_identity_for(profile.path().to_path_buf()),
+                    ..test_handshake_defaults()
+                }
+                .to_line()
+                .expect("handshake")
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write handshake");
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 29,
+                    "method": super::super::DAEMON_SHUTDOWN_METHOD,
+                })
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write shutdown");
+
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
+        .await
+        .expect("read shutdown response");
+    let response: serde_json::Value = serde_json::from_str(response.trim()).expect("shutdown JSON");
+
+    assert_eq!(response["id"], serde_json::json!(29));
+    assert_eq!(response["result"], serde_json::json!({"accepted": true}));
+    server.await.expect("shutdown server");
+    assert!(!server_lifecycle.accepting());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn authenticated_socket_reserved_lane_rejects_bulk_with_typed_backpressure() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    let profile = TempDir::new().expect("profile");
+    let engine = test_daemon_engine_for_profile(profile.path());
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept bulk client");
+        super::super::serve_authenticated_socket_client_with_class(
+            stream,
+            engine,
+            TOKEN.to_owned(),
+            super::super::DaemonClientAdmissionClass::ReservedControl,
+        )
+        .await
+        .expect("serve bulk client");
+    });
+
+    let stream = super::super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect bulk client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = super::super::transport::DaemonAuthPreface::new(TOKEN)
+        .to_line()
+        .expect("auth preface");
+    writer
+        .write_all(format!("{preface}\n").as_bytes())
+        .await
+        .expect("write auth preface");
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                DaemonHandshake {
+                    client_identity: test_client_identity_for(profile.path().to_path_buf()),
+                    ..test_handshake_defaults()
+                }
+                .to_line()
+                .expect("handshake")
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write handshake");
+    writer
+        .write_all(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedecay_context",
+                    "arguments": {"task": "no-capacity"},
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .await
+        .expect("write bulk request");
+    writer.write_all(b"\n").await.expect("write bulk newline");
+
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
+        .await
+        .expect("read saturation response");
+    let response: serde_json::Value =
+        serde_json::from_str(response.trim()).expect("saturation response JSON");
+
+    assert_eq!(response["id"], serde_json::json!(31));
+    assert_eq!(response["error"]["data"]["kind"], "bulk_capacity_reached");
+    assert_eq!(response["error"]["data"]["retryable"], true);
+    server.await.expect("bulk server");
+}
+
 #[test]
 fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
     let admission = super::super::DaemonPerClientAdmission::new(2);

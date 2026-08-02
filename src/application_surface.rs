@@ -1875,14 +1875,12 @@ where
         Err(DaemonInvocationError::TimedOut { .. }) => {
             ApplicationProblem::timed_out_before_admission()
         }
-        Err(
-            DaemonInvocationError::Saturated { .. }
-            | DaemonInvocationError::Backpressured { .. }
-            | DaemonInvocationError::Unavailable,
-        ) => ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "work.transport_unavailable".to_owned(),
-            message: "The Work application transport is unavailable".to_owned(),
-        }),
+        Err(DaemonInvocationError::Unavailable) => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "work.transport_unavailable".to_owned(),
+                message: "The Work application transport is unavailable".to_owned(),
+            })
+        }
     };
     CanonicalInvocationResult::<T>::new(
         binding_id,
@@ -3960,15 +3958,6 @@ pub async fn execute_application_surface(
                         Plan26FeedbackSourceEventV1::Cancellation {
                             operation: plan26_surface_operation(operation),
                             outcome: Plan26FeedbackOutcomeV1::TimedOut,
-                        }
-                    }
-                    DaemonInvocationError::Saturated { .. }
-                    | DaemonInvocationError::Backpressured { .. } => {
-                        Plan26FeedbackSourceEventV1::Dispatch {
-                            operation: plan26_surface_operation(operation),
-                            outcome: Plan26FeedbackOutcomeV1::AtCapacity,
-                            capacity: 1,
-                            admitted: 0,
                         }
                     }
                     DaemonInvocationError::Unavailable => Plan26FeedbackSourceEventV1::Delivery {
