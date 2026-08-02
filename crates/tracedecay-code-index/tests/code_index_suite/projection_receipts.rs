@@ -379,3 +379,44 @@ fn invalid_or_failed_receipts_never_cross_the_publication_handoff() {
         Err(ProjectionPublicationErrorV1::NotActivatable)
     );
 }
+
+/// A receipt returned by a projection sink crosses a trust boundary: even
+/// though the request digest was already recomputed earlier in the same
+/// publication chain, the receipt's own publication seal must still be
+/// recomputed before it can publish.
+#[test]
+fn sink_receipt_with_a_tampered_publication_seal_never_publishes() {
+    let request = request();
+    let mut tampered = build_batch_receipt(&request, &decisions()).expect("receipt builds");
+    tampered.publication_digest = digest::<ManifestDigest>('9');
+
+    let mut sink = FixedSink {
+        receipt: tampered,
+        seen_request: None,
+    };
+    assert_eq!(
+        project_for_publication(&mut sink, request),
+        Err(ProjectionPublicationErrorV1::Receipt(
+            ProjectionReceiptErrorV1::DigestMismatch
+        ))
+    );
+}
+
+/// A sink is likewise not trusted about which request its receipt answers.
+#[test]
+fn sink_receipt_with_a_foreign_request_digest_never_publishes() {
+    let request = request();
+    let mut tampered = build_batch_receipt(&request, &decisions()).expect("receipt builds");
+    tampered.request_digest = digest::<ManifestDigest>('9');
+
+    let mut sink = FixedSink {
+        receipt: tampered,
+        seen_request: None,
+    };
+    assert_eq!(
+        project_for_publication(&mut sink, request),
+        Err(ProjectionPublicationErrorV1::Receipt(
+            ProjectionReceiptErrorV1::DigestMismatch
+        ))
+    );
+}

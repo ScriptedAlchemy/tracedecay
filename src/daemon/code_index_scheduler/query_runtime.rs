@@ -295,12 +295,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 Some(ready) => (ready, false),
                 None => (serving, true),
             },
-            None => (
-                self.latest_complete_ready_for_scope(scope)
-                    .await
-                    .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?,
-                false,
-            ),
+            None => match self.latest_complete_ready_for_scope(scope).await {
+                Some(ready) => (ready, false),
+                None => {
+                    // Nothing servable and the ready gate refused. Search is the
+                    // one lane whose resolution never runs the freshness ladder,
+                    // so nothing else on this path will ever request the rebuild
+                    // that would remedy the failure — it would return this typed
+                    // error forever. Ask for the remedy exactly once per
+                    // admission (debounced on the pending wake), never inline and
+                    // never parking, then still fail typed rather than degrade
+                    // into an empty answer.
+                    self.request_query_background_reconcile(scope).await;
+                    return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+                }
+            },
         };
         let authority = self
             .query_authority_for_scope(scope)

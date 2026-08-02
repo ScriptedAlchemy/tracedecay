@@ -161,6 +161,49 @@ pub fn decisions_for_noop(changes: &ChangedCodeChunkSetV1) -> Vec<ChunkProjectio
         .collect()
 }
 
+/// Request digest work already done, once, for one immutable request.
+///
+/// Every entry point that accepts a request from outside its call chain
+/// recomputes the canonical request digest and re-validates the changed-chunk
+/// set — both O(request) canonical hashes over sets that reach six figures.
+/// Once a chain has done that for a request it does not mutate again, the
+/// same evidence is threaded to the remaining steps instead of hashing the
+/// request two more times.
+pub(crate) struct ProjectionRequestEvidenceV1 {
+    /// `expected_request_digest(request)`, already compared against
+    /// `request.request_digest`.
+    request_digest: ManifestDigest,
+    /// The validated changed-chunk set indexed by chunk identity.
+    partitions: BTreeMap<CodeSearchChunkId, (Partition, DigestPair)>,
+}
+
+impl ProjectionRequestEvidenceV1 {
+    /// Record evidence for a request whose digest was just recomputed and
+    /// whose changed-chunk set was just validated by the caller.
+    pub(crate) fn recorded(
+        request_digest: ManifestDigest,
+        changes: &ChangedCodeChunkSetV1,
+    ) -> Self {
+        Self {
+            request_digest,
+            partitions: index_partitions(changes),
+        }
+    }
+}
+
+/// Whether a batch receipt's publication digest still has to be recomputed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationDigestTrustV1 {
+    /// The receipt crossed a trust boundary — a projection sink, durable
+    /// storage, or any other caller — so its self-declared publication digest
+    /// proves nothing until it is recomputed from the receipt's own fields.
+    Unverified,
+    /// The receipt was sealed by [`build_batch_receipt`] earlier in this same
+    /// call chain and has not been touched since, so its publication digest is
+    /// the value that recomputation would produce.
+    SealedInThisChain,
+}
+
 /// Build the complete batch receipt for one projection request from the
 /// projector's per-chunk decisions. The decisions must cover every chunk in
 /// the request exactly once, with operations and digests consistent with the
@@ -171,13 +214,40 @@ pub fn build_batch_receipt(
     request: &ProjectionBatchRequestV1,
     decisions: &[ChunkProjectionDecisionV1],
 ) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
-    let expected_request = expected_request_digest(request)
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    build_batch_receipt_with(request, None, decisions)
+}
+
+/// [`build_batch_receipt`] for a request this chain already verified.
+pub(crate) fn build_batch_receipt_verified(
+    request: &ProjectionBatchRequestV1,
+    evidence: &ProjectionRequestEvidenceV1,
+    decisions: &[ChunkProjectionDecisionV1],
+) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
+    build_batch_receipt_with(request, Some(evidence), decisions)
+}
+
+fn build_batch_receipt_with(
+    request: &ProjectionBatchRequestV1,
+    evidence: Option<&ProjectionRequestEvidenceV1>,
+    decisions: &[ChunkProjectionDecisionV1],
+) -> Result<ProjectionBatchReceiptV1, ProjectionReceiptErrorV1> {
+    let expected_request = match evidence {
+        Some(evidence) => evidence.request_digest.clone(),
+        None => expected_request_digest(request)
+            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?,
+    };
     if request.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
     let reembed_reused = reembeds_reused_chunks(request)?;
-    let partitions = partitions_of(&request.changes)?;
+    let recomputed_partitions;
+    let partitions = match evidence {
+        Some(evidence) => &evidence.partitions,
+        None => {
+            recomputed_partitions = partitions_of(&request.changes)?;
+            &recomputed_partitions
+        }
+    };
 
     let mut seen = BTreeSet::new();
     let mut receipts = Vec::with_capacity(decisions.len());
@@ -243,8 +313,33 @@ pub fn verify_batch_receipt(
     request: &ProjectionBatchRequestV1,
     batch: &ProjectionBatchReceiptV1,
 ) -> Result<(), ProjectionReceiptErrorV1> {
-    let expected_request = expected_request_digest(request)
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    verify_batch_receipt_with(request, None, batch, PublicationDigestTrustV1::Unverified)
+}
+
+/// [`verify_batch_receipt`] for a request this chain already verified, and a
+/// receipt whose publication digest may already be known good.
+pub(crate) fn verify_batch_receipt_verified(
+    request: &ProjectionBatchRequestV1,
+    evidence: &ProjectionRequestEvidenceV1,
+    batch: &ProjectionBatchReceiptV1,
+    publication: PublicationDigestTrustV1,
+) -> Result<(), ProjectionReceiptErrorV1> {
+    verify_batch_receipt_with(request, Some(evidence), batch, publication)
+}
+
+fn verify_batch_receipt_with(
+    request: &ProjectionBatchRequestV1,
+    evidence: Option<&ProjectionRequestEvidenceV1>,
+    batch: &ProjectionBatchReceiptV1,
+    publication: PublicationDigestTrustV1,
+) -> Result<(), ProjectionReceiptErrorV1> {
+    let expected_request = match evidence {
+        Some(evidence) => evidence.request_digest.clone(),
+        None => expected_request_digest(request)
+            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?,
+    };
+    // The batch is never trusted about the request it answers, even when the
+    // request digest itself was recomputed earlier in this chain.
     if request.request_digest != expected_request || batch.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
@@ -273,7 +368,14 @@ pub fn verify_batch_receipt(
         return Err(ProjectionReceiptErrorV1::NonCanonicalReceiptOrder);
     }
 
-    let partitions = partitions_of(&request.changes)?;
+    let recomputed_partitions;
+    let partitions = match evidence {
+        Some(evidence) => &evidence.partitions,
+        None => {
+            recomputed_partitions = partitions_of(&request.changes)?;
+            &recomputed_partitions
+        }
+    };
     let mut seen = BTreeSet::new();
     for receipt in &batch.receipts {
         if receipt.projection_key != request.target_projection_key {
@@ -324,10 +426,12 @@ pub fn verify_batch_receipt(
     if batch.reused_count != reused_count {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
-    let expected_publication = expected_publication_digest(batch)
-        .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
-    if batch.publication_digest != expected_publication {
-        return Err(ProjectionReceiptErrorV1::DigestMismatch);
+    if publication == PublicationDigestTrustV1::Unverified {
+        let expected_publication = expected_publication_digest(batch)
+            .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+        if batch.publication_digest != expected_publication {
+            return Err(ProjectionReceiptErrorV1::DigestMismatch);
+        }
     }
     Ok(())
 }
@@ -357,6 +461,16 @@ fn partitions_of(
     changes
         .validate()
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
+    Ok(index_partitions(changes))
+}
+
+/// Index an already-validated changed-chunk set by chunk identity.
+///
+/// `ChangedCodeChunkSetV1::validate` recomputes the whole set's manifest
+/// digest, so it runs once per call chain and the index is threaded onward.
+fn index_partitions(
+    changes: &ChangedCodeChunkSetV1,
+) -> BTreeMap<CodeSearchChunkId, (Partition, DigestPair)> {
     let mut partitions = BTreeMap::new();
     for change in &changes.added_or_changed {
         partitions.insert(
@@ -394,7 +508,7 @@ fn partitions_of(
             ),
         );
     }
-    Ok(partitions)
+    partitions
 }
 
 /// The digests a request partition declares for one chunk.

@@ -216,10 +216,17 @@ pub struct McpServer {
     /// handler await, so a swap never contends with in-flight calls. Calls
     /// already running when a swap lands finish against the old snapshot;
     /// each call is internally consistent.
-    cg: tokio::sync::RwLock<Arc<TraceDecay>>,
-    /// Serializes branch reopen work without hiding the last complete graph
-    /// behind the `cg` write lock while the replacement is prepared.
-    branch_reopen: tokio::sync::Mutex<()>,
+    /// `Arc` so the detached branch-reopen task can hold a cheap clone and swap
+    /// the freshly opened instance in when it lands.
+    cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
+    /// Single-flights branch reopen work. Held by the detached reopen task, not
+    /// by the request that noticed the drift: a reopen is a full DB open plus a
+    /// sealed restore, and no caller ever waits on it.
+    branch_reopen: Arc<tokio::sync::Mutex<()>>,
+    /// Count of completed branch reopens (success or failure). Lets tests and
+    /// callers observe that a detached swap has landed without exposing the
+    /// task handle.
+    branch_reopen_completions: Arc<AtomicU64>,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -843,8 +850,9 @@ impl McpServer {
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
         let server = Arc::new(Self {
-            cg: tokio::sync::RwLock::new(cg),
-            branch_reopen: tokio::sync::Mutex::new(()),
+            cg: Arc::new(tokio::sync::RwLock::new(cg)),
+            branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
+            branch_reopen_completions: Arc::new(AtomicU64::new(0)),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
