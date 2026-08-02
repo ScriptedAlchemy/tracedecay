@@ -230,17 +230,21 @@ enum IncrementFileMaterializationV1 {
 const PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN: &str =
     "tracedecay.physical-code-artifact-reuse.v1";
 const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
-// Match the established extraction ceiling: enough parallelism to use large
-// hosts without multiplying parser memory across every logical CPU.
-const MAX_CODE_INDEX_EXTRACTION_WORKERS: usize = 8;
 
-fn bounded_code_index_extraction_workers(file_count: usize) -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .clamp(1, MAX_CODE_INDEX_EXTRACTION_WORKERS)
-        .min(file_count.max(1))
-}
-
+/// Fan `operation` across every file at once on the reserved-width indexing
+/// pool (see [`crate::parallelism`]), preserving input order in the output.
+///
+/// There is no batch barrier: a batched fan-out re-synchronized every
+/// `workers` files, so one slow file stalled a whole batch and the pipeline
+/// never reached machine width. Files are independent, so the whole slice is
+/// one parallel map.
+///
+/// Failure semantics are the sequential ones: the returned error is always
+/// the lowest-index failure, independent of completion order. Unlike the
+/// batched form this does not abandon later files after a failure — the
+/// tradeoff for having no barrier. Cancellation still short-circuits, because
+/// every per-file closure checkpoints the execution control first and
+/// returns immediately once the reconcile is cancelled.
 fn collect_bounded_ordered<T, R, E, F>(items: &[T], operation: F) -> Result<Vec<R>, E>
 where
     T: Sync,
@@ -248,29 +252,19 @@ where
     E: Send,
     F: Fn(&T) -> Result<R, E> + Sync,
 {
-    let workers = bounded_code_index_extraction_workers(items.len());
-    if workers == 1 {
-        return items.iter().map(operation).collect();
-    }
-    let pool = match rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .thread_name(|index| format!("tracedecay-code-index-{index}"))
-        .build()
-    {
-        Ok(pool) => pool,
-        Err(_) => return items.iter().map(operation).collect(),
-    };
-    let mut values = Vec::with_capacity(items.len());
-    for batch in items.chunks(workers) {
-        let results = pool.install(|| {
-            batch
-                .par_iter()
-                .map(&operation)
-                .collect::<Vec<Result<R, E>>>()
-        });
-        values.extend(results.into_iter().collect::<Result<Vec<_>, _>>()?);
-    }
-    Ok(values)
+    // Always enter the indexing pool, even when the width is 1: the pool is
+    // what keeps the nested chunk-level fan-out inside the reservation
+    // instead of spilling onto rayon's global (all-cores) pool.
+    crate::parallelism::install(|| {
+        if items.len() < 2 || crate::parallelism::indexing_workers() < 2 {
+            return items.iter().map(&operation).collect();
+        }
+        let results: Vec<Result<R, E>> = items
+            .par_iter()
+            .map(&operation)
+            .collect::<Vec<Result<R, E>>>();
+        results.into_iter().collect()
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

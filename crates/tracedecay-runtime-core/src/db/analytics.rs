@@ -677,29 +677,146 @@ impl Database {
         Ok(items)
     }
 
-    /// Returns node kind counts grouped by file or directory prefix.
+    /// Returns whole-scope node counts per kind.
+    ///
+    /// Bounded by the number of distinct node kinds (a small closed set), not
+    /// by store size, so the summary form of `tracedecay_distribution` never
+    /// materializes one row per file. Folding per-file rows in the handler to
+    /// reach the same totals made a summary request cost O(files × kinds).
+    pub async fn get_node_kind_totals(
+        &self,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<(String, u64)>> {
+        let (sql, param_values): (&str, Vec<Value>) = match path_prefix {
+            Some(prefix) => (
+                "SELECT kind, COUNT(*) AS cnt
+                 FROM nodes
+                 WHERE file_path LIKE ?1
+                 GROUP BY kind
+                 ORDER BY cnt DESC, kind",
+                vec![path_prefix_like_value(prefix)],
+            ),
+            None => (
+                "SELECT kind, COUNT(*) AS cnt
+                 FROM nodes
+                 GROUP BY kind
+                 ORDER BY cnt DESC, kind",
+                vec![],
+            ),
+        };
+
+        let op = "get_node_kind_totals";
+        let mut rows = self
+            .engine_conn()
+            .query(sql, params_from_iter(param_values))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query node kind totals: {e}"),
+                operation: op.to_string(),
+            })?;
+
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read row: {e}"),
+            operation: op.to_string(),
+        })? {
+            let kind = row
+                .get::<String>(0)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read kind: {e}"),
+                    operation: op.to_string(),
+                })?;
+            let count = row.get::<u64>(1).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read count: {e}"),
+                operation: op.to_string(),
+            })?;
+            items.push((kind, count));
+        }
+
+        Ok(items)
+    }
+
+    /// Returns the total number of files in scope, so a bounded per-file page
+    /// can state honestly how many files it omitted.
+    pub async fn count_distribution_files(&self, path_prefix: Option<&str>) -> Result<u64> {
+        let (sql, param_values): (&str, Vec<Value>) = match path_prefix {
+            Some(prefix) => (
+                "SELECT COUNT(*) FROM (SELECT 1 FROM nodes WHERE file_path LIKE ?1 GROUP BY file_path)",
+                vec![path_prefix_like_value(prefix)],
+            ),
+            None => (
+                "SELECT COUNT(*) FROM (SELECT 1 FROM nodes GROUP BY file_path)",
+                vec![],
+            ),
+        };
+
+        let op = "count_distribution_files";
+        let mut rows = self
+            .engine_conn()
+            .query(sql, params_from_iter(param_values))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to count distribution files: {e}"),
+                operation: op.to_string(),
+            })?;
+        let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read row: {e}"),
+            operation: op.to_string(),
+        })?
+        else {
+            return Ok(0);
+        };
+        row.get::<u64>(0).map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read count: {e}"),
+            operation: op.to_string(),
+        })
+    }
+
+    /// Returns node kind counts grouped by file or directory prefix, for at
+    /// most `file_limit` files ranked by node count.
     ///
     /// If `path_prefix` is provided, only files under that path are included.
-    /// Results are grouped by (`file_path`, kind) and ordered by file then count.
+    /// Results are grouped by (`file_path`, kind) and ordered by file then
+    /// count. The file cap is applied inside SQL so the request materializes
+    /// O(returned files × kinds) rows; the unbounded form used to read every
+    /// (file, kind) group in the store and was rejected outright by the row
+    /// materialization limiter on any real repository.
     pub async fn get_node_distribution(
         &self,
         path_prefix: Option<&str>,
+        file_limit: u32,
     ) -> Result<Vec<(String, String, u64)>> {
+        let file_limit = file_limit.max(1);
         let (sql, param_values): (&str, Vec<Value>) = match path_prefix {
             Some(prefix) => (
                 "SELECT file_path, kind, COUNT(*) AS cnt
                  FROM nodes
-                 WHERE file_path LIKE ?1
+                 WHERE file_path IN (
+                     SELECT file_path FROM nodes
+                     WHERE file_path LIKE ?1
+                     GROUP BY file_path
+                     ORDER BY COUNT(*) DESC, file_path
+                     LIMIT ?2
+                 )
                  GROUP BY file_path, kind
                  ORDER BY file_path, cnt DESC",
-                vec![path_prefix_like_value(prefix)],
+                vec![
+                    path_prefix_like_value(prefix),
+                    Value::Integer(i64::from(file_limit)),
+                ],
             ),
             None => (
                 "SELECT file_path, kind, COUNT(*) AS cnt
                  FROM nodes
+                 WHERE file_path IN (
+                     SELECT file_path FROM nodes
+                     GROUP BY file_path
+                     ORDER BY COUNT(*) DESC, file_path
+                     LIMIT ?1
+                 )
                  GROUP BY file_path, kind
                  ORDER BY file_path, cnt DESC",
-                vec![],
+                vec![Value::Integer(i64::from(file_limit))],
             ),
         };
 

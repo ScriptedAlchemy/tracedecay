@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 
 use super::{
     ConnectionMode, OpenedDatabaseFile, OpenedDatabaseFileError, open, open_immutable_reader,
-    with_progress_cancellation,
+    open_writer, with_progress_cancellation,
 };
 
 fn database() -> NamedTempFile {
@@ -227,6 +227,28 @@ fn writer_bootstraps_fresh_incremental_auto_vacuum_before_wal() {
     );
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn fresh_writer_uses_a_sidecar_compatible_path() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("fresh-writer.sqlite3");
+    let pinned = OpenedDatabaseFile::create_new(&path).expect("pin fresh database");
+    let worker_path = pinned.writer_open_path(&path).expect("select writer path");
+    let connection = open_writer(&worker_path, Some(&pinned), &path).expect("writer policy");
+
+    connection
+        .execute_batch(
+            "CREATE TABLE sidecar_probe(value INTEGER);
+             INSERT INTO sidecar_probe VALUES (1);",
+        )
+        .expect("fresh writer schema and WAL write");
+
+    assert!(
+        sidecar_path(&path, "-wal").is_file(),
+        "fresh writer must create WAL beside the canonical database"
+    );
+}
+
 #[test]
 fn progress_cancellation_interrupts_and_is_removed_after_scope() {
     let file = database();
@@ -310,6 +332,52 @@ fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
     std::fs::rename(&retired, &path).unwrap();
     assert_eq!(std::fs::read(&worker_path).unwrap(), b"original");
     pinned.verify_current_path(&path).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn writer_open_path_preserves_platform_identity_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("writer-path.db");
+    std::fs::File::create(&path).unwrap();
+    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
+    let worker_path = pinned.writer_open_path(&path).unwrap();
+
+    #[cfg(unix)]
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        assert!(worker_path.starts_with("/proc/self/fd/"));
+    } else {
+        assert_eq!(worker_path, path);
+    }
+    #[cfg(windows)]
+    assert_eq!(worker_path, path);
+}
+
+#[cfg(unix)]
+#[test]
+fn writer_identity_fence_rejects_a_replacement_hidden_by_path_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.db");
+    let replacement = directory.path().join("identity.replacement.db");
+    let retired = directory.path().join("identity.retired.db");
+    for candidate in [&path, &replacement] {
+        let connection = Connection::open(candidate).unwrap();
+        connection
+            .execute_batch("CREATE TABLE identity(value INTEGER);")
+            .unwrap();
+    }
+
+    let pinned = OpenedDatabaseFile::pin(&path).unwrap();
+    std::fs::rename(&path, &retired).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    let connection = Connection::open(&path).unwrap();
+    std::fs::rename(&path, &replacement).unwrap();
+    std::fs::rename(&retired, &path).unwrap();
+
+    assert_eq!(
+        pinned.verify_connection(&connection, &path),
+        Err(OpenedDatabaseFileError::Replaced)
+    );
 }
 
 #[cfg(windows)]

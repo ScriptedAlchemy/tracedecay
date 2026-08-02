@@ -18,8 +18,6 @@
 //! It depends only on the domain projection contract plus its sibling
 //! `fastembed_adapter` port surface. Deadlines are `Duration` values against
 //! the injected clock, bridged from query `RetrievalBudget`.
-#![allow(dead_code)] // semantic embedding session pool; Plan 31
-
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;

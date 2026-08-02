@@ -3660,7 +3660,30 @@ mod tests {
 "#;
     const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
 "#;
-    static HOST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// A host lifecycle resolves its profile root from the process-global
+    /// `TRACEDECAY_DATA_DIR`, not from the `home` the fixture passes in, and
+    /// `.cargo/config.toml` points that variable at one workspace-wide
+    /// `target/test-profile/.tracedecay` for every cargo-launched process. So
+    /// every test driving an opencode/codex/kiro `Core` registration wrote the
+    /// *same* `agent_managed/memory_digest_targets.json` no matter how private
+    /// its own `home` was: one test's write landed between another's recorded
+    /// intent and its read-back, and the second test reported its neighbour's
+    /// bytes as `StalePreview` drift. The file also outlived the process,
+    /// accumulating a stale entry per run.
+    ///
+    /// [`PinnedUserDataDir`] gives each test its own profile root (and its own
+    /// `HOME`) for the duration of the guard, and holds the crate-wide
+    /// user-data-dir lock while the override is installed — the same lock every
+    /// other profile-mutating test takes, so the mutation cannot be observed
+    /// half-applied. Hold it for as long as any `home` fixture is alive.
+    ///
+    /// This is also the serialization point for the other process-global
+    /// variables these tests set (`PATH`, `KIMI_CODE_HOME`, and the host
+    /// registration fault injectors): one lock for all of them keeps their
+    /// windows from overlapping each other or a profile pin.
+    fn pinned_host_profile() -> tracedecay_runtime_core::config::PinnedUserDataDir {
+        tracedecay_runtime_core::config::PinnedUserDataDir::new()
+    }
 
     /// `--yes` confirms the plan the preview showed; taking ownership of bytes
     /// no receipt records is a separate decision, so the dry run must name it
@@ -3708,7 +3731,7 @@ mod tests {
     /// where the replaced bytes are preserved.
     #[tokio::test]
     async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set(
@@ -3770,6 +3793,7 @@ mod tests {
 
     #[test]
     fn feedback_registration_snapshot_rejects_pre_activation_edit() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let integration = tracedecay::agents::get_integration("cursor").unwrap();
         let snapshot =
@@ -3801,6 +3825,7 @@ mod tests {
     fn feedback_registration_snapshot_rejects_metadata_only_drift() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let integration = tracedecay::agents::get_integration("cursor").unwrap();
         let config = home.path().join(".cursor/mcp.json");
@@ -4211,6 +4236,7 @@ mod tests {
 
     #[test]
     fn artifact_restore_refuses_components_with_registration_state() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let core = canonical_host_component_set(
@@ -4253,6 +4279,7 @@ mod tests {
 
     #[test]
     fn artifact_command_route_backs_up_and_restores_managed_files() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set(
@@ -4311,6 +4338,7 @@ mod tests {
 
     #[test]
     fn explicit_context_component_lifecycle_preserves_other_opencode_state() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let preserved = seed_opencode_non_context_state(home.path());
@@ -4358,6 +4386,7 @@ mod tests {
     /// therefore makes the transaction invalidate itself on every run.
     #[test]
     fn kiro_context_mcp_component_set_applies_non_interactively_and_repeats() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4407,6 +4436,7 @@ mod tests {
     /// `host-bundle recover`.
     #[test]
     fn interrupted_component_set_journal_recovers_on_next_non_interactive_apply() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
@@ -4487,6 +4517,7 @@ mod tests {
     fn confirmed_apply_reports_an_ownership_conflict_as_itself() {
         use tracedecay::agents::host_bundle_v2::HostBundleError;
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set =
@@ -4536,9 +4567,8 @@ mod tests {
                 &mut registration,
             )
             .expect_err("an unowned file on the artifact path must refuse the apply");
-        assert_ne!(
-            error,
-            HostBundleError::StalePreview,
+        assert!(
+            !matches!(error, HostBundleError::StalePreview(_)),
             "a standing refusal must not be laundered into a retryable staleness report"
         );
         assert_eq!(error, HostBundleError::OwnershipConflict);
@@ -4553,6 +4583,7 @@ mod tests {
             HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
         };
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set("opencode", None, 0)
@@ -4601,9 +4632,11 @@ mod tests {
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
 
-        assert_eq!(
-            registration.apply(&component_set.component_set, &request),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            matches!(
+                registration.apply(&component_set.component_set, &request),
+                Err(HostBundleError::StalePreview(_))
+            ),
             "a foreign mid-transaction edit must still abort the apply"
         );
     }
@@ -4625,6 +4658,7 @@ mod tests {
         // other input is identical, and each run gets its own home so the two
         // outcomes cannot influence each other.
         let drive = |declare_the_write: bool| {
+            let _profile = pinned_host_profile();
             let home = tempfile::tempdir().unwrap();
             let lifecycle = tempfile::tempdir().unwrap();
             let registration_path = home.path().join(".config/opencode/opencode.json");
@@ -4677,14 +4711,12 @@ mod tests {
             registration.apply(&component_set.component_set, &request)
         };
 
-        assert_ne!(
-            drive(true),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            !matches!(drive(true), Err(HostBundleError::StalePreview(_))),
             "the transaction's own declared write must not read back as drift"
         );
-        assert_eq!(
-            drive(false),
-            Err(HostBundleError::StalePreview),
+        assert!(
+            matches!(drive(false), Err(HostBundleError::StalePreview(_))),
             "the same write is foreign drift when the transaction did not declare it"
         );
     }
@@ -4693,6 +4725,7 @@ mod tests {
     fn explicit_context_component_rollback_preserves_other_opencode_state() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let preserved = seed_opencode_non_context_state(home.path());
@@ -4737,6 +4770,7 @@ mod tests {
 
     #[test]
     fn opencode_non_owner_component_cannot_remove_context_registration() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -4773,6 +4807,7 @@ mod tests {
     fn current_opencode_context_install_is_byte_preserving() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
@@ -4818,6 +4853,7 @@ mod tests {
     fn opencode_core_rollback_restores_every_registration_side_effect() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
@@ -4871,6 +4907,7 @@ mod tests {
 
     #[test]
     fn codex_core_rollback_restores_generated_agent_exports_byte_for_byte() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let agents_dir = home.path().join(".codex/agents");
@@ -4941,12 +4978,15 @@ mod tests {
         );
         assert!(
             registration.injected_after_apply,
-            "the failure must be injected after stale export replacement"
+            "the failure must be injected after stale export replacement: {:?}",
+            result.as_ref().err()
         );
 
         assert_eq!(
             std::fs::read(&manifest_path).unwrap(),
-            manifest_bytes.as_bytes()
+            manifest_bytes.as_bytes(),
+            "rollback must restore the ownership manifest: {:?}",
+            result.as_ref().err()
         );
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_bytes);
         assert_eq!(std::fs::read(&current_path).unwrap(), current_bytes);
@@ -4969,6 +5009,7 @@ mod tests {
 
     #[test]
     fn explicit_core_component_lifecycle_preserves_opencode_companions() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let tracedecay_bin = std::env::current_exe()
@@ -5049,16 +5090,13 @@ mod tests {
             if operation == HostBundleCliOperation::Uninstall {
                 assert!(config["lsp"].get("tracedecay").is_none());
             } else {
+                // The bridge binds its workspace roots from the host's own
+                // `initialize` frame, so the registration deliberately carries
+                // no `--project`: pinning it to OpenCode's process CWD would
+                // override the folders the editor actually opened.
                 assert_eq!(
                     config["lsp"]["tracedecay"]["command"],
-                    serde_json::json!([
-                        tracedecay_bin.clone(),
-                        "lsp",
-                        "bridge",
-                        "--stdio",
-                        "--project",
-                        "."
-                    ])
+                    serde_json::json!([tracedecay_bin.clone(), "lsp", "bridge", "--stdio"])
                 );
             }
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
@@ -5073,7 +5111,7 @@ mod tests {
     /// own artifact write is not third-party registration drift.
     #[tokio::test]
     async fn kiro_context_mcp_apply_converges_without_rollback() {
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
@@ -5190,6 +5228,7 @@ mod tests {
         for agent in [
             "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
         ] {
+            let _profile = pinned_host_profile();
             let home = tempfile::tempdir().unwrap();
             let lifecycle = tempfile::tempdir().unwrap();
             let component_set = canonical_host_component_set(agent, None, 0)
@@ -5240,7 +5279,7 @@ mod tests {
     #[cfg(feature = "test-transport")]
     #[tokio::test]
     async fn a_wedged_kiro_journal_is_recovered_by_the_next_apply() {
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let tracedecay_bin = std::env::current_exe()
             .unwrap()
             .to_string_lossy()
@@ -5315,6 +5354,7 @@ mod tests {
 
     #[test]
     fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/opencode/opencode.json");
@@ -5356,7 +5396,7 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_tracked_reinstall_returns_non_blocking_typed_deferral() {
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
         let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
@@ -5391,7 +5431,7 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_canonical_component_set_fails_before_direct_host_mutation() {
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
@@ -5456,7 +5496,7 @@ mod tests {
     async fn kimi_registration_preflight_creates_no_backup_for_unavailable_api() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
-        let _env_lock = HOST_ENV_LOCK.lock().await;
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
@@ -5526,6 +5566,7 @@ mod tests {
             HostBundleError, HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1,
         };
 
+        let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let component_set = canonical_host_component_set("opencode", None, 0)
@@ -5563,10 +5604,10 @@ mod tests {
         let registration_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
-        assert_eq!(
+        assert!(matches!(
             registration.stage(&component_set.component_set, &request),
-            Err(HostBundleError::StalePreview)
-        );
+            Err(HostBundleError::StalePreview(_))
+        ));
         registration
             .rollback(&component_set.component_set, &request)
             .unwrap();

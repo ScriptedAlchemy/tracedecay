@@ -230,11 +230,27 @@ fn typed_work_descriptors_close_the_public_operation_surface() {
     assert_typed_contract::<WorkCreate>();
     assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
     let capabilities = base_operation_capabilities().collect::<Vec<_>>();
+    let exposed_count = tracedecay_sdk::api::HttpApplicationOperation::ALL
+        .into_iter()
+        .filter(|operation| operation.is_http_exposed())
+        .count();
     assert_eq!(
         capabilities.len(),
-        tracedecay_sdk::api::HttpApplicationOperation::ALL.len(),
+        exposed_count,
         "every base HTTP application operation must surface as a capability"
     );
+    assert!(capabilities.iter().all(|capability| {
+        capability.operation.is_http_exposed()
+            && !matches!(
+                capability.operation,
+                tracedecay_sdk::api::HttpApplicationOperation::GitPreview
+                    | tracedecay_sdk::api::HttpApplicationOperation::GitApply
+            )
+            && !matches!(
+                capability.route.as_str(),
+                "/application/git/preview" | "/application/git/apply"
+            )
+    }));
     assert!(capabilities.iter().all(|capability| capability.disposition
         == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable));
 }

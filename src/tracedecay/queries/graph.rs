@@ -239,12 +239,27 @@ impl TraceDecay {
         self.db.get_inheritance_depth(path_prefix, limit).await
     }
 
-    /// Returns node kind distribution, optionally filtered by path prefix.
+    /// Returns node kind distribution for the highest-node-count files,
+    /// optionally filtered by path prefix.
     pub async fn get_node_distribution(
         &self,
         path_prefix: Option<&str>,
+        file_limit: u32,
     ) -> Result<Vec<(String, String, u64)>> {
-        self.db.get_node_distribution(path_prefix).await
+        self.db.get_node_distribution(path_prefix, file_limit).await
+    }
+
+    /// Returns whole-scope node counts per kind.
+    pub async fn get_node_kind_totals(
+        &self,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<(String, u64)>> {
+        self.db.get_node_kind_totals(path_prefix).await
+    }
+
+    /// Returns the number of files in the distribution scope.
+    pub async fn count_distribution_files(&self, path_prefix: Option<&str>) -> Result<u64> {
+        self.db.count_distribution_files(path_prefix).await
     }
 
     /// Returns calls edges as (`source_id`, `target_id`) pairs for cycle detection.
