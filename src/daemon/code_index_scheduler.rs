@@ -935,6 +935,7 @@ type GenerationServingCachesV1 = (
     CodeGenerationId,
     Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    Arc<Mutex<()>>,
 );
 
 #[derive(Clone)]
@@ -942,6 +943,11 @@ pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    /// Single-flight gate for the O(store) lane-owner build. Without it every
+    /// query that raced the activation warm rebuilt the full lexical/exact
+    /// projection inline — N concurrent cold queries did N store-sized builds,
+    /// each blowing its own dispatch deadline while the warm was still running.
+    query_owners_build_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1078,6 +1084,16 @@ impl LatestCompleteCodeIndexV1 {
     pub fn production_query_owners(
         &self,
     ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        if let Some(owners) = self.query_owners.get() {
+            return Ok(Arc::clone(owners));
+        }
+        // Cold memo: exactly one caller builds; everyone else waits here and
+        // reads the memo the winner installed. The build is O(store), so
+        // duplicating it per racing query was the outage, not the wait.
+        let _build = self
+            .query_owners_build_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
         }
@@ -1814,21 +1830,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index) = match cached.as_ref() {
-            Some((cached_id, owners, index)) if cached_id == &generation_id => {
-                (Arc::clone(owners), Arc::clone(index))
+        let (query_owners, record_index, query_owners_build_gate) = match cached.as_ref() {
+            Some((cached_id, owners, index, gate)) if cached_id == &generation_id => {
+                (Arc::clone(owners), Arc::clone(index), Arc::clone(gate))
             }
             _ => {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
-                *cached = Some((generation_id, Arc::clone(&owners), Arc::clone(&index)));
-                (owners, index)
+                let gate = Arc::new(Mutex::new(()));
+                *cached = Some((
+                    generation_id,
+                    Arc::clone(&owners),
+                    Arc::clone(&index),
+                    Arc::clone(&gate),
+                ));
+                (owners, index, gate)
             }
         };
         LatestCompleteCodeIndexV1 {
             generation,
             query_owners,
             record_index,
+            query_owners_build_gate,
         }
     }
 
@@ -1875,6 +1898,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation,
                     query_owners: Arc::new(OnceLock::new()),
                     record_index: Arc::new(OnceLock::new()),
+                    query_owners_build_gate: Arc::new(Mutex::new(())),
                 })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
