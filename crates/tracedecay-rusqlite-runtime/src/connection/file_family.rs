@@ -246,7 +246,7 @@ fn open_component(path: &Path, component: SqliteFamilyComponent) -> io::Result<F
 
 #[cfg(not(windows))]
 fn open_sidecar(path: &Path) -> io::Result<File> {
-    OpenOptions::new().read(true).write(true).open(path)
+    OpenOptions::new().read(true).open(path)
 }
 
 #[cfg(windows)]
@@ -259,7 +259,6 @@ fn open_sidecar(path: &Path) -> io::Result<File> {
 
     OpenOptions::new()
         .read(true)
-        .write(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(path)
 }

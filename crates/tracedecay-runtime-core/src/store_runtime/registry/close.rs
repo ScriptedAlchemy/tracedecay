@@ -188,10 +188,10 @@ impl StoreRuntimeRegistry {
                     .to_owned(),
             });
         }
-        if let Err(failure) = ready
-            .handle
-            .validate_database_write_authority(authority, "reserve exact registered runtime close")
-        {
+        if let Err(failure) = ready.handle.validate_database_write_authority_for_close(
+            authority,
+            "reserve exact registered runtime close",
+        ) {
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(failure);
         }

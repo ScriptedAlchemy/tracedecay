@@ -501,6 +501,23 @@ impl StoreRuntimeHandle {
         authority: &crate::db::DatabaseAuthority,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        self.validate_database_write_authority_inner(authority, operation, true)
+    }
+
+    pub(super) fn validate_database_write_authority_for_close(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        self.validate_database_write_authority_inner(authority, operation, false)
+    }
+
+    fn validate_database_write_authority_inner(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+        require_healthy: bool,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
         authority
             .require_active_write_scope(operation)
             .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
@@ -517,10 +534,28 @@ impl StoreRuntimeHandle {
                 ),
             });
         }
-        self.validate_opened_file_identity(operation)
+        if require_healthy {
+            self.validate_opened_file_identity(operation)
+        } else {
+            self.validate_opened_file_identity_only(operation)
+        }
     }
 
     fn validate_opened_file_identity(
+        &self,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        let physical = self.physical_snapshot();
+        if !physical.healthy && !physical.is_drained() {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeQuarantined {
+                operation,
+                snapshot: physical,
+            });
+        }
+        self.validate_opened_file_identity_only(operation)
+    }
+
+    fn validate_opened_file_identity_only(
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
@@ -640,6 +675,10 @@ pub enum StoreRuntimeRegistryFailure {
     PhysicalRuntimeFailed {
         operation: &'static str,
         message: String,
+    },
+    PhysicalRuntimeQuarantined {
+        operation: &'static str,
+        snapshot: PhysicalRuntimeSnapshot,
     },
     PhysicalRuntimeNotDrained {
         snapshot: PhysicalRuntimeSnapshot,
