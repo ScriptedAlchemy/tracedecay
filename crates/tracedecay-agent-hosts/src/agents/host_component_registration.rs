@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracedecay_host_integration::host_bundle_storage_failure;
 
 const REGISTRATION_BACKUP_IDENTITY_SCHEMA_VERSION: u16 = 2;
 const MIN_SUPPORTED_REGISTRATION_BACKUP_SCHEMA_VERSION: u16 = 1;
@@ -229,7 +230,7 @@ impl HostComponentRegistrationDelegate {
         // generic storage failure — otherwise the actionable cause (for
         // example a refused symlinked project config) is lost.
         eprintln!("{error}");
-        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+        host_bundle_storage_failure!()
     }
 
     fn backup_dir(&self, operation_id: [u8; 16]) -> PathBuf {
@@ -447,7 +448,7 @@ impl HostComponentRegistrationDelegate {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
+            Err(_) => return Err(host_bundle_storage_failure!()),
         };
         let config = serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::InvalidObservedState)?;
@@ -638,19 +639,14 @@ impl HostComponentRegistrationDelegate {
                         );
                     }
                     Ok(_) => {
-                        let bytes = fs::read(path).map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?;
+                        let bytes = fs::read(path).map_err(|_| host_bundle_storage_failure!())?;
                         digest.update(b"file");
                         digest.update((bytes.len() as u64).to_be_bytes());
                         digest.update(bytes);
-                        let metadata =
-                            crate::agents::capture_host_file_metadata(path).map_err(|_| {
-                                crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                            })?;
-                        let metadata = serde_json::to_vec(&metadata).map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?;
+                        let metadata = crate::agents::capture_host_file_metadata(path)
+                            .map_err(|_| host_bundle_storage_failure!())?;
+                        let metadata = serde_json::to_vec(&metadata)
+                            .map_err(|_| host_bundle_storage_failure!())?;
                         digest.update((metadata.len() as u64).to_be_bytes());
                         digest.update(metadata);
                     }
@@ -658,7 +654,7 @@ impl HostComponentRegistrationDelegate {
                         digest.update(b"missing");
                     }
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
             }
@@ -688,21 +684,20 @@ impl HostComponentRegistrationDelegate {
         operation_id: [u8; 16],
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         let backup_dir = self.backup_dir(operation_id);
-        fs::create_dir_all(&backup_dir)
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        fs::create_dir_all(&backup_dir).map_err(|_| host_bundle_storage_failure!())?;
         tracedecay_application::sync_parent_directory(
             &backup_dir,
             tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
         )
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        .map_err(|_| host_bundle_storage_failure!())?;
         let identity = RegistrationBackupIdentityV1::new(
             self.integration.id(),
             &self.context.home,
             &self.lifecycle_root,
             self.rollback_project_path(),
         )?;
-        let identity_bytes = serde_json::to_vec(&identity)
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        let identity_bytes =
+            serde_json::to_vec(&identity).map_err(|_| host_bundle_storage_failure!())?;
         write_registration_backup(&self.identity_path(operation_id), &identity_bytes)?;
         let registration_paths = self.registration_paths(component_set);
         let mut registration_directories = Vec::new();
@@ -729,7 +724,7 @@ impl HostComponentRegistrationDelegate {
                     registration_directories.push(path);
                 }
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
         }
@@ -740,12 +735,12 @@ impl HostComponentRegistrationDelegate {
             paths: registration_paths.clone(),
             directories: registration_directories.clone(),
         };
-        let mutation_plan = serde_json::to_vec(&mutation_plan)
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+        let mutation_plan =
+            serde_json::to_vec(&mutation_plan).map_err(|_| host_bundle_storage_failure!())?;
         write_registration_backup(&self.mutation_plan_path(operation_id), &mutation_plan)?;
         for (index, path) in registration_directories.iter().enumerate() {
-            let path_bytes = serde_json::to_vec(path)
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            let path_bytes =
+                serde_json::to_vec(path).map_err(|_| host_bundle_storage_failure!())?;
             write_registration_backup(
                 &self.directory_path_marker(operation_id, index),
                 &path_bytes,
@@ -755,13 +750,10 @@ impl HostComponentRegistrationDelegate {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
                 }
                 Ok(_) => {
-                    let metadata =
-                        crate::agents::capture_host_file_metadata(path).map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?;
-                    let metadata = serde_json::to_vec(&metadata).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    let metadata = crate::agents::capture_host_file_metadata(path)
+                        .map_err(|_| host_bundle_storage_failure!())?;
+                    let metadata = serde_json::to_vec(&metadata)
+                        .map_err(|_| host_bundle_storage_failure!())?;
                     write_registration_backup(
                         &self.directory_metadata_marker(operation_id, index),
                         &metadata,
@@ -774,13 +766,13 @@ impl HostComponentRegistrationDelegate {
                     )?;
                 }
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
         }
         for (index, path) in registration_paths.iter().enumerate() {
-            let path_bytes = serde_json::to_vec(path)
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            let path_bytes =
+                serde_json::to_vec(path).map_err(|_| host_bundle_storage_failure!())?;
             write_registration_backup(
                 &self.registration_path_marker(operation_id, index),
                 &path_bytes,
@@ -790,17 +782,12 @@ impl HostComponentRegistrationDelegate {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
                 }
                 Ok(_) => {
-                    let bytes = fs::read(path).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    let bytes = fs::read(path).map_err(|_| host_bundle_storage_failure!())?;
                     write_registration_backup(&self.backup_path(operation_id, index), &bytes)?;
-                    let permissions =
-                        crate::agents::capture_host_file_metadata(path).map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?;
-                    let permissions = serde_json::to_vec(&permissions).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    let permissions = crate::agents::capture_host_file_metadata(path)
+                        .map_err(|_| host_bundle_storage_failure!())?;
+                    let permissions = serde_json::to_vec(&permissions)
+                        .map_err(|_| host_bundle_storage_failure!())?;
                     write_registration_backup(
                         &self.registration_permission_marker(operation_id, index),
                         &permissions,
@@ -813,7 +800,7 @@ impl HostComponentRegistrationDelegate {
                     )?;
                 }
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
         }
@@ -828,8 +815,8 @@ impl HostComponentRegistrationDelegate {
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         for (index, path) in self.registration_paths(component_set).iter().enumerate() {
             let observed = registration_observed_state(path)?;
-            let bytes = serde_json::to_vec(&observed)
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            let bytes =
+                serde_json::to_vec(&observed).map_err(|_| host_bundle_storage_failure!())?;
             write_registration_backup(&self.applied_state_marker(operation_id, index), &bytes)?;
         }
         Ok(())
@@ -851,7 +838,7 @@ impl HostComponentRegistrationDelegate {
                 Ok(_) => return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
             let parent = path.parent().ok_or(
@@ -869,9 +856,7 @@ impl HostComponentRegistrationDelegate {
                 }
                 Ok(_) => {
                     if fs::read_dir(&staging_path)
-                        .map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?
+                        .map_err(|_| host_bundle_storage_failure!())?
                         .next()
                         .is_some()
                     {
@@ -894,8 +879,7 @@ impl HostComponentRegistrationDelegate {
             let applied = registration_directory_applied_state(&staging_path)?;
             write_registration_backup(
                 &self.directory_applied_metadata_marker(operation_id, index),
-                &serde_json::to_vec(&applied)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+                &serde_json::to_vec(&applied).map_err(|_| host_bundle_storage_failure!())?,
             )?;
             sync_registration_metadata(&staging_path)?;
             fs::rename(&staging_path, path).map_err(|_| {
@@ -905,7 +889,7 @@ impl HostComponentRegistrationDelegate {
                 path,
                 tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
             )
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            .map_err(|_| host_bundle_storage_failure!())?;
         }
         Ok(())
     }
@@ -934,8 +918,7 @@ impl HostComponentRegistrationDelegate {
     ) -> Result<RegistrationObservedStateV1, crate::agents::host_bundle_v2::HostBundleError> {
         let backup = self.backup_path(operation_id, index);
         if backup.is_file() {
-            let bytes = fs::read(backup)
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            let bytes = fs::read(backup).map_err(|_| host_bundle_storage_failure!())?;
             return Ok(RegistrationObservedStateV1 {
                 present: true,
                 digest: Sha256::digest(bytes).into(),
@@ -961,9 +944,8 @@ impl HostComponentRegistrationDelegate {
         crate::agents::host_bundle_v2::HostBundleError,
     > {
         let bytes = fs::read(self.registration_permission_marker(operation_id, index))
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+            .map_err(|_| host_bundle_storage_failure!())?;
+        serde_json::from_slice(&bytes).map_err(|_| host_bundle_storage_failure!())
     }
 
     fn intended_registration_state(
@@ -977,7 +959,7 @@ impl HostComponentRegistrationDelegate {
                 &self.write_intent_root(operation_id),
                 path,
             )
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+            .map_err(|_| host_bundle_storage_failure!())?,
         ) {
             Ok(intent) if intent != [0] => {
                 let intent: HostConfigWriteIntentV2 = serde_json::from_slice(&intent)
@@ -1035,14 +1017,13 @@ impl HostComponentRegistrationDelegate {
         for index in 0.. {
             match fs::read(self.registration_path_marker(operation_id, index)) {
                 Ok(bytes) => {
-                    let path = serde_json::from_slice::<PathBuf>(&bytes).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    let path = serde_json::from_slice::<PathBuf>(&bytes)
+                        .map_err(|_| host_bundle_storage_failure!())?;
                     persisted_paths.push(path);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
         }
@@ -1065,13 +1046,14 @@ impl HostComponentRegistrationDelegate {
         for index in 0.. {
             match fs::read(self.directory_path_marker(operation_id, index)) {
                 Ok(bytes) => {
-                    persisted_directories.push(serde_json::from_slice::<PathBuf>(&bytes).map_err(
-                        |_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                    )?);
+                    persisted_directories.push(
+                        serde_json::from_slice::<PathBuf>(&bytes)
+                            .map_err(|_| host_bundle_storage_failure!())?,
+                    );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
                 Err(_) => {
-                    return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                    return Err(host_bundle_storage_failure!());
                 }
             }
         }
@@ -1103,9 +1085,9 @@ impl HostComponentRegistrationDelegate {
                 // pre-existing directory: registration never changes its
                 // permissions or ACLs, so any other metadata is foreign drift.
                 let original_metadata: crate::agents::HostFileMetadataIdentityV1 =
-                    serde_json::from_slice(&fs::read(metadata_marker).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?)
+                    serde_json::from_slice(
+                        &fs::read(metadata_marker).map_err(|_| host_bundle_storage_failure!())?,
+                    )
                     .map_err(|_| {
                         crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
                     })?;
@@ -1116,10 +1098,8 @@ impl HostComponentRegistrationDelegate {
                         );
                     }
                     Ok(_) => {
-                        let observed =
-                            crate::agents::capture_host_file_metadata(path).map_err(|_| {
-                                crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                            })?;
+                        let observed = crate::agents::capture_host_file_metadata(path)
+                            .map_err(|_| host_bundle_storage_failure!())?;
                         if observed != original_metadata {
                             return Err(
                                 crate::agents::host_bundle_v2::HostBundleError::StalePreview,
@@ -1130,7 +1110,7 @@ impl HostComponentRegistrationDelegate {
                         if recovery_marker.is_file() {
                             let recovery_metadata: crate::agents::HostFileMetadataIdentityV1 =
                                 serde_json::from_slice(&fs::read(recovery_marker).map_err(|_| {
-                                    crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                                    host_bundle_storage_failure!()
                                 })?)
                                 .map_err(|_| {
                                     crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
@@ -1148,7 +1128,7 @@ impl HostComponentRegistrationDelegate {
                         recovery_owned_directories.push(path);
                     }
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
             } else {
@@ -1176,7 +1156,7 @@ impl HostComponentRegistrationDelegate {
                         }
                         let applied: RegistrationDirectoryAppliedStateV2 =
                             serde_json::from_slice(&fs::read(applied_marker).map_err(|_| {
-                                crate::agents::host_bundle_v2::HostBundleError::StorageFailure
+                                host_bundle_storage_failure!()
                             })?)
                             .map_err(|_| {
                                 crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
@@ -1190,7 +1170,7 @@ impl HostComponentRegistrationDelegate {
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
             }
@@ -1214,7 +1194,7 @@ impl HostComponentRegistrationDelegate {
         for (index, path) in vanished_directories {
             let metadata: crate::agents::HostFileMetadataIdentityV1 = serde_json::from_slice(
                 &fs::read(self.directory_metadata_marker(operation_id, index))
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+                    .map_err(|_| host_bundle_storage_failure!())?,
             )
             .map_err(|_| {
                 crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
@@ -1236,9 +1216,7 @@ impl HostComponentRegistrationDelegate {
                 }
                 Ok(_) => {
                     if fs::read_dir(&staging_path)
-                        .map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?
+                        .map_err(|_| host_bundle_storage_failure!())?
                         .next()
                         .is_some()
                     {
@@ -1264,8 +1242,7 @@ impl HostComponentRegistrationDelegate {
             sync_registration_metadata(&staging_path)?;
             write_registration_backup(
                 &self.directory_recovery_metadata_marker(operation_id, index),
-                &serde_json::to_vec(&metadata)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+                &serde_json::to_vec(&metadata).map_err(|_| host_bundle_storage_failure!())?,
             )?;
             fs::rename(&staging_path, path).map_err(|_| {
                 crate::agents::host_bundle_v2::HostBundleError::RecoveryDirectoryUnavailable
@@ -1274,7 +1251,7 @@ impl HostComponentRegistrationDelegate {
                 path,
                 tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
             )
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            .map_err(|_| host_bundle_storage_failure!())?;
         }
         for (index, path) in registration_paths.iter().enumerate() {
             let observed = registration_observed_state(path)?;
@@ -1282,25 +1259,21 @@ impl HostComponentRegistrationDelegate {
             let backup = self.backup_path(operation_id, index);
             let missing = self.missing_marker_path(operation_id, index);
             if backup.is_file() {
-                let permissions = fs::read(
-                    self.registration_permission_marker(operation_id, index),
-                )
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+                let permissions =
+                    fs::read(self.registration_permission_marker(operation_id, index))
+                        .map_err(|_| host_bundle_storage_failure!())?;
                 let permissions: crate::agents::HostFileMetadataIdentityV1 =
-                    serde_json::from_slice(&permissions).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    serde_json::from_slice(&permissions)
+                        .map_err(|_| host_bundle_storage_failure!())?;
                 if observed != original {
-                    let bytes = fs::read(&backup).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?;
+                    let bytes = fs::read(&backup).map_err(|_| host_bundle_storage_failure!())?;
                     crate::agents::safe_write_bytes_file_with_metadata(
                         path,
                         &bytes,
                         None,
                         Some(&permissions),
                     )
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
                     #[cfg(feature = "test-transport")]
                     if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE")
                         .is_some()
@@ -1313,17 +1286,16 @@ impl HostComponentRegistrationDelegate {
                     }
                 }
                 crate::agents::restore_host_file_metadata(path, &permissions)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
                 sync_registration_metadata(path)?;
             } else if missing.is_file() {
                 if observed == original {
                     continue;
                 }
                 match fs::symlink_metadata(path) {
-                    Ok(metadata) if metadata.file_type().is_file() => fs::remove_file(path)
-                        .map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?,
+                    Ok(metadata) if metadata.file_type().is_file() => {
+                        fs::remove_file(path).map_err(|_| host_bundle_storage_failure!())?
+                    }
                     Ok(_) => {
                         return Err(
                             crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath,
@@ -1331,7 +1303,7 @@ impl HostComponentRegistrationDelegate {
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
             }
@@ -1346,21 +1318,20 @@ impl HostComponentRegistrationDelegate {
         for (index, path) in directory_restore_order {
             let metadata_marker = self.directory_metadata_marker(operation_id, index);
             if metadata_marker.is_file() {
-                let metadata: crate::agents::HostFileMetadataIdentityV1 =
-                    serde_json::from_slice(&fs::read(metadata_marker).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?)
-                    .map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
-                    })?;
+                let metadata: crate::agents::HostFileMetadataIdentityV1 = serde_json::from_slice(
+                    &fs::read(metadata_marker).map_err(|_| host_bundle_storage_failure!())?,
+                )
+                .map_err(|_| {
+                    crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
+                })?;
                 if crate::agents::capture_host_file_metadata(path)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?
+                    .map_err(|_| host_bundle_storage_failure!())?
                     != metadata
                 {
                     return Err(crate::agents::host_bundle_v2::HostBundleError::StalePreview);
                 }
                 crate::agents::restore_host_file_metadata(path, &metadata)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+                    .map_err(|_| host_bundle_storage_failure!())?;
             } else {
                 let applied_marker = self.directory_applied_metadata_marker(operation_id, index);
                 let legacy_missing_directory =
@@ -1387,22 +1358,18 @@ impl HostComponentRegistrationDelegate {
                             Ok(()) => {}
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(_) => {
-                                return Err(
-                                    crate::agents::host_bundle_v2::HostBundleError::StorageFailure,
-                                );
+                                return Err(host_bundle_storage_failure!());
                             }
                         }
                         continue;
                     }
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
                 if !legacy_missing_directory {
                     let applied: RegistrationDirectoryAppliedStateV2 = serde_json::from_slice(
-                        &fs::read(applied_marker).map_err(|_| {
-                            crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                        })?,
+                        &fs::read(applied_marker).map_err(|_| host_bundle_storage_failure!())?,
                     )
                     .map_err(|_| {
                         crate::agents::host_bundle_v2::HostBundleError::UnsupportedRecoveryFormat
@@ -1419,7 +1386,7 @@ impl HostComponentRegistrationDelegate {
                             std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
                         ) => {}
                     Err(_) => {
-                        return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+                        return Err(host_bundle_storage_failure!());
                     }
                 }
             }
@@ -1434,12 +1401,11 @@ impl HostComponentRegistrationDelegate {
         let backup_dir = self.backup_dir(operation_id);
         match fs::symlink_metadata(&backup_dir) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                fs::remove_dir_all(backup_dir)
-                    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+                fs::remove_dir_all(backup_dir).map_err(|_| host_bundle_storage_failure!())
             }
             Ok(_) => Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
+            Err(_) => Err(host_bundle_storage_failure!()),
         }
     }
 }
@@ -1753,7 +1719,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         #[cfg(feature = "test-transport")]
         if std::env::var_os("TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY").is_some() {
-            return Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure);
+            return Err(host_bundle_storage_failure!());
         }
         if self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly {
             return Ok(());
@@ -1773,7 +1739,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         {
             Ok(())
         } else {
-            Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+            Err(host_bundle_storage_failure!())
         }
     }
 
@@ -1871,8 +1837,7 @@ fn claim_identifier(name: &str) -> String {
 }
 
 fn canonical_path(path: &Path) -> Result<PathBuf, crate::agents::host_bundle_v2::HostBundleError> {
-    fs::canonicalize(path)
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+    fs::canonicalize(path).map_err(|_| host_bundle_storage_failure!())
 }
 
 fn registration_observed_state(
@@ -1883,15 +1848,13 @@ fn registration_observed_state(
             Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath)
         }
         Ok(_) => {
-            let bytes = fs::read(path)
-                .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+            let bytes = fs::read(path).map_err(|_| host_bundle_storage_failure!())?;
             Ok(RegistrationObservedStateV1 {
                 present: true,
                 digest: Sha256::digest(bytes).into(),
                 metadata: Some(
-                    crate::agents::capture_host_file_metadata(path).map_err(|_| {
-                        crate::agents::host_bundle_v2::HostBundleError::StorageFailure
-                    })?,
+                    crate::agents::capture_host_file_metadata(path)
+                        .map_err(|_| host_bundle_storage_failure!())?,
                 ),
             })
         }
@@ -1902,15 +1865,14 @@ fn registration_observed_state(
                 metadata: None,
             })
         }
-        Err(_) => Err(crate::agents::host_bundle_v2::HostBundleError::StorageFailure),
+        Err(_) => Err(host_bundle_storage_failure!()),
     }
 }
 
 fn registration_directory_applied_state(
     path: &Path,
 ) -> Result<RegistrationDirectoryAppliedStateV2, crate::agents::host_bundle_v2::HostBundleError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| host_bundle_storage_failure!())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(crate::agents::host_bundle_v2::HostBundleError::UnsafeInstallPath);
     }
@@ -1920,7 +1882,7 @@ fn registration_directory_applied_state(
     let unix_identity = None;
     Ok(RegistrationDirectoryAppliedStateV2 {
         metadata: crate::agents::capture_host_file_metadata(path)
-            .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)?,
+            .map_err(|_| host_bundle_storage_failure!())?,
         unix_identity,
     })
 }
@@ -1936,7 +1898,7 @@ fn sync_registration_metadata(
                 tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
             )
         })
-        .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+        .map_err(|_| host_bundle_storage_failure!())
 }
 
 fn write_registration_backup(
@@ -1949,7 +1911,7 @@ fn write_registration_backup(
         bytes,
         tracedecay_application::DirectorySyncPolicy::TolerateUnsupported,
     )
-    .map_err(|_| crate::agents::host_bundle_v2::HostBundleError::StorageFailure)
+    .map_err(|_| host_bundle_storage_failure!())
 }
 
 pub fn project_local_registration_path(
